@@ -4,12 +4,12 @@
 use serde_json::json;
 use tempfile::TempDir;
 
-use codexrr::config::default_config;
-use codexrr::exec_sessions::{SessionState, ShellType, resolve_shell, shell_type_of};
-use codexrr::tool::{Tool, arg_u64};
-use codexrr::tools::glob::Glob;
-use codexrr::tools::grep::Grep;
-use codexrr::tools::read_file::ReadFile;
+use codexify::config::default_config;
+use codexify::exec_sessions::{SessionState, ShellType, resolve_shell, shell_type_of};
+use codexify::tool::{Tool, arg_u64};
+use codexify::tools::glob::Glob;
+use codexify::tools::grep::Grep;
+use codexify::tools::read_file::ReadFile;
 
 // #1: shell_type_of strips `.exe` case-insensitively (cmd.Exe -> Cmd, not Posix).
 #[test]
@@ -126,18 +126,18 @@ fn find_skill_is_unicode_case_insensitive() {
     let mut config = default_config(root.path().to_path_buf());
     config.skills.dirs = Some(vec![root.path().to_string_lossy().into_owned()]);
 
-    let catalog = codexrr::skills::discover_skills(&config);
+    let catalog = codexify::skills::discover_skills(&config);
     assert_eq!(catalog.skills.len(), 1, "skill should be discovered");
     // Uppercase Ü lookup should resolve via the Unicode-lowercasing fallback.
-    assert!(codexrr::skills::find_skill(&catalog, "\u{dc}BER").is_some());
+    assert!(codexify::skills::find_skill(&catalog, "\u{dc}BER").is_some());
 }
 
 // #16: an empty-string plan explanation is not rendered.
 #[test]
 fn render_memory_omits_empty_explanation() {
-    use codexrr::memory::render_memory;
-    use codexrr::types::{PlanItem, PlanState, PlanStepStatus};
-    let mem = codexrr::memory::Memory {
+    use codexify::memory::render_memory;
+    use codexify::types::{PlanItem, PlanState, PlanStepStatus};
+    let mem = codexify::memory::Memory {
         work_dir: "/w".into(),
         plan: Some(PlanState {
             explanation: Some(String::new()),

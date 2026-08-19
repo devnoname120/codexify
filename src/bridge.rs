@@ -1,6 +1,6 @@
 //! Bridge to upstream MCP servers.
 //!
-//! codexrr can act as an MCP *client* to other local MCP servers (e.g. `idasql`),
+//! codexify can act as an MCP *client* to other local MCP servers (e.g. `idasql`),
 //! discover their tools at startup, and re-expose them through its own
 //! `tools/list` / `tools/call` so the ChatGPT-side agent can use them too. Each
 //! upstream tool is offered under a `<server>__<tool>` name and calls are
@@ -584,7 +584,7 @@ mod tests {
         config.mcp_servers.insert(
             "bad".into(),
             McpServerSpec {
-                command: Some("codexrr-nonexistent-binary-xyz".into()),
+                command: Some("codexify-nonexistent-binary-xyz".into()),
                 args: vec![],
                 env: HashMap::new(),
                 disabled: false,
@@ -635,7 +635,7 @@ mod tests {
         config.mcp_servers.insert(
             "off".into(),
             McpServerSpec {
-                command: Some("codexrr-should-never-run".into()),
+                command: Some("codexify-should-never-run".into()),
                 args: vec![],
                 env: HashMap::new(),
                 disabled: true,

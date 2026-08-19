@@ -10,19 +10,19 @@
 
 use std::path::PathBuf;
 
-use codexrr::apply_patch::{
+use codexify::apply_patch::{
     PatchAction, apply_update, parse_patch, render_added_file, seek_sequence, uses_crlf,
 };
-use codexrr::config::default_config;
-use codexrr::exec_policy::{assert_exec_allowed, effective_allowlist, split_shell_segments};
-use codexrr::exec_sessions::{
+use codexify::config::default_config;
+use codexify::exec_policy::{assert_exec_allowed, effective_allowlist, split_shell_segments};
+use codexify::exec_sessions::{
     ShellType, default_shell_bin, resolve_shell, shell_type_of, wrap_for_shell,
 };
-use codexrr::output_budget::{
+use codexify::output_budget::{
     DEFAULT_MAX_ENTRIES, DEFAULT_MAX_FILE_BYTES, DEFAULT_MAX_FILE_LINES, DEFAULT_MAX_TREE_NODES,
     FileBudget, entry_budget, file_budget, limit_list, tree_node_budget, window_file_lines,
 };
-use codexrr::types::{AppConfig, ExecMode};
+use codexify::types::{AppConfig, ExecMode};
 
 // ─── helpers ───────────────────────────────────────────────────────────
 
@@ -215,7 +215,7 @@ fn seek_searches_from_end_when_eof_set() {
 
 // ─── apply-patch: apply_update ────────────────────────────────────────
 
-fn update_chunks(patch: &str) -> Vec<codexrr::apply_patch::UpdateChunk> {
+fn update_chunks(patch: &str) -> Vec<codexify::apply_patch::UpdateChunk> {
     let actions = parse_patch(patch).unwrap();
     match actions.into_iter().next().unwrap() {
         PatchAction::Update { chunks, .. } => chunks,

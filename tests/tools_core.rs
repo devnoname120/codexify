@@ -10,22 +10,22 @@
 use serde_json::json;
 use tempfile::TempDir;
 
-use codexrr::config::default_config;
-use codexrr::exec_sessions::SessionState;
-use codexrr::tool::Tool;
-use codexrr::tools::apply_patch::ApplyPatch;
-use codexrr::tools::clock_curr_time::ClockCurrTime;
-use codexrr::tools::clock_sleep::ClockSleep;
-use codexrr::tools::read_file::ReadFile;
-use codexrr::tools::run_command::RunCommand;
-use codexrr::tools::update_plan::UpdatePlan;
-use codexrr::tools::view_image::ViewImage;
-use codexrr::tools::write_file::WriteFile;
-use codexrr::types::ToolContent;
+use codexify::config::default_config;
+use codexify::exec_sessions::SessionState;
+use codexify::tool::Tool;
+use codexify::tools::apply_patch::ApplyPatch;
+use codexify::tools::clock_curr_time::ClockCurrTime;
+use codexify::tools::clock_sleep::ClockSleep;
+use codexify::tools::read_file::ReadFile;
+use codexify::tools::run_command::RunCommand;
+use codexify::tools::update_plan::UpdatePlan;
+use codexify::tools::view_image::ViewImage;
+use codexify::tools::write_file::WriteFile;
+use codexify::types::ToolContent;
 
 /// A config rooted at `dir` with the memory (plan-persistence) directory pinned
 /// inside a temp path, so update_plan never writes to the real state directory.
-fn config_in(dir: &TempDir) -> codexrr::types::AppConfig {
+fn config_in(dir: &TempDir) -> codexify::types::AppConfig {
     let mut config = default_config(dir.path().to_path_buf());
     config.memory.dir = Some(dir.path().join(".state").to_string_lossy().into_owned());
     config

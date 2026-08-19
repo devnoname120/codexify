@@ -1,18 +1,18 @@
-# Porting OpenAI Codex Tool Calls into the codex-free MCP Bridge
+# Porting OpenAI Codex Tool Calls into the codexify MCP Bridge
 
 **Date:** 2026-08-12
 **Status:** Approved
 **Stack:** Bun + TypeScript
-**Applies to:** codex-free v0.3.1 → v0.4.0
+**Applies to:** codexify v0.3.1 → v0.4.0
 
 ## Problem
 
-codex-free exposes 11 hand-rolled tools to ChatGPT Web. They work, but two gaps hurt daily use:
+codexify exposes 11 hand-rolled tools to ChatGPT Web. They work, but two gaps hurt daily use:
 
 1. **Editing is all-or-nothing.** `write_file` overwrites the whole file. Changing one line in a 500-line file means the model regenerates all 500 lines — slow, expensive, and a frequent source of accidental content loss.
 2. **Command execution is one-shot.** `run_command` spawns a binary with an argument array, waits, and returns. There is no way to drive an interactive process, resume a long-running build, or stream partial output.
 
-OpenAI Codex solved both problems years of iteration ago. Rather than invent new designs, this spec ports Codex's tool contracts — exact parameter names, defaults, ranges, and semantics — into codex-free, so that a model already trained on Codex's tool surface behaves correctly here with no relearning.
+OpenAI Codex solved both problems years of iteration ago. Rather than invent new designs, this spec ports Codex's tool contracts — exact parameter names, defaults, ranges, and semantics — into codexify, so that a model already trained on Codex's tool surface behaves correctly here with no relearning.
 
 ## Source of Truth
 
@@ -59,13 +59,13 @@ All 11 existing tools are **retained unchanged in behavior**. Only their descrip
 
 ### Out of Scope
 
-Codex declares 44 static tool identifiers. Most assume a runtime codex-free does not have. Excluded, with reasons:
+Codex declares 44 static tool identifiers. Most assume a runtime codexify does not have. Excluded, with reasons:
 
 | Tool(s) | Count | Reason for exclusion |
 |---------|-------|----------------------|
 | `shell_command` | 1 | Redundant. Overlaps `run_command` (one-shot) and `exec_command` (shell). A third command tool would only confuse tool selection. |
 | `request_permissions`, `wait_for_environment` | 2 | No sandbox and no multi-environment runtime. There are no permissions to escalate and no environment to wait for. |
-| `list_mcp_resources`, `list_mcp_resource_templates`, `read_mcp_resource` | 3 | codex-free is an MCP *server*, not a client. There is no upstream MCP server whose resources could be listed. |
+| `list_mcp_resources`, `list_mcp_resource_templates`, `read_mcp_resource` | 3 | codexify is an MCP *server*, not a client. There is no upstream MCP server whose resources could be listed. |
 | `request_user_input` | 1 | ChatGPT Web can simply ask in the chat turn. MCP elicitation is not supported by the ChatGPT plugin client. |
 | `new_context`, `get_context_remaining` | 2 | The bridge has no visibility into the model's context window. Any answer would be fabricated. |
 | `tool_search` | 1 | Deferred-tool loading is a planner feature. With 18 tools there is nothing to defer. |
@@ -546,14 +546,14 @@ Description edits:
 
 Codex ships **no** `read_file`, `grep`, `glob`, `list_directory`, or `tree` — verified by searching `codex-rs/core/src/tools/`, where the only matches are MCP test fixtures. Codex routes all file reading and searching through the shell, because it runs in a sandboxed environment with a full PTY and a model tuned for that surface.
 
-codex-free operates under different constraints, and its structured primitives are the better fit for them:
+codexify operates under different constraints, and its structured primitives are the better fit for them:
 
 - **Token efficiency.** `read_file` with `offset`/`limit` returns exactly the requested slice with line numbers. `cat file | sed -n '100,150p'` returns unnumbered text and costs an extra reasoning step to construct.
 - **Safety by construction.** `grep` and `glob` take a pattern parameter and cannot be turned into a command. Their shell equivalents pass through a tokenizer and an allowlist that can only ever be approximate.
 - **No quoting hazards.** A regex containing quotes, `$`, or backticks is a plain string argument to `grep`; through a shell it is a minefield, and on Windows a PowerShell one.
 - **Cross-platform.** `tree` and `list_directory` behave identically on Windows and POSIX. Their shell equivalents do not.
 
-So this is **addition, not replacement**. codex-free contributes safe, structured, token-cheap primitives for reading and searching. Codex contributes the two capabilities that were genuinely missing: a session-capable shell and patch-based editing. All 11 existing tools stay exactly as they are, and the routing table above is what keeps the combined surface legible to the model.
+So this is **addition, not replacement**. codexify contributes safe, structured, token-cheap primitives for reading and searching. Codex contributes the two capabilities that were genuinely missing: a session-capable shell and patch-based editing. All 11 existing tools stay exactly as they are, and the routing table above is what keeps the combined surface legible to the model.
 
 ## Configuration
 

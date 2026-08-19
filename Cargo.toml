@@ -1,12 +1,12 @@
 [package]
-name = "codexrr"
+name = "codexify"
 version = "1.0.0"
 edition = "2024"
-description = "Codex Free MCP bridge, ported to Rust: a local Streamable-HTTP MCP server exposing Codex-style agent tools over a chosen work directory."
+description = "Codexify MCP bridge, ported to Rust: a local Streamable-HTTP MCP server exposing Codex-style agent tools over a chosen work directory."
 license = "MIT"
 
 [[bin]]
-name = "codexrr"
+name = "codexify"
 path = "src/main.rs"
 
 [dependencies]

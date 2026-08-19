@@ -1,4 +1,4 @@
-# Codex Free MCP Bridge — Implementation Plan
+# Codexify MCP Bridge — Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -22,7 +22,7 @@
 
 ```json
 {
-  "name": "codex-free",
+  "name": "codexify",
   "version": "0.1.0",
   "type": "module",
   "scripts": {
@@ -82,7 +82,7 @@
 ```
 MIT License
 
-Copyright (c) 2026 Codex Free Contributors
+Copyright (c) 2026 Codexify Contributors
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -1457,7 +1457,7 @@ import type { AppConfig } from "./types.js";
 
 export function createMcpServer(config: AppConfig): McpServer {
   const server = new McpServer({
-    name: "codex-free",
+    name: "codexify",
     version: "0.1.0",
   });
 
@@ -1561,7 +1561,7 @@ export async function startHttpServer(mcpServer: McpServer, config: AppConfig): 
     },
   });
 
-  console.log(`\n🚀 Codex Free MCP Bridge running on http://localhost:${config.port}`);
+  console.log(`\n🚀 Codexify MCP Bridge running on http://localhost:${config.port}`);
   console.log(`📁 Work directory: ${config.workDir}`);
   console.log(`🔧 Tools loaded: ${loadTools().map((t) => t.name).join(", ")}`);
   if (config.apiKey) {
@@ -1663,7 +1663,7 @@ git commit -m "test: add server integration test scaffold"
 - [ ] **Step 1: Write README.md**
 
 ````markdown
-# Codex Free
+# Codexify
 
 A local MCP (Model Context Protocol) bridge server that lets ChatGPT Web Pro
 interact with your local filesystem, run commands, and manage git — all through

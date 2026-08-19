@@ -1,6 +1,6 @@
-# codexrr — Architecture & Design
+# codexify — Architecture & Design
 
-A Rust port of the `codex-free` MCP bridge. codexrr is a local [Model Context
+A Rust port of the `codexify` MCP bridge. codexify is a local [Model Context
 Protocol](https://modelcontextprotocol.io) server that exposes Codex-style agent
 tools over **Streamable HTTP**, scoped to a chosen working directory, and can
 additionally **aggregate other local MCP servers** and **surface local skills**.
@@ -20,7 +20,7 @@ ChatGPT / MCP client
         │  HTTP  POST/GET/DELETE /mcp
         ▼
 ┌──────────────────────────────────────────────┐
-│ codexrr  (axum + tokio + rmcp)                │
+│ codexify  (axum + tokio + rmcp)                │
 │                                               │
 │  /health   /mcp (StreamableHttpService)       │
 │                                               │
@@ -116,7 +116,7 @@ defaults.
 - **Session model**: the factory runs per session, so each conversation gets its
   own `SessionState`. Upstream MCP connections and the tool registry are shared
   (`Arc`) across sessions.
-- **`get_info`** advertises server name `codex-free` (wire-compatible identity),
+- **`get_info`** advertises server name `codexify` (wire-compatible identity),
   version, `tools` capability, and the `instructions`.
 - **Errors**: a tool that fails returns `Ok(CallToolResult::error(...))`
   (`isError: true`) so the caller sees the message; only an unknown tool name is
@@ -161,7 +161,7 @@ the original order and rejects duplicate names.
 
 ## 7. MCP bridging (aggregator)
 
-codexrr can act as an MCP **client** to other local MCP servers, discover their
+codexify can act as an MCP **client** to other local MCP servers, discover their
 tools at startup, and re-expose them. Implemented in `bridge.rs`; wired in
 `server.rs::start_http_server` before the HTTP server starts.
 
@@ -213,7 +213,7 @@ failing the whole config.
 ## 8. Skills discovery (`skills.rs`)
 
 A skill is a directory holding a `SKILL.md` whose YAML frontmatter carries a
-`name` and `description`. codexrr discovers three kinds, all merged (deduped by
+`name` and `description`. codexify discovers three kinds, all merged (deduped by
 lowercased name, repo > user precedence) and surfaced through the instructions
 catalogue and `skills_list` / `skills_read`.
 
@@ -230,8 +230,8 @@ explicit `skills.dirs` override is set (which is also how the test suite isolate
 from the real home). Toggle with `skills.includePlugins`.
 
 ### 8.3 Generated gateway skills
-For each gateway-mode MCP server, codexrr writes a `SKILL.md` to a per-port temp
-directory (`<temp>/codexrr-gateway-skills/<port>/<server>/SKILL.md`, rebuilt fresh
+For each gateway-mode MCP server, codexify writes a `SKILL.md` to a per-port temp
+directory (`<temp>/codexify-gateway-skills/<port>/<server>/SKILL.md`, rebuilt fresh
 each start) documenting every function and its argument schema. That directory is
 added to the skill roots, so the generated skill is discovered like any other and
 read through `skills_read`. Scope `plugin`.
@@ -333,8 +333,8 @@ Run: `cargo test`. Build a standalone binary: `cargo build --release`.
 
 | Symptom | Cause / fix |
 |---------|-------------|
-| Bridged tools don't appear; banner shows `-> FAILED` | The `command` path isn't a runnable stdio binary **on the machine where codexrr runs**. Fix the path or run the server locally. |
-| Banner shows a server you didn't configure (e.g. `idasql -> disabled`) | codexrr loaded a *different* `codex.config.json` than you edited. Check the `Config:` line and edit that file, or pass `--config`. |
-| codexrr exposes the tools (`Tools loaded (109)`) but the client shows only 25 | The client caches the tool manifest — **remove and re-add the connector** so it re-fetches `tools/list`. There is no tool-count cap at 109 (the hard API cap is 128). |
+| Bridged tools don't appear; banner shows `-> FAILED` | The `command` path isn't a runnable stdio binary **on the machine where codexify runs**. Fix the path or run the server locally. |
+| Banner shows a server you didn't configure (e.g. `idasql -> disabled`) | codexify loaded a *different* `codex.config.json` than you edited. Check the `Config:` line and edit that file, or pass `--config`. |
+| codexify exposes the tools (`Tools loaded (109)`) but the client shows only 25 | The client caches the tool manifest — **remove and re-add the connector** so it re-fetches `tools/list`. There is no tool-count cap at 109 (the hard API cap is 128). |
 | A client won't surface a large bridged set at all | Use `"mode": "gateway"` to collapse the server into one tool + a skill, or `"tools": [...]` to expose a curated few. |
 | Upstream `type: "sse"`/`"http"` | Not bridged yet (stdio only); reported as unsupported instead of breaking the config. |

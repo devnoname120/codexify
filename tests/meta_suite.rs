@@ -15,12 +15,12 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
-use codexrr::config::default_config;
-use codexrr::exec_sessions::SessionState;
-use codexrr::registry::load_tools;
-use codexrr::safe_path::resolve_safe_path;
-use codexrr::tool::Tool;
-use codexrr::types::{AppConfig, ToolContent, ToolResult};
+use codexify::config::default_config;
+use codexify::exec_sessions::SessionState;
+use codexify::registry::load_tools;
+use codexify::safe_path::resolve_safe_path;
+use codexify::tool::Tool;
+use codexify::types::{AppConfig, ToolContent, ToolResult};
 
 // ─── registry.test.ts ──────────────────────────────────────────────────
 
@@ -348,7 +348,7 @@ fn init_repo() -> TempDir {
 
 #[tokio::test]
 async fn git_status_clean_after_initial_commit() {
-    use codexrr::tools::git_status::GitStatus;
+    use codexify::tools::git_status::GitStatus;
 
     let repo = init_repo();
     let p = repo.path();
@@ -371,7 +371,7 @@ async fn git_status_clean_after_initial_commit() {
 
 #[tokio::test]
 async fn git_status_shows_untracked_files() {
-    use codexrr::tools::git_status::GitStatus;
+    use codexify::tools::git_status::GitStatus;
 
     let repo = init_repo();
     let p = repo.path();
@@ -394,7 +394,7 @@ async fn git_status_shows_untracked_files() {
 
 #[tokio::test]
 async fn git_commit_commits_staged_changes() {
-    use codexrr::tools::git_commit::GitCommit;
+    use codexify::tools::git_commit::GitCommit;
 
     let repo = init_repo();
     let p = repo.path();
@@ -417,7 +417,7 @@ async fn git_commit_commits_staged_changes() {
 
 #[tokio::test]
 async fn git_commit_commits_with_all_flag() {
-    use codexrr::tools::git_commit::GitCommit;
+    use codexify::tools::git_commit::GitCommit;
 
     let repo = init_repo();
     let p = repo.path();
@@ -449,7 +449,7 @@ async fn git_commit_commits_with_all_flag() {
 
 #[tokio::test]
 async fn git_commit_fails_when_nothing_to_commit() {
-    use codexrr::tools::git_commit::GitCommit;
+    use codexify::tools::git_commit::GitCommit;
 
     let repo = init_repo();
     let p = repo.path();
@@ -488,7 +488,7 @@ fn init_log_repo() -> TempDir {
 
 #[tokio::test]
 async fn git_log_shows_commit_history() {
-    use codexrr::tools::git_log::GitLog;
+    use codexify::tools::git_log::GitLog;
 
     let repo = init_log_repo();
     let config = default_config(repo.path().to_path_buf());
@@ -503,7 +503,7 @@ async fn git_log_shows_commit_history() {
 
 #[tokio::test]
 async fn git_log_limits_count() {
-    use codexrr::tools::git_log::GitLog;
+    use codexify::tools::git_log::GitLog;
 
     let repo = init_log_repo();
     let config = default_config(repo.path().to_path_buf());
@@ -517,7 +517,7 @@ async fn git_log_limits_count() {
 
 #[tokio::test]
 async fn git_log_supports_oneline_format() {
-    use codexrr::tools::git_log::GitLog;
+    use codexify::tools::git_log::GitLog;
 
     let repo = init_log_repo();
     let config = default_config(repo.path().to_path_buf());

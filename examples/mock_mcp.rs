@@ -2,7 +2,7 @@
 //!
 //! It speaks newline-delimited JSON-RPC on stdin/stdout and exposes a single
 //! `mock_echo` tool that echoes its `message`, returning both a text block and a
-//! structured `{ echoed }` result. Run indirectly via codexrr's `mcpServers`
+//! structured `{ echoed }` result. Run indirectly via codexify's `mcpServers`
 //! config; not meant to be used on its own.
 
 use std::io::{BufRead, Write};

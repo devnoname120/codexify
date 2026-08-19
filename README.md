@@ -1,14 +1,14 @@
-# Codexrr
+# Codexify
 
-*Codex Free, rewritten in Rust (but you still have to buy ChatGPT Plus)*
+*Codex-style local tooling for ChatGPT, implemented in Rust.*
 
-A local MCP bridge server that lets ChatGPT Web Pro call tools on your machine: read/write files, run shell commands, git operations, search. Codexrr is a faithful Rust port of the original Bun + TypeScript `codex-free`, built on **tokio + axum** and the official [`rmcp`](https://crates.io/crates/rmcp) SDK over Streamable HTTP.
+A local MCP bridge server that lets ChatGPT Web Pro call tools on your machine: read/write files, run shell commands, git operations, search. Codexify is the Rust continuation of the original Bun + TypeScript implementation, built on **tokio + axum** and the official [`rmcp`](https://crates.io/crates/rmcp) SDK over Streamable HTTP.
 
 ChatGPT talks to a public tunnel URL, which forwards to this server running on your machine, which operates on a project directory you choose.
 
 The tool set covers the ones [Codex](https://github.com/openai/codex) gives its own agent — `apply_patch`, `exec_command`/`write_stdin`, `view_image`, `update_plan`, `clock_curr_time`/`clock_sleep` — so ChatGPT Web can work the way Codex does: patch files in place instead of rewriting them, drive interactive and long-running processes, and keep a plan across a task. It carries the project's `AGENTS.md` and Codex's own agent brief, so the client is told how to behave and not just what it can call. It bounds what a tool call can return and keeps a plan and notes on disk across conversations, addressing the one thing Codex never had to solve — a context window far smaller than the task. And it loads Codex's skills: a `SKILL.md` in the repo or your home directory teaches the client how *you* do a recurring task, and only the ones that apply are ever read. Schemas and prompt are ported from the Codex source, not reimplemented from guesswork.
 
-Beyond the port, Codexrr can **aggregate other MCP servers** — connecting to your local stdio MCP servers and re-exposing their tools through its own endpoint, so the ChatGPT-side agent can call them too.
+Beyond the port, Codexify can **aggregate other MCP servers** — connecting to your local stdio MCP servers and re-exposing their tools through its own endpoint, so the ChatGPT-side agent can call them too.
 
 ## Architecture
 
@@ -16,7 +16,7 @@ Beyond the port, Codexrr can **aggregate other MCP servers** — connecting to y
 flowchart LR
     ChatGPT["ChatGPT Web Pro"]
     Tunnel["Public Tunnel\n(ngrok / cloudflared)"]
-    Server["Codexrr\nMCP Bridge\n:3000"]
+    Server["Codexify\nMCP Bridge\n:3000"]
     Tools["Tool Registry"]
 
     FS["read_file\nwrite_file\nlist_directory\ntree"]
@@ -31,7 +31,7 @@ flowchart LR
     Skills["skills_list\nskills_read"]
     Bridge["MCP aggregator\n(bridge.rs)"]
     WorkDir[("Project\nDirectory")]
-    State[("~/.codex-free\nmemory.json")]
+    State[("~/.codexify\nmemory.json")]
     SkillDirs[(".agents/skills\n.codex/skills\n.claude/skills")]
     Upstream[("Upstream MCP\nservers (stdio)")]
 
@@ -75,12 +75,12 @@ To build a standalone binary:
 
 ```bash
 cargo build --release
-./target/release/codexrr --work-dir /path/to/your/project
+./target/release/codexify --work-dir /path/to/your/project
 ```
 
 ### Prebuilt binaries
 
-Each release ships a compiled binary per platform — `windows-x64`, `linux-x64`, `linux-arm64`, `darwin-x64` and `darwin-arm64`. Download the archive for your OS/arch, unpack it, and run `codexrr --work-dir …`. These are native builds, so there is no AVX2/baseline caveat: the binary runs on any CPU of its architecture.
+Each release ships a compiled binary per platform — `windows-x64`, `linux-x64`, `linux-arm64`, `darwin-x64` and `darwin-arm64`. Download the archive for your OS/arch, unpack it, and run `codexify --work-dir …`. These are native builds, so there is no AVX2/baseline caveat: the binary runs on any CPU of its architecture.
 
 ## CLI flags
 
@@ -248,7 +248,7 @@ The `memory` block governs `remember`, `recall` and the plan `update_plan` saves
 | Key | Default | Description |
 |-----|---------|-------------|
 | `enabled` | `true` | `false` turns persistence off entirely; nothing is read or written |
-| `dir` | `~/.codex-free/projects/<name>-<hash of work-dir>` | Where the state file lives. Outside the repository by default |
+| `dir` | `~/.codexify/projects/<name>-<hash of work-dir>` | Where the state file lives. Outside the repository by default |
 | `maxBytes` | `16384` | Budget for all notes together. A note over it is rejected, not silently evicted |
 
 The `skills` block governs `SKILL.md` discovery. See [Skills](#skills):
@@ -263,7 +263,7 @@ The `allowedHosts` array and the `mcpServers` map are covered under [Host allowl
 
 ## Context and memory
 
-Codex runs against a large context window and keeps its session in a process you control. ChatGPT Web does neither: the window is smaller than most real tasks, and when it fills — or when you open a new chat — the plan and everything learned along the way are gone, with no sign to the model that they ever existed. Codexrr attacks both halves of that.
+Codex runs against a large context window and keeps its session in a process you control. ChatGPT Web does neither: the window is smaller than most real tasks, and when it fills — or when you open a new chat — the plan and everything learned along the way are gone, with no sign to the model that they ever existed. Codexify attacks both halves of that.
 
 **Spend the window on less.** Every tool that could return an unbounded amount of text stops at a budget and says so on its last line, naming the argument that continues from where it stopped:
 
@@ -275,7 +275,7 @@ That line matters as much as the cap. Silent truncation reads as "that was the w
 
 **Keep what would be expensive to rediscover.** `remember` writes one keyed note; `recall` hands back the notes and the current plan. `update_plan` persists too, so the plan survives the conversation that made it. Writing to a key that exists replaces it, and an empty value deletes it — a keyed store stays current where an append log accumulates contradictions until it is worthless.
 
-State lives in `~/.codex-free/projects/<name>-<hash>/memory.json`, keyed by the absolute work directory. Nothing is written into the repository you pointed the server at, and two checkouts of the same repo do not share notes.
+State lives in `~/.codexify/projects/<name>-<hash>/memory.json`, keyed by the absolute work directory. Nothing is written into the repository you pointed the server at, and two checkouts of the same repo do not share notes.
 
 Because `instructions` is rebuilt for every MCP session, a new conversation opens with the saved plan and notes already in front of it, under a `## Saved state` heading between the environment and `AGENTS.md`. If the client ignores `instructions`, one `recall` gets the same thing.
 
@@ -344,7 +344,7 @@ Instructions are built per MCP session, so editing `AGENTS.md` takes effect on t
 
 ## Skills
 
-`AGENTS.md` says what is true of the project always. A **skill** says how to do one recurring task well — cut a release, review a PR the way this team reviews PRs, debug the flaky suite — and is only read when that task comes up. Codex has had them since its extension crate landed; Codexrr ports the format and the discovery, from `codex-rs/ext/skills` and `codex-rs/skills`.
+`AGENTS.md` says what is true of the project always. A **skill** says how to do one recurring task well — cut a release, review a PR the way this team reviews PRs, debug the flaky suite — and is only read when that task comes up. Codex has had them since its extension crate landed; Codexify ports the format and the discovery, from `codex-rs/ext/skills` and `codex-rs/skills`.
 
 A skill is a directory holding a `SKILL.md` whose YAML frontmatter names it and says when it applies:
 
@@ -379,7 +379,7 @@ description: Cut and publish a release of this project
 
 Repo skills come first, so a project decides how a name behaves inside it; a personal skill of the same name is shadowed and `skills_list` says so rather than merging the two.
 
-**Claude Code plugins.** Codexrr also discovers skills bundled with your installed Claude Code plugins, namespaced `<plugin>:<skill>` (e.g. `idasql:decompiler`) so they never collide with your own. The highest installed version of each plugin is used. Turn this off with `"skills": { "includePlugins": false }`. Setting `skills.dirs` overrides the standalone roots and, by default, disables plugin discovery too — set `includePlugins: true` alongside `dirs` to keep it.
+**Claude Code plugins.** Codexify also discovers skills bundled with your installed Claude Code plugins, namespaced `<plugin>:<skill>` (e.g. `idasql:decompiler`) so they never collide with your own. The highest installed version of each plugin is used. Turn this off with `"skills": { "includePlugins": false }`. Setting `skills.dirs` overrides the standalone roots and, by default, disables plugin discovery too — set `includePlugins: true` alongside `dirs` to keep it.
 
 **What the model sees.** The catalogue — a name and a description per skill — goes into `instructions` under a `## Skills` heading, so a chat opens knowing what is available without spending a call to find out. Bodies are not loaded: `skills_read` fetches one only once a skill has actually been chosen. That is the progressive disclosure that makes a large library affordable on a small context window. The section is omitted entirely when nothing is installed.
 
@@ -389,9 +389,9 @@ Discovery runs per MCP session, so adding a skill takes effect on the next conne
 
 ## Bridging other MCP servers
 
-Codexrr can also act as an **MCP aggregator**: it connects to your other local MCP servers as a client, discovers their tools at startup, and re-exposes them through its own `/mcp` endpoint — so the ChatGPT-side agent sees and can call them too.
+Codexify can also act as an **MCP aggregator**: it connects to your other local MCP servers as a client, discovers their tools at startup, and re-exposes them through its own `/mcp` endpoint — so the ChatGPT-side agent sees and can call them too.
 
-Add an `mcpServers` section to `codex.config.json` (the standard Claude-Desktop shape). Each entry is a stdio command that Codexrr launches and drives over stdin/stdout:
+Add an `mcpServers` section to `codex.config.json` (the standard Claude-Desktop shape). Each entry is a stdio command that Codexify launches and drives over stdin/stdout:
 
 ```json
 {
@@ -470,7 +470,7 @@ By default `allowedHosts` is empty, which accepts any `Host` header — the serv
 
 - **Path traversal prevention**: every filesystem tool — including `apply_patch` and `view_image` — resolves paths through a guard that rejects anything outside `--work-dir`.
 - **One bounded exception**: [AGENTS.md](#agentsmd) discovery reads above `--work-dir`, up to the nearest `.git`. Nothing else does. It is read-only, opens only `AGENTS.override.md`, `AGENTS.md` and any `projectDoc.fallbackFilenames`, and `get_project_doc` reports the absolute path of every file it used. Set `projectDoc.maxBytes` to `0` to switch it off, or `projectDoc.rootMarkers` to `[]` to keep the search inside the work directory.
-- **One bounded write outside the work directory**: `remember` and `update_plan` write `memory.json` under `~/.codex-free/`, deliberately outside the repository so nothing lands in your git history. It holds whatever the model chose to note about the task — read it if you want to know, delete the directory to forget, or set `memory.enabled` to `false` to never write it. The write is atomic (temp file plus rename) and guarded by a per-project lock, so a crash mid-write never leaves a torn file and two servers pointed at the same work directory do not lose each other's notes to an interleaved update. See [Context and memory](#context-and-memory).
+- **One bounded write outside the work directory**: `remember` and `update_plan` write `memory.json` under `~/.codexify/`, deliberately outside the repository so nothing lands in your git history. It holds whatever the model chose to note about the task — read it if you want to know, delete the directory to forget, or set `memory.enabled` to `false` to never write it. The write is atomic (temp file plus rename) and guarded by a per-project lock, so a crash mid-write never leaves a torn file and two servers pointed at the same work directory do not lose each other's notes to an interleaved update. See [Context and memory](#context-and-memory).
 - **Bounded reads outside the work directory**: [skills](#skills) may live in `~/.agents/skills`, `~/.codex/skills`, `~/.claude/skills` or an installed Claude Code plugin. `skills_read` opens files there, but only inside a skill package that already exists — the `resource` path is checked against the skill's own directory, so it cannot walk out into the rest of your home directory. `skills_list` reports the absolute path of every skill it found. Set `skills.enabled` to `false` to switch it off, or `skills.dirs` to point the user scope somewhere you choose.
 - **Command allowlist**: `run_command` only runs binaries listed in `allowedCommands`; everything else is rejected. `exec_command` checks the same list plus `exec.extraAllowedCommands`, at every command position in the string.
 - **Bridged servers run with your privileges**: an `mcpServers` entry launches a real process on your machine and forwards the model's calls to it verbatim. Only bridge servers you trust, and prefer `tools` allow-lists or `gateway` mode to keep the exposed surface small. A bad `command` path is reported, never silently ignored.
@@ -492,7 +492,7 @@ Don't expose this without tunnel-level access control (ngrok IP restrictions, Cl
 
 ```bash
 cargo run -- --work-dir /path/to/project   # run against a project
-cargo build --release                       # optimized binary at target/release/codexrr
+cargo build --release                       # optimized binary at target/release/codexify
 cargo test                                  # run the test suite
 cargo clippy --all-targets                  # lints
 cargo fmt                                    # format

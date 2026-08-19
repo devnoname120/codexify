@@ -9,12 +9,12 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 The first Rust release. The server was rewritten from Bun + TypeScript to Rust
 (**tokio + axum + [`rmcp`](https://crates.io/crates/rmcp)**), keeping the tool
 schemas, the agent brief, and the on-disk formats compatible with the 0.x line.
-The binary is now `codexrr`.
+The binary is now `codexify`.
 
 ### Added
 
 - **MCP aggregator.** Bridge other local MCP servers through an `mcpServers`
-  section in `codex.config.json`: Codexrr launches each as a stdio child,
+  section in `codex.config.json`: Codexify launches each as a stdio child,
   discovers its tools at startup, and re-exposes them as `<server>__<tool>`
   alongside the native tools. Startup banner reports every configured server so a
   bad path or failed handshake is never silent.
@@ -47,4 +47,4 @@ filename sort uses byte/Unicode ordering rather than `localeCompare`;
 `write_file` reports UTF-8 byte counts; `exec_command` uses plain pipes, not a
 PTY. See the README's "Notes on the port" for the full list.
 
-[1.0.0]: https://github.com/hypnguyen1209/codex-free/releases/tag/v1.0.0
+[1.0.0]: https://github.com/devnoname120/codexify/releases/tag/v1.0.0

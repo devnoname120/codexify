@@ -93,9 +93,9 @@ jobs:
         shell: bash
         run: |
           VERSION="${GITHUB_REF#refs/tags/}"
-          STAGE="codexrr-${VERSION}-${{ matrix.name }}"
+          STAGE="codexify-${VERSION}-${{ matrix.name }}"
           mkdir "${STAGE}"
-          cp "target/${{ matrix.target }}/release/codexrr${{ matrix.ext }}" "${STAGE}/"
+          cp "target/${{ matrix.target }}/release/codexify${{ matrix.ext }}" "${STAGE}/"
           cp codex.config.json LICENSE README.md "${STAGE}/"
           echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
           echo "STAGE=${STAGE}" >> "$GITHUB_ENV"
@@ -116,7 +116,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: codexrr-${{ matrix.name }}
+          name: codexify-${{ matrix.name }}
           path: ${{ env.ARCHIVE }}
 
   release:

@@ -1,7 +1,7 @@
 use clap::Parser;
 
-use codexrr::config::{Cli, load_config};
-use codexrr::server::start_http_server;
+use codexify::config::{Cli, load_config};
+use codexify::server::start_http_server;
 
 #[tokio::main]
 async fn main() {

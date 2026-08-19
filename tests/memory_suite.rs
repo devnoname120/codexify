@@ -2,7 +2,7 @@
 //! src/tools/__tests__/memory-tools.test.ts.
 //!
 //! Every test sets `config.memory.dir` to a TempDir so nothing touches the real
-//! ~/.codex-free, except the pure path-computation tests for `memory_dir` which
+//! ~/.codexify, except the pure path-computation tests for `memory_dir` which
 //! do not write to disk.
 
 use std::collections::BTreeMap;
@@ -10,17 +10,17 @@ use std::collections::BTreeMap;
 use serde_json::json;
 use tempfile::TempDir;
 
-use codexrr::config::default_config;
-use codexrr::exec_sessions::SessionState;
-use codexrr::memory::{
+use codexify::config::default_config;
+use codexify::exec_sessions::SessionState;
+use codexify::memory::{
     DEFAULT_MEMORY_MAX_BYTES, MemoryNote, load_memory, lock_path, memory_dir, memory_enabled,
     memory_max_bytes, memory_path, notes_bytes, remember, render_memory, save_plan,
 };
-use codexrr::tool::Tool;
-use codexrr::tools::recall::{NOTHING_REMEMBERED, Recall};
-use codexrr::tools::remember::Remember;
-use codexrr::tools::update_plan::UpdatePlan;
-use codexrr::types::{AppConfig, PlanItem, PlanState, PlanStepStatus};
+use codexify::tool::Tool;
+use codexify::tools::recall::{NOTHING_REMEMBERED, Recall};
+use codexify::tools::remember::Remember;
+use codexify::tools::update_plan::UpdatePlan;
+use codexify::types::{AppConfig, PlanItem, PlanState, PlanStepStatus};
 
 const NOW: &str = "2026-01-01T00:00:00.000Z";
 
@@ -41,7 +41,7 @@ fn memory_dir_defaults_under_home_not_in_repo() {
     let config = default_config(root.path().join("work"));
     let dir = memory_dir(&config);
     let dir_str = dir.to_string_lossy();
-    assert!(dir_str.contains(".codex-free"));
+    assert!(dir_str.contains(".codexify"));
     assert!(dir_str.contains("projects"));
     // Never inside the repository being worked on.
     assert!(!dir.starts_with(&config.work_dir));

@@ -18,8 +18,8 @@ use crate::types::{
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "codexrr",
-    about = "Codex Free MCP bridge (Rust): expose Codex-style agent tools over Streamable HTTP."
+    name = "codexify",
+    about = "Codexify MCP bridge (Rust): expose Codex-style agent tools over Streamable HTTP."
 )]
 pub struct Cli {
     /// Project directory the tools operate on (required).
@@ -187,7 +187,7 @@ pub fn load_config(cli: Cli) -> Result<AppConfig, String> {
         .unwrap_or_else(|| PathBuf::from("codex.config.json"));
 
     // Show the absolute path of the config actually loaded, so it is obvious
-    // when codexrr picked up a different file than the one being edited.
+    // when codexify picked up a different file than the one being edited.
     let display_path = if config_path.is_absolute() {
         config_path.clone()
     } else {

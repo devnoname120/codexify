@@ -80,7 +80,7 @@ pub fn memory_dir(config: &AppConfig) -> PathBuf {
     };
 
     let home = home_dir().unwrap_or_else(|| PathBuf::from("."));
-    home.join(".codex-free")
+    home.join(".codexify")
         .join("projects")
         .join(format!("{slug}-{digest}"))
 }

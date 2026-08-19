@@ -1,4 +1,4 @@
-//! Codex Free MCP bridge, ported to Rust.
+//! Codexify MCP bridge, ported to Rust.
 //!
 //! A local Streamable-HTTP MCP server exposing Codex-style agent tools over a
 //! chosen work directory. See the module docs for the piece-by-piece port of the

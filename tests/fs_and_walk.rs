@@ -15,17 +15,17 @@ use std::path::Path;
 use serde_json::json;
 use tempfile::TempDir;
 
-use codexrr::config::default_config;
-use codexrr::exec_sessions::SessionState;
-use codexrr::ignore_rules::{DEFAULT_IGNORE, build_ignore, to_rel_posix};
-use codexrr::tool::Tool;
-use codexrr::tools::glob::Glob;
-use codexrr::tools::grep::Grep;
-use codexrr::tools::list_directory::ListDirectory;
-use codexrr::tools::read_file::ReadFile;
-use codexrr::tools::tree::Tree;
-use codexrr::tools::write_file::WriteFile;
-use codexrr::types::AppConfig;
+use codexify::config::default_config;
+use codexify::exec_sessions::SessionState;
+use codexify::ignore_rules::{DEFAULT_IGNORE, build_ignore, to_rel_posix};
+use codexify::tool::Tool;
+use codexify::tools::glob::Glob;
+use codexify::tools::grep::Grep;
+use codexify::tools::list_directory::ListDirectory;
+use codexify::tools::read_file::ReadFile;
+use codexify::tools::tree::Tree;
+use codexify::tools::write_file::WriteFile;
+use codexify::types::AppConfig;
 
 // --- helpers -----------------------------------------------------------
 

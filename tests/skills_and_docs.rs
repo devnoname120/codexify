@@ -17,29 +17,29 @@ use std::path::{Path, PathBuf};
 use serde_json::json;
 use tempfile::TempDir;
 
-use codexrr::config::default_config;
-use codexrr::environment::{
+use codexify::config::default_config;
+use codexify::environment::{
     describe_environment, node_arch, node_platform, os_name, render_environment,
 };
-use codexrr::exec_sessions::SessionState;
-use codexrr::instructions::{AGENT_BRIEF, build_instructions};
-use codexrr::memory::{remember, save_plan};
-use codexrr::project_doc::{
+use codexify::exec_sessions::SessionState;
+use codexify::instructions::{AGENT_BRIEF, build_instructions};
+use codexify::memory::{remember, save_plan};
+use codexify::project_doc::{
     DEFAULT_ROOT_MARKERS, PROJECT_DOC_MAX_BYTES, candidate_filenames, find_project_root,
     load_project_doc, project_doc_paths,
 };
-use codexrr::skills::{
+use codexify::skills::{
     MAX_SKILL_NAME_BYTES, MAX_SKILL_PACKAGE_FILES, SKILL_FILENAME, SkillScope, discover_skills,
     find_skill, parse_skill_frontmatter, render_skill_catalog, resolve_skill_resource,
     skill_package_files, skill_roots,
 };
-use codexrr::tool::Tool;
-use codexrr::tools::get_agent_brief::GetAgentBrief;
-use codexrr::tools::get_environment::GetEnvironment;
-use codexrr::tools::get_project_doc::GetProjectDoc;
-use codexrr::tools::skills_list::SkillsList;
-use codexrr::tools::skills_read::SkillsRead;
-use codexrr::types::{AppConfig, ExecMode};
+use codexify::tool::Tool;
+use codexify::tools::get_agent_brief::GetAgentBrief;
+use codexify::tools::get_environment::GetEnvironment;
+use codexify::tools::get_project_doc::GetProjectDoc;
+use codexify::tools::skills_list::SkillsList;
+use codexify::tools::skills_read::SkillsRead;
+use codexify::types::{AppConfig, ExecMode};
 
 // --- helpers -----------------------------------------------------------
 
@@ -134,7 +134,7 @@ fn skill_roots_defaults_user_scope_to_home() {
     let mut config = default_config(dir.path().to_path_buf());
     config.skills.dirs = None; // fall back to the home directory defaults
 
-    let home = codexrr::util::home_dir().expect("home dir");
+    let home = codexify::util::home_dir().expect("home dir");
     let user_roots: Vec<PathBuf> = skill_roots(&config)
         .into_iter()
         .filter(|r| r.scope == SkillScope::User)
@@ -450,7 +450,7 @@ fn render_catalog_name_and_reason_per_skill() {
 
 #[test]
 fn candidate_filenames_default() {
-    use codexrr::types::ProjectDocConfig;
+    use codexify::types::ProjectDocConfig;
     let names = candidate_filenames(&ProjectDocConfig::default());
     assert_eq!(
         names,
@@ -460,7 +460,7 @@ fn candidate_filenames_default() {
 
 #[test]
 fn candidate_filenames_appends_without_dupes_or_blanks() {
-    use codexrr::types::ProjectDocConfig;
+    use codexify::types::ProjectDocConfig;
     let cfg = ProjectDocConfig {
         fallback_filenames: Some(vec![
             "CLAUDE.md".into(),
@@ -829,7 +829,7 @@ fn build_says_nothing_about_saved_state_when_none() {
 
 #[test]
 fn build_hands_back_saved_plan_and_notes() {
-    use codexrr::types::{PlanItem, PlanState, PlanStepStatus};
+    use codexify::types::{PlanItem, PlanState, PlanStepStatus};
     let dir = TempDir::new().unwrap();
     let state = TempDir::new().unwrap();
     std::fs::create_dir_all(dir.path().join(".git")).unwrap();

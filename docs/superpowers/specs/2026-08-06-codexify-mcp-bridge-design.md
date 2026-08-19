@@ -1,4 +1,4 @@
-# Codex Free — Local MCP Bridge for ChatGPT Web Pro
+# Codexify — Local MCP Bridge for ChatGPT Web Pro
 
 **Date:** 2026-08-06
 **Status:** Approved
@@ -18,7 +18,7 @@ This works in regular ChatGPT chat mode (no need for "Work" mode). The user conf
 ### Project Structure
 
 ```
-codex-free/
+codexify/
 ├── main.ts                   # Entry: parse CLI args, boot server
 ├── package.json
 ├── tsconfig.json
