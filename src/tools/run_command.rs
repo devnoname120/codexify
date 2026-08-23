@@ -6,6 +6,7 @@ use serde_json::{Value, json};
 use tokio::process::Command;
 
 use crate::exec_sessions::SessionState;
+use crate::process_env::scrub_untrusted_child_env;
 use crate::tool::{Tool, arg_str, arg_u64};
 use crate::types::{AppConfig, ToolResult};
 
@@ -75,6 +76,7 @@ impl Tool for RunCommand {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        scrub_untrusted_child_env(&mut cmd, config);
 
         let child = match cmd.spawn() {
             Ok(c) => c,

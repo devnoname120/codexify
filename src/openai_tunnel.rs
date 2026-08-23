@@ -14,8 +14,12 @@ use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tokio::process::{Child, Command};
 use tokio::time::{Instant, sleep, timeout};
+use zeroize::Zeroizing;
 use zip::ZipArchive;
 
+use crate::process_env::{
+    CHILD_CONTROL_PLANE_API_KEY_ENV, CHILD_MCP_AUTHORIZATION_ENV, isolate_tunnel_child_env,
+};
 use crate::types::{AppConfig, OpenAiTunnelConfig};
 use crate::util::home_dir;
 
@@ -45,12 +49,13 @@ struct InstallManifest {
 struct ReleaseAsset {
     archive_name: String,
     binary_name: String,
+    archive_sha256: &'static str,
 }
 
-enum ControlPlaneReadiness {
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RuntimeReadiness {
     Ready,
     Pending(String),
-    Failed(String),
 }
 
 pub struct RunningOpenAiTunnel {
@@ -90,7 +95,12 @@ pub async fn start(config: &AppConfig) -> anyhow::Result<RunningOpenAiTunnel> {
         .openai_tunnel
         .as_ref()
         .context("OpenAI tunnel configuration is missing")?;
-    validate_key_reference(&settings.api_key_ref)?;
+    let control_plane_api_key = resolve_key_reference(&settings.api_key_ref)?;
+    let internal_mcp_bearer = config
+        .api_key
+        .as_deref()
+        .context("native tunnel mode requires an internal MCP bearer token")?;
+    let internal_mcp_authorization = bearer_authorization_value(internal_mcp_bearer);
     let client_path = resolve_client(settings).await?;
 
     let runtime_dir = tempfile::Builder::new()
@@ -106,12 +116,17 @@ pub async fn start(config: &AppConfig) -> anyhow::Result<RunningOpenAiTunnel> {
     let target_url = format!("http://127.0.0.1:{}/mcp", config.port);
 
     let mut command = Command::new(&client_path);
+    isolate_tunnel_child_env(&mut command);
     command
         .args(runtime_args(settings, &health_url_path, &target_url))
-        .env_remove("TUNNEL_CLIENT_CONFIG")
-        .env_remove("TUNNEL_CLIENT_PROFILE")
-        .env_remove("TUNNEL_CLIENT_PROFILE_FILE")
-        .env_remove("TUNNEL_CLIENT_PROFILE_DIR")
+        .env(
+            CHILD_CONTROL_PLANE_API_KEY_ENV,
+            control_plane_api_key.as_str(),
+        )
+        .env(
+            CHILD_MCP_AUTHORIZATION_ENV,
+            internal_mcp_authorization.as_str(),
+        )
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(log_stderr))
         .kill_on_drop(true);
@@ -119,6 +134,9 @@ pub async fn start(config: &AppConfig) -> anyhow::Result<RunningOpenAiTunnel> {
     let mut child = command
         .spawn()
         .with_context(|| format!("start OpenAI tunnel runtime at {}", client_path.display()))?;
+    drop(command);
+    drop(control_plane_api_key);
+    drop(internal_mcp_authorization);
 
     let health_url = match wait_until_ready(&mut child, &health_url_path, &log_path).await {
         Ok(url) => url,
@@ -146,9 +164,13 @@ fn runtime_args(
         OsString::from("--control-plane.tunnel-id"),
         OsString::from(&settings.tunnel_id),
         OsString::from("--control-plane.api-key"),
-        OsString::from(&settings.api_key_ref),
+        OsString::from(format!("env:{CHILD_CONTROL_PLANE_API_KEY_ENV}")),
         OsString::from("--mcp.server-url"),
         OsString::from(target_url),
+        OsString::from("--mcp.extra-headers"),
+        OsString::from(format!("Authorization: env:{CHILD_MCP_AUTHORIZATION_ENV}")),
+        OsString::from("--mcp.discovery-extra-headers"),
+        OsString::from(format!("Authorization: env:{CHILD_MCP_AUTHORIZATION_ENV}")),
         OsString::from("--mcp.startup-wait-timeout"),
         OsString::from("15s"),
         OsString::from("--health.listen-addr"),
@@ -163,6 +185,10 @@ fn runtime_args(
         args.push(OsString::from(organization_id));
     }
     args
+}
+
+fn bearer_authorization_value(token: &str) -> Zeroizing<String> {
+    Zeroizing::new(format!("Bearer {token}"))
 }
 
 async fn wait_until_ready(
@@ -188,43 +214,12 @@ async fn wait_until_ready(
 
         if let Ok(raw) = std::fs::read_to_string(health_url_path) {
             match parse_loopback_health_url(&raw) {
-                Ok(base_url) => {
-                    let ready_url = base_url.join("readyz").context("build /readyz URL")?;
-                    match client.get(ready_url).send().await {
-                        Ok(response) if response.status() == StatusCode::OK => {
-                            match probe_control_plane(&client, &base_url).await {
-                                ControlPlaneReadiness::Ready => {
-                                    return Ok(base_url.as_str().trim_end_matches('/').to_string());
-                                }
-                                ControlPlaneReadiness::Pending(detail) => {
-                                    last_detail = detail;
-                                }
-                                ControlPlaneReadiness::Failed(detail) => {
-                                    bail!(
-                                        "OpenAI tunnel control-plane validation failed: {detail}"
-                                    );
-                                }
-                            }
-                        }
-                        Ok(response) => {
-                            let status = response.status();
-                            let body = response
-                                .bytes()
-                                .await
-                                .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
-                                .unwrap_or_default();
-                            last_detail = sanitize_detail(format!(
-                                "/readyz returned {status}: {}",
-                                body.trim()
-                            ));
-                        }
-                        Err(error) => {
-                            last_detail = sanitize_detail(format!(
-                                "could not query tunnel-client /readyz: {error}"
-                            ));
-                        }
+                Ok(base_url) => match probe_runtime_readiness(&client, &base_url).await {
+                    RuntimeReadiness::Ready => {
+                        return Ok(base_url.as_str().trim_end_matches('/').to_string());
                     }
-                }
+                    RuntimeReadiness::Pending(detail) => last_detail = detail,
+                },
                 Err(error) => last_detail = error.to_string(),
             }
         }
@@ -240,64 +235,40 @@ async fn wait_until_ready(
     }
 }
 
-async fn probe_control_plane(client: &Client, base_url: &Url) -> ControlPlaneReadiness {
-    let status_url = match base_url.join("api/status") {
+async fn probe_runtime_readiness(client: &Client, base_url: &Url) -> RuntimeReadiness {
+    let ready_url = match base_url.join("readyz") {
         Ok(url) => url,
         Err(error) => {
-            return ControlPlaneReadiness::Pending(sanitize_detail(format!(
-                "could not build tunnel-client status URL: {error}"
+            return RuntimeReadiness::Pending(sanitize_detail(format!(
+                "could not build tunnel-client readiness URL: {error}"
             )));
         }
     };
-    let status = match client.get(status_url).send().await {
-        Ok(response) if response.status() == StatusCode::OK => match response.text().await {
-            Ok(text) => match serde_json::from_str::<serde_json::Value>(&text) {
-                Ok(value) => value,
-                Err(error) => {
-                    return ControlPlaneReadiness::Pending(sanitize_detail(format!(
-                        "could not parse tunnel-client status: {error}"
-                    )));
-                }
-            },
-            Err(error) => {
-                return ControlPlaneReadiness::Pending(sanitize_detail(format!(
-                    "could not read tunnel-client status: {error}"
-                )));
-            }
-        },
+    match client.get(ready_url).send().await {
+        Ok(response) if response.status() == StatusCode::OK => {}
         Ok(response) => {
-            return ControlPlaneReadiness::Pending(format!(
-                "tunnel-client status returned {}",
-                response.status()
-            ));
+            let status = response.status();
+            let body = response
+                .bytes()
+                .await
+                .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+                .unwrap_or_default();
+            return RuntimeReadiness::Pending(sanitize_detail(format!(
+                "/readyz returned {status}: {}",
+                body.trim()
+            )));
         }
         Err(error) => {
-            return ControlPlaneReadiness::Pending(sanitize_detail(format!(
-                "could not query tunnel-client status: {error}"
+            return RuntimeReadiness::Pending(sanitize_detail(format!(
+                "could not query tunnel-client /readyz: {error}"
             )));
         }
-    };
-
-    if let Some(error) = status
-        .get("tunnel_metadata_error")
-        .and_then(serde_json::Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-    {
-        return ControlPlaneReadiness::Failed(sanitize_detail(error));
-    }
-    if !status
-        .get("tunnel_metadata")
-        .is_some_and(serde_json::Value::is_object)
-    {
-        return ControlPlaneReadiness::Pending(
-            "waiting for OpenAI tunnel metadata and Tunnels Read permission".into(),
-        );
     }
 
     let metrics_url = match base_url.join("metrics") {
         Ok(url) => url,
         Err(error) => {
-            return ControlPlaneReadiness::Pending(sanitize_detail(format!(
+            return RuntimeReadiness::Pending(sanitize_detail(format!(
                 "could not build tunnel-client metrics URL: {error}"
             )));
         }
@@ -306,31 +277,30 @@ async fn probe_control_plane(client: &Client, base_url: &Url) -> ControlPlaneRea
         Ok(response) if response.status() == StatusCode::OK => match response.text().await {
             Ok(text) => text,
             Err(error) => {
-                return ControlPlaneReadiness::Pending(sanitize_detail(format!(
+                return RuntimeReadiness::Pending(sanitize_detail(format!(
                     "could not read tunnel-client metrics: {error}"
                 )));
             }
         },
         Ok(response) => {
-            return ControlPlaneReadiness::Pending(format!(
+            return RuntimeReadiness::Pending(format!(
                 "tunnel-client metrics returned {}",
                 response.status()
             ));
         }
         Err(error) => {
-            return ControlPlaneReadiness::Pending(sanitize_detail(format!(
+            return RuntimeReadiness::Pending(sanitize_detail(format!(
                 "could not query tunnel-client metrics: {error}"
             )));
         }
     };
 
     match parse_metric_value(&metrics, POLL_SUCCESS_METRIC) {
-        Some(value) if value > 0.0 => ControlPlaneReadiness::Ready,
-        Some(_) => ControlPlaneReadiness::Pending(
-            "waiting for the first successful OpenAI control-plane poll and Tunnels Use permission"
-                .into(),
+        Some(value) if value > 0.0 => RuntimeReadiness::Ready,
+        Some(_) => RuntimeReadiness::Pending(
+            "waiting for the first successful OpenAI control-plane poll".into(),
         ),
-        None => ControlPlaneReadiness::Pending(format!(
+        None => RuntimeReadiness::Pending(format!(
             "tunnel-client metrics did not expose {POLL_SUCCESS_METRIC}"
         )),
     }
@@ -342,12 +312,20 @@ fn parse_metric_value(metrics: &str, name: &str) -> Option<f64> {
         if line.is_empty() || line.starts_with('#') {
             return None;
         }
-        let mut fields = line.split_whitespace();
-        let metric_name = fields.next()?;
+        let split_at = line
+            .char_indices()
+            .find_map(|(index, ch)| (ch == '{' || ch.is_ascii_whitespace()).then_some(index))?;
+        let metric_name = &line[..split_at];
         if metric_name != name {
             return None;
         }
-        fields.next()?.parse().ok()
+        let remainder = &line[split_at..];
+        let sample = if remainder.starts_with('{') {
+            &remainder[remainder.rfind('}')? + 1..]
+        } else {
+            remainder
+        };
+        sample.split_whitespace().next()?.parse().ok()
     })
 }
 
@@ -419,6 +397,7 @@ async fn validate_managed_install(
     if manifest.version != 1
         || manifest.tunnel_client_version != TUNNEL_CLIENT_VERSION
         || manifest.asset != asset.archive_name
+        || manifest.archive_sha256 != asset.archive_sha256
     {
         bail!("managed OpenAI tunnel installation manifest does not match this Codexify build");
     }
@@ -436,10 +415,7 @@ async fn install_managed_client(
     asset: &ReleaseAsset,
 ) -> anyhow::Result<()> {
     let archive_url = format!("{RELEASE_BASE}/{}", asset.archive_name);
-    let sums_url = format!("{RELEASE_BASE}/SHA256SUMS.txt");
-    let (archive, sums) = tokio::try_join!(fetch_bytes(&archive_url), fetch_bytes(&sums_url))?;
-    let expected_hash =
-        parse_expected_checksum(&String::from_utf8_lossy(&sums), &asset.archive_name)?;
+    let archive = fetch_bytes(&archive_url).await?;
     let archive_hash = sha256_hex(&archive);
     if archive_hash != asset.archive_sha256 {
         bail!(
@@ -511,6 +487,15 @@ fn release_asset() -> anyhow::Result<ReleaseAsset> {
         "x86_64" => "amd64",
         other => bail!("OpenAI tunnel runtime has no pinned build for architecture {other}"),
     };
+    let archive_sha256 = match (os, arch) {
+        ("darwin", "amd64") => "ca05df2ab5397065fcf4b1e2e8ec330d9ad0d7a880a1f08265b36fc69eddd391",
+        ("darwin", "arm64") => "924c7a1e0a2ea2c10f4f72b9c2e2382e7d55443831cdf8d84e394a54e83ccc30",
+        ("linux", "amd64") => "31e9ece3f54f87126813fb206d465fd86b23462cc71734a787927b818f60d931",
+        ("linux", "arm64") => "f02bc770367e328f21614841eb27393d7f023256224a6dde31c8aa4d6dc763f5",
+        ("windows", "amd64") => "0721098f9edda72cc36f938adcb12cd6a0c49c6c0be7ad6ab6e412f966585f2e",
+        ("windows", "arm64") => "952a30d469df749c88722e70441e72c541aa9ad878ab082678533f64bd31b2a9",
+        _ => unreachable!("OS and architecture were validated above"),
+    };
     Ok(ReleaseAsset {
         archive_name: format!("tunnel-client-runtime-v{TUNNEL_CLIENT_VERSION}-{os}-{arch}.zip"),
         binary_name: if cfg!(windows) {
@@ -518,6 +503,7 @@ fn release_asset() -> anyhow::Result<ReleaseAsset> {
         } else {
             "tunnel-client-runtime".to_string()
         },
+        archive_sha256,
     })
 }
 
@@ -529,25 +515,6 @@ fn managed_binary_path(binary_name: &str) -> anyhow::Result<PathBuf> {
         .join("openai-tunnel")
         .join(format!("v{TUNNEL_CLIENT_VERSION}"))
         .join(binary_name))
-}
-
-fn parse_expected_checksum(text: &str, asset: &str) -> anyhow::Result<String> {
-    for line in text.lines() {
-        let mut fields = line.split_whitespace();
-        let Some(hash) = fields.next() else {
-            continue;
-        };
-        let Some(name) = fields.next() else {
-            continue;
-        };
-        if name.trim_start_matches('*') == asset
-            && hash.len() == 64
-            && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
-        {
-            return Ok(hash.to_ascii_lowercase());
-        }
-    }
-    bail!("official SHA256SUMS.txt has no valid entry for {asset}")
 }
 
 fn extract_binary(archive: &[u8], binary_name: &str) -> anyhow::Result<Vec<u8>> {
@@ -585,12 +552,7 @@ async fn validate_client(path: &Path, exact_version: Option<&str>) -> anyhow::Re
         }
     }
 
-    let version = timeout(
-        Duration::from_secs(10),
-        Command::new(path).arg("--version").output(),
-    )
-    .await
-    .context("OpenAI tunnel client version check timed out")??;
+    let version = client_probe_output(path, &["--version"], "version check").await?;
     if !version.status.success() {
         bail!(
             "OpenAI tunnel client version check failed: {}",
@@ -607,16 +569,13 @@ async fn validate_client(path: &Path, exact_version: Option<&str>) -> anyhow::Re
         );
     }
 
-    let help = timeout(
-        Duration::from_secs(10),
-        Command::new(path).args(["run", "--help"]).output(),
-    )
-    .await
-    .context("OpenAI tunnel client compatibility check timed out")??;
+    let help = client_probe_output(path, &["run", "--help"], "compatibility check").await?;
     let help_output = command_output(&help.stdout, &help.stderr);
     if !help.status.success()
         || !help_output.contains("--control-plane.tunnel-id")
         || !help_output.contains("--mcp.server-url")
+        || !help_output.contains("--mcp.extra-headers")
+        || !help_output.contains("--mcp.discovery-extra-headers")
         || !help_output.contains("--health.url-file")
     {
         bail!(
@@ -627,15 +586,32 @@ async fn validate_client(path: &Path, exact_version: Option<&str>) -> anyhow::Re
     Ok(())
 }
 
-fn validate_key_reference(reference: &str) -> anyhow::Result<()> {
+async fn client_probe_output(
+    path: &Path,
+    args: &[&str],
+    operation: &str,
+) -> anyhow::Result<std::process::Output> {
+    let mut command = Command::new(path);
+    isolate_tunnel_child_env(&mut command);
+    command.args(args);
+    timeout(Duration::from_secs(10), command.output())
+        .await
+        .with_context(|| format!("OpenAI tunnel client {operation} timed out"))?
+        .with_context(|| format!("run OpenAI tunnel client {operation}"))
+}
+
+fn resolve_key_reference(reference: &str) -> anyhow::Result<Zeroizing<String>> {
     if let Some(name) = reference.strip_prefix("env:") {
-        let value = std::env::var_os(name).ok_or_else(|| {
-            anyhow!("OpenAI tunnel API-key environment variable {name} is not set")
+        let value = std::env::var(name).map_err(|error| match error {
+            std::env::VarError::NotPresent => {
+                anyhow!("OpenAI tunnel API-key environment variable {name} is not set")
+            }
+            std::env::VarError::NotUnicode(_) => {
+                anyhow!("OpenAI tunnel API-key environment variable {name} is not valid Unicode")
+            }
         })?;
-        if value.is_empty() {
-            bail!("OpenAI tunnel API-key environment variable {name} is empty");
-        }
-        return Ok(());
+        validate_runtime_api_key(&value)?;
+        return Ok(Zeroizing::new(value));
     }
 
     let path = reference
@@ -660,6 +636,28 @@ fn validate_key_reference(reference: &str) -> anyhow::Result<()> {
                 path.display()
             );
         }
+    }
+    let contents = Zeroizing::new(
+        std::fs::read_to_string(path)
+            .with_context(|| format!("read OpenAI tunnel API-key file {}", path.display()))?,
+    );
+    let value = Zeroizing::new(contents.trim().to_string());
+    validate_runtime_api_key(&value)?;
+    Ok(value)
+}
+
+fn validate_runtime_api_key(value: &str) -> anyhow::Result<()> {
+    if value.is_empty() {
+        bail!("OpenAI tunnel API key is empty");
+    }
+    if value.len() as u64 > MAX_KEY_BYTES {
+        bail!("OpenAI tunnel API key exceeds 64 KiB");
+    }
+    if !value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    {
+        bail!("OpenAI tunnel API key is malformed");
     }
     Ok(())
 }
@@ -827,10 +825,21 @@ mod tests {
         .map(|value| value.to_string_lossy().into_owned())
         .collect::<Vec<_>>();
         assert_eq!(args[0], "run");
-        assert!(
-            args.windows(2)
-                .any(|pair| { pair == ["--control-plane.api-key", "env:CONTROL_PLANE_API_KEY"] })
-        );
+        assert!(args.windows(2).any(|pair| pair
+            == [
+                "--control-plane.api-key",
+                "env:CODEXIFY_OPENAI_TUNNEL_API_KEY"
+            ]));
+        assert!(args.windows(2).any(|pair| pair
+            == [
+                "--mcp.extra-headers",
+                "Authorization: env:CODEXIFY_INTERNAL_MCP_AUTHORIZATION"
+            ]));
+        assert!(args.windows(2).any(|pair| pair
+            == [
+                "--mcp.discovery-extra-headers",
+                "Authorization: env:CODEXIFY_INTERNAL_MCP_AUTHORIZATION"
+            ]));
         assert!(
             args.windows(2)
                 .any(|pair| { pair == ["--mcp.server-url", "http://127.0.0.1:3000/mcp"] })
@@ -839,17 +848,24 @@ mod tests {
             args.windows(2)
                 .any(|pair| { pair == ["--control-plane.organization-id", "org_test"] })
         );
+        assert!(!args.iter().any(|arg| arg == "env:CONTROL_PLANE_API_KEY"));
     }
 
     #[test]
-    fn parses_only_the_requested_release_checksum() {
-        let sums = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  other.zip\n\
-                    bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb *wanted.zip\n";
+    fn internal_mcp_header_uses_the_bearer_scheme() {
         assert_eq!(
-            parse_expected_checksum(sums, "wanted.zip").unwrap(),
-            "b".repeat(64)
+            bearer_authorization_value("internal-token").as_str(),
+            "Bearer internal-token"
         );
-        assert!(parse_expected_checksum(sums, "missing.zip").is_err());
+    }
+
+    #[test]
+    fn runtime_api_key_validation_matches_the_official_character_set() {
+        assert!(validate_runtime_api_key("sk-valid_key-123").is_ok());
+        assert!(validate_runtime_api_key("").is_err());
+        assert!(validate_runtime_api_key("key with spaces").is_err());
+        assert!(validate_runtime_api_key("key\nvalue").is_err());
+        assert!(validate_runtime_api_key(&"a".repeat(MAX_KEY_BYTES as usize + 1)).is_err());
     }
 
     #[test]
@@ -873,12 +889,47 @@ mod tests {
     fn reads_the_first_successful_control_plane_poll_metric() {
         let metrics = "# HELP commands_poll_last_successful_timestamp_seconds last success\n\
                        commands_poll_cycles_total 2\n\
-                       commands_poll_last_successful_timestamp_seconds 1787429375\n";
+                       commands_poll_last_successful_timestamp_seconds{otel_scope_name=\"controlplane\",otel_scope_schema_url=\"\",otel_scope_version=\"\"} 1787429375\n";
         assert_eq!(
             parse_metric_value(metrics, POLL_SUCCESS_METRIC),
             Some(1_787_429_375.0)
         );
         assert_eq!(parse_metric_value(metrics, "missing"), None);
+    }
+
+    #[tokio::test]
+    async fn runtime_only_health_contract_needs_no_admin_api() {
+        use axum::{Router, routing::get};
+
+        let app = Router::new()
+            .route("/readyz", get(|| async { "ready" }))
+            .route(
+                "/metrics",
+                get(|| async {
+                    "commands_poll_last_successful_timestamp_seconds{otel_scope_name=\"controlplane\"} 1787429375\n"
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let base_url = Url::parse(&format!("http://{address}/")).unwrap();
+        let client = Client::builder().no_proxy().build().unwrap();
+
+        assert_eq!(
+            client
+                .get(base_url.join("api/status").unwrap())
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            probe_runtime_readiness(&client, &base_url).await,
+            RuntimeReadiness::Ready
+        );
+
+        server.abort();
     }
 
     #[test]
@@ -890,6 +941,13 @@ mod tests {
             let asset = asset.unwrap();
             assert!(asset.archive_name.contains(TUNNEL_CLIENT_VERSION));
             assert!(asset.binary_name.starts_with("tunnel-client-runtime"));
+            assert_eq!(asset.archive_sha256.len(), 64);
+            assert!(
+                asset
+                    .archive_sha256
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit())
+            );
         } else {
             assert!(asset.is_err());
         }

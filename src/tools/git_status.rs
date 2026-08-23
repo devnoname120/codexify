@@ -3,6 +3,7 @@ use serde_json::{Value, json};
 use tokio::process::Command;
 
 use crate::exec_sessions::SessionState;
+use crate::process_env::scrub_untrusted_child_env;
 use crate::tool::Tool;
 use crate::types::{AppConfig, ToolResult};
 
@@ -35,11 +36,12 @@ impl Tool for GitStatus {
     }
 
     async fn call(&self, _args: Value, config: &AppConfig, _session: &SessionState) -> ToolResult {
-        let output = Command::new("git")
+        let mut command = Command::new("git");
+        command
             .args(["status", "--porcelain"])
-            .current_dir(&config.work_dir)
-            .output()
-            .await;
+            .current_dir(&config.work_dir);
+        scrub_untrusted_child_env(&mut command, config);
+        let output = command.output().await;
 
         match output {
             Ok(o) => {

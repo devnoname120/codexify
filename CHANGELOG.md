@@ -15,21 +15,27 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   disabled with `codexMcp.enabled`.
 - Native OpenAI Secure MCP Tunnel support through the official
   `tunnel-client-runtime`. Codexify can supervise the outbound tunnel directly,
-  verify readiness and control-plane polling, and stop the runtime with the MCP
-  server.
+  verify its runtime-only readiness and labeled control-plane polling metric,
+  and stop the runtime with the MCP server.
 - Verified managed installation of a pinned runtime-only tunnel client, with
-  official release checksums, a local integrity manifest, private permissions,
-  and compatibility checks. An explicit official client binary can be selected
-  instead.
+  per-platform archive hashes embedded in Codexify, a local integrity manifest,
+  private permissions, and compatibility checks. An explicit official client
+  binary can be selected instead.
 - `openaiTunnel` configuration and matching CLI flags for tunnel ID, runtime
   key reference, client path, and organization ID.
 
 ### Security
 
 - Native tunnel mode binds the MCP listener to loopback, forces DNS-rebinding
-  Host validation to loopback authorities, and disables permissive browser CORS.
+  Host validation to loopback authorities, disables permissive browser CORS,
+  and authenticates the local MCP hop with a random per-process bearer token.
 - Tunnel runtime keys must be referenced through `env:NAME` or `file:/path`;
-  literal keys are rejected, and Unix key files must have private permissions.
+  literal keys are rejected, Unix key files must have private permissions, the
+  resolved key is exposed only to the tunnel child under a synthetic variable,
+  and model-controlled or bridged subprocesses remove the source key variable.
+- The tunnel runtime starts with an allowlisted environment rather than
+  inheriting ambient tunnel-client configuration, proxy, header, or trust-store
+  overrides. HTTP and tunnel shutdown paths are coupled and time-bounded.
 
 ## [1.0.1] - 2026-08-24
 

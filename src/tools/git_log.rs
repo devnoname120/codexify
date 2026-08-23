@@ -3,6 +3,7 @@ use serde_json::{Value, json};
 use tokio::process::Command;
 
 use crate::exec_sessions::SessionState;
+use crate::process_env::scrub_untrusted_child_env;
 use crate::tool::{Tool, arg_bool, arg_u64};
 use crate::types::{AppConfig, ToolResult};
 
@@ -48,11 +49,10 @@ impl Tool for GitLog {
             log_args.push("--format=%H %an <%ae> %ai%n  %s%n");
         }
 
-        let output = Command::new("git")
-            .args(&log_args)
-            .current_dir(&config.work_dir)
-            .output()
-            .await;
+        let mut command = Command::new("git");
+        command.args(&log_args).current_dir(&config.work_dir);
+        scrub_untrusted_child_env(&mut command, config);
+        let output = command.output().await;
 
         match output {
             Ok(o) => {

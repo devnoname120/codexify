@@ -4,7 +4,7 @@
 
 A local MCP bridge server that lets ChatGPT Web Pro call tools on your machine: read/write files, run shell commands, git operations, search. Codexify is the Rust continuation of the original Bun + TypeScript implementation, built on **tokio + axum** and the official [`rmcp`](https://crates.io/crates/rmcp) SDK over Streamable HTTP. It can expose that local MCP endpoint through OpenAI's native [Secure MCP Tunnel](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels), without opening an inbound port or publishing a general-purpose URL.
 
-In native-tunnel mode, Codexify listens only on `127.0.0.1`, starts OpenAI's official runtime-only tunnel client, and supervises it for the lifetime of the server. The tunnel client makes outbound HTTPS requests to OpenAI and forwards only tunnel traffic to the loopback MCP endpoint. A conventional externally managed tunnel remains available as an alternative.
+In native-tunnel mode, Codexify listens only on `127.0.0.1`, protects the MCP endpoint with a random per-process bearer token, starts OpenAI's official runtime-only tunnel client, and supervises it for the lifetime of the server. The tunnel client makes outbound HTTPS requests to OpenAI and forwards tunnel traffic to the authenticated loopback MCP endpoint. A conventional externally managed tunnel remains available as an alternative.
 
 The tool set covers the ones [Codex](https://github.com/openai/codex) gives its own agent — `apply_patch`, `exec_command`/`write_stdin`, `view_image`, `update_plan`, `clock_curr_time`/`clock_sleep` — so ChatGPT Web can work the way Codex does: patch files in place instead of rewriting them, drive interactive and long-running processes, and keep a plan across a task. It carries the project's `AGENTS.md` and Codex's own agent brief, so the client is told how to behave and not just what it can call. It bounds what a tool call can return and keeps a plan and notes on disk across conversations, addressing the one thing Codex never had to solve — a context window far smaller than the task. And it loads Codex's skills: a `SKILL.md` in the repo or your home directory teaches the client how *you* do a recurring task, and only the ones that apply are ever read. Schemas and prompt are ported from the Codex source, not reimplemented from guesswork.
 
@@ -89,7 +89,7 @@ flowchart LR
    cargo run --release -- --work-dir /path/to/your/project
    ```
 
-On first use, Codexify downloads the pinned runtime-only build of OpenAI's official [`tunnel-client`](https://github.com/openai/tunnel-client), verifies the release checksum and binary integrity, and installs it under `~/.codexify/openai-tunnel/`. Codexify reports ready only after the local MCP probe, tunnel metadata lookup, and a successful control-plane poll have all completed. The local MCP listener and the tunnel client's diagnostics UI remain loopback-only.
+On first use, Codexify downloads the pinned runtime-only build of OpenAI's official [`tunnel-client`](https://github.com/openai/tunnel-client), verifies the archive against the per-platform SHA-256 embedded in this Codexify build, and installs it under `~/.codexify/openai-tunnel/`. Codexify reports ready only after the runtime's `/readyz` check succeeds and its metrics show a successful control-plane poll. The runtime-only binary exposes loopback `/healthz`, `/readyz`, and `/metrics` endpoints; it intentionally does not include the full client's admin UI.
 
 To use a preinstalled official client instead, set `openaiTunnel.clientPath` or pass `--openai-tunnel-client /path/to/tunnel-client-runtime`. Codexify still checks the binary's version surface and required flags before starting it.
 
@@ -255,7 +255,9 @@ The `openaiTunnel` block enables OpenAI's native outbound tunnel:
 | `clientPath` | verified managed runtime | Explicit official `tunnel-client` or `tunnel-client-runtime` binary. Relative paths resolve from the launch directory |
 | `organizationId` | - | Optional organization ID passed as `OpenAI-Organization` by the official client |
 
-Native mode deliberately cannot be combined with `apiKey` / `--api-key`. The local MCP endpoint is not remotely addressable in this mode: it is bound to loopback, Host validation is forced to loopback authorities, and permissive browser CORS is disabled. The OpenAI runtime key authenticates the outbound tunnel connection instead. The referenced environment variable or key file must exist before startup; on Unix, a key file must not be readable by group or other users.
+Native mode deliberately cannot be combined with a caller-supplied `apiKey` / `--api-key`: Codexify generates a high-entropy bearer token for the loopback MCP hop and injects it into the tunnel runtime through static MCP and discovery headers. Host validation is forced to loopback authorities and permissive browser CORS is disabled.
+
+The OpenAI runtime key authenticates the outbound control-plane connection. Codexify resolves the configured `env:NAME` or `file:/path` reference once, passes the value to the tunnel child under a private synthetic environment name, and removes the original environment variable from model-launched commands and bridged MCP children. The tunnel runtime starts with a small allowlist of ordinary OS variables rather than inheriting tunnel-client configuration, proxy, header, or trust-store overrides from the launching shell. On Unix, a referenced key file must not be readable by group or other users. These measures prevent accidental inheritance; they do not create a secret boundary against hostile code running as the same OS user, which can potentially inspect same-user processes or read an accessible key file.
 
 The `exec` block governs `exec_command` and `write_stdin`:
 
@@ -557,7 +559,7 @@ When `remote-exec` was imported from Codex, that overlay is sufficient; include 
 5. Set the connector's permissions to **Allow all actions** if you do not want per-call confirmations.
 6. Enable the connector in a new chat, then open with `Call get_agent_brief and follow it for the rest of this chat.` — see [Acting as a Codex agent](#acting-as-a-codex-agent).
 
-There is no server URL to enter in this mode. OpenAI routes the selected tunnel to the supervised client, and that client alone can reach Codexify's loopback MCP listener. The startup banner includes the local diagnostics UI; it is not exposed through the tunnel.
+There is no server URL to enter in this mode. OpenAI routes the selected tunnel to the supervised client, which supplies Codexify's generated per-process bearer on the local hop. The startup banner prints the runtime-only `/readyz` and `/metrics` URLs. It does not advertise an admin UI because `tunnel-client-runtime` deliberately omits that full-client surface.
 
 ### With an externally managed tunnel
 

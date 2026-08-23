@@ -363,7 +363,7 @@ fn valid_tunnel_id(value: &str) -> bool {
         suffix.len() == 32
             && suffix
                 .bytes()
-                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
     })
 }
 
@@ -413,8 +413,7 @@ fn resolve_openai_tunnel(
         .ok_or_else(|| "openaiTunnel requires tunnelId (or --openai-tunnel-id)".to_string())?;
     if !valid_tunnel_id(&tunnel_id) {
         return Err(
-            "OpenAI tunnel id must be tunnel_ followed by 32 lowercase hexadecimal characters"
-                .into(),
+            "OpenAI tunnel id must be tunnel_ followed by 32 lowercase letters or digits".into(),
         );
     }
 
@@ -538,7 +537,7 @@ pub fn load_config(cli: Cli) -> Result<AppConfig, String> {
     let api_key = cli.api_key.or(file.api_key);
     if api_key.is_some() && openai_tunnel.is_some() {
         return Err(
-            "--api-key cannot be combined with openaiTunnel: native tunnel mode is loopback-only and does not expose the local MCP listener"
+            "apiKey/--api-key cannot be combined with openaiTunnel: native tunnel mode generates a private per-process bearer for the loopback MCP hop"
                 .into(),
         );
     }
@@ -748,14 +747,21 @@ mod tests {
         .unwrap();
 
         let error = load_config(cli(root.path(), &config_path)).unwrap_err();
-        assert!(error.contains("32 lowercase hexadecimal characters"));
+        assert!(error.contains("32 lowercase letters or digits"));
 
         std::fs::write(
             &config_path,
-            r#"{"openaiTunnel":{"tunnelId":"tunnel_gggggggggggggggggggggggggggggggg"}}"#,
+            r#"{"openaiTunnel":{"tunnelId":"tunnel_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}}"#,
         )
         .unwrap();
         let error = load_config(cli(root.path(), &config_path)).unwrap_err();
-        assert!(error.contains("32 lowercase hexadecimal characters"));
+        assert!(error.contains("32 lowercase letters or digits"));
+
+        std::fs::write(
+            &config_path,
+            r#"{"openaiTunnel":{"tunnelId":"tunnel_0123456789abcdefghijklmnopqrstuv"}}"#,
+        )
+        .unwrap();
+        assert!(load_config(cli(root.path(), &config_path)).is_ok());
     }
 }

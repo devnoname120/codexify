@@ -15,6 +15,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::{ChildStdin, Command};
 use tokio::sync::{Mutex as TokioMutex, Notify};
 
+use crate::process_env::scrub_untrusted_child_env;
 use crate::types::{AppConfig, PlanState};
 
 // Codex constants (shell_spec.rs). Kept as code, not config, because they are
@@ -296,6 +297,7 @@ pub fn start_exec_session(
     {
         command.process_group(0);
     }
+    scrub_untrusted_child_env(&mut command, config);
 
     let mut child = command
         .spawn()

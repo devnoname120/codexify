@@ -23,6 +23,7 @@ use serde_json::{Value, json};
 use tokio::process::Command;
 
 use crate::exec_sessions::SessionState;
+use crate::process_env::scrub_untrusted_child_env;
 use crate::tool::Tool;
 use crate::types::{AppConfig, ToolContent, ToolResult};
 
@@ -194,7 +195,7 @@ pub async fn connect_upstreams(config: &AppConfig) -> Bridge {
 
         let is_gateway = spec.mode.as_deref() == Some("gateway");
 
-        match connect_one(server_name, spec).await {
+        match connect_one(server_name, spec, config).await {
             Ok((service, upstream_tools)) => {
                 let peer = service.peer().clone();
                 let count = upstream_tools.len();
@@ -446,6 +447,7 @@ impl Tool for GatewayTool {
 async fn connect_one(
     server_name: &str,
     spec: &crate::types::McpServerSpec,
+    config: &AppConfig,
 ) -> Result<(RunningService<RoleClient, ()>, Vec<rmcp::model::Tool>), String> {
     if spec.command.is_some() && spec.url.is_some() {
         return Err("both \"command\" and \"url\" are configured".to_string());
