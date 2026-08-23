@@ -447,6 +447,9 @@ async fn connect_one(
     server_name: &str,
     spec: &crate::types::McpServerSpec,
 ) -> Result<(RunningService<RoleClient, ()>, Vec<rmcp::model::Tool>), String> {
+    if spec.command.is_some() && spec.url.is_some() {
+        return Err("both \"command\" and \"url\" are configured".to_string());
+    }
     // Recognise url-based transports and report them clearly instead of failing
     // to launch a nonexistent command.
     let kind = spec
@@ -456,7 +459,7 @@ async fn connect_one(
         .to_ascii_lowercase();
     if matches!(
         kind.as_str(),
-        "sse" | "http" | "streamable-http" | "websocket" | "ws"
+        "sse" | "http" | "streamable-http" | "streamable_http" | "websocket" | "ws"
     ) {
         return Err(format!(
             "type \"{kind}\" (url transport) is not supported yet; only stdio (command) servers are bridged"
@@ -477,6 +480,9 @@ async fn connect_one(
     for (key, value) in &spec.env {
         command.env(key, value);
     }
+    if let Some(cwd) = spec.cwd.as_deref().filter(|cwd| !cwd.is_empty()) {
+        command.current_dir(cwd);
+    }
 
     let transport = TokioChildProcess::new(command)
         .map_err(|e| format!("could not launch '{command_path}': {e}"))?;
@@ -489,12 +495,9 @@ async fn connect_one(
 
     match tokio::time::timeout(CONNECT_TIMEOUT, connect).await {
         Ok(Ok((service, mut tools))) => {
-            // Apply the optional per-server allow-list on the upstream's own names.
-            if let Some(allow) = &spec.tools {
-                let set: std::collections::HashSet<&str> =
-                    allow.iter().map(|s| s.as_str()).collect();
-                tools.retain(|t| set.contains(t.name.as_ref()));
-            }
+            // Codex applies the deny-list after the allow-list; use the same
+            // order so imported filtering has identical results.
+            tools.retain(|tool| tool_is_enabled(spec, tool.name.as_ref()));
             Ok((service, tools))
         }
         Ok(Err(e)) => Err(e),
@@ -503,6 +506,18 @@ async fn connect_one(
             CONNECT_TIMEOUT.as_secs()
         )),
     }
+}
+
+fn tool_is_enabled(spec: &crate::types::McpServerSpec, name: &str) -> bool {
+    let allowed = spec
+        .tools
+        .as_ref()
+        .is_none_or(|tools| tools.iter().any(|tool| tool == name));
+    let denied = spec
+        .disabled_tools
+        .as_ref()
+        .is_some_and(|tools| tools.iter().any(|tool| tool == name));
+    allowed && !denied
 }
 
 #[cfg(test)]
@@ -587,10 +602,12 @@ mod tests {
                 command: Some("codexify-nonexistent-binary-xyz".into()),
                 args: vec![],
                 env: HashMap::new(),
+                cwd: None,
                 disabled: false,
                 transport: None,
                 url: None,
                 tools: None,
+                disabled_tools: None,
                 mode: None,
             },
         );
@@ -613,10 +630,12 @@ mod tests {
                 command: None,
                 args: vec![],
                 env: HashMap::new(),
+                cwd: None,
                 disabled: false,
                 transport: Some("sse".into()),
                 url: Some("http://localhost:9/sse".into()),
                 tools: None,
+                disabled_tools: None,
                 mode: None,
             },
         );
@@ -638,14 +657,28 @@ mod tests {
                 command: Some("codexify-should-never-run".into()),
                 args: vec![],
                 env: HashMap::new(),
+                cwd: None,
                 disabled: true,
                 transport: None,
                 url: None,
                 tools: None,
+                disabled_tools: None,
                 mode: None,
             },
         );
         let bridge = connect_upstreams(&config).await;
         assert!(bridge.tools.is_empty());
+    }
+
+    #[test]
+    fn deny_list_is_applied_after_allow_list() {
+        let spec = McpServerSpec {
+            tools: Some(vec!["read".into(), "write".into()]),
+            disabled_tools: Some(vec!["write".into()]),
+            ..Default::default()
+        };
+        assert!(tool_is_enabled(&spec, "read"));
+        assert!(!tool_is_enabled(&spec, "write"));
+        assert!(!tool_is_enabled(&spec, "other"));
     }
 }

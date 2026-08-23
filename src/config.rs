@@ -11,6 +11,7 @@ use serde::Deserialize;
 
 use std::collections::HashMap;
 
+use crate::codex_mcp::{codex_config_path, discover_codex_mcp_servers};
 use crate::types::{
     AppConfig, CommandConfig, ExecConfig, ExecMode, IgnoreConfig, McpServerSpec, MemoryConfig,
     OutputConfig, ProjectDocConfig, SkillsConfig, TreeConfig,
@@ -111,6 +112,101 @@ struct PartialExec {
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct CodexMcpConfig {
+    enabled: Option<bool>,
+}
+
+impl CodexMcpConfig {
+    fn enabled(&self) -> bool {
+        self.enabled.unwrap_or(true)
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PartialMcpServerSpec {
+    command: Option<String>,
+    args: Option<Vec<String>>,
+    env: Option<HashMap<String, String>>,
+    cwd: Option<String>,
+    disabled: Option<bool>,
+    #[serde(rename = "type")]
+    transport: Option<String>,
+    url: Option<String>,
+    tools: Option<Vec<String>>,
+    disabled_tools: Option<Vec<String>>,
+    mode: Option<String>,
+}
+
+impl PartialMcpServerSpec {
+    fn overlay(self, mut base: McpServerSpec) -> McpServerSpec {
+        let Self {
+            command,
+            args,
+            env,
+            cwd,
+            disabled,
+            transport,
+            url,
+            tools,
+            disabled_tools,
+            mode,
+        } = self;
+        let sets_command = command.is_some();
+        let sets_url = url.is_some();
+        let sets_transport = transport.is_some();
+
+        if let Some(command) = command {
+            base.command = Some(command);
+        }
+        if let Some(args) = args {
+            base.args = args;
+        }
+        if let Some(env) = env {
+            base.env = env;
+        }
+        if let Some(cwd) = cwd {
+            base.cwd = Some(cwd);
+        }
+        if let Some(disabled) = disabled {
+            base.disabled = disabled;
+        }
+        if let Some(transport) = transport {
+            base.transport = Some(transport);
+        }
+        if let Some(url) = url {
+            base.url = Some(url);
+        }
+        if let Some(tools) = tools {
+            base.tools = Some(tools);
+        }
+        if let Some(disabled_tools) = disabled_tools {
+            base.disabled_tools = Some(disabled_tools);
+        }
+        if let Some(mode) = mode {
+            base.mode = Some(mode);
+        }
+
+        // Naming a different transport replaces the imported transport rather
+        // than leaving an impossible command+URL hybrid behind.
+        if sets_command && !sets_url {
+            base.url = None;
+            if !sets_transport {
+                base.transport = None;
+            }
+        } else if sets_url && !sets_command {
+            base.command = None;
+            if !sets_transport {
+                base.transport = Some("streamable-http".to_string());
+            }
+        }
+
+        base
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct FileConfig {
     api_key: Option<String>,
     port: Option<u16>,
@@ -123,8 +219,71 @@ struct FileConfig {
     memory: Option<MemoryConfig>,
     skills: Option<SkillsConfig>,
     ignore: Option<IgnoreConfig>,
+    codex_mcp: Option<CodexMcpConfig>,
     allowed_hosts: Option<Vec<String>>,
-    mcp_servers: Option<HashMap<String, McpServerSpec>>,
+    mcp_servers: Option<HashMap<String, PartialMcpServerSpec>>,
+}
+
+fn merge_mcp_servers(
+    mut imported: HashMap<String, McpServerSpec>,
+    explicit: HashMap<String, PartialMcpServerSpec>,
+) -> (HashMap<String, McpServerSpec>, Vec<String>) {
+    let mut entries: Vec<(String, PartialMcpServerSpec)> = explicit.into_iter().collect();
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let mut report = Vec::new();
+    for (name, overlay) in entries {
+        let imported_entry = imported.remove(&name);
+        if imported_entry.is_some() {
+            report.push(format!(
+                "{name} -> imported fields overlaid by codex.config.json"
+            ));
+        }
+        let base = imported_entry.unwrap_or_default();
+        imported.insert(name, overlay.overlay(base));
+    }
+    (imported, report)
+}
+
+fn resolve_mcp_servers(file: &mut FileConfig) -> HashMap<String, McpServerSpec> {
+    let discovery_enabled = file.codex_mcp.take().unwrap_or_default().enabled();
+    let explicit = file.mcp_servers.take().unwrap_or_default();
+
+    if !discovery_enabled {
+        println!("Codex MCP discovery: disabled by codexMcp.enabled=false");
+        return merge_mcp_servers(HashMap::new(), explicit).0;
+    }
+
+    let path = match codex_config_path() {
+        Ok(path) => path,
+        Err(error) => {
+            println!("Codex MCP discovery: skipped ({error})");
+            return merge_mcp_servers(HashMap::new(), explicit).0;
+        }
+    };
+
+    let discovery = match discover_codex_mcp_servers(&path) {
+        Ok(Some(discovery)) => discovery,
+        Ok(None) => return merge_mcp_servers(HashMap::new(), explicit).0,
+        Err(error) => {
+            println!(
+                "Codex MCP discovery: failed for {} ({error})",
+                path.display()
+            );
+            return merge_mcp_servers(HashMap::new(), explicit).0;
+        }
+    };
+
+    let (servers, overlay_report) = merge_mcp_servers(discovery.servers, explicit);
+    let mut report = discovery.report;
+    report.extend(overlay_report);
+    if !report.is_empty() {
+        println!("Codex MCP discovery: {}", path.display());
+        for line in report {
+            println!("  {line}");
+        }
+    }
+    servers
 }
 
 /// A fully-defaulted config for a given work directory, matching what
@@ -195,7 +354,7 @@ pub fn load_config(cli: Cli) -> Result<AppConfig, String> {
             .unwrap_or_default()
             .join(&config_path)
     };
-    let file: FileConfig = match std::fs::read_to_string(&config_path) {
+    let mut file: FileConfig = match std::fs::read_to_string(&config_path) {
         Ok(text) => {
             println!("Config: {}", display_path.display());
             serde_json::from_str(&text)
@@ -211,7 +370,7 @@ pub fn load_config(cli: Cli) -> Result<AppConfig, String> {
     };
 
     let mut tree = default_tree();
-    if let Some(t) = file.tree {
+    if let Some(t) = file.tree.take() {
         if let Some(d) = t.default_depth {
             tree.default_depth = d;
         }
@@ -221,7 +380,7 @@ pub fn load_config(cli: Cli) -> Result<AppConfig, String> {
     }
 
     let mut command = default_command();
-    if let Some(c) = file.command {
+    if let Some(c) = file.command.take() {
         if let Some(d) = c.default_timeout {
             command.default_timeout = d;
         }
@@ -231,7 +390,7 @@ pub fn load_config(cli: Cli) -> Result<AppConfig, String> {
     }
 
     let mut exec = default_exec();
-    if let Some(e) = file.exec {
+    if let Some(e) = file.exec.take() {
         if let Some(m) = e.mode {
             exec.mode = m;
         }
@@ -245,6 +404,8 @@ pub fn load_config(cli: Cli) -> Result<AppConfig, String> {
             exec.default_shell = e.default_shell;
         }
     }
+
+    let mcp_servers = resolve_mcp_servers(&mut file);
 
     Ok(AppConfig {
         work_dir,
@@ -262,7 +423,99 @@ pub fn load_config(cli: Cli) -> Result<AppConfig, String> {
         skills: file.skills.unwrap_or_default(),
         ignore: file.ignore.unwrap_or_default(),
         allowed_hosts: file.allowed_hosts.unwrap_or_default(),
-        mcp_servers: file.mcp_servers.unwrap_or_default(),
+        mcp_servers,
         generated_skills_dir: None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn imported_server() -> McpServerSpec {
+        McpServerSpec {
+            command: Some("codex-server".to_string()),
+            args: vec!["--stdio".to_string()],
+            env: HashMap::from([("TOKEN".to_string(), "secret".to_string())]),
+            cwd: Some("/codex/cwd".to_string()),
+            disabled: true,
+            transport: None,
+            url: None,
+            tools: Some(vec!["read".to_string()]),
+            disabled_tools: Some(vec!["write".to_string()]),
+            mode: None,
+        }
+    }
+
+    #[test]
+    fn local_entry_can_add_gateway_mode_without_repeating_launch_config() {
+        let imported = HashMap::from([("demo".to_string(), imported_server())]);
+        let explicit = HashMap::from([(
+            "demo".to_string(),
+            PartialMcpServerSpec {
+                mode: Some("gateway".to_string()),
+                disabled: Some(false),
+                ..Default::default()
+            },
+        )]);
+
+        let (merged, report) = merge_mcp_servers(imported, explicit);
+        let server = merged.get("demo").unwrap();
+        assert_eq!(server.command.as_deref(), Some("codex-server"));
+        assert_eq!(server.args, ["--stdio"]);
+        assert_eq!(server.env.get("TOKEN").map(String::as_str), Some("secret"));
+        assert_eq!(server.mode.as_deref(), Some("gateway"));
+        assert!(!server.disabled);
+        assert_eq!(report.len(), 1);
+    }
+
+    #[test]
+    fn explicit_command_replaces_imported_url_transport() {
+        let imported = HashMap::from([(
+            "demo".to_string(),
+            McpServerSpec {
+                transport: Some("streamable-http".to_string()),
+                url: Some("https://example.invalid/mcp".to_string()),
+                ..Default::default()
+            },
+        )]);
+        let explicit = HashMap::from([(
+            "demo".to_string(),
+            PartialMcpServerSpec {
+                command: Some("local-server".to_string()),
+                ..Default::default()
+            },
+        )]);
+
+        let (merged, _) = merge_mcp_servers(imported, explicit);
+        let server = merged.get("demo").unwrap();
+        assert_eq!(server.command.as_deref(), Some("local-server"));
+        assert!(server.url.is_none());
+        assert!(server.transport.is_none());
+    }
+
+    #[test]
+    fn json_config_accepts_partial_camel_case_overlay() {
+        let file: FileConfig = serde_json::from_str(
+            r#"{
+                "codexMcp": { "enabled": false },
+                "mcpServers": {
+                    "demo": {
+                        "mode": "gateway",
+                        "disabledTools": ["write"]
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        assert!(!file.codex_mcp.as_ref().unwrap().enabled());
+        let demo = file.mcp_servers.as_ref().unwrap().get("demo").unwrap();
+        assert_eq!(demo.mode.as_deref(), Some("gateway"));
+        assert_eq!(
+            demo.disabled_tools.as_deref(),
+            Some(&["write".to_string()][..])
+        );
+        assert!(demo.command.is_none());
+    }
 }

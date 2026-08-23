@@ -198,6 +198,9 @@ All paths are resolved relative to `--work-dir`.
     "enabled": true,
     "includePlugins": true
   },
+  "codexMcp": {
+    "enabled": true
+  },
   "allowedHosts": [],
   "mcpServers": {}
 }
@@ -258,6 +261,12 @@ The `skills` block governs `SKILL.md` discovery. See [Skills](#skills):
 | `enabled` | `true` | `false` searches nothing; both tools say so and the catalogue leaves `instructions` |
 | `dirs` | `~/.agents/skills`, `~/.codex/skills`, `~/.claude/skills` | User-scope directories, **replacing** the home-directory defaults. Relative paths resolve against the work directory; project-scope roots are unaffected |
 | `includePlugins` | `true` | Discover installed Claude Code plugin skills. Setting `dirs` disables this unless you set it back to `true` |
+
+The `codexMcp` block controls [automatic import of MCP servers configured in Codex](#bridging-other-mcp-servers):
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `enabled` | `true` | Read the user-level Codex `config.toml` and merge its MCP servers into `mcpServers`; `false` disables all Codex-config discovery |
 
 The `allowedHosts` array and the `mcpServers` map are covered under [Host allowlist](#host-allowlist) and [Bridging other MCP servers](#bridging-other-mcp-servers).
 
@@ -391,7 +400,31 @@ Discovery runs per MCP session, so adding a skill takes effect on the next conne
 
 Codexify can also act as an **MCP aggregator**: it connects to your other local MCP servers as a client, discovers their tools at startup, and re-exposes them through its own `/mcp` endpoint — so the ChatGPT-side agent sees and can call them too.
 
-Add an `mcpServers` section to `codex.config.json` (the standard Claude-Desktop shape). Each entry is a stdio command that Codexify launches and drives over stdin/stdout:
+### Automatic discovery from Codex
+
+By default, Codexify imports the MCP servers from Codex's user-level configuration: `$CODEX_HOME/config.toml` when `CODEX_HOME` is set, otherwise `~/.codex/config.toml`. The file is read only; Codexify never rewrites it. This initial implementation intentionally does not reproduce Codex's project-local configuration layers or trust decisions.
+
+For each `[mcp_servers.<name>]` entry, Codexify imports the fields it can preserve:
+
+- `command`, `args`, `env` and `cwd` for local stdio launch;
+- local `env_vars`, resolved from Codexify's process environment;
+- `enabled = false` as a disabled upstream;
+- `enabled_tools` as an allow-list and `disabled_tools` as a deny-list applied afterwards.
+
+Streamable-HTTP entries (`url`) and non-local execution environments are skipped because the bridge currently supports only local stdio children. Other Codex-only fields are ignored explicitly: the startup report names those fields, but never prints environment values or other configuration values. A missing or unreadable Codex config does not prevent servers declared directly in `codex.config.json` from loading.
+
+Disable discovery while retaining explicit upstreams with:
+
+```json
+{
+  "codexMcp": { "enabled": false },
+  "mcpServers": {}
+}
+```
+
+### Explicit servers and overrides
+
+The `mcpServers` map in `codex.config.json` remains supported. Each entry is a stdio command that Codexify launches and drives over stdin/stdout:
 
 ```json
 {
@@ -405,9 +438,27 @@ Add an `mcpServers` section to `codex.config.json` (the standard Claude-Desktop 
 }
 ```
 
+An explicit entry with the same name as an imported Codex server is a field-by-field overlay. That makes Codex-specific launch settings reusable while adding bridge-only settings without copying the command, arguments or environment:
+
+```json
+{
+  "mcpServers": {
+    "remote-exec": {
+      "mode": "gateway",
+      "tools": ["exec", "machine_list"]
+    }
+  }
+}
+```
+
+Set an empty array or object to replace an imported collection with an empty one. Explicit `command` and `url` fields replace the imported transport rather than producing a mixed configuration.
+
 At startup you'll see, e.g.:
 
 ```
+Codex MCP discovery: /home/user/.codex/config.toml
+  idasql -> imported from Codex
+  remote-exec -> imported fields overlaid by codex.config.json
 bridged MCP server 'idasql': 12 tool(s)
 Tools loaded (37): 25 native + 12 bridged from upstream MCP servers
 ```
@@ -424,6 +475,8 @@ Upstream MCP servers:
 
 - `disabled: true` on an entry keeps its config but skips it (shown as `-> disabled`).
 - `tools: ["exec", "machine_list", ...]` limits which upstream tools are bridged (an allow-list on the upstream's own names).
+- `disabledTools: ["dangerous_write", ...]` removes tools after the allow-list has been applied.
+- `cwd` selects the child process's working directory.
 - Bridged names are sanitised to `[A-Za-z0-9_]` (e.g. `remote_exec__exec`) so function-calling layers that reject hyphens don't drop them.
 - A bridged name that would collide with a native tool is skipped with a warning.
 - `type` may be `"stdio"` (default). Only stdio (command-launched) upstreams are bridged today; `type: "sse"`/`"http"` (or a bare `url`) entries are recognised and reported as `not supported yet` rather than failing the whole config.
@@ -437,14 +490,12 @@ Some clients (ChatGPT among them) won't reliably surface a large bridged tool se
 ```json
 "mcpServers": {
   "remote-exec": {
-    "command": "D:\\mcphub\\mcp-server-windows-x86_64.exe",
-    "type": "stdio",
     "mode": "gateway"
   }
 }
 ```
 
-This registers one tool named `remote_exec` taking `{ "function": "<name>", "arguments": { ... } }`, and auto-generates a skill (`skills_read name="remote-exec"`) documenting every function and its argument schema. The agent reads the skill, then calls the one tool — so an 84-tool server shows up as **1 tool + 1 skill** instead of 84 tools. `disabled`, `type`, and `tools` (allow-list) all still apply.
+When `remote-exec` was imported from Codex, that overlay is sufficient; include its `command` and other launch fields when it exists only in `codex.config.json`. Gateway mode registers one tool named `remote_exec` taking `{ "function": "<name>", "arguments": { ... } }`, and auto-generates a skill (`skills_read name="remote-exec"`) documenting every function and its argument schema. The agent reads the skill, then calls the one tool — so an 84-tool server shows up as **1 tool + 1 skill** instead of 84 tools. `disabled`, `type`, `tools` and `disabledTools` all still apply.
 
 ## Connecting to ChatGPT
 
@@ -473,7 +524,7 @@ By default `allowedHosts` is empty, which accepts any `Host` header — the serv
 - **One bounded write outside the work directory**: `remember` and `update_plan` write `memory.json` under `~/.codexify/`, deliberately outside the repository so nothing lands in your git history. It holds whatever the model chose to note about the task — read it if you want to know, delete the directory to forget, or set `memory.enabled` to `false` to never write it. The write is atomic (temp file plus rename) and guarded by a per-project lock, so a crash mid-write never leaves a torn file and two servers pointed at the same work directory do not lose each other's notes to an interleaved update. See [Context and memory](#context-and-memory).
 - **Bounded reads outside the work directory**: [skills](#skills) may live in `~/.agents/skills`, `~/.codex/skills`, `~/.claude/skills` or an installed Claude Code plugin. `skills_read` opens files there, but only inside a skill package that already exists — the `resource` path is checked against the skill's own directory, so it cannot walk out into the rest of your home directory. `skills_list` reports the absolute path of every skill it found. Set `skills.enabled` to `false` to switch it off, or `skills.dirs` to point the user scope somewhere you choose.
 - **Command allowlist**: `run_command` only runs binaries listed in `allowedCommands`; everything else is rejected. `exec_command` checks the same list plus `exec.extraAllowedCommands`, at every command position in the string.
-- **Bridged servers run with your privileges**: an `mcpServers` entry launches a real process on your machine and forwards the model's calls to it verbatim. Only bridge servers you trust, and prefer `tools` allow-lists or `gateway` mode to keep the exposed surface small. A bad `command` path is reported, never silently ignored.
+- **Bridged servers run with your privileges**: an explicit `mcpServers` entry or an automatically imported Codex MCP launches a real process on your machine and forwards the model's calls to it verbatim. Only bridge servers you trust, prefer `tools`/`disabledTools` filters or `gateway` mode to keep the exposed surface small, and set `codexMcp.enabled` to `false` when Codex contains servers that should not be exposed through ChatGPT. A bad `command` path is reported, never silently ignored.
 - **Optional bearer token auth**: set `--api-key` to require an `Authorization: Bearer <key>` header on all requests (except `/health`). Useful for non-ChatGPT clients. ChatGPT Plugins do not support simple bearer token auth.
 - **Host allowlist**: set `allowedHosts` to pin the accepted `Host` header for DNS-rebinding protection. See [Host allowlist](#host-allowlist).
 

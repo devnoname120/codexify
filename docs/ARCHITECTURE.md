@@ -100,10 +100,11 @@ Per-MCP-session mutable state: the map of resident `exec_command` shells and the
 current plan. Created fresh per session by the factory; `Drop` disposes shells.
 
 ### `AppConfig` (`types.rs`)
-The fully-resolved config handed to every tool. Parsed from `codex.config.json`
-with camelCase field names for backward compatibility. Optional sub-configs
-(`projectDoc`, `output`, `memory`, `skills`, `ignore`) fall back to per-module
-defaults.
+The fully-resolved config handed to every tool. `config.rs` parses
+`codex.config.json` with camelCase field names for backward compatibility, imports
+user-level Codex MCP definitions through `codex_mcp.rs`, then applies explicit
+`mcpServers` entries as field overlays. Optional sub-configs (`projectDoc`,
+`output`, `memory`, `skills`, `ignore`) fall back to per-module defaults.
 
 ---
 
@@ -154,6 +155,7 @@ the original order and rejects duplicate names.
 | `memory.rs` | Working memory outside the repo, keyed by a hash of the normalized work dir, with `O_EXCL` locking and atomic writes. |
 | `project_doc.rs` | `AGENTS.md` discovery from project root down to the work dir under a byte budget. |
 | `skills.rs` | `SKILL.md` discovery (see §8). |
+| `codex_mcp.rs` | Read-only import of local stdio MCP definitions from `$CODEX_HOME/config.toml` or `~/.codex/config.toml`, with secret-safe diagnostics. |
 | `instructions.rs` | Assembles the agent brief + environment + saved state + skills + project doc, per session. |
 | `environment.rs` | OS / shell / policy description, shared by `get_environment` and the instructions. |
 
@@ -166,11 +168,16 @@ tools at startup, and re-expose them. Implemented in `bridge.rs`; wired in
 `server.rs::start_http_server` before the HTTP server starts.
 
 ### Discovery
-For each entry in `mcpServers` (sorted, non-disabled), `connect_one`:
+Before bridging, `config.rs` imports compatible `[mcp_servers.<name>]` entries
+from Codex's user-level config. Explicit `codex.config.json.mcpServers` fields
+overlay imports with the same name; `codexMcp.enabled = false` disables the
+import. HTTP and non-local Codex entries are reported and skipped.
+
+For each resulting server entry (sorted, non-disabled), `connect_one`:
 1. Launches the `command` as a stdio child process (`TokioChildProcess`).
 2. Runs the MCP handshake (`().serve(transport)`), then `list_all_tools()`,
    under a 20 s timeout.
-3. Applies the optional `tools` allow-list.
+3. Applies the optional `tools` allow-list, then `disabledTools` deny-list.
 
 Failures are **reported, not fatal** — each server appears in the startup banner
 as `-> N tool(s)`, `-> FAILED: <reason>`, `-> disabled`, or

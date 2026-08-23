@@ -7,6 +7,7 @@
 pub mod apply_patch;
 pub mod auth;
 pub mod bridge;
+pub mod codex_mcp;
 pub mod config;
 pub mod environment;
 pub mod exec_policy;

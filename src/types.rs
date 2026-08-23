@@ -229,7 +229,7 @@ pub struct CommandConfig {
 /// name. Only stdio servers (a `command`) are bridged today; `type: "sse"|"http"`
 /// / `url` entries are recognised and reported as not-yet-supported rather than
 /// failing the whole config.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct McpServerSpec {
     /// The executable to launch (e.g. `idasql`, `npx`, `python`). Absent for
@@ -240,6 +240,10 @@ pub struct McpServerSpec {
     pub args: Vec<String>,
     #[serde(default)]
     pub env: std::collections::HashMap<String, String>,
+    /// Working directory for the launched stdio server. When absent, the child
+    /// inherits codexify's process working directory.
+    #[serde(default)]
+    pub cwd: Option<String>,
     /// Skip this server without removing it from the config.
     #[serde(default)]
     pub disabled: bool,
@@ -256,6 +260,10 @@ pub struct McpServerSpec {
     /// some (including ChatGPT) cap how many a connector may expose.
     #[serde(default)]
     pub tools: Option<Vec<String>>,
+    /// Upstream tool names removed after applying `tools`, matching Codex's
+    /// `disabled_tools` semantics.
+    #[serde(default)]
+    pub disabled_tools: Option<Vec<String>>,
     /// How the upstream's tools are exposed:
     /// - `"direct"` (default): each upstream tool becomes its own `<server>__<tool>`.
     /// - `"gateway"`: the whole server collapses into ONE dispatcher tool named
