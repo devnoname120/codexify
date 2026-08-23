@@ -2,9 +2,9 @@
 
 *Codex-style local tooling for ChatGPT, implemented in Rust.*
 
-A local MCP bridge server that lets ChatGPT Web Pro call tools on your machine: read/write files, run shell commands, git operations, search. Codexify is the Rust continuation of the original Bun + TypeScript implementation, built on **tokio + axum** and the official [`rmcp`](https://crates.io/crates/rmcp) SDK over Streamable HTTP.
+A local MCP bridge server that lets ChatGPT Web Pro call tools on your machine: read/write files, run shell commands, git operations, search. Codexify is the Rust continuation of the original Bun + TypeScript implementation, built on **tokio + axum** and the official [`rmcp`](https://crates.io/crates/rmcp) SDK over Streamable HTTP. It can expose that local MCP endpoint through OpenAI's native [Secure MCP Tunnel](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels), without opening an inbound port or publishing a general-purpose URL.
 
-ChatGPT talks to a public tunnel URL, which forwards to this server running on your machine, which operates on a project directory you choose.
+In native-tunnel mode, Codexify listens only on `127.0.0.1`, starts OpenAI's official runtime-only tunnel client, and supervises it for the lifetime of the server. The tunnel client makes outbound HTTPS requests to OpenAI and forwards only tunnel traffic to the loopback MCP endpoint. A conventional externally managed tunnel remains available as an alternative.
 
 The tool set covers the ones [Codex](https://github.com/openai/codex) gives its own agent — `apply_patch`, `exec_command`/`write_stdin`, `view_image`, `update_plan`, `clock_curr_time`/`clock_sleep` — so ChatGPT Web can work the way Codex does: patch files in place instead of rewriting them, drive interactive and long-running processes, and keep a plan across a task. It carries the project's `AGENTS.md` and Codex's own agent brief, so the client is told how to behave and not just what it can call. It bounds what a tool call can return and keeps a plan and notes on disk across conversations, addressing the one thing Codex never had to solve — a context window far smaller than the task. And it loads Codex's skills: a `SKILL.md` in the repo or your home directory teaches the client how *you* do a recurring task, and only the ones that apply are ever read. Schemas and prompt are ported from the Codex source, not reimplemented from guesswork.
 
@@ -15,8 +15,9 @@ Beyond the port, Codexify can **aggregate other MCP servers** — connecting to 
 ```mermaid
 flowchart LR
     ChatGPT["ChatGPT Web Pro"]
-    Tunnel["Public Tunnel\n(ngrok / cloudflared)"]
-    Server["Codexify\nMCP Bridge\n:3000"]
+    OpenAITunnel["OpenAI Secure MCP Tunnel"]
+    TunnelClient["Official OpenAI\ntunnel-client-runtime"]
+    Server["Codexify\nMCP Bridge\n127.0.0.1:3000"]
     Tools["Tool Registry"]
 
     FS["read_file\nwrite_file\nlist_directory\ntree"]
@@ -35,8 +36,9 @@ flowchart LR
     SkillDirs[(".agents/skills\n.codex/skills\n.claude/skills")]
     Upstream[("Upstream MCP\nservers (stdio)")]
 
-    ChatGPT -- "HTTPS" --> Tunnel
-    Tunnel -- "HTTP\n/mcp" --> Server
+    ChatGPT <-->|"connector calls"| OpenAITunnel
+    TunnelClient <-->|"outbound HTTPS"| OpenAITunnel
+    TunnelClient <-->|"loopback HTTP\n/mcp"| Server
     Server -- "Streamable HTTP\n(MCP Protocol)" --> Tools
 
     Tools --> FS
@@ -65,11 +67,39 @@ flowchart LR
 
 ## Quick start
 
+### Native OpenAI tunnel (recommended)
+
+1. Create or obtain a tunnel ID in [OpenAI Platform tunnel settings](https://platform.openai.com/settings/organization/tunnels).
+2. Create a restricted [runtime API key](https://platform.openai.com/settings/organization/api-keys) whose principal has Tunnels **Read** + **Use** for that tunnel. Keep tunnel-management/admin credentials separate.
+3. Add the tunnel to `codex.config.json`:
+
+   ```json
+   {
+     "openaiTunnel": {
+       "tunnelId": "tunnel_0123456789abcdef0123456789abcdef",
+       "apiKeyRef": "env:CONTROL_PLANE_API_KEY"
+     }
+   }
+   ```
+
+4. Put the runtime key in the referenced environment variable and start Codexify:
+
+   ```bash
+   export CONTROL_PLANE_API_KEY='...'
+   cargo run --release -- --work-dir /path/to/your/project
+   ```
+
+On first use, Codexify downloads the pinned runtime-only build of OpenAI's official [`tunnel-client`](https://github.com/openai/tunnel-client), verifies the release checksum and binary integrity, and installs it under `~/.codexify/openai-tunnel/`. Codexify reports ready only after the local MCP probe, tunnel metadata lookup, and a successful control-plane poll have all completed. The local MCP listener and the tunnel client's diagnostics UI remain loopback-only.
+
+To use a preinstalled official client instead, set `openaiTunnel.clientPath` or pass `--openai-tunnel-client /path/to/tunnel-client-runtime`. Codexify still checks the binary's version surface and required flags before starting it.
+
+### Local endpoint or externally managed tunnel
+
 ```bash
 cargo run --release -- --work-dir /path/to/your/project
 ```
 
-Server starts on `http://localhost:3000`. The MCP endpoint is `/mcp`; a health check is at `/health`.
+Without `openaiTunnel`, the server keeps its legacy behavior: it listens on `0.0.0.0:3000`, serves MCP at `/mcp`, and serves `/health`. This is appropriate for local clients or an explicitly configured reverse proxy/tunnel. Do not publish this mode without authentication and network-level access controls.
 
 To build a standalone binary:
 
@@ -90,6 +120,10 @@ Each release ships a compiled binary per platform — `windows-x64`, `linux-x64`
 | `--port` | No | `3000` | Server port |
 | `--api-key` | No | - | Bearer token for auth |
 | `--config` | No | `./codex.config.json` | Config file path (tolerated if missing) |
+| `--openai-tunnel-id` | No | - | Existing OpenAI Secure MCP Tunnel ID; enables native tunnel mode |
+| `--openai-tunnel-api-key-ref` | No | `env:CONTROL_PLANE_API_KEY` | Runtime key reference in `env:NAME` or `file:/path` form |
+| `--openai-tunnel-client` | No | managed pinned runtime | Explicit `tunnel-client` or `tunnel-client-runtime` binary |
+| `--openai-tunnel-organization-id` | No | - | Optional OpenAI organization ID sent by the tunnel client |
 
 ## Tools
 
@@ -201,12 +235,27 @@ All paths are resolved relative to `--work-dir`.
   "codexMcp": {
     "enabled": true
   },
+  "openaiTunnel": {
+    "tunnelId": "tunnel_0123456789abcdef0123456789abcdef",
+    "apiKeyRef": "env:CONTROL_PLANE_API_KEY"
+  },
   "allowedHosts": [],
   "mcpServers": {}
 }
 ```
 
 CLI flags override values from the config file.
+
+The `openaiTunnel` block enables OpenAI's native outbound tunnel:
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `tunnelId` | required | Existing `tunnel_…` identifier from OpenAI Platform |
+| `apiKeyRef` | `"env:CONTROL_PLANE_API_KEY"` | Runtime API-key reference. Only `env:NAME` and `file:/path` are accepted; literal keys are rejected |
+| `clientPath` | verified managed runtime | Explicit official `tunnel-client` or `tunnel-client-runtime` binary. Relative paths resolve from the launch directory |
+| `organizationId` | - | Optional organization ID passed as `OpenAI-Organization` by the official client |
+
+Native mode deliberately cannot be combined with `apiKey` / `--api-key`. The local MCP endpoint is not remotely addressable in this mode: it is bound to loopback, Host validation is forced to loopback authorities, and permissive browser CORS is disabled. The OpenAI runtime key authenticates the outbound tunnel connection instead. The referenced environment variable or key file must exist before startup; on Unix, a key file must not be readable by group or other users.
 
 The `exec` block governs `exec_command` and `write_stdin`:
 
@@ -268,7 +317,7 @@ The `codexMcp` block controls [automatic import of MCP servers configured in Cod
 |-----|---------|-------------|
 | `enabled` | `true` | Read the user-level Codex `config.toml` and merge its MCP servers into `mcpServers`; `false` disables all Codex-config discovery |
 
-The `allowedHosts` array and the `mcpServers` map are covered under [Host allowlist](#host-allowlist) and [Bridging other MCP servers](#bridging-other-mcp-servers).
+The `openaiTunnel` block, `allowedHosts` array, and `mcpServers` map are covered under [Native OpenAI tunnel](#native-openai-tunnel-recommended), [Host allowlist](#host-allowlist), and [Bridging other MCP servers](#bridging-other-mcp-servers).
 
 ## Context and memory
 
@@ -499,23 +548,31 @@ When `remote-exec` was imported from Codex, that overlay is sufficient; include 
 
 ## Connecting to ChatGPT
 
-1. In ChatGPT, go to **Settings > Security and login** and enable **Developer mode**.
-2. Start the server: `cargo run --release -- --work-dir /path/to/your/project` (or run the release binary directly).
-3. Expose it with a tunnel (ngrok, Cloudflare Tunnel, etc.):
-   ```bash
-   ngrok http 3000
-   ```
-4. In ChatGPT, go to **Plugins > + New Plugin**.
-5. Set the **Server URL** to the tunnel URL with `/mcp` appended, e.g. `https://<your-tunnel>/mcp`.
-6. Set **Authentication** to "No Auth".
-7. After creating the plugin, go to **Permissions** and set it to **Allow all actions** so ChatGPT can call tools without asking for confirmation each time.
-8. In a new chat, enable the plugin from the composer's tools menu, then open with `Call get_agent_brief and follow it for the rest of this chat.` — see [Acting as a Codex agent](#acting-as-a-codex-agent).
+### With the native OpenAI tunnel
 
-> ChatGPT Plugins only support OAuth, No Auth, and Mixed. The `--api-key` option is for non-ChatGPT clients or tunnel-level auth. When using ChatGPT, secure access through your tunnel provider instead (e.g. ngrok IP restrictions, Cloudflare Access).
+1. In ChatGPT, enable **Developer mode**.
+2. Configure `openaiTunnel`, export the referenced runtime key, and start Codexify. Keep the process running for connector discovery and every tool call.
+3. In ChatGPT's connector/plugin settings, create a developer-mode connector with **Connection type: Tunnel**.
+4. Select the same tunnel ID that Codexify reports as ready. Set **Authentication** to **None**.
+5. Set the connector's permissions to **Allow all actions** if you do not want per-call confirmations.
+6. Enable the connector in a new chat, then open with `Call get_agent_brief and follow it for the rest of this chat.` — see [Acting as a Codex agent](#acting-as-a-codex-agent).
+
+There is no server URL to enter in this mode. OpenAI routes the selected tunnel to the supervised client, and that client alone can reach Codexify's loopback MCP listener. The startup banner includes the local diagnostics UI; it is not exposed through the tunnel.
+
+### With an externally managed tunnel
+
+1. Start Codexify without `openaiTunnel`.
+2. Put an authenticated reverse proxy or tunnel in front of port `3000`.
+3. Create a URL-based developer connector/plugin whose server URL is the resulting HTTPS URL with `/mcp` appended.
+4. Configure the connector authentication supported by the client, and enforce access controls at the proxy/tunnel layer.
+
+For example, `ngrok http 3000` is sufficient for a disposable connectivity test, but an unprotected public URL is not an appropriate long-lived deployment. Use provider access policies, source restrictions, mTLS, OAuth, or another control appropriate to the deployment. The `--api-key` option is useful for MCP clients that can send a static bearer token; ChatGPT's connector authentication choices may not support that form directly.
 
 ## Host allowlist
 
-By default `allowedHosts` is empty, which accepts any `Host` header — the server works behind a tunnel that presents an arbitrary hostname. Set it to a list of hostnames to enable **DNS-rebinding protection**: only requests whose `Host` header matches are served. Leave it empty for the common tunnel case; set it when the server is reachable on a host you control and want to pin.
+Without `openaiTunnel`, `allowedHosts` is empty by default, which accepts any `Host` header so an externally managed proxy can present an arbitrary hostname. Set it to a list of hostnames to enable **DNS-rebinding protection**: only requests whose `Host` header matches are served.
+
+Native tunnel mode ignores `allowedHosts` and forces the accepted authorities to `127.0.0.1`, `localhost`, and `::1`. It also binds only `127.0.0.1` and removes the permissive CORS layer. These restrictions are part of the mode rather than optional hardening.
 
 ## Security
 
@@ -525,10 +582,14 @@ By default `allowedHosts` is empty, which accepts any `Host` header — the serv
 - **Bounded reads outside the work directory**: [skills](#skills) may live in `~/.agents/skills`, `~/.codex/skills`, `~/.claude/skills` or an installed Claude Code plugin. `skills_read` opens files there, but only inside a skill package that already exists — the `resource` path is checked against the skill's own directory, so it cannot walk out into the rest of your home directory. `skills_list` reports the absolute path of every skill it found. Set `skills.enabled` to `false` to switch it off, or `skills.dirs` to point the user scope somewhere you choose.
 - **Command allowlist**: `run_command` only runs binaries listed in `allowedCommands`; everything else is rejected. `exec_command` checks the same list plus `exec.extraAllowedCommands`, at every command position in the string.
 - **Bridged servers run with your privileges**: an explicit `mcpServers` entry or an automatically imported Codex MCP launches a real process on your machine and forwards the model's calls to it verbatim. Only bridge servers you trust, prefer `tools`/`disabledTools` filters or `gateway` mode to keep the exposed surface small, and set `codexMcp.enabled` to `false` when Codex contains servers that should not be exposed through ChatGPT. A bad `command` path is reported, never silently ignored.
-- **Optional bearer token auth**: set `--api-key` to require an `Authorization: Bearer <key>` header on all requests (except `/health`). Useful for non-ChatGPT clients. ChatGPT Plugins do not support simple bearer token auth.
+- **Native OpenAI tunnel is outbound-only**: Codexify binds its MCP listener to loopback and supervises OpenAI's official runtime-only tunnel client. Startup fails unless the runtime reports `/readyz` and completes a control-plane poll. Failure of either process stops the other, and HTTP shutdown has a bounded grace period before remaining connections are aborted.
+- **The loopback MCP hop is authenticated**: native mode generates a random per-process bearer token and configures the tunnel runtime to send it on MCP requests and discovery probes. The token is never printed, written to the config file, or inherited by model-launched commands and bridged MCP children.
+- **Verified tunnel-client installation**: the managed client is pinned to a specific official release and per-platform archive SHA-256 embedded in Codexify, extracted by exact filename under size limits, installed atomically with private permissions, and hash-checked against its installation manifest on subsequent starts. Set `clientPath` to opt out of managed installation while retaining compatibility checks.
+- **Tunnel secrets are references, not config values**: `openaiTunnel.apiKeyRef` accepts only `env:NAME` or `file:/path`; literal API keys are rejected. Codexify resolves the value and exposes it only to the tunnel child under a synthetic environment name, while the child receives a clean, allowlisted environment. Use a restricted runtime key with Tunnels **Read** + **Use**, not an admin key. Private key-file permissions are enforced on Unix. Same-user process inspection and same-user file access remain outside this boundary.
+- **Optional bearer token auth in non-native mode**: set `--api-key` to require an `Authorization: Bearer <key>` header on all requests except `/health`. Native mode instead owns its private per-process bearer token. ChatGPT Plugins do not support simple bearer token auth for URL-based connectors.
 - **Host allowlist**: set `allowedHosts` to pin the accepted `Host` header for DNS-rebinding protection. See [Host allowlist](#host-allowlist).
 
-The allowlist is a **guardrail against accidents, not a sandbox**. It catches a model reaching for `curl` or `rm -rf`; it does not contain a determined one. The defaults already include `node`, `python` and `cargo`, each of which runs arbitrary code — `node -e "..."` can do anything the server process can. Shell redirection can also write outside the work directory even though the command's cwd is confined to it. Treat everything below as reachable by whoever holds the tunnel URL:
+The allowlist is a **guardrail against accidents, not a sandbox**. It catches a model reaching for `curl` or `rm -rf`; it does not contain a determined one. The defaults already include `node`, `python` and `cargo`, each of which runs arbitrary code — `node -e "..."` can do anything the server process can. Shell redirection can also write outside the work directory even though the command's cwd is confined to it. Treat everything below as reachable by whoever is authorized to use the configured connector or external endpoint:
 
 - everything in `--work-dir`, read and write
 - anything else the user account running the server can touch, via an allowlisted interpreter
@@ -537,7 +598,7 @@ The allowlist is a **guardrail against accidents, not a sandbox**. It catches a 
 
 `exec_command` sessions that outlive a request are killed when the MCP session closes, and the kill takes the children with it: `taskkill /T /F` walks the process tree on Windows, and on POSIX each session gets its own process group that is signalled as a whole. A process that deliberately re-parents or daemonises itself still escapes, so check for strays if a run leaves something listening.
 
-Don't expose this without tunnel-level access control (ngrok IP restrictions, Cloudflare Access), and don't point it at directories you don't trust ChatGPT with. If the work directory holds anything sensitive, set `exec.mode` and the allowlists tighter than the defaults rather than relying on them.
+The native OpenAI tunnel removes the general public-URL exposure, but it does not reduce the authority of a successful tool call. Keep tunnel and connector permissions narrow, do not point Codexify at directories you do not trust the model with, and set `exec.mode` and the command allowlists tighter than the defaults when the work directory is sensitive. For an external tunnel, require tunnel-level access control rather than relying on URL secrecy.
 
 ## Dev commands
 

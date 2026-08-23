@@ -274,6 +274,18 @@ pub struct McpServerSpec {
     pub mode: Option<String>,
 }
 
+/// Configuration for OpenAI's outbound Secure MCP Tunnel runtime.
+#[derive(Debug, Clone)]
+pub struct OpenAiTunnelConfig {
+    pub tunnel_id: String,
+    /// A secret reference accepted by tunnel-client, never a literal API key.
+    pub api_key_ref: String,
+    pub organization_id: Option<String>,
+    /// An explicit full or runtime-only tunnel-client binary. When absent,
+    /// Codexify installs and verifies its pinned runtime-only build.
+    pub client_path: Option<std::path::PathBuf>,
+}
+
 /// The fully-resolved server configuration handed to every tool.
 ///
 /// `work_dir` and `port` are always concrete. `projectDoc`, `output`, `memory`,
@@ -297,6 +309,9 @@ pub struct AppConfig {
     /// "accept any Host", which the original bridge did so it works behind a
     /// tunnel that presents an arbitrary hostname.
     pub allowed_hosts: Vec<String>,
+    /// OpenAI's outbound tunnel, when enabled. The HTTP listener is restricted
+    /// to loopback and its permissive browser CORS layer is disabled in this mode.
+    pub openai_tunnel: Option<OpenAiTunnelConfig>,
     /// Upstream MCP servers to bridge, keyed by name. Their tools are discovered
     /// at startup and re-exposed as `<server>__<tool>`.
     pub mcp_servers: std::collections::HashMap<String, McpServerSpec>,

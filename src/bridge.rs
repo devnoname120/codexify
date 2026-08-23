@@ -483,6 +483,7 @@ async fn connect_one(
     if let Some(cwd) = spec.cwd.as_deref().filter(|cwd| !cwd.is_empty()) {
         command.current_dir(cwd);
     }
+    scrub_untrusted_child_env(&mut command, config);
 
     let transport = TokioChildProcess::new(command)
         .map_err(|e| format!("could not launch '{command_path}': {e}"))?;

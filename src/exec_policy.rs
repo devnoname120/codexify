@@ -267,6 +267,7 @@ mod tests {
             skills: SkillsConfig::default(),
             ignore: IgnoreConfig::default(),
             allowed_hosts: vec![],
+            openai_tunnel: None,
             mcp_servers: std::collections::HashMap::new(),
             generated_skills_dir: None,
         }

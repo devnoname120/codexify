@@ -15,6 +15,7 @@ pub mod exec_sessions;
 pub mod ignore_rules;
 pub mod instructions;
 pub mod memory;
+pub mod openai_tunnel;
 pub mod output_budget;
 pub mod project_doc;
 pub mod registry;
