@@ -41,6 +41,10 @@ impl Tool for ClockCurrTime {
         }))
     }
 
+    fn requires_project_root(&self) -> bool {
+        false
+    }
+
     async fn call(&self, _args: Value, _config: &AppConfig, _session: &SessionState) -> ToolResult {
         let current_time = format_utc_now();
         ToolResult::text(current_time.clone())

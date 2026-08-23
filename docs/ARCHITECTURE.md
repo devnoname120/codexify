@@ -2,7 +2,8 @@
 
 A Rust port of the `codexify` MCP bridge. codexify is a local [Model Context
 Protocol](https://modelcontextprotocol.io) server that exposes Codex-style agent
-tools over **Streamable HTTP**, scoped to a chosen working directory, and can
+tools over **Streamable HTTP**, scoped either to one configured working directory
+or to a project root selected independently by each MCP session, and can
 additionally **aggregate other local MCP servers** and **surface local skills**.
 
 This document explains how it is put together and why. For usage, see
@@ -33,14 +34,17 @@ ChatGPT / MCP client
 │        ▼                                      │
 │  registry: Vec<Box<dyn Tool>>                 │
 │    • 25 native tools                          │
+│    • + set_project_root in multi-project mode │
 │    • bridged tools  ← upstream MCP servers    │
 │    • gateway tools  ← upstream MCP servers    │
 │                                               │
-│  per-session SessionState (exec + plan)       │
+│  per-session SessionState                     │
+│    • selected project root                    │
+│    • exec sessions + plan                     │
 └──────────────────────────────────────────────┘
         │ reads/writes           │ stdio child processes
         ▼                        ▼
-   work directory         upstream MCP servers (idasql, remote-exec, …)
+   active project root     upstream MCP servers (idasql, remote-exec, …)
 ```
 
 Three surfaces reach the model:
@@ -59,13 +63,20 @@ Three surfaces reach the model:
    `StreamableHttpService` manages the session and calls the **service factory**
    once per session, producing a fresh `CodexHandler`.
 2. `CodexHandler::get_info` returns the negotiated protocol version, capabilities
-   (`tools`), server identity, and the `instructions` string (built per session,
-   so a resumed conversation opens with the saved plan and notes in front of it).
+   (`tools`), server identity, and the `instructions` string. Single-project mode
+   builds the full project-aware brief immediately. Multi-project mode emits only
+   the root-selection protocol and a project-neutral environment because no
+   project is known yet.
 3. `tools/list` → `CodexHandler::list_tools` maps the shared tool registry into
    rmcp `Tool` definitions.
-4. `tools/call` → `CodexHandler::call_tool` finds the tool by name, runs it, then
-   fills in the default `structuredContent` when appropriate.
-5. When the session ends, rmcp drops the `CodexHandler`; its `SessionState`
+4. In multi-project mode, `set_project_root` canonicalizes an existing directory
+   below the configured access root and stores it in `SessionState`. The same
+   root may be selected again idempotently; a different root is rejected.
+5. `tools/call` → `CodexHandler::call_tool` finds the tool by name. Project-scoped
+   tools require a selected root and receive an effective clone of `AppConfig`
+   whose `work_dir` is that root. The server then fills in default
+   `structuredContent` when appropriate.
+6. When the session ends, rmcp drops the `CodexHandler`; its `SessionState`
    `Drop` kills any resident `exec_command` shells.
 
 Cross-cutting HTTP concerns live in the axum layer: a `/health` route, a
@@ -89,6 +100,7 @@ trait Tool: Send + Sync {
     fn input_schema(&self) -> Value;
     fn output_schema(&self) -> Option<Value>;
     fn fills_structured_content(&self) -> bool;         // opt out of default-fill
+    fn requires_project_root(&self) -> bool;            // true by default
     async fn call(&self, args: Value, cfg: &AppConfig, session: &SessionState) -> ToolResult;
 }
 ```
@@ -101,15 +113,19 @@ whose text *is* the structured form rely on the server's default-fill
 or bridge it from upstream — return `fills_structured_content() == false`.
 
 ### `SessionState` (`exec_sessions.rs`)
-Per-MCP-session mutable state: the map of resident `exec_command` shells and the
-current plan. Created fresh per session by the factory; `Drop` disposes shells.
+Per-MCP-session mutable state: the optional selected project root, the map of
+resident `exec_command` shells, and the current plan. Created fresh per session
+by the factory; the root binding is immutable and `Drop` disposes shells.
 
 ### `AppConfig` (`types.rs`)
 The fully-resolved config handed to every tool. `config.rs` parses
 `codex.config.json` with camelCase field names for backward compatibility, imports
 user-level Codex MCP definitions through `codex_mcp.rs`, then applies explicit
 `mcpServers` entries as field overlays. Optional sub-configs (`projectDoc`,
-`output`, `memory`, `skills`, `ignore`) fall back to per-module defaults.
+`output`, `memory`, `skills`, `ignore`) fall back to per-module defaults. In
+multi-project mode, dispatch clones this config per call and substitutes the
+session's selected root for `work_dir`; the static server policy and bridge
+configuration remain shared.
 
 ---
 
@@ -122,9 +138,12 @@ user-level Codex MCP definitions through `codex_mcp.rs`, then applies explicit
   Native tunnel mode instead binds `127.0.0.1`, forces Host validation to
   loopback authorities, omits permissive CORS, and requires a random
   process-private bearer token generated at startup.
-- **Session model**: the factory runs per session, so each conversation gets its
-  own `SessionState`. Upstream MCP connections and the tool registry are shared
-  (`Arc`) across sessions.
+- **Session model**: the factory runs per MCP transport session. `SessionState`
+  therefore owns only transport-lifetime resources such as resident commands and
+  the generic-client root fallback. ChatGPT project identity is taken from
+  `RequestContext::meta["openai/session"]` and resolved through the shared,
+  persistent `ProjectBindingStore`. Upstream MCP connections, the binding store,
+  and the tool registry are shared (`Arc`) across transports.
 - **`get_info`** advertises server name `codexify` (wire-compatible identity),
   version, `tools` capability, and the `instructions`.
 - **Errors**: a tool that fails returns `Ok(CallToolResult::error(...))`
@@ -167,7 +186,7 @@ a private per-run temporary directory and are removed after shutdown.
 
 ---
 
-## 5. Native tools (25)
+## 5. Native tools (25 default, 26 multi-project)
 
 | Group | Tools |
 |-------|-------|
@@ -178,6 +197,11 @@ a private per-run temporary directory and are removed after shutdown.
 | Task state | `update_plan`, `remember`, `recall` |
 | Skills | `skills_list`, `skills_read` |
 | Timing | `clock_curr_time`, `clock_sleep` |
+
+Multi-project mode prepends `set_project_root`. It is omitted entirely in the
+default registry, preserving the original 25-tool surface and behaviour. Clocks
+and bridged/gateway tools are project-independent; every other native tool is
+blocked until a root is selected.
 
 Each lives in `src/tools/<name>.rs`; the registry (`registry.rs`) lists them in
 the original order and rejects duplicate names.
@@ -192,15 +216,15 @@ the original order and rejects duplicate names.
 | `output_budget.rs` | Line/byte windowing and list caps, each cut announced with the continuation argument. |
 | `ignore_rules.rs` | One `.gitignore`-accurate matcher (the `ignore` crate) shared by glob/grep/tree/list_directory. |
 | `exec_policy.rs` | Shell-string allowlist guard for `exec_command` (a guardrail, not a sandbox). |
-| `exec_sessions.rs` | Unified-exec sessions: shell resolution, PowerShell exit-code wrapping, background stdout/stderr drain tasks, process-group kill, output truncation (UTF-16 units to match the TS). |
+| `exec_sessions.rs` | Per-session project-root binding plus unified-exec sessions: shell resolution, PowerShell exit-code wrapping, background stdout/stderr drain tasks, process-group kill, output truncation (UTF-16 units to match the TS). |
 | `apply_patch.rs` | The Codex patch format: parse then apply, atomically, with fuzzy context matching and CRLF preservation. |
-| `memory.rs` | Working memory outside the repo, keyed by a hash of the normalized work dir, with `O_EXCL` locking and atomic writes. |
+| `memory.rs` | Working memory outside the repo, keyed by a hash of the normalized active root, with `O_EXCL` locking and atomic writes. In multi-project mode, a configured `memory.dir` is a base containing one hashed child per project. |
 | `openai_tunnel.rs` | Verified installation and lifecycle supervision for OpenAI's outbound Secure MCP Tunnel runtime. |
 | `process_env.rs` | Child-process environment boundaries: isolate the tunnel runtime and remove tunnel credentials from model-controlled and upstream subprocesses. |
-| `project_doc.rs` | `AGENTS.md` discovery from project root down to the work dir under a byte budget. |
+| `project_doc.rs` | `AGENTS.md` discovery from project root down to the work dir under a byte budget. Multi-project mode treats the selected directory as the exact project root and never walks into the common access-root parent. |
 | `skills.rs` | `SKILL.md` discovery (see §8). |
 | `codex_mcp.rs` | Read-only import of local stdio MCP definitions from `$CODEX_HOME/config.toml` or `~/.codex/config.toml`, with secret-safe diagnostics. |
-| `instructions.rs` | Assembles the agent brief + environment + saved state + skills + project doc, per session. |
+| `instructions.rs` | Assembles the agent brief + environment + saved state + skills + project doc. Multi-project initialization emits a project-neutral selector brief because conversation metadata is available only on subsequent tool calls; `get_agent_brief` builds the full brief after restoring or creating a binding. |
 | `environment.rs` | OS / shell / policy description, shared by `get_environment` and the instructions. |
 
 ---
@@ -298,6 +322,7 @@ startup banner prints the exact file with `Config:`). All fields optional.
 {
   "port": 3000,
   "apiKey": "…",                      // or --api-key; bearer token
+  "multiProject": false,               // or --multi-project; work-dir becomes access root
   "allowedCommands": ["git", "node", …],   // run_command allowlist
   "allowedHosts": [],                  // DNS-rebinding allowlist; empty = any host
   "openaiTunnel": {
@@ -351,6 +376,9 @@ Auth: disabled (no --api-key)
   internal-auth boundary, managed runtime version or operator-supplied client,
   and local `/readyz` and `/metrics` URLs. The tunnel ID, runtime key, and
   internal bearer are never printed.
+- Multi-project startup also prints `Project access root:`, `Project mode:
+  persistent ChatGPT conversation binding`, and the conversation-binding state
+  directory; its native count is 26 because the selector is present.
 
 ---
 
@@ -374,10 +402,14 @@ units to match the TS `text.length` / `text.slice`.
 
 ## 12. Testing
 
-- Unit tests inside modules plus integration tests under `tests/`
+- **381 tests** — unit tests inside modules plus integration tests under `tests/`
   (`tempfile`-isolated), ported from the TS Bun suite.
 - Memory / skills tests pin `memory.dir` / `skills.dirs` to temp dirs so they never
   touch the real home; plugin discovery is suppressed when `skills.dirs` is set.
+- `tests/project_selection.rs` covers pre-selection blocking, immutable canonical
+  bindings, concurrent session isolation, traversal and symlink escapes,
+  project-keyed persistent state, deferred project instructions, and CLI/config
+  activation.
 - `tests/review_fixes.rs` locks the behavioral-fidelity fixes found by the
   adversarial review of the port. The bridge/gateway/skills code was reviewed the
   same way; the confirmed low-severity findings (name-collision dedup, YAML-safe

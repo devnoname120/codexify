@@ -60,9 +60,37 @@ pub const AGENT_BRIEF: &str = concat!(
     "- Offer natural next steps briefly — tests, a commit, a build — and say plainly what you could not verify yourself.",
 );
 
-/// The brief a client sees at initialize time, and the exact text
-/// `get_agent_brief` returns. Rebuilt per MCP session so a conversation that
-/// starts after a previous one was lost opens with the plan and notes in front.
+/// The initialize-time instructions. Multi-project sessions deliberately omit
+/// project state until the client binds the session to one root.
+pub fn build_initial_instructions(config: &AppConfig) -> String {
+    if !config.multi_project {
+        return build_instructions(config);
+    }
+
+    let mut environment = describe_environment(config);
+    environment.cwd = "<not selected>".to_string();
+
+    [
+        AGENT_BRIEF.to_string(),
+        String::new(),
+        "## Project selection".to_string(),
+        String::new(),
+        "This server is running in multi-project mode. This MCP session has no project root yet, so project-scoped tools will reject calls until one is selected.".to_string(),
+        format!("Project access root: {}", config.work_dir.display()),
+        "Call `set_project_root` with an existing directory beneath that access root before using filesystem, search, edit, command, git, project-instruction, skill, memory, or plan tools.".to_string(),
+        "The selection is permanent for this MCP session. Use a new chat or MCP session for another project.".to_string(),
+        "Immediately after selecting, call `get_agent_brief` and follow the returned environment, saved state, skills, and project instructions for the rest of the task.".to_string(),
+        String::new(),
+        "## Environment".to_string(),
+        String::new(),
+        render_environment(&environment),
+    ]
+    .join("\n")
+}
+
+/// The full project-aware brief returned by `get_agent_brief`, and used at
+/// initialize time in single-project mode. Rebuilt from the effective project
+/// config so a later conversation can recover the saved plan and notes.
 ///
 /// Codex assembles the same layers in the same order: base instructions, then
 /// `<environment_context>`, then the skill catalogue, then the project's

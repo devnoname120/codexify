@@ -59,6 +59,10 @@ pub fn find_project_root(start_dir: &Path, markers: &[String]) -> Option<PathBuf
 /// Directories from the project root down to the work directory, outermost
 /// first. Shared by AGENTS.md discovery and (in `skills.rs`) repo skill roots.
 pub fn project_dirs(config: &AppConfig) -> Vec<PathBuf> {
+    if config.multi_project {
+        return vec![config.work_dir.clone()];
+    }
+
     let settings = &config.project_doc;
     let root = find_project_root(&config.work_dir, &root_markers(settings));
 

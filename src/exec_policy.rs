@@ -244,6 +244,7 @@ mod tests {
     fn cfg(mode: ExecMode) -> AppConfig {
         AppConfig {
             work_dir: std::path::PathBuf::from("/w"),
+            multi_project: false,
             api_key: None,
             port: 3000,
             allowed_commands: vec!["git".into(), "node".into()],

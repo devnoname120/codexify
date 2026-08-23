@@ -294,6 +294,7 @@ pub struct OpenAiTunnelConfig {
 #[derive(Debug, Clone)]
 pub struct AppConfig {
     pub work_dir: std::path::PathBuf,
+    pub multi_project: bool,
     pub api_key: Option<String>,
     pub port: u16,
     pub allowed_commands: Vec<String>,

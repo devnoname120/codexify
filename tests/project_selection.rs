@@ -1,0 +1,351 @@
+use std::fs;
+
+use clap::Parser;
+use codexify::config::{Cli, default_config, load_config};
+use codexify::exec_sessions::SessionState;
+use codexify::instructions::{build_initial_instructions, build_instructions};
+use codexify::memory::memory_dir;
+use codexify::tool::Tool;
+use codexify::tools::git_status::GitStatus;
+use codexify::tools::read_file::ReadFile;
+use codexify::tools::recall::Recall;
+use codexify::tools::remember::Remember;
+use codexify::tools::run_command::RunCommand;
+use codexify::tools::set_project_root::SetProjectRoot;
+use serde_json::json;
+use tempfile::TempDir;
+
+fn multi_project_config(access_root: &std::path::Path) -> codexify::types::AppConfig {
+    let mut config = default_config(access_root.to_path_buf());
+    config.multi_project = true;
+    config.skills.enabled = Some(false);
+    config
+}
+
+#[test]
+fn project_tools_require_a_selection_in_multi_project_mode() {
+    let root = TempDir::new().unwrap();
+    let config = multi_project_config(root.path());
+    let session = SessionState::new();
+
+    let error = session.effective_config(&config).unwrap_err();
+    assert!(error.contains("set_project_root"));
+    assert!(error.contains(root.path().to_string_lossy().as_ref()));
+}
+
+#[tokio::test]
+async fn sessions_are_isolated_to_their_selected_roots() {
+    let root = TempDir::new().unwrap();
+    let access = root.path().join("projects");
+    let project_a = access.join("alpha");
+    let project_b = access.join("beta");
+    fs::create_dir_all(&project_a).unwrap();
+    fs::create_dir_all(&project_b).unwrap();
+    fs::write(project_a.join("identity.txt"), "alpha").unwrap();
+    fs::write(project_b.join("identity.txt"), "beta").unwrap();
+
+    let config = multi_project_config(&access);
+    let alpha_session = SessionState::new();
+    let beta_session = SessionState::new();
+
+    let alpha_selector = SetProjectRoot;
+    let beta_selector = SetProjectRoot;
+    let beta_path = project_b.to_string_lossy().into_owned();
+    let (alpha, beta) = tokio::join!(
+        alpha_selector.call(json!({ "path": "alpha" }), &config, &alpha_session),
+        beta_selector.call(json!({ "path": beta_path }), &config, &beta_session)
+    );
+    assert!(!alpha.is_error);
+    assert!(!beta.is_error);
+
+    let alpha_config = alpha_session.effective_config(&config).unwrap();
+    let beta_config = beta_session.effective_config(&config).unwrap();
+    assert_eq!(alpha_config.work_dir, fs::canonicalize(&project_a).unwrap());
+    assert_eq!(beta_config.work_dir, fs::canonicalize(&project_b).unwrap());
+
+    let alpha_reader = ReadFile;
+    let beta_reader = ReadFile;
+    let (alpha_file, beta_file) = tokio::join!(
+        alpha_reader.call(
+            json!({ "path": "identity.txt" }),
+            &alpha_config,
+            &alpha_session,
+        ),
+        beta_reader.call(
+            json!({ "path": "identity.txt" }),
+            &beta_config,
+            &beta_session,
+        )
+    );
+    assert_eq!(alpha_file.joined_text(), "1\talpha");
+    assert_eq!(beta_file.joined_text(), "1\tbeta");
+
+    let sibling = ReadFile
+        .call(
+            json!({ "path": "../beta/identity.txt" }),
+            &alpha_config,
+            &alpha_session,
+        )
+        .await;
+    assert!(sibling.is_error);
+    assert!(sibling.joined_text().contains("within work directory"));
+}
+
+#[tokio::test]
+async fn command_and_git_tools_use_the_selected_root() {
+    let root = TempDir::new().unwrap();
+    let access = root.path().join("projects");
+    let project_a = access.join("alpha");
+    let project_b = access.join("beta");
+    fs::create_dir_all(&project_a).unwrap();
+    fs::create_dir_all(&project_b).unwrap();
+
+    for project in [&project_a, &project_b] {
+        let status = std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(project)
+            .status()
+            .expect("git must be installed to run these tests");
+        assert!(status.success());
+    }
+    fs::write(project_a.join("alpha-only.txt"), "alpha").unwrap();
+    fs::write(project_b.join("beta-only.txt"), "beta").unwrap();
+
+    let config = multi_project_config(&access);
+    let session = SessionState::new();
+    SetProjectRoot
+        .call(json!({ "path": "alpha" }), &config, &session)
+        .await;
+    let selected = session.effective_config(&config).unwrap();
+
+    let command = RunCommand
+        .call(
+            json!({
+                "command": "git",
+                "args": ["status", "--porcelain"]
+            }),
+            &selected,
+            &session,
+        )
+        .await;
+    assert!(!command.is_error);
+    assert!(command.joined_text().contains("alpha-only.txt"));
+    assert!(!command.joined_text().contains("beta-only.txt"));
+
+    let git = GitStatus.call(json!({}), &selected, &session).await;
+    assert!(!git.is_error);
+    assert!(git.joined_text().contains("alpha-only.txt"));
+    assert!(!git.joined_text().contains("beta-only.txt"));
+}
+
+#[tokio::test]
+async fn project_selection_is_idempotent_but_cannot_switch() {
+    let root = TempDir::new().unwrap();
+    let access = root.path().join("projects");
+    fs::create_dir_all(access.join("alpha")).unwrap();
+    fs::create_dir_all(access.join("beta")).unwrap();
+    let config = multi_project_config(&access);
+    let session = SessionState::new();
+
+    let first = SetProjectRoot
+        .call(json!({ "path": "alpha" }), &config, &session)
+        .await;
+    assert!(!first.is_error);
+    assert_eq!(
+        first
+            .structured_content
+            .as_ref()
+            .and_then(|value| value.get("newly_selected"))
+            .and_then(|value| value.as_bool()),
+        Some(true)
+    );
+
+    let repeated = SetProjectRoot
+        .call(json!({ "path": "alpha/." }), &config, &session)
+        .await;
+    assert!(!repeated.is_error);
+    assert_eq!(
+        repeated
+            .structured_content
+            .as_ref()
+            .and_then(|value| value.get("newly_selected"))
+            .and_then(|value| value.as_bool()),
+        Some(false)
+    );
+
+    let switched = SetProjectRoot
+        .call(json!({ "path": "beta" }), &config, &session)
+        .await;
+    assert!(switched.is_error);
+    assert!(switched.joined_text().contains("cannot switch"));
+}
+
+#[tokio::test]
+async fn selection_rejects_paths_outside_the_access_root_and_non_directories() {
+    let root = TempDir::new().unwrap();
+    let access = root.path().join("projects");
+    let outside = root.path().join("outside");
+    fs::create_dir_all(&access).unwrap();
+    fs::create_dir_all(&outside).unwrap();
+    fs::write(access.join("file.txt"), "not a directory").unwrap();
+    let config = multi_project_config(&access);
+    let session = SessionState::new();
+
+    let relative_escape = SetProjectRoot
+        .call(json!({ "path": "../outside" }), &config, &session)
+        .await;
+    assert!(relative_escape.is_error);
+
+    let absolute_escape = SetProjectRoot
+        .call(
+            json!({ "path": outside.to_string_lossy() }),
+            &config,
+            &session,
+        )
+        .await;
+    assert!(absolute_escape.is_error);
+
+    let file = SetProjectRoot
+        .call(json!({ "path": "file.txt" }), &config, &session)
+        .await;
+    assert!(file.is_error);
+    assert!(file.joined_text().contains("not a directory"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn selection_rejects_a_symlink_that_resolves_outside_the_access_root() {
+    use std::os::unix::fs::symlink;
+
+    let root = TempDir::new().unwrap();
+    let access = root.path().join("projects");
+    let outside = root.path().join("outside");
+    fs::create_dir_all(&access).unwrap();
+    fs::create_dir_all(&outside).unwrap();
+    symlink(&outside, access.join("linked-outside")).unwrap();
+    let config = multi_project_config(&access);
+    let session = SessionState::new();
+
+    let result = SetProjectRoot
+        .call(json!({ "path": "linked-outside" }), &config, &session)
+        .await;
+    assert!(result.is_error);
+    assert!(
+        result
+            .joined_text()
+            .contains("escapes the configured access root")
+    );
+}
+
+#[tokio::test]
+async fn persistent_state_is_keyed_by_the_selected_root_even_with_a_custom_base_dir() {
+    let root = TempDir::new().unwrap();
+    let access = root.path().join("projects");
+    fs::create_dir_all(access.join("alpha")).unwrap();
+    fs::create_dir_all(access.join("beta")).unwrap();
+    let mut config = multi_project_config(&access);
+    let state_base = root.path().join("state");
+    config.memory.dir = Some(state_base.to_string_lossy().into_owned());
+
+    let alpha_session = SessionState::new();
+    let beta_session = SessionState::new();
+    SetProjectRoot
+        .call(json!({ "path": "alpha" }), &config, &alpha_session)
+        .await;
+    SetProjectRoot
+        .call(json!({ "path": "beta" }), &config, &beta_session)
+        .await;
+    let alpha_config = alpha_session.effective_config(&config).unwrap();
+    let beta_config = beta_session.effective_config(&config).unwrap();
+
+    assert_ne!(memory_dir(&alpha_config), memory_dir(&beta_config));
+    assert!(memory_dir(&alpha_config).starts_with(&state_base));
+    assert!(memory_dir(&beta_config).starts_with(&state_base));
+
+    Remember
+        .call(
+            json!({ "key": "identity", "value": "alpha-state" }),
+            &alpha_config,
+            &alpha_session,
+        )
+        .await;
+    Remember
+        .call(
+            json!({ "key": "identity", "value": "beta-state" }),
+            &beta_config,
+            &beta_session,
+        )
+        .await;
+
+    let alpha = Recall
+        .call(json!({}), &alpha_config, &alpha_session)
+        .await
+        .joined_text();
+    let beta = Recall
+        .call(json!({}), &beta_config, &beta_session)
+        .await
+        .joined_text();
+    assert!(alpha.contains("alpha-state"));
+    assert!(!alpha.contains("beta-state"));
+    assert!(beta.contains("beta-state"));
+    assert!(!beta.contains("alpha-state"));
+}
+
+#[tokio::test]
+async fn initialize_instructions_defer_project_state_until_selection() {
+    let root = TempDir::new().unwrap();
+    let access = root.path().join("projects");
+    let project = access.join("alpha");
+    fs::create_dir_all(&project).unwrap();
+    fs::write(access.join("AGENTS.md"), "ACCESS-ROOT-INSTRUCTION").unwrap();
+    fs::write(project.join("AGENTS.md"), "SELECTED-PROJECT-INSTRUCTION").unwrap();
+    let mut config = multi_project_config(&access);
+    config.memory.enabled = Some(false);
+
+    let initial = build_initial_instructions(&config);
+    assert!(initial.contains("set_project_root"));
+    assert!(initial.contains("<not selected>"));
+    assert!(!initial.contains("ACCESS-ROOT-INSTRUCTION"));
+    assert!(!initial.contains("SELECTED-PROJECT-INSTRUCTION"));
+
+    let session = SessionState::new();
+    SetProjectRoot
+        .call(json!({ "path": "alpha" }), &config, &session)
+        .await;
+    let selected = session.effective_config(&config).unwrap();
+    let brief = build_instructions(&selected);
+    assert!(brief.contains("SELECTED-PROJECT-INSTRUCTION"));
+    assert!(!brief.contains("ACCESS-ROOT-INSTRUCTION"));
+}
+
+#[test]
+fn multi_project_mode_can_be_enabled_by_config_or_cli() {
+    let root = TempDir::new().unwrap();
+    let access = root.path().join("projects");
+    fs::create_dir_all(&access).unwrap();
+
+    let enabled_config = root.path().join("enabled.json");
+    fs::write(&enabled_config, r#"{ "multiProject": true }"#).unwrap();
+    let from_file = Cli::try_parse_from([
+        "codexify",
+        "--work-dir",
+        access.to_str().unwrap(),
+        "--config",
+        enabled_config.to_str().unwrap(),
+    ])
+    .unwrap();
+    assert!(load_config(from_file).unwrap().multi_project);
+
+    let disabled_config = root.path().join("disabled.json");
+    fs::write(&disabled_config, r#"{ "multiProject": false }"#).unwrap();
+    let from_cli = Cli::try_parse_from([
+        "codexify",
+        "--work-dir",
+        access.to_str().unwrap(),
+        "--config",
+        disabled_config.to_str().unwrap(),
+        "--multi-project",
+    ])
+    .unwrap();
+    assert!(load_config(from_cli).unwrap().multi_project);
+}

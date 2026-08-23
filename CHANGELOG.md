@@ -4,7 +4,7 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project aims to
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.1.0] - 2026-08-24
 
 ### Added
 
@@ -23,6 +23,16 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   binary can be selected instead.
 - `openaiTunnel` configuration and matching CLI flags for tunnel ID, runtime
   key reference, client path, and organization ID.
+- **Persistent per-conversation project-root selection.** Start with
+  `--multi-project` (or `multiProject: true`) to make `--work-dir` an access root.
+  ChatGPT conversations bind once with `set_project_root`; the binding is keyed
+  from `_meta["openai/session"]`, stored under `~/.codexify/` without persisting
+  the raw identifier, and restored across MCP reconnects and server restarts.
+  Project tools, command working directories, git operations, `AGENTS.md`, repo
+  skills, plans, and notes then use that conversation's independently selected
+  root. Clients without ChatGPT conversation metadata retain the transport-session
+  fallback. Canonical containment checks reject traversal and symlink escapes,
+  and project-aware tools remain unavailable until selection.
 
 ### Security
 
@@ -92,5 +102,6 @@ filename sort uses byte/Unicode ordering rather than `localeCompare`;
 `write_file` reports UTF-8 byte counts; `exec_command` uses plain pipes, not a
 PTY. See the README's "Notes on the port" for the full list.
 
+[1.1.0]: https://github.com/devnoname120/codexify/releases/tag/v1.1.0
 [1.0.1]: https://github.com/devnoname120/codexify/releases/tag/v1.0.1
 [1.0.0]: https://github.com/devnoname120/codexify/releases/tag/v1.0.0

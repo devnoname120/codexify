@@ -43,6 +43,12 @@ pub trait Tool: Send + Sync {
         true
     }
 
+    /// Whether this tool needs the project root selected for the current MCP
+    /// session. Upstream tools and project-independent clocks opt out.
+    fn requires_project_root(&self) -> bool {
+        true
+    }
+
     /// Run the tool. `args` is the arguments object (or `Value::Null` when the
     /// call named none).
     async fn call(&self, args: Value, config: &AppConfig, session: &SessionState) -> ToolResult;

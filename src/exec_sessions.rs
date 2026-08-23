@@ -6,6 +6,7 @@
 //! as the default, so the default path matches — only `tty: true` is unsupported.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
@@ -16,6 +17,7 @@ use tokio::process::{ChildStdin, Command};
 use tokio::sync::{Mutex as TokioMutex, Notify};
 
 use crate::process_env::scrub_untrusted_child_env;
+use crate::project_bindings::{ProjectBindingScope, ProjectRootSelection, resolve_project_root};
 use crate::types::{AppConfig, PlanState};
 
 // Codex constants (shell_spec.rs). Kept as code, not config, because they are
@@ -214,12 +216,20 @@ impl ExecSession {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectRootSelection {
+    pub access_root: PathBuf,
+    pub project_root: PathBuf,
+    pub newly_selected: bool,
+}
+
 /// Per-MCP-session mutable state. A fresh instance is created for every MCP
-/// session so concurrent clients never share exec sessions or plans.
+/// session so concurrent clients never share project roots, exec sessions, or plans.
 pub struct SessionState {
     pub exec_sessions: StdMutex<HashMap<u64, Arc<ExecSession>>>,
     next_exec_id: AtomicU64,
     pub plan: StdMutex<Option<PlanState>>,
+    project_root: StdMutex<Option<PathBuf>>,
 }
 
 impl Default for SessionState {
@@ -228,6 +238,7 @@ impl Default for SessionState {
             exec_sessions: StdMutex::new(HashMap::new()),
             next_exec_id: AtomicU64::new(1),
             plan: StdMutex::new(None),
+            project_root: StdMutex::new(None),
         }
     }
 }
@@ -235,6 +246,99 @@ impl Default for SessionState {
 impl SessionState {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn effective_config(&self, config: &AppConfig) -> Result<AppConfig, String> {
+        if !config.multi_project {
+            return Ok(config.clone());
+        }
+
+        let Some(project_root) = self.project_root.lock().unwrap().clone() else {
+            return Err(format!(
+                "No project root is selected for this MCP session. Call `set_project_root` with a directory relative to the access root `{}`, then call `get_agent_brief` before using project tools.",
+                config.work_dir.display()
+            ));
+        };
+
+        let mut effective = config.clone();
+        effective.work_dir = project_root;
+        Ok(effective)
+    }
+
+    pub fn select_project_root(
+        &self,
+        config: &AppConfig,
+        input: &str,
+    ) -> Result<ProjectRootSelection, String> {
+        if !config.multi_project {
+            return Err(
+                "Project-root selection is disabled. Start codexify with `--multi-project` or set `multiProject` to true."
+                    .to_string(),
+            );
+        }
+
+        let input = input.trim();
+        if input.is_empty() {
+            return Err("path must be a non-empty string".to_string());
+        }
+
+        let access_root = std::fs::canonicalize(&config.work_dir).map_err(|e| {
+            format!(
+                "Could not resolve project access root {}: {e}",
+                config.work_dir.display()
+            )
+        })?;
+        let input_path = std::path::Path::new(input);
+        let candidate = if input_path.is_absolute() {
+            input_path.to_path_buf()
+        } else {
+            config.work_dir.join(input_path)
+        };
+        let project_root = std::fs::canonicalize(&candidate).map_err(|e| {
+            format!(
+                "Project root does not exist or cannot be resolved: {}: {e}",
+                candidate.display()
+            )
+        })?;
+
+        if !project_root.is_dir() {
+            return Err(format!(
+                "Project root is not a directory: {}",
+                project_root.display()
+            ));
+        }
+        if project_root != access_root && !project_root.starts_with(&access_root) {
+            return Err(format!(
+                "Project root escapes the configured access root: {}",
+                project_root.display()
+            ));
+        }
+
+        let mut selected = self.project_root.lock().unwrap();
+        match selected.as_ref() {
+            Some(current) if current == &project_root => Ok(ProjectRootSelection {
+                access_root,
+                project_root,
+                newly_selected: false,
+            }),
+            Some(current) => Err(format!(
+                "This MCP session is already bound to project root `{}` and cannot switch to `{}`. Open a new chat or MCP session for another project.",
+                current.display(),
+                project_root.display()
+            )),
+            None => {
+                *selected = Some(project_root.clone());
+                Ok(ProjectRootSelection {
+                    access_root,
+                    project_root,
+                    newly_selected: true,
+                })
+            }
+        }
+    }
+
+    pub fn selected_project_root(&self) -> Option<PathBuf> {
+        self.project_root.lock().unwrap().clone()
     }
 }
 

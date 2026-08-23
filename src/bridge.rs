@@ -83,6 +83,10 @@ impl Tool for BridgedTool {
         false
     }
 
+    fn requires_project_root(&self) -> bool {
+        false
+    }
+
     async fn call(&self, args: Value, _config: &AppConfig, _session: &SessionState) -> ToolResult {
         let mut params = CallToolRequestParams::new(self.original_name.clone());
         if let Some(obj) = args.as_object()
@@ -401,6 +405,10 @@ impl Tool for GatewayTool {
     }
 
     fn fills_structured_content(&self) -> bool {
+        false
+    }
+
+    fn requires_project_root(&self) -> bool {
         false
     }
 

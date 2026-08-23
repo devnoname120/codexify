@@ -44,16 +44,8 @@ pub fn memory_max_bytes(config: &AppConfig) -> usize {
     config.memory.max_bytes.unwrap_or(DEFAULT_MEMORY_MAX_BYTES)
 }
 
-/// Per-project state directory, outside the work directory by default. The
-/// basename is only there to make the directory recognisable to a human; the
-/// hash of the absolute path is what keys it.
-pub fn memory_dir(config: &AppConfig) -> PathBuf {
-    if let Some(dir) = &config.memory.dir {
-        return PathBuf::from(dir);
-    }
-    // Hash and slug the lexically-normalised path so `/proj` and `/proj/` key the
-    // same per-project directory, mirroring the TS `resolve(config.workDir)`.
-    let normalized = crate::safe_path::lexical_normalize(&config.work_dir);
+fn project_state_dir_name(work_dir: &std::path::Path) -> String {
+    let normalized = crate::safe_path::lexical_normalize(work_dir);
     let abs = normalized.to_string_lossy().to_string();
     let mut hasher = Sha256::new();
     hasher.update(abs.as_bytes());
@@ -79,10 +71,26 @@ pub fn memory_dir(config: &AppConfig) -> PathBuf {
         slug
     };
 
+    format!("{slug}-{digest}")
+}
+
+/// Per-project state directory, outside the work directory by default. The
+/// basename is only there to make the directory recognisable to a human; the
+/// hash of the absolute path is what keys it.
+pub fn memory_dir(config: &AppConfig) -> PathBuf {
+    if let Some(dir) = &config.memory.dir {
+        let base = PathBuf::from(dir);
+        return if config.multi_project {
+            base.join(project_state_dir_name(&config.work_dir))
+        } else {
+            base
+        };
+    }
+
     let home = home_dir().unwrap_or_else(|| PathBuf::from("."));
     home.join(".codexify")
         .join("projects")
-        .join(format!("{slug}-{digest}"))
+        .join(project_state_dir_name(&config.work_dir))
 }
 
 pub fn memory_path(config: &AppConfig) -> PathBuf {

@@ -101,6 +101,14 @@ cargo run --release -- --work-dir /path/to/your/project
 
 Without `openaiTunnel`, the server keeps its legacy behavior: it listens on `0.0.0.0:3000`, serves MCP at `/mcp`, and serves `/health`. This is appropriate for local clients or an explicitly configured reverse proxy/tunnel. Do not publish this mode without authentication and network-level access controls.
 
+To reuse one server across several independent projects, point it at their common parent and enable multi-project mode:
+
+```bash
+cargo run --release -- --work-dir /path/to/projects --multi-project
+```
+
+Here `--work-dir` is an **access root**, not the active project. Every new MCP session must first call `set_project_root` with an existing directory beneath it, then call `get_agent_brief`. The chosen root is canonicalized and permanently bound to that session; selecting another project requires a new chat/MCP session. Project-scoped tools reject calls until the selection is made.
+
 To build a standalone binary:
 
 ```bash
@@ -116,7 +124,8 @@ Each release ships a compiled binary per platform — `windows-x64`, `linux-x64`
 
 | Flag | Required | Default | Description |
 |------|----------|---------|-------------|
-| `--work-dir` | Yes | - | Project directory the tools operate on |
+| `--work-dir` | Yes | - | Project directory, or the project access root with `--multi-project` |
+| `--multi-project` | No | Disabled | Require each MCP session to bind once to a project beneath `--work-dir` |
 | `--port` | No | `3000` | Server port |
 | `--api-key` | No | - | Bearer token for auth |
 | `--config` | No | `./codex.config.json` | Config file path (tolerated if missing) |
@@ -159,7 +168,7 @@ Ported from Codex's own agent tools:
 
 Codex's dotted names are flattened to underscores because MCP tool names must match `^[a-zA-Z0-9_-]{1,64}$`.
 
-Five tools have no Codex counterpart:
+Five always-on tools have no Codex counterpart:
 
 | Tool | Description |
 |------|-------------|
@@ -169,9 +178,15 @@ Five tools have no Codex counterpart:
 | `remember` | Save one durable note about the task under a short key |
 | `recall` | Return the plan and notes saved by earlier turns or earlier conversations |
 
+Multi-project mode adds one session-control tool:
+
+| Tool | Description |
+|------|-------------|
+| `set_project_root` | Bind the current MCP session to one existing directory beneath the configured access root; repeated selection of the same canonical directory is idempotent, but switching is rejected |
+
 Codex needs the first three for none of these reasons: it puts its agent brief in the system prompt, the OS and shell in an `<environment_context>` message, and `AGENTS.md` straight into the prompt, all before the first turn. An MCP server has none of those channels — it can only expose tools — so the same facts are tool calls here as well as part of the server's `instructions`. It needs `remember` and `recall` for the opposite reason: its context is large and its session state lives in the CLI process, whereas the client here is a chat window that loses the conversation. See [Context and memory](#context-and-memory), [Acting as a Codex agent](#acting-as-a-codex-agent), [Shells and the host](#shells-and-the-host), [AGENTS.md](#agentsmd) and [Skills](#skills).
 
-That is 25 native tools. When [MCP bridging](#bridging-other-mcp-servers) is configured, the tools of your other MCP servers are re-exposed here too, on top of these.
+That is 25 native tools in the default single-project mode and 26 in multi-project mode. When [MCP bridging](#bridging-other-mcp-servers) is configured, the tools of your other MCP servers are re-exposed here too, on top of these.
 
 Two deliberate differences from Codex:
 
@@ -182,7 +197,7 @@ Two deliberate differences from Codex:
 
 Every tool that advertises an `outputSchema` also returns `structuredContent` matching it, as the MCP spec asks. `exec_command` and `write_stdin` return Codex's unified-exec object, `clock_curr_time` returns `{ current_time }`, `get_environment` returns the environment object, `get_project_doc` returns `{ files, content }` and `skills_list` returns `{ skills, content }`; the rest return `{ content: <text> }`, which the server derives from the text blocks so handlers don't repeat it.
 
-All paths are resolved relative to `--work-dir`.
+All project-scoped paths are resolved relative to the active project root: `--work-dir` in single-project mode, or the root selected for that MCP session in multi-project mode.
 
 ## Config file
 
@@ -190,6 +205,7 @@ All paths are resolved relative to `--work-dir`.
 
 ```json
 {
+  "multiProject": false,
   "allowedCommands": ["bun", "npm", "npx", "node", "git", "python", "pip", "cargo", "make"],
   "port": 3000,
   "tree": {
@@ -259,6 +275,8 @@ Native mode deliberately cannot be combined with a caller-supplied `apiKey` / `-
 
 The OpenAI runtime key authenticates the outbound control-plane connection. Codexify resolves the configured `env:NAME` or `file:/path` reference once, passes the value to the tunnel child under a private synthetic environment name, and removes the original environment variable from model-launched commands and bridged MCP children. The tunnel runtime starts with a small allowlist of ordinary OS variables rather than inheriting tunnel-client configuration, proxy, header, or trust-store overrides from the launching shell. On Unix, a referenced key file must not be readable by group or other users. These measures prevent accidental inheritance; they do not create a secret boundary against hostile code running as the same OS user, which can potentially inspect same-user processes or read an accessible key file.
 
+The top-level `multiProject` key is the config-file equivalent of `--multi-project`. In that mode the process still reads one static `codex.config.json`; project selection changes the effective work directory used by project-scoped tools, not the server configuration itself. ChatGPT conversation bindings are independent of the `memory` block and remain enabled even when `memory.enabled` is `false`.
+
 The `exec` block governs `exec_command` and `write_stdin`:
 
 | Key | Default | Description |
@@ -302,7 +320,7 @@ The `memory` block governs `remember`, `recall` and the plan `update_plan` saves
 | Key | Default | Description |
 |-----|---------|-------------|
 | `enabled` | `true` | `false` turns persistence off entirely; nothing is read or written |
-| `dir` | `~/.codexify/projects/<name>-<hash of work-dir>` | Where the state file lives. Outside the repository by default |
+| `dir` | `~/.codexify/projects/<name>-<hash of work-dir>` | Where the state file lives. Outside the repository by default. In multi-project mode, an explicit `dir` is treated as a base directory and each selected project gets its own hashed child directory |
 | `maxBytes` | `16384` | Budget for all notes together. A note over it is rejected, not silently evicted |
 
 The `skills` block governs `SKILL.md` discovery. See [Skills](#skills):
@@ -335,9 +353,9 @@ That line matters as much as the cap. Silent truncation reads as "that was the w
 
 **Keep what would be expensive to rediscover.** `remember` writes one keyed note; `recall` hands back the notes and the current plan. `update_plan` persists too, so the plan survives the conversation that made it. Writing to a key that exists replaces it, and an empty value deletes it — a keyed store stays current where an append log accumulates contradictions until it is worthless.
 
-State lives in `~/.codexify/projects/<name>-<hash>/memory.json`, keyed by the absolute work directory. Nothing is written into the repository you pointed the server at, and two checkouts of the same repo do not share notes.
+State lives in `~/.codexify/projects/<name>-<hash>/memory.json`, keyed by the absolute active project root. Nothing is written into the repository you pointed the server at, and two checkouts of the same repo do not share notes. Multi-project sessions therefore share state only when they select the same canonical project root.
 
-Because `instructions` is rebuilt for every MCP session, a new conversation opens with the saved plan and notes already in front of it, under a `## Saved state` heading between the environment and `AGENTS.md`. If the client ignores `instructions`, one `recall` gets the same thing.
+In single-project mode, `instructions` is rebuilt for every MCP session, so a new conversation opens with the saved plan and notes already in front of it, under a `## Saved state` heading between the environment and `AGENTS.md`. In multi-project mode the initialize-time instructions deliberately contain only the selection protocol: project state cannot be loaded correctly until `set_project_root` identifies the root. The subsequent `get_agent_brief` call returns the environment, saved state, skills, and `AGENTS.md` for that selected project. If the client ignores `instructions`, one `recall` gets the same saved state after selection.
 
 The division of labour is worth keeping straight: `AGENTS.md` is what is true of the **project** and belongs in the repo; notes are what is true of the **task in flight** and belong here.
 
@@ -369,6 +387,16 @@ Task: <what you want done>
 
 Everything else — the shell you're on, the allowlist, your repo's `AGENTS.md` — arrives with that one call. If a chat starts drifting back into generic-assistant behaviour, asking for the brief again re-anchors it.
 
+In multi-project mode, select before requesting the brief:
+
+```
+Call set_project_root with path "my-project", then call get_agent_brief and follow it for the rest of this chat.
+
+Task: <what you want done>
+```
+
+The path may be relative to the configured access root or absolute, but its canonical target must be an existing directory inside that root. The binding belongs to the MCP session, not globally to the server, so simultaneous chats may select different projects without sharing plans, notes, command sessions, project instructions, or repo skills. A session cannot switch roots after binding; start another chat for another project.
+
 ## Shells and the host
 
 Windows, macOS and Linux are all supported natively; there is no WSL or POSIX-emulation layer in between. Which shell runs is decided by name, not by host platform, the same way Codex's `Shell::derive_exec_args` does it:
@@ -393,7 +421,7 @@ Because the resolved shell decides what a command should even look like, it is p
 
 A project's `AGENTS.md` is how it tells an agent its own conventions — which test command to run, which files not to touch, how commits should look. Codex reads it before the first turn; so does this bridge, using the same algorithm as `codex-rs/core/src/agents_md.rs`.
 
-Discovery walks up from `--work-dir` to the nearest directory holding a **root marker** (`.git` by default), then collects **one doc per directory on the way back down**, so a monorepo's root conventions arrive before the ones belonging to the subdirectory you pointed the server at. In each directory, `AGENTS.override.md` wins over `AGENTS.md`, which wins over anything in `projectDoc.fallbackFilenames`. The files are concatenated outermost-first under a **shared 32 KiB budget**, counted in bytes rather than characters; a file that runs past what is left is cut there and reported as truncated, and whitespace-only files are skipped without spending any of it. If no marker is found anywhere above, only the work directory itself is checked.
+In single-project mode, discovery walks up from `--work-dir` to the nearest directory holding a **root marker** (`.git` by default), then collects **one doc per directory on the way back down**, so a monorepo's root conventions arrive before the ones belonging to the subdirectory you pointed the server at. In multi-project mode the selected directory is treated as the exact project root and discovery never reads an access-root parent, preventing instructions from one sibling project or the common parent from leaking into another session. In each directory considered, `AGENTS.override.md` wins over `AGENTS.md`, which wins over anything in `projectDoc.fallbackFilenames`. The files are concatenated outermost-first under a **shared 32 KiB budget**, counted in bytes rather than characters; a file that runs past what is left is cut there and reported as truncated, and whitespace-only files are skipped without spending any of it. If no marker is found anywhere above in single-project mode, only the work directory itself is checked.
 
 Like the environment, the result is published more than one way:
 
@@ -433,7 +461,7 @@ description: Cut and publish a release of this project
 
 | Scope | Directories |
 |-------|-------------|
-| `repo` | `.agents/skills`, `.codex/skills` and `.claude/skills`, in every directory from the project root down to `--work-dir` |
+| `repo` | `.agents/skills`, `.codex/skills` and `.claude/skills`, in every directory from the project root down to the active work directory; in multi-project mode the selected directory is the exact project root |
 | `user` | `~/.agents/skills`, `~/.codex/skills` and `~/.claude/skills`, or whatever `skills.dirs` names instead |
 | `plugin` | Installed **Claude Code plugin** skills under `~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/skills/*` |
 
@@ -441,9 +469,9 @@ Repo skills come first, so a project decides how a name behaves inside it; a per
 
 **Claude Code plugins.** Codexify also discovers skills bundled with your installed Claude Code plugins, namespaced `<plugin>:<skill>` (e.g. `idasql:decompiler`) so they never collide with your own. The highest installed version of each plugin is used. Turn this off with `"skills": { "includePlugins": false }`. Setting `skills.dirs` overrides the standalone roots and, by default, disables plugin discovery too — set `includePlugins: true` alongside `dirs` to keep it.
 
-**What the model sees.** The catalogue — a name and a description per skill — goes into `instructions` under a `## Skills` heading, so a chat opens knowing what is available without spending a call to find out. Bodies are not loaded: `skills_read` fetches one only once a skill has actually been chosen. That is the progressive disclosure that makes a large library affordable on a small context window. The section is omitted entirely when nothing is installed.
+**What the model sees.** The catalogue — a name and a description per skill — goes into the project-aware brief under a `## Skills` heading. In single-project mode that is available at initialization; in multi-project mode it arrives from `get_agent_brief` after selection. Bodies are not loaded: `skills_read` fetches one only once a skill has actually been chosen. That is the progressive disclosure that makes a large library affordable on a small context window. The section is omitted entirely when nothing is installed.
 
-**Reaching the rest of a package.** Reference files, scripts and assets are read with `skills_read` and the skill's name, passing the file's path as `resource`. `read_file` will not do: it is confined to `--work-dir`, and user- and plugin-scope skills live in your home directory. Paths inside a skill are relative to the skill's own directory, and a `resource` that tries to leave it is rejected — so the only thing this opens up is the inside of a skill you or the project deliberately installed. Reading a `SKILL.md` lists the package's other files, since the model cannot glob a directory it cannot see.
+**Reaching the rest of a package.** Reference files, scripts and assets are read with `skills_read` and the skill's name, passing the file's path as `resource`. `read_file` will not do: it is confined to the active project root, and user- and plugin-scope skills live in your home directory. Paths inside a skill are relative to the skill's own directory, and a `resource` that tries to leave it is rejected — so the only thing this opens up is the inside of a skill you or the project deliberately installed. Reading a `SKILL.md` lists the package's other files, since the model cannot glob a directory it cannot see.
 
 Discovery runs per MCP session, so adding a skill takes effect on the next connection without restarting the server. Set `skills.enabled` to `false` to turn the whole thing off.
 
@@ -557,13 +585,13 @@ When `remote-exec` was imported from Codex, that overlay is sufficient; include 
 3. In ChatGPT's connector/plugin settings, create a developer-mode connector with **Connection type: Tunnel**.
 4. Select the same tunnel ID that Codexify reports as ready. Set **Authentication** to **None**.
 5. Set the connector's permissions to **Allow all actions** if you do not want per-call confirmations.
-6. Enable the connector in a new chat, then open with `Call get_agent_brief and follow it for the rest of this chat.` — see [Acting as a Codex agent](#acting-as-a-codex-agent).
+6. Enable the connector in a new chat, then open with `Call get_agent_brief and follow it for the rest of this chat.` — see [Acting as a Codex agent](#acting-as-a-codex-agent). In multi-project mode (`--multi-project`), call `set_project_root` first in a new chat; later follow-ups in that same chat can call `get_agent_brief` directly, since the project binding is restored from ChatGPT's conversation metadata.
 
 There is no server URL to enter in this mode. OpenAI routes the selected tunnel to the supervised client, which supplies Codexify's generated per-process bearer on the local hop. The startup banner prints the runtime-only `/readyz` and `/metrics` URLs. It does not advertise an admin UI because `tunnel-client-runtime` deliberately omits that full-client surface.
 
 ### With an externally managed tunnel
 
-1. Start Codexify without `openaiTunnel`.
+1. Start Codexify without `openaiTunnel` (add `--work-dir /path/to/projects --multi-project` for one connector shared across projects).
 2. Put an authenticated reverse proxy or tunnel in front of port `3000`.
 3. Create a URL-based developer connector/plugin whose server URL is the resulting HTTPS URL with `/mcp` appended.
 4. Configure the connector authentication supported by the client, and enforce access controls at the proxy/tunnel layer.
@@ -578,8 +606,8 @@ Native tunnel mode ignores `allowedHosts` and forces the accepted authorities to
 
 ## Security
 
-- **Path traversal prevention**: every filesystem tool — including `apply_patch` and `view_image` — resolves paths through a guard that rejects anything outside `--work-dir`.
-- **One bounded exception**: [AGENTS.md](#agentsmd) discovery reads above `--work-dir`, up to the nearest `.git`. Nothing else does. It is read-only, opens only `AGENTS.override.md`, `AGENTS.md` and any `projectDoc.fallbackFilenames`, and `get_project_doc` reports the absolute path of every file it used. Set `projectDoc.maxBytes` to `0` to switch it off, or `projectDoc.rootMarkers` to `[]` to keep the search inside the work directory.
+- **Path traversal prevention**: every filesystem tool — including `apply_patch` and `view_image` — resolves paths through a guard that rejects anything outside the active project root. In multi-project mode, `set_project_root` canonicalizes both the configured access root and the requested directory, so `..` and symlinks cannot bind a session outside the access root.
+- **One bounded exception in single-project mode**: [AGENTS.md](#agentsmd) discovery may read above `--work-dir`, up to the nearest `.git`. It is read-only, opens only `AGENTS.override.md`, `AGENTS.md` and any `projectDoc.fallbackFilenames`, and `get_project_doc` reports the absolute path of every file it used. Set `projectDoc.maxBytes` to `0` to switch it off, or `projectDoc.rootMarkers` to `[]` to keep the search inside the work directory. Multi-project mode does not perform this upward walk; its selected directory is the exact project root.
 - **One bounded write outside the work directory**: `remember` and `update_plan` write `memory.json` under `~/.codexify/`, deliberately outside the repository so nothing lands in your git history. It holds whatever the model chose to note about the task — read it if you want to know, delete the directory to forget, or set `memory.enabled` to `false` to never write it. The write is atomic (temp file plus rename) and guarded by a per-project lock, so a crash mid-write never leaves a torn file and two servers pointed at the same work directory do not lose each other's notes to an interleaved update. See [Context and memory](#context-and-memory).
 - **Bounded reads outside the work directory**: [skills](#skills) may live in `~/.agents/skills`, `~/.codex/skills`, `~/.claude/skills` or an installed Claude Code plugin. `skills_read` opens files there, but only inside a skill package that already exists — the `resource` path is checked against the skill's own directory, so it cannot walk out into the rest of your home directory. `skills_list` reports the absolute path of every skill it found. Set `skills.enabled` to `false` to switch it off, or `skills.dirs` to point the user scope somewhere you choose.
 - **Command allowlist**: `run_command` only runs binaries listed in `allowedCommands`; everything else is rejected. `exec_command` checks the same list plus `exec.extraAllowedCommands`, at every command position in the string.
@@ -591,16 +619,17 @@ Native tunnel mode ignores `allowedHosts` and forces the accepted authorities to
 - **Optional bearer token auth in non-native mode**: set `--api-key` to require an `Authorization: Bearer <key>` header on all requests except `/health`. Native mode instead owns its private per-process bearer token. ChatGPT Plugins do not support simple bearer token auth for URL-based connectors.
 - **Host allowlist**: set `allowedHosts` to pin the accepted `Host` header for DNS-rebinding protection. See [Host allowlist](#host-allowlist).
 
-The allowlist is a **guardrail against accidents, not a sandbox**. It catches a model reaching for `curl` or `rm -rf`; it does not contain a determined one. The defaults already include `node`, `python` and `cargo`, each of which runs arbitrary code — `node -e "..."` can do anything the server process can. Shell redirection can also write outside the work directory even though the command's cwd is confined to it. Treat everything below as reachable by whoever is authorized to use the configured connector or external endpoint:
+The allowlist is a **guardrail against accidents, not a sandbox**. It catches a model reaching for `curl` or `rm -rf`; it does not contain a determined one. The defaults already include `node`, `python` and `cargo`, each of which runs arbitrary code — `node -e "..."` can do anything the server process can. Shell redirection and explicit absolute or parent paths can also reach outside the active project root even though each command starts with that root as its cwd. Multi-project selection isolates Codexify's structured tools and logical per-conversation project state; it is not an operating-system sandbox. Treat everything below as reachable by whoever is authorized to use the configured connector or external endpoint:
 
-- everything in `--work-dir`, read and write
+- everything in the active project root, read and write
+- in multi-project mode, any project beneath the configured access root can be selected by a new session
 - anything else the user account running the server can touch, via an allowlisted interpreter
 - the network, from your machine
 - anything a bridged MCP server can do
 
 `exec_command` sessions that outlive a request are killed when the MCP session closes, and the kill takes the children with it: `taskkill /T /F` walks the process tree on Windows, and on POSIX each session gets its own process group that is signalled as a whole. A process that deliberately re-parents or daemonises itself still escapes, so check for strays if a run leaves something listening.
 
-The native OpenAI tunnel removes the general public-URL exposure, but it does not reduce the authority of a successful tool call. Keep tunnel and connector permissions narrow, do not point Codexify at directories you do not trust the model with, and set `exec.mode` and the command allowlists tighter than the defaults when the work directory is sensitive. For an external tunnel, require tunnel-level access control rather than relying on URL secrecy.
+The native OpenAI tunnel removes the general public-URL exposure, but it does not reduce the authority of a successful tool call. Keep tunnel and connector permissions narrow, do not point Codexify at directories you do not trust the model with, and set `exec.mode` and the command allowlists tighter than the defaults when the work directory is sensitive. In multi-project mode, the entire access-root subtree is intentionally selectable, so treat the whole subtree as sensitive. For an external tunnel, require tunnel-level access control rather than relying on URL secrecy.
 
 ## Dev commands
 

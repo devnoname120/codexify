@@ -17,7 +17,7 @@ use tempfile::TempDir;
 
 use codexify::config::default_config;
 use codexify::exec_sessions::SessionState;
-use codexify::registry::load_tools;
+use codexify::registry::{load_tools, load_tools_for_mode};
 use codexify::safe_path::resolve_safe_path;
 use codexify::tool::Tool;
 use codexify::types::{AppConfig, ToolContent, ToolResult};
@@ -28,6 +28,13 @@ use codexify::types::{AppConfig, ToolContent, ToolResult};
 fn loads_all_25_tools() {
     let tools = load_tools();
     assert_eq!(tools.len(), 25);
+}
+
+#[test]
+fn multi_project_mode_adds_only_the_session_selector() {
+    let tools = load_tools_for_mode(true);
+    assert_eq!(tools.len(), 26);
+    assert_eq!(tools[0].name(), "set_project_root");
 }
 
 #[test]

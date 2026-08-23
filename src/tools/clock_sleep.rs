@@ -50,6 +50,10 @@ impl Tool for ClockSleep {
         }))
     }
 
+    fn requires_project_root(&self) -> bool {
+        false
+    }
+
     async fn call(&self, args: Value, _config: &AppConfig, _session: &SessionState) -> ToolResult {
         let Some(duration_ms) = args.get("duration_ms").and_then(|v| v.as_f64()) else {
             return ToolResult::error("duration_ms must be a number");

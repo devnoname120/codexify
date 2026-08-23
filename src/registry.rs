@@ -1,14 +1,23 @@
 //! The tool registry. Ports `src/registry.ts`.
 //!
-//! `load_tools` returns every registered tool and enforces that names are
-//! unique, panicking on a duplicate (a programming error, as in the TS which
-//! throws at startup). The order mirrors the TypeScript registry.
+//! `load_tools` returns the single-project registry; `load_tools_for_mode` adds
+//! the session selector only when multi-project mode is enabled. Both enforce
+//! unique names, panicking on a duplicate (a programming error, as in the TS
+//! which throws at startup). The common order mirrors the TypeScript registry.
 
 use crate::tool::Tool;
 use crate::tools;
 
 pub fn load_tools() -> Vec<Box<dyn Tool>> {
-    let all: Vec<Box<dyn Tool>> = vec![
+    load_tools_for_mode(false)
+}
+
+pub fn load_tools_for_mode(multi_project: bool) -> Vec<Box<dyn Tool>> {
+    let mut all: Vec<Box<dyn Tool>> = Vec::new();
+    if multi_project {
+        all.push(Box::new(tools::set_project_root::SetProjectRoot));
+    }
+    all.extend([
         Box::new(tools::read_file::ReadFile),
         Box::new(tools::write_file::WriteFile),
         Box::new(tools::run_command::RunCommand),
@@ -41,7 +50,7 @@ pub fn load_tools() -> Vec<Box<dyn Tool>> {
         // Codex's skills.list / skills.read.
         Box::new(tools::skills_list::SkillsList),
         Box::new(tools::skills_read::SkillsRead),
-    ];
+    ] as [Box<dyn Tool>; 25]);
 
     let mut seen = std::collections::HashSet::new();
     for tool in &all {
