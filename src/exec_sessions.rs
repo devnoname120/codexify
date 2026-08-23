@@ -216,15 +216,11 @@ impl ExecSession {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProjectRootSelection {
-    pub access_root: PathBuf,
-    pub project_root: PathBuf,
-    pub newly_selected: bool,
-}
-
-/// Per-MCP-session mutable state. A fresh instance is created for every MCP
-/// session so concurrent clients never share project roots, exec sessions, or plans.
+/// Per-MCP-transport mutable state. A fresh instance is created for every MCP
+/// transport session so concurrent transports never share exec sessions or
+/// in-memory plans.
+/// Project-root state here is the fallback for clients without a durable
+/// conversation identifier.
 pub struct SessionState {
     pub exec_sessions: StdMutex<HashMap<u64, Arc<ExecSession>>>,
     next_exec_id: AtomicU64,
@@ -255,7 +251,7 @@ impl SessionState {
 
         let Some(project_root) = self.project_root.lock().unwrap().clone() else {
             return Err(format!(
-                "No project root is selected for this MCP session. Call `set_project_root` with a directory relative to the access root `{}`, then call `get_agent_brief` before using project tools.",
+                "No project root is selected for this MCP transport session. Call `set_project_root` with a directory relative to the access root `{}`, then call `get_agent_brief` before using project tools.",
                 config.work_dir.display()
             ));
         };
@@ -277,42 +273,7 @@ impl SessionState {
             );
         }
 
-        let input = input.trim();
-        if input.is_empty() {
-            return Err("path must be a non-empty string".to_string());
-        }
-
-        let access_root = std::fs::canonicalize(&config.work_dir).map_err(|e| {
-            format!(
-                "Could not resolve project access root {}: {e}",
-                config.work_dir.display()
-            )
-        })?;
-        let input_path = std::path::Path::new(input);
-        let candidate = if input_path.is_absolute() {
-            input_path.to_path_buf()
-        } else {
-            config.work_dir.join(input_path)
-        };
-        let project_root = std::fs::canonicalize(&candidate).map_err(|e| {
-            format!(
-                "Project root does not exist or cannot be resolved: {}: {e}",
-                candidate.display()
-            )
-        })?;
-
-        if !project_root.is_dir() {
-            return Err(format!(
-                "Project root is not a directory: {}",
-                project_root.display()
-            ));
-        }
-        if project_root != access_root && !project_root.starts_with(&access_root) {
-            return Err(format!(
-                "Project root escapes the configured access root: {}",
-                project_root.display()
-            ));
-        }
+        let (access_root, project_root) = resolve_project_root(config, input)?;
 
         let mut selected = self.project_root.lock().unwrap();
         match selected.as_ref() {
@@ -320,9 +281,10 @@ impl SessionState {
                 access_root,
                 project_root,
                 newly_selected: false,
+                scope: ProjectBindingScope::McpTransportSession,
             }),
             Some(current) => Err(format!(
-                "This MCP session is already bound to project root `{}` and cannot switch to `{}`. Open a new chat or MCP session for another project.",
+                "This MCP transport session is already bound to project root `{}` and cannot switch to `{}`. Open a new session for another project.",
                 current.display(),
                 project_root.display()
             )),
@@ -332,6 +294,7 @@ impl SessionState {
                     access_root,
                     project_root,
                     newly_selected: true,
+                    scope: ProjectBindingScope::McpTransportSession,
                 })
             }
         }

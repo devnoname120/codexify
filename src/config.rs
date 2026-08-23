@@ -27,7 +27,8 @@ pub struct Cli {
     #[arg(long = "work-dir")]
     pub work_dir: String,
 
-    /// Let each MCP session bind once to a project below --work-dir.
+    /// Let each ChatGPT conversation bind once to a project below --work-dir.
+    /// Other MCP clients fall back to transport-session binding.
     #[arg(long = "multi-project")]
     pub multi_project: bool,
 

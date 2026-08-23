@@ -60,8 +60,9 @@ pub const AGENT_BRIEF: &str = concat!(
     "- Offer natural next steps briefly — tests, a commit, a build — and say plainly what you could not verify yourself.",
 );
 
-/// The initialize-time instructions. Multi-project sessions deliberately omit
-/// project state until the client binds the session to one root.
+/// The initialize-time instructions. Multi-project initialization deliberately
+/// omits project state because ChatGPT's conversation ID arrives on tool calls,
+/// after the MCP initialize exchange.
 pub fn build_initial_instructions(config: &AppConfig) -> String {
     if !config.multi_project {
         return build_instructions(config);
@@ -75,11 +76,12 @@ pub fn build_initial_instructions(config: &AppConfig) -> String {
         String::new(),
         "## Project selection".to_string(),
         String::new(),
-        "This server is running in multi-project mode. This MCP session has no project root yet, so project-scoped tools will reject calls until one is selected.".to_string(),
+        "This server is running in multi-project mode. Project identity cannot be resolved during MCP initialization because stable ChatGPT conversation metadata arrives on tool calls.".to_string(),
         format!("Project access root: {}", config.work_dir.display()),
-        "Call `set_project_root` with an existing directory beneath that access root before using filesystem, search, edit, command, git, project-instruction, skill, memory, or plan tools.".to_string(),
-        "The selection is permanent for this MCP session. Use a new chat or MCP session for another project.".to_string(),
-        "Immediately after selecting, call `get_agent_brief` and follow the returned environment, saved state, skills, and project instructions for the rest of the task.".to_string(),
+        "For ChatGPT, a project selected earlier in this same conversation is restored automatically even after an MCP reconnect or server restart. A new conversation has no binding.".to_string(),
+        "Call `get_agent_brief` first. If this conversation is not yet bound, call `set_project_root` with an existing directory beneath the access root, then call `get_agent_brief` again. Re-selecting the same canonical directory is idempotent.".to_string(),
+        "A ChatGPT conversation cannot switch projects; start a new chat for another project. Clients without stable `openai/session` metadata fall back to an MCP-transport-session binding and must select again after reconnecting.".to_string(),
+        "Follow the environment, saved state, skills, and project instructions returned by `get_agent_brief` for the rest of the task.".to_string(),
         String::new(),
         "## Environment".to_string(),
         String::new(),

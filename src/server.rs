@@ -2,9 +2,10 @@
 //! the axum wiring (`/mcp` Streamable HTTP, `/health`, CORS, bearer auth).
 //!
 //! Ports `src/server.ts`. rmcp's `StreamableHttpService` owns the transport and
-//! MCP session lifecycle: the service factory runs once per MCP session, so a
-//! fresh [`SessionState`] lives inside each handler and is dropped — killing any
-//! resident exec processes — when the session ends.
+//! MCP session lifecycle: the service factory runs once per transport session,
+//! so a fresh [`SessionState`] owns resident exec processes and drops them when
+//! that session ends. ChatGPT project selection is stored separately by its
+//! stable conversation metadata and survives transport replacement.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -29,8 +30,10 @@ use tower_http::cors::{Any, CorsLayer};
 use crate::auth::{generate_internal_bearer_token, require_auth};
 use crate::exec_sessions::SessionState;
 use crate::instructions::build_initial_instructions;
+use crate::project_bindings::{ConversationIdentity, ProjectBindingStore};
 use crate::registry::load_tools_for_mode;
 use crate::tool::Tool;
+use crate::tools::set_project_root::{SetProjectRoot, select_and_render};
 use crate::types::{AppConfig, ToolContent, ToolResult};
 
 const HTTP_SERVER_STOP_TIMEOUT: Duration = Duration::from_secs(10);
@@ -41,6 +44,7 @@ type HttpServerTask = JoinHandle<Result<(), std::io::Error>>;
 pub struct CodexHandler {
     config: Arc<AppConfig>,
     tools: Arc<Vec<Box<dyn Tool>>>,
+    project_bindings: Arc<ProjectBindingStore>,
     session: SessionState,
 }
 
@@ -97,8 +101,14 @@ impl ServerHandler for CodexHandler {
     async fn call_tool(
         &self,
         request: CallToolRequestParams,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, McpError> {
+        let conversation = ConversationIdentity::from_request_meta(&context.meta).or_else(|| {
+            request
+                .meta
+                .as_ref()
+                .and_then(ConversationIdentity::from_request_meta)
+        });
         let name = request.name.as_ref();
         let args = request.arguments.map(Value::Object).unwrap_or(Value::Null);
 
@@ -108,22 +118,39 @@ impl ServerHandler for CodexHandler {
             return Ok(result.into());
         };
 
-        let effective_config = if tool.requires_project_root() {
-            match self.session.effective_config(&self.config) {
-                Ok(config) => Some(config),
-                Err(error) => {
-                    let result = ToolResult::error(error);
-                    tracing::info!("  tool: {name} -> error");
-                    return Ok(to_call_tool_result(result).into());
-                }
+        let mut result = if name == SetProjectRoot::NAME {
+            if let Some(identity) = conversation.as_ref() {
+                select_and_render(&args, |path| {
+                    self.project_bindings
+                        .select_project_root(&self.config, identity, path)
+                })
+            } else {
+                tool.call(args, &self.config, &self.session).await
             }
         } else {
-            None
+            let effective_config = if tool.requires_project_root() {
+                let resolved = match conversation.as_ref() {
+                    Some(identity) => self
+                        .project_bindings
+                        .effective_config(&self.config, identity),
+                    None => self.session.effective_config(&self.config),
+                };
+                match resolved {
+                    Ok(config) => Some(config),
+                    Err(error) => {
+                        let result = ToolResult::error(error);
+                        tracing::info!("  tool: {name} -> error");
+                        return Ok(to_call_tool_result(result).into());
+                    }
+                }
+            } else {
+                None
+            };
+            let call_config = effective_config
+                .as_ref()
+                .unwrap_or_else(|| self.config.as_ref());
+            tool.call(args, call_config, &self.session).await
         };
-        let call_config = effective_config
-            .as_ref()
-            .unwrap_or_else(|| self.config.as_ref());
-        let mut result = tool.call(args, call_config, &self.session).await;
 
         // Fill in the `structuredContent` the MCP spec expects from any tool that
         // advertises an `outputSchema`. Most tools use the `{ content: string }`
@@ -167,6 +194,7 @@ pub async fn start_http_server(mut config: AppConfig) -> anyhow::Result<()> {
     let _ = std::fs::remove_dir_all(&gen_dir);
     config.generated_skills_dir = Some(gen_dir);
     let config = Arc::new(config);
+    let project_bindings = Arc::new(ProjectBindingStore::for_current_user());
 
     // Connect to any configured upstream MCP servers and merge their tools in.
     // The returned services must stay alive for the whole server lifetime, so
@@ -213,11 +241,13 @@ pub async fn start_http_server(mut config: AppConfig) -> anyhow::Result<()> {
 
     let factory_config = config.clone();
     let factory_tools = tools.clone();
+    let factory_project_bindings = project_bindings.clone();
     let service = StreamableHttpService::new(
         move || {
             Ok(CodexHandler {
                 config: factory_config.clone(),
                 tools: factory_tools.clone(),
+                project_bindings: factory_project_bindings.clone(),
                 session: SessionState::new(),
             })
         },
@@ -263,7 +293,11 @@ pub async fn start_http_server(mut config: AppConfig) -> anyhow::Result<()> {
     );
     if config.multi_project {
         println!("Project access root: {}", config.work_dir.display());
-        println!("Project mode: per-session selection required");
+        println!("Project mode: persistent ChatGPT conversation binding");
+        println!(
+            "Conversation bindings: {}",
+            project_bindings.base_dir().display()
+        );
     } else {
         println!("Work directory: {}", config.work_dir.display());
     }

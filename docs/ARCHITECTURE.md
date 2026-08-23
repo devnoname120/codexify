@@ -3,8 +3,9 @@
 A Rust port of the `codexify` MCP bridge. codexify is a local [Model Context
 Protocol](https://modelcontextprotocol.io) server that exposes Codex-style agent
 tools over **Streamable HTTP**, scoped either to one configured working directory
-or to a project root selected independently by each MCP session, and can
+or to a project root selected independently by each ChatGPT conversation, and can
 additionally **aggregate other local MCP servers** and **surface local skills**.
+Clients without ChatGPT conversation metadata use an MCP-transport-session fallback.
 
 This document explains how it is put together and why. For usage, see
 [README.md](../README.md).
@@ -38,9 +39,13 @@ ChatGPT / MCP client
 │    • bridged tools  ← upstream MCP servers    │
 │    • gateway tools  ← upstream MCP servers    │
 │                                               │
-│  per-session SessionState                     │
-│    • selected project root                    │
-│    • exec sessions + plan                     │
+│  shared ProjectBindingStore                   │
+│    • openai/session hash → project root       │
+│    • persistent atomic binding records        │
+│                                               │
+│  per-transport SessionState                   │
+│    • fallback root for generic MCP clients    │
+│    • exec sessions + current plan             │
 └──────────────────────────────────────────────┘
         │ reads/writes           │ stdio child processes
         ▼                        ▼
@@ -53,7 +58,7 @@ Three surfaces reach the model:
 - **Skills** — a catalogue in the server `instructions` plus the `skills_list` /
   `skills_read` tools, discovered from disk.
 - **Instructions** — the agent brief + environment + memory + project doc,
-  rebuilt per MCP session.
+  rebuilt from the active project config.
 
 ---
 
@@ -65,19 +70,26 @@ Three surfaces reach the model:
 2. `CodexHandler::get_info` returns the negotiated protocol version, capabilities
    (`tools`), server identity, and the `instructions` string. Single-project mode
    builds the full project-aware brief immediately. Multi-project mode emits only
-   the root-selection protocol and a project-neutral environment because no
-   project is known yet.
+   the root-selection protocol and a project-neutral environment because ChatGPT's
+   conversation identity arrives in request `_meta` on tool calls, after
+   initialization.
 3. `tools/list` → `CodexHandler::list_tools` maps the shared tool registry into
    rmcp `Tool` definitions.
-4. In multi-project mode, `set_project_root` canonicalizes an existing directory
-   below the configured access root and stores it in `SessionState`. The same
-   root may be selected again idempotently; a different root is rejected.
-5. `tools/call` → `CodexHandler::call_tool` finds the tool by name. Project-scoped
-   tools require a selected root and receive an effective clone of `AppConfig`
-   whose `work_dir` is that root. The server then fills in default
-   `structuredContent` when appropriate.
-6. When the session ends, rmcp drops the `CodexHandler`; its `SessionState`
-   `Drop` kills any resident `exec_command` shells.
+4. `tools/call` → `CodexHandler::call_tool` reads `openai/session` from rmcp's
+   `RequestContext::meta`. rmcp moves wire-level request `_meta` into that context
+   before dispatch, so the typed tool parameters are not the authoritative source.
+5. In multi-project mode, `set_project_root` canonicalizes an existing directory
+   below the configured access root. With `openai/session`, it writes an immutable
+   conversation binding through the shared `ProjectBindingStore`; without it, the
+   root is stored in the current `SessionState`. Re-selecting the same canonical
+   root is idempotent and selecting a different root is rejected.
+6. Other project-scoped calls resolve the durable conversation binding first, or
+   the transport-session fallback when no conversation identity exists, then
+   receive an effective clone of `AppConfig` whose `work_dir` is that root. The
+   server fills in default `structuredContent` when appropriate.
+7. When the transport session ends, rmcp drops the `CodexHandler`; its
+   `SessionState::Drop` kills resident `exec_command` shells. The conversation
+   binding remains on disk and is restored by a later transport or server process.
 
 Cross-cutting HTTP concerns live in the axum layer: a `/health` route, a
 bearer-auth middleware that bypasses `/health`, and—in externally exposed
@@ -112,10 +124,20 @@ whose text *is* the structured form rely on the server's default-fill
 (`{ "content": <joined text> }`); tools that build their own structured content —
 or bridge it from upstream — return `fills_structured_content() == false`.
 
+### `ProjectBindingStore` (`project_bindings.rs`)
+Shared, durable conversation-to-project bindings. `ConversationIdentity` hashes
+ChatGPT's `openai/session` value before it reaches a filename; no raw conversation
+identifier is written to disk. Records are namespaced by canonical access-root
+hash, written atomically under a per-record lock, and validated again on every
+load so a deleted project or changed symlink fails closed. A new store instance
+can recover the same binding after a server restart.
+
 ### `SessionState` (`exec_sessions.rs`)
-Per-MCP-session mutable state: the optional selected project root, the map of
-resident `exec_command` shells, and the current plan. Created fresh per session
-by the factory; the root binding is immutable and `Drop` disposes shells.
+Per-MCP-transport mutable state: the optional fallback project root used only when
+the client provides no stable ChatGPT conversation identity, the map of resident
+`exec_command` shells, and the current plan. Created fresh by the service factory;
+the fallback root is immutable and `Drop` disposes shells. Live process handles are
+intentionally not persisted across reconnects.
 
 ### `AppConfig` (`types.rs`)
 The fully-resolved config handed to every tool. `config.rs` parses
@@ -124,8 +146,8 @@ user-level Codex MCP definitions through `codex_mcp.rs`, then applies explicit
 `mcpServers` entries as field overlays. Optional sub-configs (`projectDoc`,
 `output`, `memory`, `skills`, `ignore`) fall back to per-module defaults. In
 multi-project mode, dispatch clones this config per call and substitutes the
-session's selected root for `work_dir`; the static server policy and bridge
-configuration remain shared.
+conversation's selected root—or the transport fallback—for `work_dir`; the static
+server policy and bridge configuration remain shared.
 
 ---
 
@@ -201,7 +223,7 @@ a private per-run temporary directory and are removed after shutdown.
 Multi-project mode prepends `set_project_root`. It is omitted entirely in the
 default registry, preserving the original 25-tool surface and behaviour. Clocks
 and bridged/gateway tools are project-independent; every other native tool is
-blocked until a root is selected.
+blocked until a conversation binding or transport fallback is available.
 
 Each lives in `src/tools/<name>.rs`; the registry (`registry.rs`) lists them in
 the original order and rejects duplicate names.
@@ -216,7 +238,8 @@ the original order and rejects duplicate names.
 | `output_budget.rs` | Line/byte windowing and list caps, each cut announced with the continuation argument. |
 | `ignore_rules.rs` | One `.gitignore`-accurate matcher (the `ignore` crate) shared by glob/grep/tree/list_directory. |
 | `exec_policy.rs` | Shell-string allowlist guard for `exec_command` (a guardrail, not a sandbox). |
-| `exec_sessions.rs` | Per-session project-root binding plus unified-exec sessions: shell resolution, PowerShell exit-code wrapping, background stdout/stderr drain tasks, process-group kill, output truncation (UTF-16 units to match the TS). |
+| `project_bindings.rs` | Canonical project-root validation plus durable ChatGPT conversation bindings keyed by a hash of `openai/session`, namespaced by access root, locked per record, and atomically written. |
+| `exec_sessions.rs` | Generic-client transport fallback plus unified-exec sessions: shell resolution, PowerShell exit-code wrapping, background stdout/stderr drain tasks, process-group kill, output truncation (UTF-16 units to match the TS). |
 | `apply_patch.rs` | The Codex patch format: parse then apply, atomically, with fuzzy context matching and CRLF preservation. |
 | `memory.rs` | Working memory outside the repo, keyed by a hash of the normalized active root, with `O_EXCL` locking and atomic writes. In multi-project mode, a configured `memory.dir` is a base containing one hashed child per project. |
 | `openai_tunnel.rs` | Verified installation and lifecycle supervision for OpenAI's outbound Secure MCP Tunnel runtime. |

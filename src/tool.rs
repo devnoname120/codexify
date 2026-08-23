@@ -43,8 +43,8 @@ pub trait Tool: Send + Sync {
         true
     }
 
-    /// Whether this tool needs the project root selected for the current MCP
-    /// session. Upstream tools and project-independent clocks opt out.
+    /// Whether this tool needs an active project root for the current call.
+    /// Upstream tools and project-independent clocks opt out.
     fn requires_project_root(&self) -> bool {
         true
     }
