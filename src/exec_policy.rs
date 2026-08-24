@@ -238,7 +238,7 @@ mod tests {
     use super::*;
     use crate::types::{
         CommandConfig, ExecConfig, IgnoreConfig, MemoryConfig, OutputConfig, ProjectDocConfig,
-        SkillsConfig, TreeConfig,
+        ReviewConfig, SkillsConfig, TreeConfig,
     };
 
     fn cfg(mode: ExecMode) -> AppConfig {
@@ -266,6 +266,7 @@ mod tests {
             },
             project_doc: ProjectDocConfig::default(),
             output: OutputConfig::default(),
+            review: ReviewConfig::default(),
             memory: MemoryConfig::default(),
             skills: SkillsConfig::default(),
             ignore: IgnoreConfig::default(),

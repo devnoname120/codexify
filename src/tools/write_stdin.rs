@@ -44,6 +44,10 @@ impl Tool for WriteStdin {
         true
     }
 
+    fn may_modify_project(&self) -> bool {
+        true
+    }
+
     async fn call(&self, args: Value, _config: &AppConfig, session: &SessionState) -> ToolResult {
         let Some(session_id) = arg_u64(&args, "session_id") else {
             return ToolResult::error("session_id must be a number");

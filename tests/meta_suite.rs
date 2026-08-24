@@ -25,15 +25,15 @@ use codexify::types::{AppConfig, ToolContent, ToolResult};
 // ─── registry.test.ts ──────────────────────────────────────────────────
 
 #[test]
-fn loads_all_25_tools() {
+fn loads_all_26_tools() {
     let tools = load_tools();
-    assert_eq!(tools.len(), 25);
+    assert_eq!(tools.len(), 26);
 }
 
 #[test]
 fn multi_project_mode_adds_catalogue_and_session_selector() {
     let tools = load_tools_for_mode(true);
-    assert_eq!(tools.len(), 27);
+    assert_eq!(tools.len(), 28);
     assert_eq!(tools[0].name(), "list_projects");
     assert_eq!(tools[1].name(), "set_project_root");
 }
@@ -75,6 +75,7 @@ fn includes_expected_tool_names() {
         "write_file",
         "run_command",
         "git_status",
+        "show_changes",
         "git_push",
         "git_commit",
         "git_log",
@@ -142,6 +143,44 @@ fn all_tool_names_are_valid_mcp_names() {
             tool.name()
         );
     }
+}
+
+#[test]
+fn show_changes_links_the_review_mcp_app() {
+    let tools = load_tools();
+    let tool = tools
+        .iter()
+        .find(|tool| tool.name() == "show_changes")
+        .unwrap();
+    assert_eq!(tool.title().as_deref(), Some("Show changes"));
+    let meta = tool.meta().unwrap();
+    assert_eq!(
+        meta.get("ui")
+            .and_then(|value| value.get("resourceUri"))
+            .and_then(Value::as_str),
+        Some(codexify::review_ui::REVIEW_UI_URI)
+    );
+}
+
+#[test]
+fn mutating_tools_are_classified_for_checkpoint_fail_closed_behavior() {
+    let mut names = load_tools()
+        .into_iter()
+        .filter(|tool| tool.may_modify_project())
+        .map(|tool| tool.name().to_string())
+        .collect::<Vec<_>>();
+    names.sort();
+    assert_eq!(
+        names,
+        [
+            "apply_patch".to_string(),
+            "exec_command".to_string(),
+            "git_commit".to_string(),
+            "run_command".to_string(),
+            "write_file".to_string(),
+            "write_stdin".to_string(),
+        ]
+    );
 }
 
 // ─── structured-content.test.ts ────────────────────────────────────────
@@ -322,6 +361,7 @@ fn tools_that_need_their_own_structured_content() {
             "exec_command".to_string(),
             "get_environment".to_string(),
             "get_project_doc".to_string(),
+            "show_changes".to_string(),
             "skills_list".to_string(),
             "write_stdin".to_string(),
         ]

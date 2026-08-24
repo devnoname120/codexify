@@ -33,6 +33,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   credential directory and file are restricted to the current user. The wizard
   can start the normal supervised server immediately so ChatGPT can scan the live
   tunnel.
+- Project-scoped review checkpoints with immutable project-open and incremental
+  last-review baselines. `show_changes` reports structured file statistics,
+  renames, binaries and a bounded complete patch, and can advance the incremental
+  baseline with compare-and-swap semantics.
+- A self-contained MCP Apps review resource linked from `show_changes`. Compatible
+  ChatGPT developer connectors render file summaries and patches interactively;
+  ordinary MCP clients continue to receive the same text and structured result.
 
 ### Fixed
 
@@ -42,6 +49,15 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   connector reconnect. Generic MCP clients retain transport-owned process
   cleanup; conversation-owned processes remain bounded by the configured idle
   timeout and are killed when the server stops.
+
+### Security
+
+- Review snapshots use a private temporary Git index and an explicit literal
+  pathspec for the selected project. They preserve the real index byte-for-byte, never
+  include sibling monorepo changes, return project-relative patch paths, and persist
+  only hashed conversation identifiers in the dedicated `refs/codexify/review/`
+  namespace. Mutating calls and reviews for one conversation/project scope are
+  serialized through tool completion.
 
 ## [1.2.0] - 2026-08-24
 

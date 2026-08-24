@@ -56,7 +56,7 @@ impl ConversationIdentity {
         })
     }
 
-    fn key(&self) -> &str {
+    pub(crate) fn stable_key(&self) -> &str {
         &self.key
     }
 }
@@ -201,7 +201,7 @@ impl ProjectBindingStore {
         let access_key = encode_hex(&hasher.finalize(), 24);
         self.base_dir
             .join(access_key)
-            .join(format!("{}.json", identity.key()))
+            .join(format!("{}.json", identity.stable_key()))
     }
 
     fn read_binding(&self, path: &Path, access_root: &Path) -> Result<Option<PathBuf>, String> {

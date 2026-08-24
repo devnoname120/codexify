@@ -21,7 +21,7 @@ use crate::project_catalog::{ProjectCatalog, discover_project_catalog_at};
 use crate::types::{
     AppConfig, CodexProjectCatalogConfig, CommandConfig, ExecConfig, ExecMode, IgnoreConfig,
     McpServerSpec, MemoryConfig, OpenAiTunnelConfig, OutputConfig, ProjectCatalogConfig,
-    ProjectCatalogEntryConfig, ProjectDocConfig, SkillsConfig, TreeConfig,
+    ProjectCatalogEntryConfig, ProjectDocConfig, ReviewConfig, SkillsConfig, TreeConfig,
 };
 
 #[derive(Parser, Debug)]
@@ -333,6 +333,7 @@ struct FileConfig {
     exec: Option<PartialExec>,
     project_doc: Option<ProjectDocConfig>,
     output: Option<OutputConfig>,
+    review: Option<ReviewConfig>,
     memory: Option<MemoryConfig>,
     skills: Option<SkillsConfig>,
     ignore: Option<IgnoreConfig>,
@@ -524,6 +525,7 @@ pub fn default_config(work_dir: std::path::PathBuf) -> AppConfig {
         exec: default_exec(),
         project_doc: ProjectDocConfig::default(),
         output: OutputConfig::default(),
+        review: ReviewConfig::default(),
         memory: MemoryConfig::default(),
         skills: SkillsConfig::default(),
         ignore: IgnoreConfig::default(),
@@ -758,6 +760,7 @@ pub fn load_config(cli: Cli) -> Result<AppConfig, String> {
         exec,
         project_doc: file.project_doc.unwrap_or_default(),
         output: file.output.unwrap_or_default(),
+        review: file.review.unwrap_or_default(),
         memory: file.memory.unwrap_or_default(),
         skills: file.skills.unwrap_or_default(),
         ignore: file.ignore.unwrap_or_default(),
@@ -1090,6 +1093,19 @@ mod tests {
         let catalog = load_project_catalog_for_cli(&cli(root.path(), &config_path)).unwrap();
         assert_eq!(catalog.projects.len(), 1);
         assert_eq!(catalog.projects[0].selector, "project");
+    }
+
+    #[test]
+    fn review_config_accepts_an_empty_block_and_camel_case_override() {
+        let empty: FileConfig = serde_json::from_str(r#"{"review":{}}"#).unwrap();
+        assert_eq!(
+            empty.review.unwrap().max_patch_bytes,
+            crate::types::DEFAULT_REVIEW_MAX_PATCH_BYTES
+        );
+
+        let configured: FileConfig =
+            serde_json::from_str(r#"{"review":{"maxPatchBytes":1234}}"#).unwrap();
+        assert_eq!(configured.review.unwrap().max_patch_bytes, 1234);
     }
 
     #[test]

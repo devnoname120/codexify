@@ -29,6 +29,7 @@ pub const AGENT_BRIEF: &str = concat!(
     "- Do not amend a commit unless explicitly asked.\n",
     "- If changes appear that you did not make, STOP and ask the user how to proceed.\n",
     "- NEVER run destructive commands such as `git reset --hard` or `git checkout --` unless the user specifically asked for or approved them.\n",
+    "- After the final related file change, call show_changes once to review the project-scoped aggregate diff. Do not advance the checkpoint after every file unless the user asks for incremental reviews.\n",
     "\n## Running commands\n\n",
     "- Match the shell named under Environment. The same command string does not mean the same thing under POSIX sh, PowerShell and cmd.\n",
     "- exec_command returns a session_id instead of a result when a command outlives its yield window. Drive it from there with write_stdin rather than starting the command again.\n",

@@ -2,9 +2,11 @@
 //! the axum wiring (`/mcp` Streamable HTTP, `/health`, CORS, bearer auth).
 //!
 //! Ports `src/server.ts`. rmcp's `StreamableHttpService` owns the transport and
-//! MCP session lifecycle. Generic clients keep resident commands in their
-//! transport [`SessionState`], while ChatGPT's stable conversation metadata
-//! selects server-owned command state that survives transport replacement.
+//! MCP session lifecycle: the service factory runs once per transport session.
+//! Generic clients keep resident commands in their transport [`SessionState`],
+//! while ChatGPT's stable conversation metadata selects server-owned command
+//! state and review checkpoints that survive transport replacement. The embedded
+//! review resource remains presentation-only.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -13,8 +15,10 @@ use axum::{Router, extract::State, response::Json, routing::get};
 use rmcp::{
     ErrorData as McpError, ServerHandler,
     model::{
-        CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation,
-        InitializeResult, ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerInfo,
+        CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock,
+        ExtensionCapabilities, Implementation, InitializeResult, ListResourcesResult,
+        ListToolsResult, PaginatedRequestParams, ReadResourceRequestParams, ReadResourceResponse,
+        ReadResourceResult, ServerCapabilities, ServerInfo,
     },
     service::{RequestContext, RoleServer},
     transport::streamable_http_server::{
@@ -32,7 +36,9 @@ use crate::instructions::build_initial_instructions;
 use crate::openai_tunnel::TunnelHealth;
 use crate::project_bindings::{ConversationIdentity, ProjectBindingStore};
 use crate::registry::load_tools_for_mode;
-use crate::tool::Tool;
+use crate::review::{ReviewAvailability, ReviewCheckpointManager, ReviewOwner};
+use crate::review_ui;
+use crate::tool::{Tool, ToolRequestContext};
 use crate::tools::set_project_root::{SetProjectRoot, select_and_render};
 use crate::types::{AppConfig, ToolContent, ToolResult};
 
@@ -62,6 +68,7 @@ pub struct CodexHandler {
     tools: Arc<Vec<Box<dyn Tool>>>,
     project_bindings: Arc<ProjectBindingStore>,
     conversation_exec_sessions: Arc<ConversationExecSessionStore>,
+    review_checkpoints: Arc<ReviewCheckpointManager>,
     session: SessionState,
 }
 
@@ -87,7 +94,20 @@ fn to_call_tool_result(result: ToolResult) -> CallToolResult {
 
 impl ServerHandler for CodexHandler {
     fn get_info(&self) -> ServerInfo {
-        InitializeResult::new(ServerCapabilities::builder().enable_tools().build())
+        let mut capabilities = ServerCapabilities::builder()
+            .enable_resources()
+            .enable_tools()
+            .build();
+        let mut extensions = ExtensionCapabilities::new();
+        extensions.insert(
+            review_ui::MCP_APPS_EXTENSION_ID.to_string(),
+            json!({ "mimeTypes": [review_ui::REVIEW_UI_MIME_TYPE] })
+                .as_object()
+                .cloned()
+                .expect("static MCP Apps capability must be an object"),
+        );
+        capabilities.extensions = Some(extensions);
+        InitializeResult::new(capabilities)
             .with_server_info(Implementation::new("codexify", "1.2.0"))
             .with_instructions(build_initial_instructions(&self.config))
     }
@@ -104,6 +124,12 @@ impl ServerHandler for CodexHandler {
                 let schema = tool.input_schema().as_object().cloned().unwrap_or_default();
                 let mut mcp_tool =
                     rmcp::model::Tool::new(tool.name(), tool.describe(&self.config), schema);
+                if let Some(title) = tool.title() {
+                    mcp_tool = mcp_tool.with_title(title);
+                }
+                if let Some(meta) = tool.meta() {
+                    mcp_tool = mcp_tool.with_meta(meta);
+                }
                 if let Some(out) = tool.output_schema()
                     && let Some(obj) = out.as_object()
                 {
@@ -113,6 +139,30 @@ impl ServerHandler for CodexHandler {
             })
             .collect();
         Ok(ListToolsResult::with_all_items(tools))
+    }
+
+    async fn list_resources(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListResourcesResult, McpError> {
+        Ok(ListResourcesResult::with_all_items(vec![
+            review_ui::resource(),
+        ]))
+    }
+
+    async fn read_resource(
+        &self,
+        request: ReadResourceRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ReadResourceResponse, McpError> {
+        if request.uri != review_ui::REVIEW_UI_URI {
+            return Err(McpError::resource_not_found(
+                format!("Unknown resource: {}", request.uri),
+                None,
+            ));
+        }
+        Ok(ReadResourceResult::new(vec![review_ui::contents()]).into())
     }
 
     async fn call_tool(
@@ -128,6 +178,10 @@ impl ServerHandler for CodexHandler {
         });
         let name = request.name.as_ref();
         let args = request.arguments.map(Value::Object).unwrap_or(Value::Null);
+        let tool_context = ToolRequestContext {
+            conversation: conversation.clone(),
+            review_checkpoints: self.review_checkpoints.clone(),
+        };
 
         let Some(tool) = self.tools.iter().find(|t| t.name() == name) else {
             let result =
@@ -152,7 +206,8 @@ impl ServerHandler for CodexHandler {
                         .select_project_root(&self.config, identity, path)
                 })
             } else {
-                tool.call(args, &self.config, session).await
+                tool.call_with_context(args, &self.config, session, &tool_context)
+                    .await
             }
         } else {
             let effective_config = if tool.requires_project_root() {
@@ -176,7 +231,56 @@ impl ServerHandler for CodexHandler {
             let call_config = effective_config
                 .as_ref()
                 .unwrap_or_else(|| self.config.as_ref());
-            tool.call(args, call_config, session).await
+            let review_guard = if tool.requires_project_root() {
+                let owner = match conversation.as_ref() {
+                    Some(identity) => ReviewOwner::conversation(identity),
+                    None => ReviewOwner::transport(self.session.review_state()),
+                };
+                if tool.may_modify_project() {
+                    match self
+                        .review_checkpoints
+                        .begin_mutation(call_config, owner)
+                        .await
+                    {
+                        Ok((ReviewAvailability::Ready, guard)) => Some(guard),
+                        Ok((ReviewAvailability::Unavailable(reason), guard)) => {
+                            tracing::debug!("review checkpoints unavailable for {name}: {reason}");
+                            Some(guard)
+                        }
+                        Err(error) => {
+                            let result = ToolResult::error(format!(
+                                "Refusing to run mutating tool `{name}` because the project review checkpoint could not be captured: {error}"
+                            ));
+                            tracing::info!("  tool: {name} -> error");
+                            return Ok(to_call_tool_result(result).into());
+                        }
+                    }
+                } else {
+                    match self
+                        .review_checkpoints
+                        .ensure_initialized(call_config, owner)
+                        .await
+                    {
+                        Ok(ReviewAvailability::Ready) => {}
+                        Ok(ReviewAvailability::Unavailable(reason)) => {
+                            tracing::debug!("review checkpoints unavailable for {name}: {reason}");
+                        }
+                        Err(error) => {
+                            tracing::debug!(
+                                "review checkpoint initialization skipped for {name}: {error}"
+                            );
+                        }
+                    }
+                    None
+                }
+            } else {
+                None
+            };
+            let result = tool
+                .call_with_context(args, call_config, session, &tool_context)
+                .await;
+            drop(review_guard);
+            result
         };
 
         // Fill in the `structuredContent` the MCP spec expects from any tool that
@@ -225,6 +329,7 @@ pub async fn start_http_server(mut config: AppConfig) -> anyhow::Result<()> {
     let conversation_exec_sessions = Arc::new(ConversationExecSessionStore::new());
     conversation_exec_sessions
         .spawn_idle_reaper(Duration::from_millis(config.exec.idle_timeout_ms));
+    let review_checkpoints = Arc::new(ReviewCheckpointManager::new());
 
     // Connect to any configured upstream MCP servers and merge their tools in.
     // The returned services must stay alive for the whole server lifetime, so
@@ -273,6 +378,7 @@ pub async fn start_http_server(mut config: AppConfig) -> anyhow::Result<()> {
     let factory_tools = tools.clone();
     let factory_project_bindings = project_bindings.clone();
     let factory_conversation_exec_sessions = conversation_exec_sessions.clone();
+    let factory_review_checkpoints = review_checkpoints.clone();
     let service = StreamableHttpService::new(
         move || {
             let session = SessionState::new();
@@ -282,6 +388,7 @@ pub async fn start_http_server(mut config: AppConfig) -> anyhow::Result<()> {
                 tools: factory_tools.clone(),
                 project_bindings: factory_project_bindings.clone(),
                 conversation_exec_sessions: factory_conversation_exec_sessions.clone(),
+                review_checkpoints: factory_review_checkpoints.clone(),
                 session,
             })
         },
@@ -661,6 +768,30 @@ async fn shutdown_signal() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn advertises_review_resources_and_mcp_apps_extension() {
+        let root = tempfile::tempdir().unwrap();
+        let handler = CodexHandler {
+            config: Arc::new(crate::config::default_config(root.path().to_path_buf())),
+            tools: Arc::new(crate::registry::load_tools()),
+            project_bindings: Arc::new(ProjectBindingStore::new(root.path().join("bindings"))),
+            conversation_exec_sessions: Arc::new(ConversationExecSessionStore::new()),
+            review_checkpoints: Arc::new(ReviewCheckpointManager::new()),
+            session: SessionState::new(),
+        };
+
+        let info = handler.get_info();
+        assert!(info.capabilities.resources.is_some());
+        assert!(
+            info.capabilities
+                .extensions
+                .as_ref()
+                .is_some_and(|extensions| {
+                    extensions.contains_key(review_ui::MCP_APPS_EXTENSION_ID)
+                })
+        );
+    }
 
     #[tokio::test]
     async fn http_shutdown_aborts_after_the_grace_period() {

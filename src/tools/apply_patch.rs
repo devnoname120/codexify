@@ -112,6 +112,10 @@ impl Tool for ApplyPatch {
         }))
     }
 
+    fn may_modify_project(&self) -> bool {
+        true
+    }
+
     async fn call(&self, args: Value, config: &AppConfig, _session: &SessionState) -> ToolResult {
         let Some(input) = args.get("input").and_then(|v| v.as_str()) else {
             return ToolResult::error("input must be a string containing the patch text");

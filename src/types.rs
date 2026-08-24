@@ -171,6 +171,28 @@ pub struct MemoryConfig {
     pub max_bytes: Option<usize>,
 }
 
+pub const DEFAULT_REVIEW_MAX_PATCH_BYTES: usize = 512 * 1024;
+
+/// Bounds review results without changing checkpoint semantics.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewConfig {
+    #[serde(default = "default_review_max_patch_bytes")]
+    pub max_patch_bytes: usize,
+}
+
+fn default_review_max_patch_bytes() -> usize {
+    DEFAULT_REVIEW_MAX_PATCH_BYTES
+}
+
+impl Default for ReviewConfig {
+    fn default() -> Self {
+        Self {
+            max_patch_bytes: DEFAULT_REVIEW_MAX_PATCH_BYTES,
+        }
+    }
+}
+
 /// Governs `SKILL.md` discovery. Every field is optional; `skills.rs` owns the
 /// defaults and search order.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -323,8 +345,8 @@ pub struct ProjectCatalogConfig {
 /// The fully-resolved server configuration handed to every tool.
 ///
 /// `work_dir` and `port` are always concrete. `project_catalog`, `projectDoc`,
-/// `output`, `memory`, `skills` and `ignore` carry their resolved/defaultable
-/// module settings.
+/// `output`, `review`, `memory`, `skills` and `ignore` carry their
+/// resolved/defaultable module settings.
 #[derive(Debug, Clone)]
 pub struct AppConfig {
     pub work_dir: std::path::PathBuf,
@@ -338,6 +360,7 @@ pub struct AppConfig {
     pub exec: ExecConfig,
     pub project_doc: ProjectDocConfig,
     pub output: OutputConfig,
+    pub review: ReviewConfig,
     pub memory: MemoryConfig,
     pub skills: SkillsConfig,
     pub ignore: IgnoreConfig,

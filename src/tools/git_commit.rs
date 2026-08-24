@@ -39,6 +39,10 @@ impl Tool for GitCommit {
         }))
     }
 
+    fn may_modify_project(&self) -> bool {
+        true
+    }
+
     async fn call(&self, args: Value, config: &AppConfig, _session: &SessionState) -> ToolResult {
         let message = arg_str(&args, "message").unwrap_or("");
         let mut commit_args: Vec<&str> = vec!["commit"];

@@ -38,6 +38,10 @@ impl Tool for WriteFile {
         }))
     }
 
+    fn may_modify_project(&self) -> bool {
+        true
+    }
+
     async fn call(&self, args: Value, config: &AppConfig, _session: &SessionState) -> ToolResult {
         let Some(path) = arg_str(&args, "path") else {
             return ToolResult::error("path must be a string");

@@ -6,7 +6,7 @@ A local MCP bridge server that lets ChatGPT Web Pro call tools on your machine: 
 
 In native-tunnel mode, Codexify listens only on `127.0.0.1`, protects the MCP endpoint with a random per-process bearer token, starts OpenAI's official runtime-only tunnel client, and supervises it for the lifetime of the server. The tunnel client makes outbound HTTPS requests to OpenAI and forwards tunnel traffic to the authenticated loopback MCP endpoint. A conventional externally managed tunnel remains available as an alternative.
 
-The tool set covers the ones [Codex](https://github.com/openai/codex) gives its own agent — `apply_patch`, `exec_command`/`write_stdin`, `view_image`, `update_plan`, `clock_curr_time`/`clock_sleep` — so ChatGPT Web can work the way Codex does: patch files in place instead of rewriting them, drive interactive and long-running processes, and keep a plan across a task. It carries the project's `AGENTS.md` and Codex's own agent brief, so the client is told how to behave and not just what it can call. It bounds what a tool call can return and keeps a plan and notes on disk across conversations, addressing the one thing Codex never had to solve — a context window far smaller than the task. And it loads Codex's skills: a `SKILL.md` in the repo or your home directory teaches the client how *you* do a recurring task, and only the ones that apply are ever read. Schemas and prompt are ported from the Codex source, not reimplemented from guesswork.
+The tool set covers the ones [Codex](https://github.com/openai/codex) gives its own agent — `apply_patch`, `exec_command`/`write_stdin`, `view_image`, `update_plan`, `clock_curr_time`/`clock_sleep` — so ChatGPT Web can work the way Codex does: patch files in place instead of rewriting them, drive interactive and long-running processes, and keep a plan across a task. It carries the project's `AGENTS.md` and Codex's own agent brief, so the client is told how to behave and not just what it can call. It bounds what a tool call can return, keeps a plan and notes on disk across conversations, and records project-scoped review checkpoints so ChatGPT can inspect either the full task diff or only changes since the last review. And it loads Codex's skills: a `SKILL.md` in the repo or your home directory teaches the client how *you* do a recurring task, and only the ones that apply are ever read. Schemas and prompt are ported from the Codex source, not reimplemented from guesswork.
 
 Beyond the port, Codexify can **aggregate other MCP servers** — connecting to your local stdio MCP servers and re-exposing their tools through its own endpoint, so the ChatGPT-side agent can call them too.
 
@@ -23,7 +23,7 @@ flowchart LR
     FS["read_file\nwrite_file\nlist_directory\ntree"]
     Search["glob\ngrep"]
     Shell["run_command"]
-    Git["git_status\ngit_push\ngit_commit\ngit_log"]
+    Git["git_status\nshow_changes\ngit_push\ngit_commit\ngit_log"]
     Edit["apply_patch"]
     Exec["exec_command\nwrite_stdin"]
     Agent["view_image\nupdate_plan\nclock_curr_time\nclock_sleep"]
@@ -37,6 +37,8 @@ flowchart LR
     State[("~/.codexify\nmemory (per project)")]
     Bindings[("~/.codexify\nconversation-projects")]
     ExecSessions[("Conversation exec sessions\n(in memory, idle-reaped)")]
+    ReviewRefs[("Git refs/codexify/review\nproject-open + last-review")]
+    ReviewUI["MCP App review card\nui://codexify/review/mcp-app.html"]
     SkillDirs[(".agents/skills\n.codex/skills\n.claude/skills")]
     CodexCfg[("$CODEX_HOME\nconfig.toml")]
     CodexCli["optional Codex CLI\nmcp list/get --json"]
@@ -73,6 +75,8 @@ flowchart LR
     ListProjects -.->|"selector"| SetRoot
     SetRoot --> Bindings
     Exec --> ExecSessions
+    Git --> ReviewRefs
+    Git -.-> ReviewUI
     SetRoot -.->|"selects"| WorkDir
     CodexCfg -.->|"project candidates"| ListProjects
     CodexCfg -.->|"auto-import"| Bridge
@@ -216,6 +220,7 @@ Structured primitives — cheaper and safer than shelling out for the same job, 
 | `write_file` | Write content to a file, creating parent directories if needed |
 | `run_command` | Execute a command in the work directory (allowlist-restricted) |
 | `git_status` | Show git status, parsed into changed files with status codes |
+| `show_changes` | Compare the scoped working tree with the project-open or last-review checkpoint, optionally advancing the incremental baseline; compatible hosts render an interactive review card |
 | `git_push` | Push commits to a remote |
 | `git_commit` | Create a commit, optionally staging all tracked changes |
 | `git_log` | Show recent commit history |
@@ -259,7 +264,7 @@ Multi-project mode adds two project-control tools:
 
 Codex needs the first three for none of these reasons: it puts its agent brief in the system prompt, the OS and shell in an `<environment_context>` message, and `AGENTS.md` straight into the prompt, all before the first turn. An MCP server has none of those channels — it can only expose tools — so the same facts are tool calls here as well as part of the server's `instructions`. It needs `remember` and `recall` for the opposite reason: its context is large and its session state lives in the CLI process, whereas the client here is a chat window that loses the conversation. See [Context and memory](#context-and-memory), [Acting as a Codex agent](#acting-as-a-codex-agent), [Shells and the host](#shells-and-the-host), [AGENTS.md](#agentsmd) and [Skills](#skills).
 
-That is 25 native tools in the default single-project mode and 27 in multi-project mode. When [MCP bridging](#bridging-other-mcp-servers) is configured, the tools of your other MCP servers are re-exposed here too, on top of these.
+That is 26 native tools in the default single-project mode and 28 in multi-project mode. When [MCP bridging](#bridging-other-mcp-servers) is configured, the tools of your other MCP servers are re-exposed here too, on top of these.
 
 Two deliberate differences from Codex:
 
@@ -276,7 +281,7 @@ sessions.
 
 `clock_sleep` also caps at 5 minutes rather than Codex's 12 hours — a longer wait would outlive the HTTP request through the tunnel.
 
-Every tool that advertises an `outputSchema` also returns `structuredContent` matching it, as the MCP spec asks. `exec_command` and `write_stdin` return Codex's unified-exec object, `clock_curr_time` returns `{ current_time }`, `get_environment` returns the environment object, `get_project_doc` returns `{ files, content }` and `skills_list` returns `{ skills, content }`; the rest return `{ content: <text> }`, which the server derives from the text blocks so handlers don't repeat it.
+Every tool that advertises an `outputSchema` also returns `structuredContent` matching it, as the MCP spec asks. `exec_command` and `write_stdin` return Codex's unified-exec object, `show_changes` returns its review summary, file records, warnings and bounded patch, `clock_curr_time` returns `{ current_time }`, `get_environment` returns the environment object, `get_project_doc` returns `{ files, content }` and `skills_list` returns `{ skills, content }`; the rest return `{ content: <text> }`, which the server derives from the text blocks so handlers don't repeat it.
 
 All project-scoped paths are resolved relative to the active project root: `--work-dir` in single-project mode, or the root selected for the current ChatGPT conversation in multi-project mode. Non-ChatGPT clients use the root selected for their current MCP transport session.
 
@@ -321,6 +326,9 @@ All project-scoped paths are resolved relative to the active project root: `--wo
     "maxFileBytes": 131072,
     "maxEntries": 500,
     "maxTreeNodes": 1000
+  },
+  "review": {
+    "maxPatchBytes": 524288
   },
   "memory": {
     "enabled": true,
@@ -411,6 +419,12 @@ The `output` block bounds what a single tool call may return. See [Context and m
 | `maxFileBytes` | `131072` | Byte ceiling for the same window, which is what actually bounds a minified file |
 | `maxEntries` | `500` | Results per `glob` or `list_directory` call |
 | `maxTreeNodes` | `1000` | Nodes in one `tree` walk, counted across the whole tree rather than per directory |
+
+The `review` block bounds presentation without changing checkpoint semantics:
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `maxPatchBytes` | `524288` | Largest complete binary-capable patch returned by `show_changes`; a larger patch is omitted rather than cut mid-hunk, while file metadata and aggregate statistics remain available. `0` disables patch bodies |
 
 The `memory` block governs `remember`, `recall` and the plan `update_plan` saves:
 
@@ -512,6 +526,28 @@ The native table is read live for every `list_projects` call. The file is read-o
 Per-conversation separation extends to saved state: with an explicit `memory.dir`, each selected project gets its own hashed child directory (see the [`memory` block](#config-file)), and conversation bindings stay enabled even when `memory.enabled` is `false`. The end-to-end onboarding flow — select, then request the brief — is in [Starting a chat](#starting-a-chat).
 
 To clear a stray binding, delete its file under `~/.codexify/conversation-projects/`; there is no tool to re-point an already-bound conversation.
+
+## Review checkpoints and ChatGPT UI
+
+Review state is initialized immediately before the first project-scoped tool call for a conversation or generic MCP transport. That timing captures the checkout as the agent first sees it, before a write, formatter, generator, or shell command can change it. Mutating tool calls and `show_changes` are serialized for the same owner and project through tool completion, so a review cannot advance over a partially completed write. A resident `exec_command` process may continue changing files after its initiating call returns, so every review remains a point-in-time snapshot. Non-Git projects remain usable; inside a Git worktree, a snapshot failure blocks mutating tools rather than silently losing the baseline. Two baselines are maintained:
+
+- **project open** is immutable and shows the complete task diff;
+- **last review** advances only when `show_changes` is called with `advance=true` (the default), so the next review is incremental.
+
+`show_changes` accepts `since: "last_review" | "project_open"`, `advance`, and `include_patch`. Use `advance=false` for a read-only inspection. The result contains a concise text summary plus structured aggregate counts, bounded file records, rename sources, binary markers, warnings, and a complete unified binary patch when it fits `review.maxPatchBytes`. Oversized patches are omitted explicitly rather than returned as invalid partial hunks.
+
+Snapshots use Git objects, but they do **not** touch the real index or working tree. Codexify builds a private temporary index containing only the logical project root, then carries the same literal pathspec through every comparison. If the selected project is `packages/app` inside a monorepo, sibling changes under `packages/other` cannot enter its checkpoint or diff. Paths returned to the model and UI are relative to the selected project, not the repository root.
+
+With ChatGPT's stable `_meta["openai/session"]`, each conversation/project scope stores exactly two namespaced refs under:
+
+```text
+refs/codexify/review/<project-hash>/<conversation-hash>/project-open
+refs/codexify/review/<project-hash>/<conversation-hash>/last-review
+```
+
+The raw conversation identifier is never written. The refs survive MCP reconnects and Codexify restarts. Generic MCP clients receive transport-local in-memory checkpoints instead. Each conversation/project pair retains only its current two referenced snapshots; superseded synthetic commits are ordinary Git-GC candidates. To inspect or remove old conversation refs manually, use `git for-each-ref refs/codexify/review/` and `git update-ref -d <ref>`. Removing both refs resets that owner to the current scoped state on its next project call.
+
+Codexify also advertises the standard MCP Apps extension and serves a self-contained resource at `ui://codexify/review/mcp-app.html`. Compatible ChatGPT developer connectors render `show_changes` as a file, statistic and patch card. No separate web service or public app publication is needed; clients that ignore MCP Apps metadata still receive the same ordinary MCP result. The card updates at the `show_changes` tool-call boundary—it is not a continuous filesystem watcher.
 
 ## Context and memory
 
@@ -748,7 +784,7 @@ Codex CLI MCP discovery: codex
 Codex MCP overrides:
   remote-exec -> imported fields overlaid by codex.config.json
 bridged MCP server 'idasql': 12 tool(s)
-Tools loaded (37): 25 native + 12 bridged from upstream MCP servers
+Tools loaded (38): 26 native + 12 bridged from upstream MCP servers
 ```
 
 Each upstream tool is offered as `<server>__<tool>` (for example `remote_exec__docker_ps`), and calls are forwarded to the upstream verbatim — text, images, structured content and error flags all pass through. An upstream that fails to launch or answer is skipped; it never blocks startup or the native tools.
@@ -817,6 +853,7 @@ Native tunnel mode ignores `allowedHosts` and forces the accepted authorities to
 
 - **Path traversal prevention**: every filesystem tool — including `apply_patch` and `view_image` — resolves paths through a guard that rejects anything outside the active project root. In multi-project mode, both catalogue discovery and `set_project_root` canonicalize the configured access root and candidate directory, so `..` and symlinks cannot expose or bind a project outside the access root.
 - **One bounded exception in single-project mode**: [AGENTS.md](#agentsmd) discovery may read above `--work-dir`, up to the nearest `.git`. It is read-only, opens only `AGENTS.override.md`, `AGENTS.md` and any `projectDoc.fallbackFilenames`, and `get_project_doc` reports the absolute path of every file it used. Set `projectDoc.maxBytes` to `0` to switch it off, or `projectDoc.rootMarkers` to `[]` to keep the search inside the work directory. Multi-project mode does not perform this upward walk; its selected directory is the exact project root.
+- **Namespaced review state inside Git**: ChatGPT review checkpoints are exactly two refs per conversation/project pair under `refs/codexify/review/`. Synthetic snapshots contain only the selected project path, are built through a temporary index, and never modify the real index or working tree. Generic MCP-client checkpoints are in memory only. The namespace grows with the number of distinct persistent conversation/project pairs; the review section documents inspection and manual removal.
 - **Bounded state writes outside the work directory**: `remember` and `update_plan` write `memory.json` under `~/.codexify/projects/`. Multi-project mode also writes one small project-binding record under `~/.codexify/conversation-projects/` for each ChatGPT conversation and access root. Both use atomic replacement and per-record locks. The binding filename is derived from a hash of `openai/session`; the raw identifier is not stored. Set `memory.enabled` to `false` to disable plans and notes; delete `~/.codexify/conversation-projects/` separately to forget conversation bindings. See [Context and memory](#context-and-memory).
 - **Bounded reads outside the work directory**: [skills](#skills) may live in `~/.agents/skills`, `~/.codex/skills`, `~/.claude/skills` or an installed Claude Code plugin. `skills_read` opens files there, but only inside a skill package that already exists — the `resource` path is checked against the skill's own directory, so it cannot walk out into the rest of your home directory. `skills_list` reports the absolute path of every skill it found. Set `skills.enabled` to `false` to switch it off, or `skills.dirs` to point the user scope somewhere you choose.
 - **Read-only Codex configuration discovery**: MCP import and the project catalogue read the user-level Codex `config.toml` without rewriting it. Project discovery inspects only the top-level `projects` table, does not read candidate project contents, and suppresses rejected absolute paths from MCP output. Set `projectCatalog.codexConfig.enabled` to `false` to disable that provider. Native Codex trust does not override the Codexify access-root boundary.

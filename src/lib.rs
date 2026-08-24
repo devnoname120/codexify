@@ -24,6 +24,8 @@ pub mod project_catalog;
 pub mod project_doc;
 pub mod quickstart;
 pub mod registry;
+pub mod review;
+pub mod review_ui;
 pub mod safe_path;
 pub mod server;
 pub mod skills;

@@ -4,11 +4,22 @@
 //! `Box<dyn Tool>` in the registry and dispatched by name, so the trait is
 //! object-safe via `async_trait`.
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
+use rmcp::model::MetaObject;
 use serde_json::Value;
 
 use crate::exec_sessions::SessionState;
+use crate::project_bindings::ConversationIdentity;
+use crate::review::ReviewCheckpointManager;
 use crate::types::{AppConfig, ToolResult};
+
+#[derive(Clone)]
+pub struct ToolRequestContext {
+    pub conversation: Option<ConversationIdentity>,
+    pub review_checkpoints: Arc<ReviewCheckpointManager>,
+}
 
 #[async_trait]
 pub trait Tool: Send + Sync {
@@ -23,6 +34,16 @@ pub trait Tool: Send + Sync {
     /// the shell it will actually launch, which is not knowable at load time.
     fn describe(&self, _config: &AppConfig) -> String {
         self.description()
+    }
+
+    /// Optional human-readable title for hosts that render tool cards.
+    fn title(&self) -> Option<String> {
+        None
+    }
+
+    /// Optional protocol metadata, including MCP Apps resource links.
+    fn meta(&self) -> Option<MetaObject> {
+        None
     }
 
     /// The JSON Schema object for the tool's arguments.
@@ -56,9 +77,25 @@ pub trait Tool: Send + Sync {
         false
     }
 
+    /// Whether dispatch must fail closed if the initial review checkpoint cannot
+    /// be captured for a Git project.
+    fn may_modify_project(&self) -> bool {
+        false
+    }
+
     /// Run the tool. `args` is the arguments object (or `Value::Null` when the
     /// call named none).
     async fn call(&self, args: Value, config: &AppConfig, session: &SessionState) -> ToolResult;
+
+    async fn call_with_context(
+        &self,
+        args: Value,
+        config: &AppConfig,
+        session: &SessionState,
+        _context: &ToolRequestContext,
+    ) -> ToolResult {
+        self.call(args, config, session).await
+    }
 }
 
 /// Read a string argument by key, or `None` when absent or not a string.

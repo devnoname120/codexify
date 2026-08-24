@@ -20,6 +20,7 @@ use crate::process_env::scrub_untrusted_child_env;
 use crate::project_bindings::{
     ConversationIdentity, ProjectBindingScope, ProjectRootSelection, resolve_project_root,
 };
+use crate::review::TransportReviewState;
 use crate::types::{AppConfig, PlanState};
 
 // Codex constants (shell_spec.rs). Kept as code, not config, because they are
@@ -514,6 +515,7 @@ pub struct SessionState {
     exec: Arc<ExecSessionState>,
     pub plan: Arc<StdMutex<Option<PlanState>>>,
     project_root: Arc<StdMutex<Option<PathBuf>>>,
+    review: TransportReviewState,
 }
 
 impl Default for SessionState {
@@ -522,6 +524,7 @@ impl Default for SessionState {
             exec: Arc::new(ExecSessionState::new()),
             plan: Arc::new(StdMutex::new(None)),
             project_root: Arc::new(StdMutex::new(None)),
+            review: TransportReviewState::new(),
         }
     }
 }
@@ -536,6 +539,7 @@ impl SessionState {
             exec,
             plan: self.plan.clone(),
             project_root: self.project_root.clone(),
+            review: self.review.clone(),
         }
     }
 
@@ -622,6 +626,10 @@ impl SessionState {
 
     pub fn selected_project_root(&self) -> Option<PathBuf> {
         self.project_root.lock().unwrap().clone()
+    }
+
+    pub fn review_state(&self) -> TransportReviewState {
+        self.review.clone()
     }
 }
 

@@ -30,11 +30,11 @@ ChatGPT / MCP client
 │                                               │
 │  /health   /mcp (StreamableHttpService)       │
 │                                               │
-│  ServerHandler ── list_tools / call_tool      │
+│  ServerHandler ── tools + resources           │
 │        │                                      │
 │        ▼                                      │
 │  registry: Vec<Box<dyn Tool>>                 │
-│    • 25 native tools                          │
+│    • 26 native tools                          │
 │    • + list_projects + set_project_root       │
 │      in multi-project mode                    │
 │    • bridged tools  ← upstream MCP servers    │
@@ -48,22 +48,28 @@ ChatGPT / MCP client
 │    • openai/session hash → resident commands  │
 │    • in-memory ownership + idle cleanup       │
 │                                               │
+│  shared ReviewCheckpointManager               │
+│    • project-open + last-review snapshots     │
+│    • scoped Git refs + MCP Apps resource      │
+│                                               │
 │  per-transport SessionState                   │
 │    • fallback root for generic MCP clients    │
-│    • generic-client exec sessions + plan      │
+│    • exec sessions + plan + review fallback   │
 └──────────────────────────────────────────────┘
         │ reads/writes           │ stdio child processes
         ▼                        ▼
    active project root     upstream MCP servers (idasql, remote-exec, …)
 ```
 
-Three surfaces reach the model:
+Four surfaces reach the model:
 
 - **Tools** — `tools/list` + `tools/call` (native, bridged, gateway).
 - **Skills** — a catalogue in the server `instructions` plus the `skills_list` /
   `skills_read` tools, discovered from disk.
 - **Instructions** — the agent brief + environment + memory + project doc,
   rebuilt from the active project config.
+- **MCP App** — the self-contained review resource linked from `show_changes`;
+  unsupported clients ignore the UI metadata and keep the ordinary tool result.
 
 ---
 
@@ -79,7 +85,8 @@ Three surfaces reach the model:
    conversation identity arrives in request `_meta` on tool calls, after
    initialization.
 3. `tools/list` → `CodexHandler::list_tools` maps the shared tool registry into
-   rmcp `Tool` definitions.
+   rmcp `Tool` definitions, including optional titles and MCP Apps resource metadata.
+   `resources/list` / `resources/read` expose the embedded review HTML.
 4. `tools/call` → `CodexHandler::call_tool` reads `openai/session` from rmcp's
    `RequestContext::meta`. rmcp moves wire-level request `_meta` into that context
    before dispatch, so the typed tool parameters are not the authoritative source.
@@ -95,17 +102,25 @@ Three surfaces reach the model:
    selecting a different root is rejected.
 7. Other project-scoped calls resolve the durable conversation binding first, or
    the transport-session fallback when no conversation identity exists, then
-   receive an effective clone of `AppConfig` whose `work_dir` is that root. The
-   server fills in default `structuredContent` when appropriate.
-8. `exec_command` and `write_stdin` opt into resident-process routing. With a
+   receive an effective clone of `AppConfig` whose `work_dir` is that root. Before
+   the first such call, the review manager captures the scoped project-open snapshot.
+   Non-Git projects report review as unavailable; a Git snapshot failure blocks
+   mutating tools before dispatch.
+8. Tool dispatch supplies a request context containing the stable conversation
+   identity and shared review manager; tools that do not need it use the default
+   context-free implementation. The server fills in default `structuredContent`
+   when appropriate.
+9. `exec_command` and `write_stdin` opt into resident-process routing. With a
    ChatGPT conversation identity, dispatch substitutes the shared conversation's
    exec state while retaining the transport's other mutable state. Without one,
    the ordinary transport-owned state is used.
-9. When a transport ends, its generic-client exec state loses its last owner and
-   kills resident process trees. Conversation-owned process state remains in the
-   server for later connector calls, subject to idle cleanup; server shutdown
-   drops the shared store and kills anything still running. Project bindings are
-   independently durable across server restarts, but process handles are not.
+10. When a transport session ends, rmcp drops the `CodexHandler`: its
+    generic-client exec state loses its last owner and kills resident process
+    trees. Conversation-owned process state remains in the server for later
+    connector calls, subject to idle cleanup; server shutdown drops the shared
+    store and kills anything still running. Project bindings and ChatGPT review
+    refs are independently durable on disk across server restarts, but process
+    handles are not.
 
 Cross-cutting HTTP concerns live in the axum layer: a `/health` route, a
 bearer-auth middleware that bypasses `/health`, and—in externally exposed
@@ -125,12 +140,16 @@ trait Tool: Send + Sync {
     fn name(&self) -> &'static str;
     fn description(&self) -> String;
     fn describe(&self, cfg: &AppConfig) -> String;      // config-aware override
+    fn title(&self) -> Option<String>;                  // host-facing card title
+    fn meta(&self) -> Option<MetaObject>;               // MCP Apps and extensions
     fn input_schema(&self) -> Value;
     fn output_schema(&self) -> Option<Value>;
     fn fills_structured_content(&self) -> bool;         // opt out of default-fill
     fn requires_project_root(&self) -> bool;            // true by default
     fn uses_exec_session_state(&self) -> bool;          // false by default
+    fn may_modify_project(&self) -> bool;               // fail closed on review errors
     async fn call(&self, args: Value, cfg: &AppConfig, session: &SessionState) -> ToolResult;
+    async fn call_with_context(&self, args: Value, cfg: &AppConfig, session: &SessionState, context: &ToolRequestContext) -> ToolResult;
 }
 ```
 
@@ -151,9 +170,9 @@ can recover the same binding after a server restart.
 
 ### `ConversationExecSessionStore` and `SessionState` (`exec_sessions.rs`)
 `SessionState` is the per-MCP-transport view: it owns the optional fallback
-project root for generic clients, the current plan, and a transport-owned exec
-state. The exec state is reference-counted and kills running process trees when
-its last owner disappears.
+project root for generic clients, the current plan, a transport-owned exec
+state, and the generic-client review fallback. The exec state is
+reference-counted and kills running process trees when its last owner disappears.
 
 `ConversationExecSessionStore` is shared by all handlers in the server process.
 For the two unified-exec tools, dispatch uses the hashed `openai/session` identity
@@ -162,14 +181,25 @@ view. That state survives replacement transports, is isolated from other
 conversations, and is removed after its sessions finish or expire. It is not
 written to disk and therefore does not survive server restart.
 
+### `ReviewCheckpointManager` (`review.rs`)
+Shared project-review state. ChatGPT owners are keyed by the existing hashed
+conversation identity and persist two refs under `refs/codexify/review/`; generic
+clients use the transport state above. Snapshots seed a private index with only
+tracked entries beneath the logical project path, refresh that scope from the
+working tree, and create root commits without touching the user's index. Comparisons
+repeat the same literal pathspec, return project-relative file records and patch
+headers, bound file and patch results, and advance `last-review` through `git update-ref`
+compare-and-swap. The same per-owner/project lock spans mutating tool calls through
+completion so reviews cannot capture an in-process write halfway through.
+
 ### `AppConfig` (`types.rs`)
 The fully-resolved config handed to every tool. `config.rs` parses
 `codex.config.json` with camelCase field names for backward compatibility, imports
 user-level Codex MCP definitions through `codex_mcp.rs`, opportunistically adds
 plugin-provided entries from the Codex CLI's effective catalogue, then applies
 explicit `mcpServers` entries as field overlays. Optional sub-configs (`projectDoc`,
-`projectCatalog`, `output`, `memory`, `skills`, `ignore`) fall back to per-module
-defaults. In multi-project mode, dispatch clones this config per call and
+`projectCatalog`, `output`, `review`, `memory`, `skills`, `ignore`) fall back to
+per-module defaults. In multi-project mode, dispatch clones this config per call and
 substitutes the conversation's selected root—or the transport fallback—for
 `work_dir`; the static server policy, catalogue overlay, and bridge configuration
 remain shared. Native Codex project entries are intentionally re-read when the
@@ -206,7 +236,9 @@ ordinary supervised server lifecycle; there is no separate quickstart runtime.
   transports. Upstream MCP connections, both stores, and the tool registry are
   shared (`Arc`) across transports.
 - **`get_info`** advertises server name `codexify` (wire-compatible identity),
-  version, `tools` capability, and the `instructions`.
+  version, tools/resources capabilities, the `io.modelcontextprotocol/ui` extension,
+  and the `instructions`. The review resource is embedded in the binary and has no
+  external network or asset dependency.
 - **Errors**: a tool that fails returns `Ok(CallToolResult::error(...))`
   (`isError: true`) so the caller sees the message; only an unknown tool name is
   an error *result* as well. Protocol errors are avoided.
@@ -247,13 +279,13 @@ a private per-run temporary directory and are removed after shutdown.
 
 ---
 
-## 5. Native tools (25 default, 27 multi-project)
+## 5. Native tools (26 default, 28 multi-project)
 
 | Group | Tools |
 |-------|-------|
 | File / code | `read_file`, `write_file`, `apply_patch`, `glob`, `grep`, `list_directory`, `tree`, `view_image` |
 | Commands | `run_command` (allowlisted argv), `exec_command` / `write_stdin` (resident shell sessions) |
-| Git | `git_status`, `git_push`, `git_commit`, `git_log` |
+| Git / review | `git_status`, `show_changes`, `git_push`, `git_commit`, `git_log` |
 | Environment / project | `get_environment`, `get_project_doc`, `get_agent_brief` |
 | Task state | `update_plan`, `remember`, `recall` |
 | Skills | `skills_list`, `skills_read` |
@@ -261,7 +293,7 @@ a private per-run temporary directory and are removed after shutdown.
 | Project selection (multi-project only) | `list_projects`, `set_project_root` |
 
 Multi-project mode prepends `list_projects` and `set_project_root`. Both are
-omitted entirely in the default registry, preserving the original 25-tool surface
+omitted entirely in the default registry, preserving the original 26-tool surface
 and behaviour. Catalogue discovery, selection, clocks, and bridged/gateway tools
 are project-independent; every other native tool is blocked until a conversation
 binding or transport fallback is available.
@@ -281,7 +313,9 @@ the original order and rejects duplicate names.
 | `exec_policy.rs` | Shell-string allowlist guard for `exec_command` (a guardrail, not a sandbox). |
 | `project_bindings.rs` | Canonical project-root validation plus durable ChatGPT conversation bindings keyed by a hash of `openai/session`, namespaced by access root, locked per record, and atomically written. |
 | `project_catalog.rs` | Live, read-only project discovery from native Codex plus explicit metadata; canonical access-root filtering, deduplication, deterministic query ranking, sanitized MCP warnings, and local diagnostics. |
-| `exec_sessions.rs` | Generic-client transport fallback plus conversation-owned unified-exec sessions: shell resolution, PowerShell exit-code wrapping, background stdout/stderr drain tasks, process-group kill, idle cleanup, and output truncation (UTF-16 units to match the TS). |
+| `exec_sessions.rs` | Generic-client transport fallback plus conversation-owned unified-exec sessions and transport-local review state: shell resolution, PowerShell exit-code wrapping, background stdout/stderr drain tasks, process-group kill, idle cleanup, and output truncation (UTF-16 units to match the TS). |
+| `review.rs` | Project-scoped Git snapshots, persistent conversation refs, transport-local fallbacks, incremental compare-and-swap checkpoints, diff parsing and result budgets. |
+| `review_ui.rs` | Embedded MCP Apps resource and compatibility metadata for the interactive `show_changes` review card. |
 | `apply_patch.rs` | The Codex patch format: parse then apply, atomically, with fuzzy context matching and CRLF preservation. |
 | `memory.rs` | Working memory outside the repo, keyed by a hash of the normalized active root, with `O_EXCL` locking and atomic writes. In multi-project mode, a configured `memory.dir` is a base containing one hashed child per project. |
 | `quickstart.rs` | Interactive first-install wizard for project scope, native tunnel credentials, JSON config merging, and the ChatGPT developer-mode connector handoff. |
@@ -412,6 +446,7 @@ startup banner prints the exact file with `Config:`). All fields optional.
               "defaultShell": "…" },
   "ignore": { "useGitignore": true, "useDefaultPatterns": true, "customPatterns": [] },
   "output": { "maxFileLines": 1000, "maxFileBytes": 131072, "maxEntries": 500, "maxTreeNodes": 1000 },
+  "review": { "maxPatchBytes": 524288 },
   "projectDoc": { "maxBytes": 32768, "fallbackFilenames": [], "rootMarkers": [".git"] },
   "memory": { "enabled": true, "dir": "…", "maxBytes": 16384 },
   "skills": { "enabled": true, "dirs": ["…"], "includePlugins": true },
@@ -437,7 +472,7 @@ The banner is designed so failures are never silent:
 
 ```
 Config: D:\codex-bridge\codex.config.json          ← which file actually loaded
-Tools loaded (26): 25 native + 1 bridged from upstream MCP servers
+Tools loaded (27): 26 native + 1 bridged from upstream MCP servers
 Upstream MCP servers:
   remote-exec -> gateway (84 functions via `remote_exec`)
 Auth: disabled (no --api-key)
@@ -452,7 +487,7 @@ Auth: disabled (no --api-key)
   internal bearer are never printed.
 - Multi-project startup also prints `Project access root:`, `Project mode:
   persistent ChatGPT conversation binding`, and the conversation-binding state
-  directory; its native count is 26 because the selector is present.
+  directory; its native count is 28 because the selectors are present.
 
 ---
 
@@ -476,7 +511,7 @@ units to match the TS `text.length` / `text.slice`.
 
 ## 12. Testing
 
-- **381 tests** — unit tests inside modules plus integration tests under `tests/`
+- **455 tests** — unit tests inside modules plus integration tests under `tests/`
   (`tempfile`-isolated), ported from the TS Bun suite.
 - Memory / skills tests pin `memory.dir` / `skills.dirs` to temp dirs so they never
   touch the real home; plugin discovery is suppressed when `skills.dirs` is set.
@@ -484,6 +519,10 @@ units to match the TS `text.length` / `text.slice`.
   bindings, concurrent session isolation, traversal and symlink escapes,
   project-keyed persistent state, deferred project instructions, and CLI/config
   activation.
+- `tests/review_checkpoints.rs` uses real repositories to cover monorepo scoping,
+  byte-for-byte real-index preservation, persistent and transport owners, live ref
+  reset, mutation/review serialization, incremental baselines, unborn repositories,
+  malformed Git state, renames, deletions, binaries, relative patches, and patch-budget omission.
 - `tests/review_fixes.rs` locks the behavioral-fidelity fixes found by the
   adversarial review of the port. The bridge/gateway/skills code was reviewed the
   same way; the confirmed low-severity findings (name-collision dedup, YAML-safe

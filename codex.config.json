@@ -29,5 +29,8 @@
       "trustedOnly": true
     },
     "entries": []
+  },
+  "review": {
+    "maxPatchBytes": 524288
   }
 }

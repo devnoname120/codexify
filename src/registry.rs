@@ -23,6 +23,7 @@ pub fn load_tools_for_mode(multi_project: bool) -> Vec<Box<dyn Tool>> {
         Box::new(tools::write_file::WriteFile),
         Box::new(tools::run_command::RunCommand),
         Box::new(tools::git_status::GitStatus),
+        Box::new(tools::show_changes::ShowChanges),
         Box::new(tools::git_push::GitPush),
         Box::new(tools::git_commit::GitCommit),
         Box::new(tools::git_log::GitLog),
@@ -51,7 +52,7 @@ pub fn load_tools_for_mode(multi_project: bool) -> Vec<Box<dyn Tool>> {
         // Codex's skills.list / skills.read.
         Box::new(tools::skills_list::SkillsList),
         Box::new(tools::skills_read::SkillsRead),
-    ] as [Box<dyn Tool>; 25]);
+    ] as [Box<dyn Tool>; 26]);
 
     let mut seen = std::collections::HashSet::new();
     for tool in &all {
