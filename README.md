@@ -8,7 +8,7 @@ In native-tunnel mode, Codexify listens only on `127.0.0.1`, protects the MCP en
 
 The tool set covers the ones [Codex](https://github.com/openai/codex) gives its own agent — `apply_patch`, `exec_command`/`write_stdin`, `view_image`, `update_plan`, `clock_curr_time`/`clock_sleep` — so ChatGPT Web can work the way Codex does: patch files in place instead of rewriting them, drive interactive and long-running processes, and keep a plan across a task. It also bridges ChatGPT-native attachments and generated files into the active local project without base64 reconstruction. It carries the project's `AGENTS.md` and Codex's own agent brief, so the client is told how to behave and not just what it can call. It bounds what a tool call can return, keeps a plan and notes on disk across conversations, and records project-scoped review checkpoints so ChatGPT can inspect either the full task diff or only changes since the last review. And it loads Codex's skills: a `SKILL.md` in the repo or your home directory teaches the client how *you* do a recurring task, and only the ones that apply are ever read. Schemas and prompt are ported from the Codex source, not reimplemented from guesswork.
 
-Beyond the port, Codexify can **aggregate other MCP servers** — connecting to your local stdio MCP servers and re-exposing their tools through its own endpoint, so the ChatGPT-side agent can call them too.
+Beyond the port, Codexify can **aggregate other MCP servers** — connecting to local stdio servers or remote Streamable HTTP endpoints and re-exposing their tools through its own endpoint, so the ChatGPT-side agent can call them too.
 
 ## Architecture
 
@@ -44,7 +44,7 @@ flowchart LR
     SkillDirs[(".agents/skills\n.codex/skills\n.claude/skills")]
     CodexCfg[("$CODEX_HOME\nconfig.toml")]
     CodexCli["optional Codex CLI\nmcp list/get --json"]
-    Upstream[("Upstream MCP\nservers (stdio)")]
+    Upstream[("Upstream MCP servers\nstdio / Streamable HTTP")]
 
     ChatGPT <-->|"connector calls"| OpenAITunnel
     TunnelClient <-->|"outbound HTTPS"| OpenAITunnel
@@ -89,7 +89,7 @@ flowchart LR
     Bridge --> Upstream
 ```
 
-Dotted edges are conditional: `list_projects` and `set_project_root` appear only in [multi-project mode](#multi-project-mode). The first discovers selectable candidates from Codex's project trust table plus optional local metadata; the second binds this conversation's project root. Independently, the aggregator [auto-imports](#automatic-discovery-from-codex) user-configured servers directly from Codex's `config.toml`, then uses the Codex CLI when available to add plugin-provided servers before applying any `codex.config.json` overlays.
+Dotted edges are conditional: `list_projects` and `set_project_root` appear only in [multi-project mode](#multi-project-mode). The first discovers selectable candidates from Codex's project trust table plus optional local metadata; the second binds this conversation's project root. Independently, the aggregator [auto-imports](#automatic-discovery-from-codex) compatible stdio and Streamable HTTP MCP servers directly from Codex's `config.toml`, then uses the Codex CLI when available to add plugin-provided servers before applying any `codex.config.json` overlays.
 
 ## Quick start
 
@@ -842,7 +842,7 @@ Discovery runs per MCP session, so adding a skill takes effect on the next conne
 
 ## Bridging other MCP servers
 
-Codexify can also act as an **MCP aggregator**: it connects to your other local MCP servers as a client, discovers their tools at startup, and re-exposes them through its own `/mcp` endpoint — so the ChatGPT-side agent sees and can call them too.
+Codexify can also act as an **MCP aggregator**: it connects to local stdio or remote Streamable HTTP MCP servers as a client, discovers their tools at startup, and re-exposes them through its own `/mcp` endpoint — so the ChatGPT-side agent sees and can call them too.
 
 ### Automatic discovery from Codex
 
@@ -852,6 +852,9 @@ For each `[mcp_servers.<name>]` entry, Codexify imports the fields it can preser
 
 - `command`, `args`, `env` and `cwd` for local stdio launch;
 - local `env_vars`, resolved from Codexify's process environment;
+- `url` for Streamable HTTP;
+- `bearer_token_env_var`, `http_headers`, and `env_http_headers` for HTTP authentication and request headers;
+- `startup_timeout_sec` (or legacy `startup_timeout_ms`) and `tool_timeout_sec`;
 - `enabled = false` as a disabled upstream;
 - `enabled_tools` as an allow-list and `disabled_tools` as a deny-list applied afterwards.
 
@@ -859,7 +862,7 @@ By default, Codexify also tries `codex mcp list --json`. Servers present in Code
 
 When the CLI is missing, fails, times out, or returns incompatible JSON, normal startup continues with the direct `config.toml` result and prints a warning that plugin-provided MCP servers may be missing. Pass `--codex-cli` to make successful CLI discovery mandatory instead; the same condition then becomes a startup error. Set `"codexMcp": { "useCli": false }` to suppress CLI invocation while retaining direct config parsing.
 
-Streamable-HTTP entries (`url`) and non-local execution environments are skipped because the bridge currently supports only local stdio children. Other Codex-only fields are ignored explicitly: the startup report names those fields, but never prints environment values or other configuration values. A missing or unreadable Codex config does not prevent CLI-discovered or explicitly declared `codex.config.json` servers from loading.
+Non-local execution environments remain unsupported: Codexify itself opens the HTTP connection and cannot delegate header resolution or stdio launch into a Codex executor. `http_headers_helper` is also unsupported. Other Codex-only fields are ignored explicitly: the startup report names those fields, but never prints header values, environment values, or bearer tokens. A missing or unreadable Codex config does not prevent CLI-discovered or explicitly declared `codex.config.json` servers from loading.
 
 Disable discovery while retaining explicit upstreams with:
 
@@ -880,7 +883,7 @@ To keep direct Codex config import but never start the Codex CLI:
 
 ### Explicit servers and overrides
 
-The `mcpServers` map in `codex.config.json` remains supported. Each entry is a stdio command that Codexify launches and drives over stdin/stdout:
+The `mcpServers` map in `codex.config.json` remains supported. A local entry is a stdio command that Codexify launches and drives over stdin/stdout:
 
 ```json
 {
@@ -893,6 +896,29 @@ The `mcpServers` map in `codex.config.json` remains supported. Each entry is a s
   }
 }
 ```
+
+A remote entry uses MCP Streamable HTTP. Secret values should come from environment variables rather than the JSON file:
+
+```json
+{
+  "mcpServers": {
+    "remote-docs": {
+      "url": "https://mcp.example.com/mcp",
+      "bearerTokenEnvVar": "REMOTE_MCP_TOKEN",
+      "httpHeaders": {
+        "X-Client": "codexify"
+      },
+      "envHttpHeaders": {
+        "X-Tenant": "REMOTE_MCP_TENANT"
+      },
+      "startupTimeoutSec": 20,
+      "toolTimeoutSec": 60
+    }
+  }
+}
+```
+
+`bearerTokenEnvVar` is required to exist and be non-empty when configured. Missing or empty values referenced by `envHttpHeaders` are omitted, matching Codex. Environment-backed headers override a same-named static header. Do not configure both `bearerTokenEnvVar` and an `Authorization` entry in `httpHeaders`/`envHttpHeaders`.
 
 An explicit entry with the same name as an imported Codex server is a field-by-field overlay. That makes Codex-specific launch settings reusable while adding bridge-only settings without copying the command, arguments or environment:
 
@@ -922,7 +948,7 @@ bridged MCP server 'idasql': 12 tool(s)
 Tools loaded (38): 26 native + 12 bridged from upstream MCP servers
 ```
 
-Each upstream tool is offered as `<server>__<tool>` (for example `remote_exec__docker_ps`), and calls are forwarded to the upstream verbatim — text, images, structured content and error flags all pass through. An upstream that fails to launch or answer is skipped; it never blocks startup or the native tools.
+Each upstream tool is offered as `<server>__<tool>` (for example `remote_exec__docker_ps`), and calls are forwarded to the upstream verbatim — text, images, structured content and error flags all pass through. An upstream that fails to launch, connect, authenticate, or answer is skipped; it never blocks startup or the native tools.
 
 Every configured server is reported in the startup banner, so a bad path or a failed handshake is never silent:
 
@@ -936,9 +962,14 @@ Upstream MCP servers:
 - `tools: ["exec", "machine_list", ...]` limits which upstream tools are bridged (an allow-list on the upstream's own names).
 - `disabledTools: ["dangerous_write", ...]` removes tools after the allow-list has been applied.
 - `cwd` selects the child process's working directory.
+- `startupTimeoutSec` bounds initialization plus the initial `tools/list`; the default is 20 seconds.
+- `toolTimeoutSec` bounds each forwarded call and sends MCP cancellation when the limit expires.
 - Bridged names are sanitised to `[A-Za-z0-9_]` (e.g. `remote_exec__exec`) so function-calling layers that reject hyphens don't drop them.
 - A bridged name that would collide with a native tool is skipped with a warning.
-- `type` may be `"stdio"` (default). Only stdio (command-launched) upstreams are bridged today; `type: "sse"`/`"http"` (or a bare `url`) entries are recognised and reported as `not supported yet` rather than failing the whole config.
+- `type` is inferred: `command` means `"stdio"`, while `url` means Streamable HTTP. Explicit HTTP aliases `"http"`, `"streamable-http"`, and `"streamable_http"` are accepted.
+- Legacy SSE and WebSocket transports are rejected explicitly because current Codex supports stdio and Streamable HTTP, not those legacy protocols.
+
+OAuth authorization-code login and credential persistence are not implemented by this bridge. An OAuth-protected upstream must therefore be supplied a usable bearer token through `bearerTokenEnvVar` or an environment-backed `Authorization` header. MCP resources, resource templates, prompts, upstream initialization instructions, and dynamic `tools/list_changed` forwarding remain separate capability work; this transport support continues to expose tools only.
 
 If your server doesn't show up, **check the banner first** — the most common cause is a wrong `command` path.
 
@@ -994,7 +1025,7 @@ Native tunnel mode ignores `allowedHosts` and forces the accepted authorities to
 - **Bounded reads outside the work directory**: [skills](#skills) may live in `~/.agents/skills`, `~/.codex/skills`, `~/.claude/skills` or an installed Claude Code plugin. `skills_read` opens files there, but only inside a skill package that already exists — the `resource` path is checked against the skill's own directory, so it cannot walk out into the rest of your home directory. `skills_list` reports the absolute path of every skill it found. Set `skills.enabled` to `false` to switch it off, or `skills.dirs` to point the user scope somewhere you choose.
 - **Read-only Codex configuration discovery**: MCP import and the project catalogue read the user-level Codex `config.toml` without rewriting it. Project discovery inspects only the top-level `projects` table, does not read candidate project contents, and suppresses rejected absolute paths from MCP output. Set `projectCatalog.codexConfig.enabled` to `false` to disable that provider. Native Codex trust does not override the Codexify access-root boundary.
 - **Command allowlist**: `run_command` only runs binaries listed in `allowedCommands`; everything else is rejected. `exec_command` checks the same list plus `exec.extraAllowedCommands`, at every command position in the string.
-- **Bridged servers run with your privileges**: an explicit `mcpServers` entry or an automatically imported Codex MCP—including one contributed by a Codex plugin—launches a real process on your machine and forwards the model's calls to it verbatim. Only bridge servers you trust, prefer `tools`/`disabledTools` filters or `gateway` mode to keep the exposed surface small, set `codexMcp.useCli` to `false` to exclude plugin-only discovery, or set `codexMcp.enabled` to `false` to disable all automatic Codex import. A bad `command` path is reported, never silently ignored.
+- **Bridged servers carry delegated authority**: an explicit `mcpServers` entry or an automatically imported Codex MCP—including one contributed by a Codex plugin—forwards the model's calls verbatim. A stdio upstream launches a real process that runs as your OS user; a Streamable HTTP upstream receives model-directed calls plus its configured bearer token and HTTP headers. Only bridge servers you trust, prefer `tools`/`disabledTools` filters or `gateway` mode to keep the exposed surface small, keep secrets in `bearerTokenEnvVar`/`envHttpHeaders` rather than static JSON, set `codexMcp.useCli` to `false` to exclude plugin-only discovery, or set `codexMcp.enabled` to `false` to disable all automatic Codex import. Launch, connection, authentication, and handshake failures are reported rather than silently ignored.
 - **Native OpenAI tunnel is outbound-only**: Codexify binds its MCP listener to loopback and supervises OpenAI's official runtime-only tunnel client. Startup fails unless the runtime reports `/readyz` and completes a control-plane poll. Failure of either process stops the other, and HTTP shutdown has a bounded grace period before remaining connections are aborted.
 - **The loopback MCP hop is authenticated**: native mode generates a random per-process bearer token and configures the tunnel runtime to send it on MCP requests and discovery probes. The token is never printed, written to the config file, or inherited by model-launched commands and bridged MCP children.
 - **Verified tunnel-client installation**: the managed client is pinned to a specific official release and per-platform archive SHA-256 embedded in Codexify, extracted by exact filename under size limits, installed atomically with private permissions, and hash-checked against its installation manifest on subsequent starts. Set `clientPath` to opt out of managed installation while retaining compatibility checks.

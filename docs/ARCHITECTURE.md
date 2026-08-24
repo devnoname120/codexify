@@ -4,7 +4,7 @@ A Rust port of the `codexify` MCP bridge. codexify is a local [Model Context
 Protocol](https://modelcontextprotocol.io) server that exposes Codex-style agent
 tools over **Streamable HTTP**, scoped either to one configured working directory
 or to a project root selected independently by each ChatGPT conversation, and can
-additionally **aggregate other local MCP servers**, **surface local skills**, and
+additionally **aggregate local or remote MCP servers**, **surface local skills**, and
 materialize ChatGPT-native files inside the active project.
 Clients without ChatGPT conversation metadata use an MCP-transport-session fallback.
 
@@ -61,9 +61,9 @@ ChatGPT / MCP client
 │    • fallback root for generic MCP clients    │
 │    • exec sessions + plan + review fallback   │
 └──────────────────────────────────────────────┘
-        │ reads/writes           │ stdio child processes
+        │ reads/writes           │ stdio / Streamable HTTP
         ▼                        ▼
-   active project root     upstream MCP servers (idasql, remote-exec, …)
+   active project root     upstream MCP servers (idasql, remote-docs, …)
 ```
 
 Four surfaces reach the model:
@@ -346,7 +346,7 @@ the original order and rejects duplicate names.
 | `project_doc.rs` | `AGENTS.md` discovery from project root down to the work dir under a byte budget. Multi-project mode treats the selected directory as the exact project root and never walks into the common access-root parent. |
 | `skills.rs` | `SKILL.md` discovery (see §8). |
 | `codex_config.rs` | Shared secret-safe resolver and TOML reader for `$CODEX_HOME/config.toml` or `~/.codex/config.toml`. |
-| `codex_mcp.rs` | Read-only import of local stdio MCP definitions from the shared native Codex configuration reader, plus bounded `codex mcp list/get --json` enrichment for plugin-provided servers, with secret-safe diagnostics. |
+| `codex_mcp.rs` | Read-only import of local stdio and remote Streamable HTTP MCP definitions from the shared native Codex configuration reader, plus bounded `codex mcp list/get --json` enrichment for plugin-provided servers, with secret-safe diagnostics. |
 | `instructions.rs` | Assembles the agent brief + environment + saved state + skills + project doc. Multi-project initialization emits a project-neutral selector brief because conversation metadata is available only on subsequent tool calls; `get_agent_brief` builds the full brief after restoring or creating a binding. |
 | `environment.rs` | OS / shell / policy description, shared by `get_environment` and the instructions. |
 
@@ -354,8 +354,8 @@ the original order and rejects duplicate names.
 
 ## 7. MCP bridging (aggregator)
 
-codexify can act as an MCP **client** to other local MCP servers, discover their
-tools at startup, and re-expose them. Implemented in `bridge.rs`; wired in
+codexify can act as an MCP **client** to local stdio and remote Streamable HTTP
+servers, discover their tools at startup, and re-expose them. Implemented in `bridge.rs`; wired in
 `server.rs::start_http_server` before the HTTP server starts.
 
 ### Discovery
@@ -368,19 +368,24 @@ or `codexMcp.cliPath` selects the executable; otherwise `codex` is resolved from
 mode and a startup error when `--codex-cli` is supplied. Explicit
 `codex.config.json.mcpServers` fields overlay the combined imports with the same
 name; `codexMcp.enabled = false` disables automatic Codex import unless
-`--codex-cli` explicitly requires it. HTTP and non-local entries are reported
-and skipped.
+`--codex-cli` explicitly requires it. Non-local Codex execution environments and
+`http_headers_helper` are reported and skipped because Codexify cannot delegate
+transport execution to a Codex executor or helper process.
 
 For each resulting server entry (sorted, non-disabled), `connect_one`:
-1. Launches the `command` as a stdio child process (`TokioChildProcess`).
-2. Runs the MCP handshake (`().serve(transport)`), then `list_all_tools()`,
-   under a 20 s timeout.
-3. Applies the optional `tools` allow-list, then `disabledTools` deny-list.
+1. Selects stdio from `command`, or Streamable HTTP from `url`.
+2. For stdio, launches the child through `TokioChildProcess`; for HTTP, resolves
+   the bearer-token environment variable and environment-backed headers, then
+   builds `StreamableHttpClientTransport` with RMCP's redirect-disabled reqwest client.
+3. Runs the MCP handshake (`().serve(transport)`), then `list_all_tools()`, under
+   `startupTimeoutSec` (20 s by default).
+4. Applies the optional `tools` allow-list, then `disabledTools` deny-list.
 
 Failures are **reported, not fatal** — each server appears in the startup banner
 as `-> N tool(s)`, `-> FAILED: <reason>`, `-> disabled`, or
 `-> gateway (N functions via <tool>)`. The `RunningService` handles are kept in
-`Bridge.services` for the whole server lifetime (dropping one kills its child).
+`Bridge.services` for the whole server lifetime (dropping one closes the HTTP
+session or kills its child).
 
 ### Direct mode (default)
 Each upstream tool becomes its own `BridgedTool`, named `<server>__<tool>`
@@ -409,9 +414,22 @@ returns `false` so the server never synthesises a `{content}` structured result
 that would not match the upstream's own schema.
 
 ### Transports
-Only **stdio** (command-launched) upstreams are bridged. `type: "sse"` / `"http"`
-or a bare `url` are recognised and reported as *not supported yet* rather than
-failing the whole config.
+The upstream client supports the two transports exposed by current Codex:
+
+- **stdio**, inferred from `command`;
+- **Streamable HTTP**, inferred from `url`, with `http`, `streamable-http`, and
+  `streamable_http` accepted as explicit aliases.
+
+HTTP configuration supports `bearerTokenEnvVar`, static `httpHeaders`,
+environment-backed `envHttpHeaders`, `startupTimeoutSec`, and `toolTimeoutSec`.
+Environment-backed headers override static headers. Tool timeouts use RMCP's
+cancellable request handle so timeout cleanup sends MCP cancellation and removes
+request bookkeeping. Legacy SSE and WebSocket types are rejected explicitly.
+
+OAuth login/token persistence, `http_headers_helper`, remote Codex execution
+environments, MCP resources/templates/prompts, upstream initialization
+instructions, and dynamic capability forwarding are not part of this
+tool-transport bridge.
 
 ---
 
@@ -480,13 +498,21 @@ startup banner prints the exact file with `Config:`). All fields optional.
   "skills": { "enabled": true, "dirs": ["…"], "includePlugins": true },
 
   "mcpServers": {
-    "remote-exec": {
-      "command": "D:\\mcphub\\mcp-server-windows-x86_64.exe",  // stdio only
+    "local-exec": {
+      "command": "D:\\mcphub\\mcp-server-windows-x86_64.exe",
       "args": [], "env": {},
-      "type": "stdio",                 // "sse"/"http" recognised but not bridged
+      "type": "stdio",
       "disabled": false,
       "tools": ["exec", "machine_list"],   // optional allow-list of upstream names
       "mode": "gateway"                // or omit for "direct"
+    },
+    "remote-docs": {
+      "url": "https://mcp.example.com/mcp",
+      "bearerTokenEnvVar": "REMOTE_MCP_TOKEN",
+      "httpHeaders": { "X-Client": "codexify" },
+      "envHttpHeaders": { "X-Tenant": "REMOTE_MCP_TENANT" },
+      "startupTimeoutSec": 20,
+      "toolTimeoutSec": 60
     }
   }
 }
@@ -544,7 +570,7 @@ units to match the TS `text.length` / `text.slice`.
 
 ## 12. Testing
 
-- **467 tests** — unit tests inside modules plus integration tests under `tests/`
+- **519 tests** — unit tests inside modules plus integration tests under `tests/`
   (`tempfile`-isolated), ported from the TS Bun suite.
 - Memory / skills tests pin `memory.dir` / `skills.dirs` to temp dirs so they never
   touch the real home; plugin discovery is suppressed when `skills.dirs` is set.
@@ -567,6 +593,8 @@ units to match the TS `text.length` / `text.slice`.
   fixed with regression tests in `bridge.rs` / `skills.rs`.
 - `examples/mock_mcp.rs` is a minimal stdio MCP server used to exercise the bridge
   end-to-end.
+- `bridge.rs` starts a loopback Streamable HTTP MCP server to verify bearer and
+  custom headers, remote discovery/calls, and cancellable tool deadlines.
 
 Run: `cargo test`. Build a standalone binary: `cargo build --release`.
 
@@ -576,11 +604,11 @@ Run: `cargo test`. Build a standalone binary: `cargo build --release`.
 
 | Symptom | Cause / fix |
 |---------|-------------|
-| Bridged tools don't appear; banner shows `-> FAILED` | The `command` path isn't a runnable stdio binary **on the machine where codexify runs**. Fix the path or run the server locally. |
+| Bridged tools don't appear; banner shows `-> FAILED` | For stdio, verify that `command` is runnable on the machine where Codexify runs. For Streamable HTTP, verify the URL, TLS trust, bearer/header environment variables, and upstream authentication. |
 | Banner shows a server you didn't configure (e.g. `idasql -> disabled`) | codexify loaded a *different* `codex.config.json` than you edited. Check the `Config:` line and edit that file, or pass `--config`. |
 | codexify exposes a newer tool set but the client still shows the old one | The client caches the tool manifest — **remove and re-add the connector** so it re-fetches `tools/list`. |
 | A client won't surface a large bridged set at all | Use `"mode": "gateway"` to collapse the server into one tool + a skill, or `"tools": [...]` to expose a curated few. |
-| Upstream `type: "sse"`/`"http"` | Not bridged yet (stdio only); reported as unsupported instead of breaking the config. |
+| Upstream uses `type: "sse"` or `"websocket"` | Current Codex transport parity is stdio plus Streamable HTTP. Point the entry at a Streamable HTTP endpoint and use `url` (or an HTTP type alias). |
 | Native tunnel never becomes ready | Check the banner's loopback `/readyz` and `/metrics` URLs and the redacted startup error. Codexify requires runtime readiness plus one successful control-plane poll; the runtime key needs the applicable Tunnels **Read** + **Use** permissions. The runtime-only binary has no `/ui` or `/api/status` surface. |
 | Native tunnel key is rejected before startup | `apiKeyRef` must be `env:NAME` or `file:/path`. The referenced value must exist; on Unix, key files must not grant group/other access. |
 | `import_host_file` is missing | `artifactIngress.enabled` is false, or the connector cached an older manifest. Enable it and remove/re-add the connector so ChatGPT refreshes `tools/list`. |

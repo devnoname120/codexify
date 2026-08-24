@@ -330,6 +330,11 @@ fn codex_cli_server_to_spec(
         disabled: !server.enabled,
         transport: None,
         url: None,
+        bearer_token_env_var: None,
+        http_headers: std::collections::HashMap::new(),
+        env_http_headers: std::collections::HashMap::new(),
+        startup_timeout_sec: None,
+        tool_timeout_sec: None,
         tools: server.enabled_tools,
         disabled_tools: server.disabled_tools,
         mode: None,
@@ -421,16 +426,6 @@ fn parse_server(
             "both `command` and `url` are configured".to_string(),
         ));
     }
-    if url.is_some() {
-        return Ok(ServerImport::Skipped(
-            "streamable HTTP transport is not supported yet".to_string(),
-        ));
-    }
-    let Some(command) = command.filter(|value| !value.trim().is_empty()) else {
-        return Ok(ServerImport::Skipped(
-            "no non-empty stdio `command` is configured".to_string(),
-        ));
-    };
 
     let environment_id = optional_string(table, "environment_id")?;
     let experimental_environment = optional_string(table, "experimental_environment")?;
@@ -444,38 +439,25 @@ fn parse_server(
         ));
     }
 
-    let mut env = optional_string_map(table, "env")?.unwrap_or_default();
-    for env_var in optional_env_vars(table)?.unwrap_or_default() {
-        match env_var.source.as_deref() {
-            None | Some("local") => {
-                if !env.contains_key(&env_var.name)
-                    && let Some(value) = env_lookup(&env_var.name)
-                {
-                    env.insert(env_var.name, value);
-                }
-            }
-            Some("remote") => {
-                return Ok(ServerImport::Skipped(
-                    "remote-sourced `env_vars` are not supported".to_string(),
-                ));
-            }
-            Some(_) => {
-                return Err("`env_vars.source` must be `local` or `remote`".to_string());
-            }
-        }
-    }
-
     let supported_fields = [
         "args",
+        "bearer_token",
+        "bearer_token_env_var",
         "command",
         "cwd",
         "disabled_tools",
         "enabled",
         "enabled_tools",
         "env",
+        "env_http_headers",
         "env_vars",
         "environment_id",
         "experimental_environment",
+        "http_headers",
+        "http_headers_helper",
+        "startup_timeout_ms",
+        "startup_timeout_sec",
+        "tool_timeout_sec",
         "url",
     ];
     let supported: BTreeSet<&str> = supported_fields.into_iter().collect();
@@ -486,17 +468,113 @@ fn parse_server(
         .collect::<Vec<_>>();
     ignored_fields.sort();
 
+    let startup_timeout_seconds = optional_timeout_seconds(table, "startup_timeout_sec")?;
+    let startup_timeout_milliseconds = optional_timeout_milliseconds(table, "startup_timeout_ms")?;
+    let startup_timeout_sec = startup_timeout_seconds.or(startup_timeout_milliseconds);
+    let tool_timeout_sec = optional_timeout_seconds(table, "tool_timeout_sec")?;
+    let disabled = !optional_bool(table, "enabled")?.unwrap_or(true);
+    let tools = optional_string_list(table, "enabled_tools")?;
+    let disabled_tools = optional_string_list(table, "disabled_tools")?;
+
+    if let Some(command) = command.filter(|value| !value.trim().is_empty()) {
+        for field in [
+            "bearer_token",
+            "bearer_token_env_var",
+            "env_http_headers",
+            "http_headers",
+            "http_headers_helper",
+        ] {
+            if table.contains_key(field) {
+                return Ok(ServerImport::Skipped(format!(
+                    "stdio transport cannot configure `{field}`"
+                )));
+            }
+        }
+
+        let mut env = optional_string_map(table, "env")?.unwrap_or_default();
+        for env_var in optional_env_vars(table)?.unwrap_or_default() {
+            match env_var.source.as_deref() {
+                None | Some("local") => {
+                    if !env.contains_key(&env_var.name)
+                        && let Some(value) = env_lookup(&env_var.name)
+                    {
+                        env.insert(env_var.name, value);
+                    }
+                }
+                Some("remote") => {
+                    return Ok(ServerImport::Skipped(
+                        "remote-sourced `env_vars` are not supported".to_string(),
+                    ));
+                }
+                Some(_) => {
+                    return Err("`env_vars.source` must be `local` or `remote`".to_string());
+                }
+            }
+        }
+
+        return Ok(ServerImport::Imported {
+            spec: Box::new(McpServerSpec {
+                command: Some(command),
+                args: optional_string_list(table, "args")?.unwrap_or_default(),
+                env,
+                cwd: optional_string(table, "cwd")?,
+                disabled,
+                transport: None,
+                url: None,
+                bearer_token_env_var: None,
+                http_headers: HashMap::new(),
+                env_http_headers: HashMap::new(),
+                startup_timeout_sec,
+                tool_timeout_sec,
+                tools,
+                disabled_tools,
+                mode: None,
+            }),
+            ignored_fields,
+        });
+    }
+
+    let Some(url) = url.filter(|value| !value.trim().is_empty()) else {
+        return Ok(ServerImport::Skipped(
+            "neither a non-empty stdio `command` nor Streamable HTTP `url` is configured"
+                .to_string(),
+        ));
+    };
+
+    for field in ["args", "cwd", "env", "env_vars"] {
+        if table.contains_key(field) {
+            return Ok(ServerImport::Skipped(format!(
+                "streamable HTTP transport cannot configure `{field}`"
+            )));
+        }
+    }
+    if table.contains_key("bearer_token") {
+        return Ok(ServerImport::Skipped(
+            "literal `bearer_token` values are rejected; use `bearer_token_env_var`".to_string(),
+        ));
+    }
+    if table.contains_key("http_headers_helper") {
+        return Ok(ServerImport::Skipped(
+            "`http_headers_helper` is not supported".to_string(),
+        ));
+    }
+
     Ok(ServerImport::Imported {
         spec: Box::new(McpServerSpec {
-            command: Some(command),
-            args: optional_string_list(table, "args")?.unwrap_or_default(),
-            env,
-            cwd: optional_string(table, "cwd")?,
-            disabled: !optional_bool(table, "enabled")?.unwrap_or(true),
-            transport: None,
-            url: None,
-            tools: optional_string_list(table, "enabled_tools")?,
-            disabled_tools: optional_string_list(table, "disabled_tools")?,
+            command: None,
+            args: Vec::new(),
+            env: HashMap::new(),
+            cwd: None,
+            disabled,
+            transport: Some("streamable-http".to_string()),
+            url: Some(url),
+            bearer_token_env_var: optional_string(table, "bearer_token_env_var")?,
+            http_headers: optional_string_map(table, "http_headers")?.unwrap_or_default(),
+            env_http_headers: optional_string_map(table, "env_http_headers")?.unwrap_or_default(),
+            startup_timeout_sec,
+            tool_timeout_sec,
+            tools,
+            disabled_tools,
             mode: None,
         }),
         ignored_fields,
@@ -555,6 +633,33 @@ fn optional_bool(table: &toml::Table, key: &str) -> Result<Option<bool>, String>
             .map(Some)
             .ok_or_else(|| format!("`{key}` must be a boolean")),
     }
+}
+
+fn optional_timeout_seconds(table: &toml::Table, key: &str) -> Result<Option<f64>, String> {
+    let Some(value) = table.get(key) else {
+        return Ok(None);
+    };
+    let seconds = value
+        .as_float()
+        .or_else(|| value.as_integer().map(|value| value as f64))
+        .ok_or_else(|| format!("`{key}` must be a non-negative number"))?;
+    if !seconds.is_finite() || seconds < 0.0 {
+        return Err(format!("`{key}` must be a non-negative finite number"));
+    }
+    Ok(Some(seconds))
+}
+
+fn optional_timeout_milliseconds(table: &toml::Table, key: &str) -> Result<Option<f64>, String> {
+    let Some(value) = table.get(key) else {
+        return Ok(None);
+    };
+    let milliseconds = value
+        .as_integer()
+        .ok_or_else(|| format!("`{key}` must be a non-negative integer"))?;
+    if milliseconds < 0 {
+        return Err(format!("`{key}` must be a non-negative integer"));
+    }
+    Ok(Some(milliseconds as f64 / 1000.0))
 }
 
 fn optional_string_list(table: &toml::Table, key: &str) -> Result<Option<Vec<String>>, String> {
@@ -651,7 +756,7 @@ STATIC_SECRET = "do-not-log-this"
     }
 
     #[test]
-    fn imports_disabled_server_but_skips_http_and_remote_servers() {
+    fn imports_disabled_and_streamable_http_but_skips_remote_execution() {
         let contents = r#"
 [mcp_servers.off]
 command = "off-server"
@@ -659,6 +764,11 @@ enabled = false
 
 [mcp_servers.web]
 url = "https://example.invalid/mcp"
+bearer_token_env_var = "WEB_TOKEN"
+startup_timeout_sec = 12
+tool_timeout_sec = 34.5
+http_headers = { X-Static = "public" }
+env_http_headers = { X-Secret = "WEB_HEADER" }
 
 [mcp_servers.remote]
 command = "remote-server"
@@ -666,11 +776,70 @@ environment_id = "executor"
 "#;
         let outcome = parse_codex_mcp_servers(contents, &|_| None).unwrap();
         assert!(outcome.servers.get("off").unwrap().disabled);
-        assert!(!outcome.servers.contains_key("web"));
+        let web = outcome.servers.get("web").unwrap();
+        assert_eq!(web.transport.as_deref(), Some("streamable-http"));
+        assert_eq!(web.url.as_deref(), Some("https://example.invalid/mcp"));
+        assert_eq!(web.bearer_token_env_var.as_deref(), Some("WEB_TOKEN"));
+        assert_eq!(
+            web.http_headers.get("X-Static").map(String::as_str),
+            Some("public")
+        );
+        assert_eq!(
+            web.env_http_headers.get("X-Secret").map(String::as_str),
+            Some("WEB_HEADER")
+        );
+        assert_eq!(web.startup_timeout_sec, Some(12.0));
+        assert_eq!(web.tool_timeout_sec, Some(34.5));
         assert!(!outcome.servers.contains_key("remote"));
         let report = outcome.report.join("\n");
-        assert!(report.contains("web -> skipped: streamable HTTP"));
+        assert!(report.contains("web -> imported from Codex"));
         assert!(report.contains("remote -> skipped: non-local"));
+        assert!(!report.contains("public"));
+    }
+
+    #[test]
+    fn imports_legacy_startup_timeout_milliseconds() {
+        let contents = r#"
+[mcp_servers.web]
+url = "https://example.invalid/mcp"
+startup_timeout_ms = 1250
+"#;
+        let outcome = parse_codex_mcp_servers(contents, &|_| None).unwrap();
+        assert_eq!(
+            outcome.servers.get("web").unwrap().startup_timeout_sec,
+            Some(1.25)
+        );
+    }
+
+    #[test]
+    fn rejects_non_integer_legacy_startup_timeout_even_when_seconds_are_present() {
+        let contents = r#"
+[mcp_servers.web]
+url = "https://example.invalid/mcp"
+startup_timeout_sec = 2
+startup_timeout_ms = 12.5
+"#;
+        let outcome = parse_codex_mcp_servers(contents, &|_| None).unwrap();
+        assert!(!outcome.servers.contains_key("web"));
+        assert!(
+            outcome
+                .report
+                .join("\n")
+                .contains("`startup_timeout_ms` must be a non-negative integer")
+        );
+    }
+
+    #[test]
+    fn rejects_literal_remote_bearer_without_echoing_it() {
+        let secret = "literal-secret-that-must-not-appear";
+        let contents = format!(
+            "[mcp_servers.web]\nurl = \"https://example.invalid/mcp\"\nbearer_token = \"{secret}\"\n"
+        );
+        let outcome = parse_codex_mcp_servers(&contents, &|_| None).unwrap();
+        assert!(!outcome.servers.contains_key("web"));
+        let report = outcome.report.join("\n");
+        assert!(report.contains("literal `bearer_token` values are rejected"));
+        assert!(!report.contains(secret));
     }
 
     #[test]

@@ -228,7 +228,7 @@ impl ReqwestFileClient {
     pub fn new(config: &ArtifactIngressConfig) -> ArtifactIngressResult<Self> {
         let request_timeout = Duration::from_millis(config.request_timeout_ms);
         let connect_timeout = request_timeout.min(Duration::from_secs(30));
-        let client = Client::builder()
+        let client = crate::tls::client_builder()
             .redirect(Policy::none())
             .no_proxy()
             .https_only(true)

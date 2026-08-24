@@ -52,6 +52,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `artifactIngress` configuration for enablement, per-file size, whole-request and
   idle timeouts, redirect limits, process-wide concurrent import limits, and a
   configurable `allowedHosts` download allowlist.
+- Upstream MCP Streamable HTTP support alongside stdio. Codexify now imports
+  compatible `url` entries from Codex configuration and accepts remote entries in
+  `codex.config.json`, including bearer-token environment variables, static and
+  environment-backed HTTP headers, startup timeouts, per-tool cancellable
+  timeouts, the existing tool filters, and gateway mode.
 
 ### Fixed
 
@@ -95,6 +100,12 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Git config, so an untrusted project could otherwise plant a script that runs
   on the next conversation binding. When the flag is off, the environment is
   neither copied into the worktree nor executed.
+- Remote bearer tokens and environment-backed headers are resolved only when the
+  upstream connection is created and are never included in discovery reports.
+  Configured tool-call timeouts use RMCP cancellation rather than abandoning an
+  in-flight request. Legacy SSE/WebSocket transports, literal Codex
+  `bearer_token` values, mixed stdio/HTTP settings, and ambiguous duplicate
+  Authorization configuration are rejected explicitly.
 
 ## [1.2.0] - 2026-08-24
 

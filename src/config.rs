@@ -306,6 +306,11 @@ struct PartialMcpServerSpec {
     #[serde(rename = "type")]
     transport: Option<String>,
     url: Option<String>,
+    bearer_token_env_var: Option<String>,
+    http_headers: Option<HashMap<String, String>>,
+    env_http_headers: Option<HashMap<String, String>>,
+    startup_timeout_sec: Option<f64>,
+    tool_timeout_sec: Option<f64>,
     tools: Option<Vec<String>>,
     disabled_tools: Option<Vec<String>>,
     mode: Option<String>,
@@ -321,13 +326,24 @@ impl PartialMcpServerSpec {
             disabled,
             transport,
             url,
+            bearer_token_env_var,
+            http_headers,
+            env_http_headers,
+            startup_timeout_sec,
+            tool_timeout_sec,
             tools,
             disabled_tools,
             mode,
         } = self;
         let sets_command = command.is_some();
+        let sets_args = args.is_some();
+        let sets_env = env.is_some();
+        let sets_cwd = cwd.is_some();
         let sets_url = url.is_some();
         let sets_transport = transport.is_some();
+        let sets_bearer_token_env_var = bearer_token_env_var.is_some();
+        let sets_http_headers = http_headers.is_some();
+        let sets_env_http_headers = env_http_headers.is_some();
 
         if let Some(command) = command {
             base.command = Some(command);
@@ -350,6 +366,21 @@ impl PartialMcpServerSpec {
         if let Some(url) = url {
             base.url = Some(url);
         }
+        if let Some(bearer_token_env_var) = bearer_token_env_var {
+            base.bearer_token_env_var = Some(bearer_token_env_var);
+        }
+        if let Some(http_headers) = http_headers {
+            base.http_headers = http_headers;
+        }
+        if let Some(env_http_headers) = env_http_headers {
+            base.env_http_headers = env_http_headers;
+        }
+        if let Some(startup_timeout_sec) = startup_timeout_sec {
+            base.startup_timeout_sec = Some(startup_timeout_sec);
+        }
+        if let Some(tool_timeout_sec) = tool_timeout_sec {
+            base.tool_timeout_sec = Some(tool_timeout_sec);
+        }
         if let Some(tools) = tools {
             base.tools = Some(tools);
         }
@@ -364,11 +395,29 @@ impl PartialMcpServerSpec {
         // than leaving an impossible command+URL hybrid behind.
         if sets_command && !sets_url {
             base.url = None;
+            if !sets_bearer_token_env_var {
+                base.bearer_token_env_var = None;
+            }
+            if !sets_http_headers {
+                base.http_headers.clear();
+            }
+            if !sets_env_http_headers {
+                base.env_http_headers.clear();
+            }
             if !sets_transport {
                 base.transport = None;
             }
         } else if sets_url && !sets_command {
             base.command = None;
+            if !sets_args {
+                base.args.clear();
+            }
+            if !sets_env {
+                base.env.clear();
+            }
+            if !sets_cwd {
+                base.cwd = None;
+            }
             if !sets_transport {
                 base.transport = Some("streamable-http".to_string());
             }
@@ -1026,6 +1075,11 @@ mod tests {
             disabled: true,
             transport: None,
             url: None,
+            bearer_token_env_var: None,
+            http_headers: HashMap::new(),
+            env_http_headers: HashMap::new(),
+            startup_timeout_sec: None,
+            tool_timeout_sec: None,
             tools: Some(vec!["read".to_string()]),
             disabled_tools: Some(vec!["write".to_string()]),
             mode: None,
@@ -1153,6 +1207,12 @@ mod tests {
             McpServerSpec {
                 transport: Some("streamable-http".to_string()),
                 url: Some("https://example.invalid/mcp".to_string()),
+                bearer_token_env_var: Some("TOKEN".to_string()),
+                http_headers: HashMap::from([("X-Static".to_string(), "value".to_string())]),
+                env_http_headers: HashMap::from([(
+                    "X-Secret".to_string(),
+                    "HEADER_TOKEN".to_string(),
+                )]),
                 ..Default::default()
             },
         )]);
@@ -1169,6 +1229,60 @@ mod tests {
         assert_eq!(server.command.as_deref(), Some("local-server"));
         assert!(server.url.is_none());
         assert!(server.transport.is_none());
+        assert!(server.bearer_token_env_var.is_none());
+        assert!(server.http_headers.is_empty());
+        assert!(server.env_http_headers.is_empty());
+    }
+
+    #[test]
+    fn explicit_url_replaces_imported_stdio_transport() {
+        let imported = HashMap::from([("demo".to_string(), imported_server())]);
+        let explicit = HashMap::from([(
+            "demo".to_string(),
+            PartialMcpServerSpec {
+                url: Some("https://example.invalid/mcp".to_string()),
+                bearer_token_env_var: Some("TOKEN".to_string()),
+                ..Default::default()
+            },
+        )]);
+
+        let (merged, _) = merge_mcp_servers(imported, explicit);
+        let server = merged.get("demo").unwrap();
+        assert!(server.command.is_none());
+        assert!(server.args.is_empty());
+        assert!(server.env.is_empty());
+        assert!(server.cwd.is_none());
+        assert_eq!(server.transport.as_deref(), Some("streamable-http"));
+        assert_eq!(server.bearer_token_env_var.as_deref(), Some("TOKEN"));
+    }
+
+    #[test]
+    fn explicit_incompatible_transport_fields_are_not_silently_discarded() {
+        let stdio = HashMap::from([(
+            "stdio".to_string(),
+            PartialMcpServerSpec {
+                command: Some("local-server".to_string()),
+                bearer_token_env_var: Some("TOKEN".to_string()),
+                ..Default::default()
+            },
+        )]);
+        let (merged, _) = merge_mcp_servers(HashMap::new(), stdio);
+        let server = merged.get("stdio").unwrap();
+        assert_eq!(server.command.as_deref(), Some("local-server"));
+        assert_eq!(server.bearer_token_env_var.as_deref(), Some("TOKEN"));
+
+        let http = HashMap::from([(
+            "http".to_string(),
+            PartialMcpServerSpec {
+                url: Some("https://example.invalid/mcp".to_string()),
+                args: Some(vec!["--stdio".to_string()]),
+                ..Default::default()
+            },
+        )]);
+        let (merged, _) = merge_mcp_servers(HashMap::new(), http);
+        let server = merged.get("http").unwrap();
+        assert_eq!(server.url.as_deref(), Some("https://example.invalid/mcp"));
+        assert_eq!(server.args, ["--stdio"]);
     }
 
     #[test]
@@ -1182,6 +1296,12 @@ mod tests {
                 },
                 "mcpServers": {
                     "demo": {
+                        "url": "https://example.invalid/mcp",
+                        "bearerTokenEnvVar": "TOKEN",
+                        "httpHeaders": { "X-Static": "public" },
+                        "envHttpHeaders": { "X-Secret": "SECRET_HEADER" },
+                        "startupTimeoutSec": 12.5,
+                        "toolTimeoutSec": 30,
                         "mode": "gateway",
                         "disabledTools": ["write"]
                     }
@@ -1195,6 +1315,18 @@ mod tests {
         assert!(!codex_mcp.use_cli());
         assert_eq!(codex_mcp.cli_path.as_deref(), Some("/opt/codex/bin/codex"));
         let demo = file.mcp_servers.as_ref().unwrap().get("demo").unwrap();
+        assert_eq!(demo.url.as_deref(), Some("https://example.invalid/mcp"));
+        assert_eq!(demo.bearer_token_env_var.as_deref(), Some("TOKEN"));
+        assert_eq!(
+            demo.http_headers
+                .as_ref()
+                .unwrap()
+                .get("X-Static")
+                .map(String::as_str),
+            Some("public")
+        );
+        assert_eq!(demo.startup_timeout_sec, Some(12.5));
+        assert_eq!(demo.tool_timeout_sec, Some(30.0));
         assert_eq!(demo.mode.as_deref(), Some("gateway"));
         assert_eq!(
             demo.disabled_tools.as_deref(),

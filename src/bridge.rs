@@ -1,23 +1,28 @@
 //! Bridge to upstream MCP servers.
 //!
-//! codexify can act as an MCP *client* to other local MCP servers (e.g. `idasql`),
-//! discover their tools at startup, and re-expose them through its own
+//! codexify can act as an MCP *client* to other MCP servers, discover their
+//! tools at startup, and re-expose them through its own
 //! `tools/list` / `tools/call` so the ChatGPT-side agent can use them too. Each
 //! upstream tool is offered under a `<server>__<tool>` name and calls are
 //! forwarded to the upstream verbatim.
 //!
-//! Only stdio (command-launched) upstreams are supported: the server is spawned
-//! as a child process and driven over its stdin/stdout, which is how most local
-//! MCP servers run.
+//! Local servers use stdio; remote servers use MCP Streamable HTTP.
 
-use std::time::Duration;
+use std::{collections::HashMap, time::Duration};
 
 use async_trait::async_trait;
+use http::{HeaderName, HeaderValue, header::AUTHORIZATION};
 use rmcp::{
     RoleClient, ServiceExt,
-    model::{CallToolRequestParams, CallToolResult, ContentBlock},
-    service::{Peer, RunningService},
-    transport::TokioChildProcess,
+    model::{
+        CallToolRequest, CallToolRequestParams, CallToolResult, ClientRequest, ContentBlock,
+        ServerResult,
+    },
+    service::{Peer, PeerRequestOptions, RunningService, ServiceError},
+    transport::{
+        StreamableHttpClientTransport, TokioChildProcess,
+        streamable_http_client::StreamableHttpClientTransportConfig,
+    },
 };
 use serde_json::{Value, json};
 use tokio::process::Command;
@@ -33,11 +38,10 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// The result of connecting to every configured upstream: the tools to merge
 /// into the registry, plus the running services kept alive for the server's
-/// lifetime (dropping a service tears down its child process).
+/// lifetime (dropping one closes its transport and any child process).
 pub struct Bridge {
     pub tools: Vec<Box<dyn Tool>>,
-    /// Held only to keep the upstream connections (and their child processes)
-    /// alive; never read directly.
+    /// Held only to keep upstream transports alive; never read directly.
     pub services: Vec<RunningService<RoleClient, ()>>,
     /// One human-readable line per configured server (connected or failed),
     /// printed in the startup banner so a bad path or handshake is never silent.
@@ -57,6 +61,7 @@ struct BridgedTool {
     input_schema: Value,
     output_schema: Option<Value>,
     peer: Peer<RoleClient>,
+    tool_timeout: Option<Duration>,
 }
 
 #[async_trait]
@@ -95,13 +100,66 @@ impl Tool for BridgedTool {
             params = params.with_arguments(obj.clone());
         }
 
-        match self.peer.call_tool(params).await {
-            Ok(result) => map_call_result(result),
-            Err(e) => ToolResult::error(format!(
-                "Upstream MCP server '{}' failed to run '{}': {e}",
-                self.server, self.original_name
-            )),
+        forward_tool_call(
+            &self.peer,
+            params,
+            &self.server,
+            &self.original_name,
+            self.tool_timeout,
+        )
+        .await
+    }
+}
+
+async fn forward_tool_call(
+    peer: &Peer<RoleClient>,
+    params: CallToolRequestParams,
+    server: &str,
+    tool: &str,
+    tool_timeout: Option<Duration>,
+) -> ToolResult {
+    let result = if let Some(limit) = tool_timeout {
+        call_tool_with_timeout(peer, params, limit).await
+    } else {
+        peer.call_tool(params)
+            .await
+            .map_err(|error| error.to_string())
+    };
+
+    match result {
+        Ok(result) => map_call_result(result),
+        Err(error) => ToolResult::error(format!(
+            "Upstream MCP server '{server}' failed to run '{tool}': {error}"
+        )),
+    }
+}
+
+async fn call_tool_with_timeout(
+    peer: &Peer<RoleClient>,
+    params: CallToolRequestParams,
+    timeout: Duration,
+) -> Result<CallToolResult, String> {
+    let request = ClientRequest::CallToolRequest(CallToolRequest::new(params));
+    let handle = peer
+        .send_cancellable_request(request, PeerRequestOptions::with_timeout(timeout))
+        .await
+        .map_err(|error| error.to_string())?;
+    let response = match handle.await_response().await {
+        Ok(response) => response,
+        Err(ServiceError::Timeout { .. }) => {
+            return Err(format!("timed out after {}s", timeout.as_secs_f64()));
         }
+        Err(error) => return Err(error.to_string()),
+    };
+    match response {
+        ServerResult::CallToolResult(result) => Ok(result),
+        ServerResult::InputRequiredResult(_) => {
+            Err("requested additional interactive input, which Codexify cannot provide".into())
+        }
+        ServerResult::CreateTaskResult(_) => {
+            Err("returned an asynchronous MCP task, which Codexify does not poll".into())
+        }
+        _ => Err("returned an unexpected response type".into()),
     }
 }
 
@@ -201,7 +259,7 @@ pub async fn connect_upstreams(config: &AppConfig) -> Bridge {
         let is_gateway = spec.mode.as_deref() == Some("gateway");
 
         match connect_one(server_name, spec, config).await {
-            Ok((service, upstream_tools)) => {
+            Ok((service, upstream_tools, tool_timeout)) => {
                 let peer = service.peer().clone();
                 let count = upstream_tools.len();
 
@@ -230,6 +288,7 @@ pub async fn connect_upstreams(config: &AppConfig) -> Bridge {
                         description: gateway_description(server_name, &functions),
                         function_names: functions.iter().map(|f| f.name.clone()).collect(),
                         peer: peer.clone(),
+                        tool_timeout,
                     }));
                     report.push(format!(
                         "{server_name} -> gateway ({count} functions via `{sanitized}`)"
@@ -259,6 +318,7 @@ pub async fn connect_upstreams(config: &AppConfig) -> Bridge {
                             input_schema: Value::Object((*tool.input_schema).clone()),
                             output_schema: tool.output_schema.map(|s| Value::Object((*s).clone())),
                             peer: peer.clone(),
+                            tool_timeout,
                         }));
                     }
                     tracing::info!("bridged MCP server '{server_name}': {count} tool(s)");
@@ -374,6 +434,7 @@ struct GatewayTool {
     description: String,
     function_names: Vec<String>,
     peer: Peer<RoleClient>,
+    tool_timeout: Option<Duration>,
 }
 
 #[async_trait]
@@ -442,13 +503,14 @@ impl Tool for GatewayTool {
             }
         }
 
-        match self.peer.call_tool(params).await {
-            Ok(result) => map_call_result(result),
-            Err(e) => ToolResult::error(format!(
-                "Upstream MCP server '{}' failed to run '{function}': {e}",
-                self.server
-            )),
-        }
+        forward_tool_call(
+            &self.peer,
+            params,
+            &self.server,
+            function,
+            self.tool_timeout,
+        )
+        .await
     }
 }
 
@@ -457,65 +519,284 @@ async fn connect_one(
     server_name: &str,
     spec: &crate::types::McpServerSpec,
     config: &AppConfig,
-) -> Result<(RunningService<RoleClient, ()>, Vec<rmcp::model::Tool>), String> {
+) -> Result<
+    (
+        RunningService<RoleClient, ()>,
+        Vec<rmcp::model::Tool>,
+        Option<Duration>,
+    ),
+    String,
+> {
+    connect_one_with_env(server_name, spec, config, &|name| std::env::var(name).ok()).await
+}
+
+#[derive(Debug)]
+enum UpstreamTransport<'a> {
+    Stdio(&'a str),
+    StreamableHttp(&'a str),
+}
+
+fn select_transport(spec: &crate::types::McpServerSpec) -> Result<UpstreamTransport<'_>, String> {
     if spec.command.is_some() && spec.url.is_some() {
         return Err("both \"command\" and \"url\" are configured".to_string());
     }
-    // Recognise url-based transports and report them clearly instead of failing
-    // to launch a nonexistent command.
-    let kind = spec
-        .transport
-        .as_deref()
-        .unwrap_or("stdio")
-        .to_ascii_lowercase();
-    if matches!(
-        kind.as_str(),
-        "sse" | "http" | "streamable-http" | "streamable_http" | "websocket" | "ws"
-    ) {
+    if spec.command.is_some() {
+        let mut incompatible = Vec::new();
+        if spec.bearer_token_env_var.is_some() {
+            incompatible.push("bearerTokenEnvVar");
+        }
+        if !spec.http_headers.is_empty() {
+            incompatible.push("httpHeaders");
+        }
+        if !spec.env_http_headers.is_empty() {
+            incompatible.push("envHttpHeaders");
+        }
+        if !incompatible.is_empty() {
+            return Err(format!(
+                "stdio transport cannot configure {}",
+                incompatible.join(", ")
+            ));
+        }
+    }
+    if spec.url.is_some() {
+        let mut incompatible = Vec::new();
+        if !spec.args.is_empty() {
+            incompatible.push("args");
+        }
+        if !spec.env.is_empty() {
+            incompatible.push("env");
+        }
+        if spec.cwd.is_some() {
+            incompatible.push("cwd");
+        }
+        if !incompatible.is_empty() {
+            return Err(format!(
+                "Streamable HTTP transport cannot configure {}",
+                incompatible.join(", ")
+            ));
+        }
+    }
+
+    let kind = spec.transport.as_deref().map(str::to_ascii_lowercase);
+    match kind.as_deref() {
+        None | Some("stdio") if spec.command.is_some() => spec
+            .command
+            .as_deref()
+            .filter(|command| !command.trim().is_empty())
+            .map(UpstreamTransport::Stdio)
+            .ok_or_else(|| "a stdio server needs a non-empty \"command\"".to_string()),
+        None | Some("http" | "streamable-http" | "streamable_http")
+            if spec.url.is_some() =>
+        {
+            spec.url
+                .as_deref()
+                .filter(|url| !url.trim().is_empty())
+                .map(UpstreamTransport::StreamableHttp)
+                .ok_or_else(|| {
+                    "a Streamable HTTP server needs a non-empty \"url\"".to_string()
+                })
+        }
+        Some("sse") => Err(
+            "legacy SSE transport is not supported by current Codex; configure a Streamable HTTP endpoint"
+                .to_string(),
+        ),
+        Some("websocket" | "ws") => Err(
+            "WebSocket transport is not supported by current Codex; configure stdio or Streamable HTTP"
+                .to_string(),
+        ),
+        Some("stdio") => Err("type \"stdio\" requires \"command\", not \"url\"".to_string()),
+        Some("http" | "streamable-http" | "streamable_http") => Err(
+            "Streamable HTTP transport requires \"url\", not \"command\"".to_string(),
+        ),
+        Some(other) => Err(format!("unsupported MCP transport type \"{other}\"")),
+        None => Err("neither \"command\" nor \"url\" is configured".to_string()),
+    }
+}
+
+fn configured_timeout(
+    value: Option<f64>,
+    field: &str,
+    default: Option<Duration>,
+) -> Result<Option<Duration>, String> {
+    match value {
+        Some(seconds) => Duration::try_from_secs_f64(seconds)
+            .map(Some)
+            .map_err(|_| format!("{field} must be a non-negative finite number")),
+        None => Ok(default),
+    }
+}
+
+fn resolve_bearer_token(
+    server_name: &str,
+    env_var: Option<&str>,
+    env_lookup: &dyn Fn(&str) -> Option<String>,
+) -> Result<Option<String>, String> {
+    let Some(env_var) = env_var else {
+        return Ok(None);
+    };
+    let value = env_lookup(env_var).ok_or_else(|| {
+        format!("environment variable {env_var} for MCP server '{server_name}' is not set")
+    })?;
+    if value.is_empty() {
         return Err(format!(
-            "type \"{kind}\" (url transport) is not supported yet; only stdio (command) servers are bridged"
+            "environment variable {env_var} for MCP server '{server_name}' is empty"
         ));
     }
-    if spec.command.is_none() && spec.url.is_some() {
-        return Err(
-            "url-based (sse/http) servers are not supported yet; only stdio (command) servers are bridged"
-                .to_string(),
-        );
+    Ok(Some(value))
+}
+
+fn insert_header(
+    headers: &mut HashMap<HeaderName, HeaderValue>,
+    name: &str,
+    value: &str,
+    source: &str,
+) {
+    let header_name = match HeaderName::from_bytes(name.as_bytes()) {
+        Ok(name) => name,
+        Err(error) => {
+            tracing::warn!("invalid upstream MCP HTTP header name `{name}` from {source}: {error}");
+            return;
+        }
+    };
+    let header_value = match HeaderValue::from_str(value) {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::warn!(
+                "invalid upstream MCP HTTP header value for `{name}` from {source}: {error}"
+            );
+            return;
+        }
+    };
+    headers.insert(header_name, header_value);
+}
+
+fn build_http_headers(
+    spec: &crate::types::McpServerSpec,
+    env_lookup: &dyn Fn(&str) -> Option<String>,
+) -> HashMap<HeaderName, HeaderValue> {
+    let mut headers = HashMap::new();
+    insert_header(
+        &mut headers,
+        "user-agent",
+        concat!("codexify/", env!("CARGO_PKG_VERSION")),
+        "Codexify",
+    );
+
+    let mut static_headers: Vec<_> = spec.http_headers.iter().collect();
+    static_headers.sort_by(|left, right| left.0.cmp(right.0));
+    for (name, value) in static_headers {
+        insert_header(&mut headers, name, value, "httpHeaders");
     }
-    let Some(command_path) = spec.command.as_deref().filter(|c| !c.is_empty()) else {
-        return Err("no \"command\" specified (a stdio server needs a command path)".to_string());
+
+    let mut env_headers: Vec<_> = spec.env_http_headers.iter().collect();
+    env_headers.sort_by(|left, right| left.0.cmp(right.0));
+    for (name, env_var) in env_headers {
+        let Some(value) = env_lookup(env_var) else {
+            continue;
+        };
+        if value.trim().is_empty() {
+            continue;
+        }
+        insert_header(&mut headers, name, &value, env_var);
+    }
+    headers
+}
+
+fn configures_authorization_header(spec: &crate::types::McpServerSpec) -> bool {
+    spec.http_headers
+        .keys()
+        .chain(spec.env_http_headers.keys())
+        .any(|name| name.eq_ignore_ascii_case(AUTHORIZATION.as_str()))
+}
+
+async fn connect_one_with_env(
+    server_name: &str,
+    spec: &crate::types::McpServerSpec,
+    config: &AppConfig,
+    env_lookup: &dyn Fn(&str) -> Option<String>,
+) -> Result<
+    (
+        RunningService<RoleClient, ()>,
+        Vec<rmcp::model::Tool>,
+        Option<Duration>,
+    ),
+    String,
+> {
+    let startup_timeout = configured_timeout(
+        spec.startup_timeout_sec,
+        "startupTimeoutSec",
+        Some(CONNECT_TIMEOUT),
+    )?
+    .expect("startup timeout has a default");
+    let tool_timeout = configured_timeout(spec.tool_timeout_sec, "toolTimeoutSec", None)?;
+
+    let connect = match select_transport(spec)? {
+        UpstreamTransport::Stdio(command_path) => {
+            let mut command = Command::new(command_path);
+            command.args(&spec.args);
+            for (key, value) in &spec.env {
+                command.env(key, value);
+            }
+            if let Some(cwd) = spec.cwd.as_deref().filter(|cwd| !cwd.is_empty()) {
+                command.current_dir(cwd);
+            }
+            scrub_untrusted_child_env(&mut command, config);
+
+            let transport = TokioChildProcess::new(command)
+                .map_err(|error| format!("could not launch '{command_path}': {error}"))?;
+            let connect = async {
+                let service = ().serve(transport).await.map_err(|error| error.to_string())?;
+                let tools = service
+                    .list_all_tools()
+                    .await
+                    .map_err(|error| error.to_string())?;
+                Ok::<_, String>((service, tools))
+            };
+            tokio::time::timeout(startup_timeout, connect).await
+        }
+        UpstreamTransport::StreamableHttp(url) => {
+            let bearer_token = resolve_bearer_token(
+                server_name,
+                spec.bearer_token_env_var.as_deref(),
+                env_lookup,
+            )?;
+            if bearer_token.is_some() && configures_authorization_header(spec) {
+                return Err(
+                    "configure either bearerTokenEnvVar or an Authorization HTTP header, not both"
+                        .to_string(),
+                );
+            }
+            let headers = build_http_headers(spec, env_lookup);
+
+            let mut transport_config = StreamableHttpClientTransportConfig::with_uri(url);
+            if let Some(token) = bearer_token {
+                transport_config = transport_config.auth_header(token);
+            }
+            transport_config = transport_config.custom_headers(headers);
+            let transport = StreamableHttpClientTransport::from_config(transport_config);
+            let connect = async {
+                let service = ().serve(transport).await.map_err(|error| error.to_string())?;
+                let tools = service
+                    .list_all_tools()
+                    .await
+                    .map_err(|error| error.to_string())?;
+                Ok::<_, String>((service, tools))
+            };
+            tokio::time::timeout(startup_timeout, connect).await
+        }
     };
 
-    let mut command = Command::new(command_path);
-    command.args(&spec.args);
-    for (key, value) in &spec.env {
-        command.env(key, value);
-    }
-    if let Some(cwd) = spec.cwd.as_deref().filter(|cwd| !cwd.is_empty()) {
-        command.current_dir(cwd);
-    }
-    scrub_untrusted_child_env(&mut command, config);
-
-    let transport = TokioChildProcess::new(command)
-        .map_err(|e| format!("could not launch '{command_path}': {e}"))?;
-
-    let connect = async {
-        let service = ().serve(transport).await.map_err(|e| e.to_string())?;
-        let tools = service.list_all_tools().await.map_err(|e| e.to_string())?;
-        Ok::<_, String>((service, tools))
-    };
-
-    match tokio::time::timeout(CONNECT_TIMEOUT, connect).await {
+    match connect {
         Ok(Ok((service, mut tools))) => {
             // Codex applies the deny-list after the allow-list; use the same
             // order so imported filtering has identical results.
             tools.retain(|tool| tool_is_enabled(spec, tool.name.as_ref()));
-            Ok((service, tools))
+            Ok((service, tools, tool_timeout))
         }
-        Ok(Err(e)) => Err(e),
+        Ok(Err(error)) => Err(error),
         Err(_) => Err(format!(
             "timed out after {}s waiting for '{server_name}' to initialise",
-            CONNECT_TIMEOUT.as_secs()
+            startup_timeout.as_secs_f64()
         )),
     }
 }
@@ -536,8 +817,124 @@ fn tool_is_enabled(spec: &crate::types::McpServerSpec, name: &str) -> bool {
 mod tests {
     use super::*;
     use crate::types::McpServerSpec;
-    use rmcp::model::CallToolResult;
-    use std::collections::HashMap;
+    use axum::{
+        Router,
+        extract::{Request, State},
+        middleware::Next,
+        response::{IntoResponse, Response},
+    };
+    use rmcp::{
+        ErrorData as McpError, ServerHandler,
+        model::{
+            CallToolResponse, Implementation, InitializeResult, ListToolsResult,
+            PaginatedRequestParams, ServerCapabilities, ServerInfo,
+        },
+        service::{RequestContext, RoleServer},
+        transport::streamable_http_server::{
+            StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
+        },
+    };
+    use std::sync::Arc;
+
+    #[derive(Clone)]
+    struct ExpectedHeaders {
+        authorization: &'static str,
+        static_value: &'static str,
+        env_value: &'static str,
+    }
+
+    async fn require_expected_headers(
+        State(expected): State<ExpectedHeaders>,
+        request: Request,
+        next: Next,
+    ) -> Response {
+        let headers = request.headers();
+        let matches = |name: &str, value: &str| {
+            headers.get(name).and_then(|actual| actual.to_str().ok()) == Some(value)
+        };
+        if !matches("authorization", expected.authorization)
+            || !matches("x-static", expected.static_value)
+            || !matches("x-env", expected.env_value)
+        {
+            return axum::http::StatusCode::UNAUTHORIZED.into_response();
+        }
+        next.run(request).await
+    }
+
+    #[derive(Clone)]
+    struct TestHttpMcp;
+
+    impl ServerHandler for TestHttpMcp {
+        fn get_info(&self) -> ServerInfo {
+            InitializeResult::new(ServerCapabilities::builder().enable_tools().build())
+                .with_server_info(Implementation::new("test-http-upstream", "1.0.0"))
+                .with_instructions("Use echo for immediate replies and slow to test timeouts.")
+        }
+
+        async fn list_tools(
+            &self,
+            _request: Option<PaginatedRequestParams>,
+            _context: RequestContext<RoleServer>,
+        ) -> Result<ListToolsResult, McpError> {
+            let schema = json!({
+                "type": "object",
+                "properties": { "text": { "type": "string" } },
+                "required": ["text"],
+                "additionalProperties": false
+            })
+            .as_object()
+            .cloned()
+            .unwrap();
+            Ok(ListToolsResult::with_all_items(vec![
+                rmcp::model::Tool::new("echo", "Echo the supplied text", schema.clone()),
+                rmcp::model::Tool::new("slow", "Return after a delay", schema),
+            ]))
+        }
+
+        async fn call_tool(
+            &self,
+            request: CallToolRequestParams,
+            _context: RequestContext<RoleServer>,
+        ) -> Result<CallToolResponse, McpError> {
+            let text = request
+                .arguments
+                .as_ref()
+                .and_then(|arguments| arguments.get("text"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            if request.name.as_ref() == "slow" {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+            Ok(CallToolResult::success(vec![ContentBlock::text(text)]).into())
+        }
+    }
+
+    async fn spawn_http_upstream() -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut config = StreamableHttpServerConfig::default();
+        config.json_response = true;
+        let service = StreamableHttpService::new(
+            || Ok(TestHttpMcp),
+            Arc::new(LocalSessionManager::default()),
+            config,
+        );
+        let expected = ExpectedHeaders {
+            authorization: "Bearer remote-token",
+            static_value: "static-value",
+            env_value: "env-value",
+        };
+        let app = Router::new().nest_service("/mcp", service).layer(
+            axum::middleware::from_fn_with_state(expected, require_expected_headers),
+        );
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (format!("http://{address}/mcp"), task)
+    }
 
     #[test]
     fn unique_name_dedups_with_suffix() {
@@ -605,6 +1002,185 @@ mod tests {
         assert!(e.is_error);
     }
 
+    #[test]
+    fn infers_codex_transports_and_rejects_legacy_protocols() {
+        let stdio = McpServerSpec {
+            command: Some("server".to_string()),
+            ..Default::default()
+        };
+        assert!(matches!(
+            select_transport(&stdio).unwrap(),
+            UpstreamTransport::Stdio("server")
+        ));
+
+        let http = McpServerSpec {
+            url: Some("https://example.invalid/mcp".to_string()),
+            ..Default::default()
+        };
+        assert!(matches!(
+            select_transport(&http).unwrap(),
+            UpstreamTransport::StreamableHttp("https://example.invalid/mcp")
+        ));
+
+        let legacy = McpServerSpec {
+            transport: Some("sse".to_string()),
+            url: Some("https://example.invalid/sse".to_string()),
+            ..Default::default()
+        };
+        assert!(
+            select_transport(&legacy)
+                .unwrap_err()
+                .contains("legacy SSE")
+        );
+    }
+
+    #[test]
+    fn rejects_transport_specific_fields_on_the_wrong_transport() {
+        let stdio = McpServerSpec {
+            command: Some("server".to_string()),
+            bearer_token_env_var: Some("TOKEN".to_string()),
+            ..Default::default()
+        };
+        assert!(
+            select_transport(&stdio)
+                .unwrap_err()
+                .contains("stdio transport cannot configure bearerTokenEnvVar")
+        );
+
+        let http = McpServerSpec {
+            url: Some("https://example.invalid/mcp".to_string()),
+            args: vec!["--stdio".to_string()],
+            ..Default::default()
+        };
+        assert!(
+            select_transport(&http)
+                .unwrap_err()
+                .contains("Streamable HTTP transport cannot configure args")
+        );
+    }
+
+    #[test]
+    fn resolves_remote_credentials_without_exposing_values_in_errors() {
+        let resolved = resolve_bearer_token("remote", Some("REMOTE_TOKEN"), &|name| {
+            (name == "REMOTE_TOKEN").then(|| "secret-value".to_string())
+        })
+        .unwrap();
+        assert_eq!(resolved.as_deref(), Some("secret-value"));
+
+        let missing = resolve_bearer_token("remote", Some("MISSING_TOKEN"), &|_| None).unwrap_err();
+        assert!(missing.contains("MISSING_TOKEN"));
+        assert!(!missing.contains("secret-value"));
+
+        let empty = resolve_bearer_token("remote", Some("EMPTY_TOKEN"), &|_| Some(String::new()))
+            .unwrap_err();
+        assert!(empty.contains("is empty"));
+    }
+
+    #[test]
+    fn environment_headers_override_static_headers() {
+        let spec = McpServerSpec {
+            http_headers: HashMap::from([
+                ("X-Static".to_string(), "static".to_string()),
+                ("X-Override".to_string(), "old".to_string()),
+            ]),
+            env_http_headers: HashMap::from([
+                ("X-Env".to_string(), "ENV_HEADER".to_string()),
+                ("X-Override".to_string(), "OVERRIDE_HEADER".to_string()),
+            ]),
+            ..Default::default()
+        };
+        let headers = build_http_headers(&spec, &|name| match name {
+            "ENV_HEADER" => Some("env".to_string()),
+            "OVERRIDE_HEADER" => Some("new".to_string()),
+            _ => None,
+        });
+        let value = |name| {
+            headers
+                .get(&HeaderName::from_static(name))
+                .and_then(|value| value.to_str().ok())
+        };
+        assert_eq!(value("x-static"), Some("static"));
+        assert_eq!(value("x-env"), Some("env"));
+        assert_eq!(value("x-override"), Some("new"));
+    }
+
+    #[tokio::test]
+    async fn rejects_duplicate_authorization_configuration_before_connecting() {
+        let spec = McpServerSpec {
+            url: Some("https://example.invalid/mcp".to_string()),
+            bearer_token_env_var: Some("REMOTE_TOKEN".to_string()),
+            env_http_headers: HashMap::from([(
+                "Authorization".to_string(),
+                "MISSING_AUTH_HEADER".to_string(),
+            )]),
+            ..Default::default()
+        };
+        let config = crate::config::default_config(std::env::temp_dir());
+        let result = connect_one_with_env("remote", &spec, &config, &|name| {
+            (name == "REMOTE_TOKEN").then(|| "secret-value".to_string())
+        })
+        .await;
+        let error = match result {
+            Ok(_) => panic!("ambiguous authorization should fail before connecting"),
+            Err(error) => error,
+        };
+        assert!(error.contains("either bearerTokenEnvVar or an Authorization HTTP header"));
+        assert!(!error.contains("secret-value"));
+    }
+
+    #[tokio::test]
+    async fn bridges_authenticated_streamable_http_and_applies_tool_timeout() {
+        let (url, server_task) = spawn_http_upstream().await;
+        let spec = McpServerSpec {
+            transport: Some("streamable_http".to_string()),
+            url: Some(url),
+            bearer_token_env_var: Some("REMOTE_TOKEN".to_string()),
+            http_headers: HashMap::from([("X-Static".to_string(), "static-value".to_string())]),
+            env_http_headers: HashMap::from([("X-Env".to_string(), "REMOTE_HEADER".to_string())]),
+            startup_timeout_sec: Some(5.0),
+            tool_timeout_sec: Some(0.05),
+            ..Default::default()
+        };
+        let config = crate::config::default_config(std::env::temp_dir());
+        let (service, tools, tool_timeout) =
+            connect_one_with_env("remote", &spec, &config, &|name| match name {
+                "REMOTE_TOKEN" => Some("remote-token".to_string()),
+                "REMOTE_HEADER" => Some("env-value".to_string()),
+                _ => None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(tools.len(), 2);
+
+        let echo = forward_tool_call(
+            service.peer(),
+            CallToolRequestParams::new("echo")
+                .with_arguments(json!({ "text": "hello" }).as_object().cloned().unwrap()),
+            "remote",
+            "echo",
+            tool_timeout,
+        )
+        .await;
+        assert!(!echo.is_error);
+        assert_eq!(echo.joined_text(), "hello");
+
+        let slow = forward_tool_call(
+            service.peer(),
+            CallToolRequestParams::new("slow")
+                .with_arguments(json!({ "text": "late" }).as_object().cloned().unwrap()),
+            "remote",
+            "slow",
+            tool_timeout,
+        )
+        .await;
+        assert!(slow.is_error);
+        assert!(slow.joined_text().contains("timed out after"));
+
+        drop(service);
+        server_task.abort();
+        let _ = server_task.await;
+    }
+
     #[tokio::test]
     async fn skips_upstream_that_fails_to_launch() {
         let mut config = crate::config::default_config(std::env::temp_dir());
@@ -612,15 +1188,7 @@ mod tests {
             "bad".into(),
             McpServerSpec {
                 command: Some("codexify-nonexistent-binary-xyz".into()),
-                args: vec![],
-                env: HashMap::new(),
-                cwd: None,
-                disabled: false,
-                transport: None,
-                url: None,
-                tools: None,
-                disabled_tools: None,
-                mode: None,
+                ..Default::default()
             },
         );
         let bridge = connect_upstreams(&config).await;
@@ -639,16 +1207,9 @@ mod tests {
         config.mcp_servers.insert(
             "remote".into(),
             McpServerSpec {
-                command: None,
-                args: vec![],
-                env: HashMap::new(),
-                cwd: None,
-                disabled: false,
                 transport: Some("sse".into()),
                 url: Some("http://localhost:9/sse".into()),
-                tools: None,
-                disabled_tools: None,
-                mode: None,
+                ..Default::default()
             },
         );
         let bridge = connect_upstreams(&config).await;
@@ -667,15 +1228,8 @@ mod tests {
             "off".into(),
             McpServerSpec {
                 command: Some("codexify-should-never-run".into()),
-                args: vec![],
-                env: HashMap::new(),
-                cwd: None,
                 disabled: true,
-                transport: None,
-                url: None,
-                tools: None,
-                disabled_tools: None,
-                mode: None,
+                ..Default::default()
             },
         );
         let bridge = connect_upstreams(&config).await;

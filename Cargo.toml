@@ -10,7 +10,7 @@ name = "codexify"
 path = "src/main.rs"
 
 [dependencies]
-rmcp = { version = "3.1.3", features = ["client", "server", "transport-child-process", "transport-streamable-http-server"] }
+rmcp = { version = "3.1.3", features = ["client", "reqwest", "server", "transport-child-process", "transport-streamable-http-client-reqwest", "transport-streamable-http-server"] }
 tokio = { version = "1", features = ["full"] }
 axum = "0.8"
 tower = "0.5"

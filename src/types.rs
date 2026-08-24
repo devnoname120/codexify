@@ -356,14 +356,13 @@ pub struct CommandConfig {
 
 /// One upstream MCP server to bridge, in the standard `mcpServers` shape. Its
 /// tools are discovered at startup and re-exposed under a `<server>__<tool>`
-/// name. Only stdio servers (a `command`) are bridged today; `type: "sse"|"http"`
-/// / `url` entries are recognised and reported as not-yet-supported rather than
-/// failing the whole config.
+/// name. A `command` selects stdio; a `url` selects Codex-compatible Streamable
+/// HTTP. Legacy SSE and WebSocket transports are rejected explicitly.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct McpServerSpec {
     /// The executable to launch (e.g. `idasql`, `npx`, `python`). Absent for
-    /// url-based (sse/http) servers.
+    /// Streamable HTTP servers.
     #[serde(default)]
     pub command: Option<String>,
     #[serde(default)]
@@ -377,13 +376,29 @@ pub struct McpServerSpec {
     /// Skip this server without removing it from the config.
     #[serde(default)]
     pub disabled: bool,
-    /// Transport type, as in the standard config: `"stdio"` (default),
-    /// `"sse"`, `"http"`. Only `stdio` is bridged so far.
+    /// Transport type. `"stdio"` is inferred from `command`; `"http"`,
+    /// `"streamable-http"`, and `"streamable_http"` are equivalent when `url`
+    /// is present.
     #[serde(rename = "type", default)]
     pub transport: Option<String>,
-    /// URL for an sse/http server. Recognised but not yet bridged.
+    /// URL for a Streamable HTTP server.
     #[serde(default)]
     pub url: Option<String>,
+    /// Environment variable containing a bearer token for Streamable HTTP.
+    #[serde(default)]
+    pub bearer_token_env_var: Option<String>,
+    /// Static headers sent with every Streamable HTTP request.
+    #[serde(default)]
+    pub http_headers: std::collections::HashMap<String, String>,
+    /// Header-name to environment-variable mappings resolved at connection time.
+    #[serde(default)]
+    pub env_http_headers: std::collections::HashMap<String, String>,
+    /// Timeout for initialization and the first tools listing, in seconds.
+    #[serde(default)]
+    pub startup_timeout_sec: Option<f64>,
+    /// Timeout for each forwarded tool call, in seconds.
+    #[serde(default)]
+    pub tool_timeout_sec: Option<f64>,
     /// If set, only these upstream tool names are bridged (an allow-list on the
     /// upstream's own names, e.g. `["exec", "machine_list"]`). Use it to keep the
     /// exposed tool count small — LLM clients work better with fewer tools and
