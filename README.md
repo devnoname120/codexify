@@ -30,10 +30,13 @@ flowchart LR
     Env["get_agent_brief\nget_environment\nget_project_doc"]
     Mem["remember\nrecall"]
     Skills["skills_list\nskills_read"]
+    SetRoot["set_project_root"]
     Bridge["MCP aggregator\n(bridge.rs)"]
-    WorkDir[("Project\nDirectory")]
-    State[("~/.codexify\nmemory.json")]
+    WorkDir[("Project root\nper-conversation in\nmulti-project mode")]
+    State[("~/.codexify\nmemory (per project)")]
+    Bindings[("~/.codexify\nconversation-projects")]
     SkillDirs[(".agents/skills\n.codex/skills\n.claude/skills")]
+    CodexCfg[("$CODEX_HOME\nconfig.toml")]
     Upstream[("Upstream MCP\nservers (stdio)")]
 
     ChatGPT <-->|"connector calls"| OpenAITunnel
@@ -51,6 +54,7 @@ flowchart LR
     Tools --> Env
     Tools --> Mem
     Tools --> Skills
+    Tools -.->|"multi-project mode"| SetRoot
     Tools --> Bridge
 
     FS --> WorkDir
@@ -62,8 +66,13 @@ flowchart LR
     Env --> WorkDir
     Mem --> State
     Skills --> SkillDirs
+    SetRoot --> Bindings
+    SetRoot -.->|"selects"| WorkDir
+    CodexCfg -.->|"auto-import"| Bridge
     Bridge --> Upstream
 ```
+
+Dotted edges are conditional: `set_project_root` appears only in [multi-project mode](#multi-project-mode) and binds this conversation's project root, and the aggregator [auto-imports](#automatic-discovery-from-codex) the stdio MCP servers configured in Codex's own `config.toml` on top of any declared in `codex.config.json`.
 
 ## Quick start
 
