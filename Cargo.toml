@@ -39,6 +39,7 @@ zip = { version = "4", default-features = false, features = ["deflate"] }
 getrandom = "0.2"
 tokio-util = "0.7"
 zeroize = "1"
+rpassword = "7"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

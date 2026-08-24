@@ -16,6 +16,7 @@ use crate::codex_config::codex_config_path;
 use crate::codex_mcp::{
     CodexMcpImport, discover_additional_codex_mcp_servers_with_cli, discover_codex_mcp_servers,
 };
+use crate::openai_tunnel::validate_tunnel_id;
 use crate::project_catalog::{ProjectCatalog, discover_project_catalog_at};
 use crate::types::{
     AppConfig, CodexProjectCatalogConfig, CommandConfig, ExecConfig, ExecMode, IgnoreConfig,
@@ -26,7 +27,9 @@ use crate::types::{
 #[derive(Parser, Debug)]
 #[command(
     name = "codexify",
-    about = "Codexify MCP bridge (Rust): expose Codex-style agent tools over Streamable HTTP."
+    about = "Codexify MCP bridge (Rust): expose Codex-style agent tools over Streamable HTTP.",
+    subcommand_negates_reqs = true,
+    args_conflicts_with_subcommands = true
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -82,6 +85,10 @@ pub enum CliCommand {
         #[command(subcommand)]
         command: ProjectsCommand,
     },
+    /// Interactively configure a native OpenAI tunnel and ChatGPT connector.
+    ///
+    /// The wizard reads the global `--config` and `--work-dir` options.
+    Quickstart,
 }
 
 #[derive(Subcommand, Debug)]
@@ -603,15 +610,6 @@ fn resolve_path(raw: &str) -> PathBuf {
     }
 }
 
-fn valid_tunnel_id(value: &str) -> bool {
-    value.strip_prefix("tunnel_").is_some_and(|suffix| {
-        suffix.len() == 32
-            && suffix
-                .bytes()
-                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
-    })
-}
-
 fn valid_env_name(value: &str) -> bool {
     let mut chars = value.chars();
     matches!(chars.next(), Some(first) if first == '_' || first.is_ascii_alphabetic())
@@ -656,11 +654,7 @@ fn resolve_openai_tunnel(
         .clone()
         .or(file.tunnel_id)
         .ok_or_else(|| "openaiTunnel requires tunnelId (or --openai-tunnel-id)".to_string())?;
-    if !valid_tunnel_id(&tunnel_id) {
-        return Err(
-            "OpenAI tunnel id must be tunnel_ followed by 32 lowercase letters or digits".into(),
-        );
-    }
+    validate_tunnel_id(&tunnel_id).map_err(|error| error.to_string())?;
 
     let api_key_ref = resolve_api_key_ref(
         cli.openai_tunnel_api_key_ref

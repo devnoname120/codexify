@@ -1,6 +1,9 @@
+use std::path::PathBuf;
+
 use clap::Parser;
 use serde::Serialize;
 
+use anyhow::Context;
 use codexify::config::{
     Cli, CliCommand, ProjectsCommand, ProjectsListArgs, load_config, load_project_catalog_for_cli,
 };
@@ -8,6 +11,7 @@ use codexify::project_catalog::{
     MAX_PROJECT_LIMIT, ProjectCatalogDiagnostic, ProjectListOutput, ProjectSource,
     ProjectTrustLevel,
 };
+use codexify::quickstart;
 use codexify::server::start_http_server;
 
 #[derive(Serialize)]
@@ -121,16 +125,42 @@ async fn main() {
         )
         .init();
 
-    let config = match load_config(cli) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("Error: {e}");
-            std::process::exit(1);
-        }
-    };
-
-    if let Err(e) = start_http_server(config).await {
-        eprintln!("Server error: {e}");
+    if let Err(error) = run().await {
+        eprintln!("Error: {error:#}");
         std::process::exit(1);
     }
+}
+
+async fn run() -> anyhow::Result<()> {
+    let mut cli = Cli::parse();
+    if let Some(command) = cli.command.take() {
+        match command {
+            CliCommand::Quickstart => {
+                let args = quickstart::QuickstartArgs {
+                    config: cli
+                        .config
+                        .clone()
+                        .map(PathBuf::from)
+                        .unwrap_or_else(|| PathBuf::from("codex.config.json")),
+                    work_dir: cli.work_dir.clone().map(PathBuf::from),
+                };
+                let outcome = quickstart::run(args)?;
+                if !outcome.start_server {
+                    return Ok(());
+                }
+                cli.work_dir = Some(outcome.work_dir.to_string_lossy().into_owned());
+                cli.config = Some(outcome.config_path.to_string_lossy().into_owned());
+            }
+            CliCommand::Projects { .. } => {
+                // Project catalogue subcommands are dispatched in `main` before
+                // the server path is reached; there is nothing to start here.
+                return Ok(());
+            }
+        }
+    }
+
+    let config = load_config(cli).map_err(anyhow::Error::msg)?;
+    start_http_server(config)
+        .await
+        .context("start Codexify server")
 }

@@ -158,6 +158,17 @@ substitutes the conversation's selected root—or the transport fallback—for
 remain shared. Native Codex project entries are intentionally re-read when the
 catalogue tool is called rather than copied into `AppConfig` at startup.
 
+### `quickstart` CLI (`quickstart.rs`)
+The `quickstart` subcommand runs before server configuration is loaded. It uses a
+testable line-oriented wizard for ordinary prompts and terminal-hidden input for
+the runtime API key. The wizard canonicalizes the project directory, validates
+the tunnel credentials with the same helpers as normal startup, merges only the
+managed fields into the existing JSON object, and stores the key outside the
+project behind an absolute `file:` reference. Config and credential replacement
+use temporary files in the destination directory. Once setup is complete, the
+same process can pass the generated paths back through `load_config` and enter the
+ordinary supervised server lifecycle; there is no separate quickstart runtime.
+
 ---
 
 ## 4. MCP server layer (`server.rs`, `auth.rs`)
@@ -254,6 +265,7 @@ the original order and rejects duplicate names.
 | `exec_sessions.rs` | Generic-client transport fallback plus unified-exec sessions: shell resolution, PowerShell exit-code wrapping, background stdout/stderr drain tasks, process-group kill, output truncation (UTF-16 units to match the TS). |
 | `apply_patch.rs` | The Codex patch format: parse then apply, atomically, with fuzzy context matching and CRLF preservation. |
 | `memory.rs` | Working memory outside the repo, keyed by a hash of the normalized active root, with `O_EXCL` locking and atomic writes. In multi-project mode, a configured `memory.dir` is a base containing one hashed child per project. |
+| `quickstart.rs` | Interactive first-install wizard for project scope, native tunnel credentials, JSON config merging, and the ChatGPT developer-mode connector handoff. |
 | `openai_tunnel.rs` | Verified installation and lifecycle supervision for OpenAI's outbound Secure MCP Tunnel runtime. |
 | `process_env.rs` | Child-process environment boundaries: isolate the tunnel runtime and remove tunnel credentials from model-controlled and upstream subprocesses. |
 | `project_doc.rs` | `AGENTS.md` discovery from project root down to the work dir under a byte budget. Multi-project mode treats the selected directory as the exact project root and never walks into the common access-root parent. |

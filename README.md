@@ -82,7 +82,39 @@ Dotted edges are conditional: `list_projects` and `set_project_root` appear only
 
 ## Quick start
 
-### Native OpenAI tunnel (recommended)
+### Interactive setup (recommended for a first install)
+
+Run the guided setup from an installed binary:
+
+```bash
+codexify quickstart
+```
+
+Or run it directly from a source checkout:
+
+```bash
+cargo run --release -- quickstart
+```
+
+The wizard asks which project directory ChatGPT may access and whether that
+directory is one project or a multi-project access root. It then walks through
+creating an OpenAI Secure MCP Tunnel, entering the tunnel ID and runtime API key,
+and creating the matching ChatGPT developer-mode connector. The relevant OpenAI
+and ChatGPT links are printed together with the exact connection values to use.
+
+The runtime key is entered without terminal echo and stored in a dedicated
+per-tunnel file under `~/.codexify/openai-tunnel/credentials/`. On Unix, the
+wizard restricts the credential directory and file to the current user.
+`codex.config.json` receives only a `file:` reference, and unrelated existing JSON
+settings are preserved. At the end, the wizard can start Codexify immediately
+so ChatGPT can scan the live connector. Keep that process running while using the
+connector.
+
+Use `codexify quickstart --config /path/to/codex.config.json` to update a
+different config file, or `--work-dir /path/to/project` to change the directory
+initially shown by the wizard.
+
+### Manual native OpenAI tunnel setup
 
 1. Create or obtain a tunnel ID in [OpenAI Platform tunnel settings](https://platform.openai.com/settings/organization/tunnels).
 2. Create a restricted [runtime API key](https://platform.openai.com/settings/organization/api-keys) whose principal has Tunnels **Read** + **Use** for that tunnel. Keep tunnel-management/admin credentials separate.
@@ -135,7 +167,18 @@ cargo build --release
 
 Each release ships a compiled binary per platform — `windows-x64`, `linux-x64`, `linux-arm64`, `darwin-x64` and `darwin-arm64`. Download the archive for your OS/arch, unpack it, and run `codexify --work-dir …`. These are native builds, so there is no AVX2/baseline caveat: the binary runs on any CPU of its architecture.
 
-## CLI flags
+## CLI
+
+### Commands
+
+| Command | Description |
+|---------|-------------|
+| `quickstart` | Interactively configure the project scope, native OpenAI tunnel credentials, JSON config, and ChatGPT developer-mode connector; optionally start the server when setup is complete |
+
+`quickstart` accepts `--config <PATH>` (default `./codex.config.json`) and
+`--work-dir <DIR>` as the initial project-directory prompt value.
+
+### Server flags
 
 | Flag | Required | Default | Description |
 |------|----------|---------|-------------|
@@ -306,6 +349,12 @@ The `openaiTunnel` block enables OpenAI's native outbound tunnel:
 | `apiKeyRef` | `"env:CONTROL_PLANE_API_KEY"` | Runtime API-key reference. Only `env:NAME` and `file:/path` are accepted; literal keys are rejected |
 | `clientPath` | verified managed runtime | Explicit official `tunnel-client` or `tunnel-client-runtime` binary. Relative paths resolve from the launch directory |
 | `organizationId` | - | Optional organization ID passed as `OpenAI-Organization` by the official client |
+
+The `quickstart` command writes its runtime key to
+`~/.codexify/openai-tunnel/credentials/<tunnel-id>.key` and sets `apiKeyRef` to
+that absolute `file:` path. It never writes the key itself into
+`codex.config.json`; on Unix, the credential directory is mode `0700` and the key
+file is mode `0600`.
 
 Native mode deliberately cannot be combined with a caller-supplied `apiKey` / `--api-key`: Codexify generates a high-entropy bearer token for the loopback MCP hop and injects it into the tunnel runtime through static MCP and discovery headers. Host validation is forced to loopback authorities and permissive browser CORS is disabled.
 

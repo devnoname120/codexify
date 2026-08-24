@@ -35,6 +35,19 @@ const LOG_TAIL_BYTES: u64 = 32 * 1024;
 const DETAIL_MAX_CHARS: usize = 2_000;
 const POLL_SUCCESS_METRIC: &str = "commands_poll_last_successful_timestamp_seconds";
 
+pub(crate) fn validate_tunnel_id(value: &str) -> anyhow::Result<()> {
+    if value.strip_prefix("tunnel_").is_some_and(|suffix| {
+        suffix.len() == 32
+            && suffix
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+    }) {
+        return Ok(());
+    }
+
+    bail!("OpenAI tunnel id must be tunnel_ followed by 32 lowercase letters or digits")
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct InstallManifest {
@@ -668,7 +681,7 @@ fn resolve_key_reference(reference: &str) -> anyhow::Result<Zeroizing<String>> {
     Ok(value)
 }
 
-fn validate_runtime_api_key(value: &str) -> anyhow::Result<()> {
+pub(crate) fn validate_runtime_api_key(value: &str) -> anyhow::Result<()> {
     if value.is_empty() {
         bail!("OpenAI tunnel API key is empty");
     }
