@@ -709,6 +709,11 @@ fn configures_authorization_header(spec: &crate::types::McpServerSpec) -> bool {
         .any(|name| name.eq_ignore_ascii_case(AUTHORIZATION.as_str()))
 }
 
+fn ensure_rustls_crypto_provider() {
+    // RMCP avoids bundling AWS-LC; install the ring provider already used by Codexify.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
 async fn connect_one_with_env(
     server_name: &str,
     spec: &crate::types::McpServerSpec,
@@ -766,6 +771,7 @@ async fn connect_one_with_env(
                         .to_string(),
                 );
             }
+            ensure_rustls_crypto_provider();
             let headers = build_http_headers(spec, env_lookup);
 
             let mut transport_config = StreamableHttpClientTransportConfig::with_uri(url);
