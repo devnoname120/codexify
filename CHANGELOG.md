@@ -4,6 +4,16 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project aims to
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- Bound the in-memory output buffer of resident `exec_command` sessions. A shell
+  that streamed output faster than it was yielded (a runaway `yes`, a chatty
+  build) previously grew an unbounded buffer and could exhaust memory; output is
+  now capped in RAM, keeping the head and tail and eliding the middle with a
+  byte count, independent of the per-call token truncation.
+
 ## [1.1.0] - 2026-08-24
 
 ### Added
@@ -102,6 +112,7 @@ filename sort uses byte/Unicode ordering rather than `localeCompare`;
 `write_file` reports UTF-8 byte counts; `exec_command` uses plain pipes, not a
 PTY. See the README's "Notes on the port" for the full list.
 
+[Unreleased]: https://github.com/devnoname120/codexify/compare/v1.1.0...HEAD
 [1.1.0]: https://github.com/devnoname120/codexify/releases/tag/v1.1.0
 [1.0.1]: https://github.com/devnoname120/codexify/releases/tag/v1.0.1
 [1.0.0]: https://github.com/devnoname120/codexify/releases/tag/v1.0.0

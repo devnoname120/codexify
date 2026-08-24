@@ -155,6 +155,104 @@ pub fn wrap_for_shell(cmd: &str, shell_bin: &str) -> String {
     .join("\n")
 }
 
+// ─── Bounded output buffer ─────────────────────────────────────────────
+
+/// Ceiling on bytes retained in RAM per session between yields. A resident
+/// session drains stdout/stderr continuously, so without a cap a noisy command
+/// (`yes`, a chatty build) could grow the pending buffer without bound and
+/// exhaust memory long before the next `yield_output`. Output beyond this is
+/// elided from the middle — head and tail are kept, matching `truncate_output`'s
+/// "most informative at the start and end" heuristic. The taken output is
+/// truncated again to the caller's token budget, so this is only a
+/// memory-safety ceiling, set well above any useful single yield.
+const MAX_PENDING_BYTES: usize = 1 << 20; // 1 MiB
+const PENDING_HEAD_BYTES: usize = MAX_PENDING_BYTES / 2;
+const PENDING_TAIL_BYTES: usize = MAX_PENDING_BYTES - PENDING_HEAD_BYTES;
+
+/// Largest byte index `<= index` that lands on a UTF-8 char boundary.
+fn floor_char_boundary(s: &str, index: usize) -> usize {
+    if index >= s.len() {
+        return s.len();
+    }
+    let mut i = index;
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
+/// Smallest byte index `>= index` that lands on a UTF-8 char boundary.
+fn ceil_char_boundary(s: &str, index: usize) -> usize {
+    if index >= s.len() {
+        return s.len();
+    }
+    let mut i = index;
+    while i < s.len() && !s.is_char_boundary(i) {
+        i += 1;
+    }
+    i
+}
+
+/// Accumulates a process's output while bounding memory: the first
+/// `PENDING_HEAD_BYTES` are frozen as the head, and the most recent
+/// `PENDING_TAIL_BYTES` slide in the tail. Anything in between is dropped and
+/// counted. Bytes always arrive in stream order, so head then tail reconstructs
+/// the stream verbatim whenever nothing was elided.
+#[derive(Default)]
+struct PendingBuffer {
+    head: String,
+    tail: String,
+    omitted: u64,
+}
+
+impl PendingBuffer {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn push_str(&mut self, chunk: &str) {
+        let mut chunk = chunk;
+        if self.head.len() < PENDING_HEAD_BYTES {
+            let space = PENDING_HEAD_BYTES - self.head.len();
+            if chunk.len() <= space {
+                self.head.push_str(chunk);
+                return;
+            }
+            let split = floor_char_boundary(chunk, space);
+            self.head.push_str(&chunk[..split]);
+            chunk = &chunk[split..];
+        }
+        self.tail.push_str(chunk);
+        if self.tail.len() > PENDING_TAIL_BYTES {
+            let overflow = self.tail.len() - PENDING_TAIL_BYTES;
+            let cut = ceil_char_boundary(&self.tail, overflow);
+            self.omitted += cut as u64;
+            self.tail.drain(..cut);
+        }
+    }
+
+    /// Reconstructs the retained output and resets the buffer, mirroring the
+    /// old `std::mem::take` semantics of "hand back everything so far, clear".
+    fn take(&mut self) -> String {
+        let head = std::mem::take(&mut self.head);
+        let tail = std::mem::take(&mut self.tail);
+        let omitted = std::mem::replace(&mut self.omitted, 0);
+        if omitted == 0 {
+            let mut out = head;
+            out.push_str(&tail);
+            out
+        } else {
+            format!(
+                "{head}\n\n[... {omitted} bytes elided (session output buffer limit) ...]\n\n{tail}"
+            )
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.head.is_empty() && self.tail.is_empty() && self.omitted == 0
+    }
+}
+
 // ─── Sessions ──────────────────────────────────────────────────────────
 
 /// A shell process started by `exec_command` that did not finish within its
@@ -166,7 +264,7 @@ pub struct ExecSession {
     pub pid: Option<u32>,
     pub started_at: Instant,
     stdin: TokioMutex<Option<ChildStdin>>,
-    pending: Arc<StdMutex<String>>,
+    pending: Arc<StdMutex<PendingBuffer>>,
     exit_code: Arc<StdMutex<Option<i32>>>,
     drain_done: Arc<Notify>,
 }
@@ -179,8 +277,7 @@ impl ExecSession {
 
     /// Take everything buffered so far, clearing the buffer.
     fn take_pending(&self) -> String {
-        let mut guard = self.pending.lock().unwrap();
-        std::mem::take(&mut *guard)
+        self.pending.lock().unwrap().take()
     }
 
     /// Write `chars` to the process's stdin and flush.
@@ -375,7 +472,7 @@ pub fn start_exec_session(
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
 
-    let pending = Arc::new(StdMutex::new(String::new()));
+    let pending = Arc::new(StdMutex::new(PendingBuffer::new()));
     let exit_code = Arc::new(StdMutex::new(None));
     let drain_done = Arc::new(Notify::new());
     let drains_remaining = Arc::new(AtomicUsize::new(2));
@@ -438,7 +535,7 @@ fn finish_drain(remaining: &Arc<AtomicUsize>, done: &Arc<Notify>) {
 
 fn spawn_drain<R>(
     mut reader: R,
-    pending: Arc<StdMutex<String>>,
+    pending: Arc<StdMutex<PendingBuffer>>,
     remaining: Arc<AtomicUsize>,
     done: Arc<Notify>,
 ) where
@@ -539,5 +636,62 @@ mod tests {
         let (out, orig) = truncate_output("short", 100);
         assert_eq!(out, "short");
         assert!(orig.is_none());
+    }
+
+    #[test]
+    fn pending_buffer_passes_small_output_through_verbatim() {
+        let mut buf = PendingBuffer::new();
+        buf.push_str("hello ");
+        buf.push_str("world");
+        assert_eq!(buf.take(), "hello world");
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn pending_buffer_reconstructs_stream_when_under_cap() {
+        let mut buf = PendingBuffer::new();
+        // Just over the head cap but under the total cap: nothing is elided,
+        // and head+tail must equal the original stream in order.
+        let text = "x".repeat(PENDING_HEAD_BYTES + 1024);
+        buf.push_str(&text);
+        let out = buf.take();
+        assert_eq!(out, text);
+        assert!(!out.contains("elided"));
+    }
+
+    #[test]
+    fn pending_buffer_elides_middle_past_cap_and_bounds_memory() {
+        let mut buf = PendingBuffer::new();
+        // Feed far more than the cap in many chunks, as the drains would.
+        for _ in 0..64 {
+            buf.push_str(&"a".repeat(100_000)); // 6.4 MiB total
+        }
+        // Retained bytes stay bounded regardless of how much was written.
+        assert!(buf.head.len() <= PENDING_HEAD_BYTES);
+        assert!(buf.tail.len() <= PENDING_TAIL_BYTES);
+        assert!(buf.omitted > 0);
+        let out = buf.take();
+        assert!(out.contains("elided"));
+        assert!(out.starts_with("aaaa"));
+        assert!(out.ends_with("aaaa"));
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn pending_buffer_keeps_utf8_boundaries_intact() {
+        let mut buf = PendingBuffer::new();
+        // A leading single byte pushes every following 2-byte char onto an odd
+        // offset, so the even head/tail cut points land mid-codepoint — the
+        // floor/ceil boundary logic must back off or take() panics.
+        buf.push_str("x");
+        for _ in 0..800_000 {
+            buf.push_str("é"); // 2 bytes each → ~1.6 MiB, well over the cap
+        }
+        assert!(buf.head.len() <= PENDING_HEAD_BYTES);
+        assert!(buf.tail.len() <= PENDING_TAIL_BYTES);
+        assert!(buf.omitted > 0);
+        let out = buf.take(); // must not panic on a char boundary
+        assert!(out.starts_with("xé"));
+        assert!(out.ends_with('é'));
     }
 }
