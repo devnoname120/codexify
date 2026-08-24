@@ -4,6 +4,18 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project aims to
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.1] - 2026-08-24
+
+### Changed
+
+- Release profile uses `lto = "thin"` and default codegen units (was full LTO +
+  `codegen-units = 1`), roughly halving release build time; binaries are now
+  stripped (`strip = true`).
+- CI release workflow builds the `darwin-x64` binary by cross-compiling on the
+  Apple-Silicon `macos-14` runner instead of the slow, frequently-queued
+  `macos-13` (Intel) pool, and the build job now has a 30-minute timeout so a
+  stalled runner fails fast.
+
 ## [1.0.0] - 2026-08-19
 
 The first Rust release. The server was rewritten from Bun + TypeScript to Rust
@@ -47,4 +59,5 @@ filename sort uses byte/Unicode ordering rather than `localeCompare`;
 `write_file` reports UTF-8 byte counts; `exec_command` uses plain pipes, not a
 PTY. See the README's "Notes on the port" for the full list.
 
+[1.0.1]: https://github.com/devnoname120/codexify/releases/tag/v1.0.1
 [1.0.0]: https://github.com/devnoname120/codexify/releases/tag/v1.0.0

@@ -61,7 +61,7 @@ fn to_call_tool_result(result: ToolResult) -> CallToolResult {
 impl ServerHandler for CodexHandler {
     fn get_info(&self) -> ServerInfo {
         InitializeResult::new(ServerCapabilities::builder().enable_tools().build())
-            .with_server_info(Implementation::new("codexify", "1.0.0"))
+            .with_server_info(Implementation::new("codexify", "1.0.1"))
             .with_instructions(build_instructions(&self.config))
     }
 
