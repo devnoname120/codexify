@@ -44,6 +44,9 @@ rpassword = "7"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Console"] }
+
 # `thin` LTO keeps nearly all of full-LTO's runtime benefit for an I/O-bound
 # MCP server while cutting release build time roughly in half; the default
 # codegen-units (16) restores parallel codegen instead of serialising on one.

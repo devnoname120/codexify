@@ -1,6 +1,8 @@
 use std::fs;
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
+use std::thread;
+use std::time::Duration;
 
 use anyhow::{Context, bail};
 use serde_json::{Map, Value};
@@ -54,9 +56,108 @@ pub fn run(args: QuickstartArgs) -> anyhow::Result<QuickstartOutcome> {
     };
     let mut input = stdin.lock();
     let mut output = stdout.lock();
-    run_with_io(args, environment, &mut input, &mut output, |label, _| {
-        rpassword::prompt_password(format!("{label}: "))
+    run_with_io(
+        args,
+        environment,
+        &mut input,
+        &mut output,
+        prompt_hidden_password,
+    )
+}
+
+fn prompt_hidden_password(output_label: &str, output: &mut impl Write) -> io::Result<String> {
+    let terminal = TerminalEchoProbe::open()?;
+    prompt_hidden_password_with(output_label, output, rpassword::read_password, || {
+        terminal.is_disabled()
     })
+}
+
+fn prompt_hidden_password_with<R, E>(
+    output_label: &str,
+    output: &mut impl Write,
+    read_password: R,
+    mut echo_is_disabled: E,
+) -> io::Result<String>
+where
+    R: FnOnce() -> io::Result<String> + Send + 'static,
+    E: FnMut() -> io::Result<bool>,
+{
+    let reader = thread::spawn(read_password);
+
+    // The reader configures the terminal first; exposing the prompt only after
+    // echo is off prevents a fast paste from being echoed during setup.
+    loop {
+        if reader.is_finished() {
+            return join_password_reader(reader);
+        }
+        if echo_is_disabled()? {
+            break;
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+
+    write!(output, "{output_label}: ")?;
+    output.flush()?;
+    join_password_reader(reader)
+}
+
+fn join_password_reader(reader: thread::JoinHandle<io::Result<String>>) -> io::Result<String> {
+    reader
+        .join()
+        .map_err(|_| io::Error::other("hidden-input reader panicked"))?
+}
+
+struct TerminalEchoProbe {
+    input: fs::File,
+}
+
+#[cfg(unix)]
+impl TerminalEchoProbe {
+    fn open() -> io::Result<Self> {
+        Ok(Self {
+            input: fs::OpenOptions::new().read(true).open("/dev/tty")?,
+        })
+    }
+
+    fn is_disabled(&self) -> io::Result<bool> {
+        use std::mem::MaybeUninit;
+        use std::os::fd::AsRawFd;
+
+        let mut terminal = MaybeUninit::<libc::termios>::uninit();
+        if unsafe { libc::tcgetattr(self.input.as_raw_fd(), terminal.as_mut_ptr()) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let terminal = unsafe { terminal.assume_init() };
+        Ok(terminal.c_lflag & libc::ECHO == 0)
+    }
+}
+
+#[cfg(windows)]
+impl TerminalEchoProbe {
+    fn open() -> io::Result<Self> {
+        Ok(Self {
+            input: fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open("CONIN$")?,
+        })
+    }
+
+    fn is_disabled(&self) -> io::Result<bool> {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+        use windows_sys::Win32::System::Console::{ENABLE_ECHO_INPUT, GetConsoleMode};
+
+        let input = self.input.as_raw_handle();
+        if input.is_null() || input == INVALID_HANDLE_VALUE {
+            return Err(io::Error::last_os_error());
+        }
+        let mut mode = 0;
+        if unsafe { GetConsoleMode(input, &mut mode) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(mode & ENABLE_ECHO_INPUT == 0)
+    }
 }
 
 fn run_with_io<R, W, F>(
@@ -77,6 +178,7 @@ where
         read_secret,
     };
     let config_path = absolute_path(&environment.current_dir, &args.config);
+    refuse_symlinked_config(&config_path)?;
     let mut file_config = read_config(&config_path)?;
     if file_config
         .get("openaiTunnel")
@@ -151,13 +253,7 @@ where
     let command = launch_command(&environment.executable, &work_dir, &config_path);
     writeln!(wizard.output, "\nLaunch command:\n  {command}")?;
 
-    print_connector_step(
-        &mut wizard,
-        &connector_name,
-        &tunnel_id,
-        &work_dir,
-        multi_project,
-    )?;
+    print_connector_step(&mut wizard, &connector_name, &tunnel_id, multi_project)?;
     let start_server = wizard.confirm(
         "Start Codexify now and keep this terminal open while ChatGPT scans the connector?",
         true,
@@ -406,7 +502,6 @@ fn print_connector_step<R, W, F>(
     wizard: &mut Wizard<'_, R, W, F>,
     connector_name: &str,
     tunnel_id: &str,
-    work_dir: &Path,
     multi_project: bool,
 ) -> anyhow::Result<()>
 where
@@ -414,10 +509,10 @@ where
     W: Write,
     F: FnMut(&str, &mut W) -> io::Result<String>,
 {
-    let scope = if multi_project {
-        format!("projects below {}", work_dir.display())
+    let description = if multi_project {
+        "Local Codex-style tools with per-chat project selection"
     } else {
-        work_dir.display().to_string()
+        "Local Codex-style file, shell, Git, and MCP tools"
     };
     writeln!(wizard.output, "\n3. Add the connector in ChatGPT Web")?;
     writeln!(
@@ -431,10 +526,7 @@ where
     writeln!(wizard.output, "   Open: {CHATGPT_PLUGINS_URL}")?;
     writeln!(wizard.output, "   Click the + button and enter:")?;
     writeln!(wizard.output, "     Name: {connector_name}")?;
-    writeln!(
-        wizard.output,
-        "     Description: Local Codex-style file, shell, Git, and MCP tools for {scope}"
-    )?;
+    writeln!(wizard.output, "     Description: {description}")?;
     writeln!(wizard.output, "     Connection: Tunnel")?;
     writeln!(
         wizard.output,
@@ -517,12 +609,7 @@ fn read_config(path: &Path) -> anyhow::Result<Map<String, Value>> {
 }
 
 fn write_config(path: &Path, config: &Map<String, Value>) -> anyhow::Result<()> {
-    if fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
-        bail!(
-            "refusing to replace symlinked config file {}",
-            path.display()
-        );
-    }
+    refuse_symlinked_config(path)?;
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -538,6 +625,16 @@ fn write_config(path: &Path, config: &Map<String, Value>) -> anyhow::Result<()> 
     preserve_permissions(path, temp.path())?;
     persist_replacing(temp, path)
         .with_context(|| format!("replace config file {}", path.display()))?;
+    Ok(())
+}
+
+fn refuse_symlinked_config(path: &Path) -> anyhow::Result<()> {
+    if fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        bail!(
+            "refusing to replace symlinked config file {}",
+            path.display()
+        );
+    }
     Ok(())
 }
 
@@ -657,6 +754,8 @@ fn quote_shell_arg(value: &str) -> String {
 mod tests {
     use std::collections::VecDeque;
     use std::io::Cursor;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Condvar, Mutex};
 
     use clap::Parser;
     use serde_json::json;
@@ -667,6 +766,27 @@ mod tests {
 
     const TUNNEL_ID: &str = "tunnel_0123456789abcdef0123456789abcdef";
     const RUNTIME_KEY: &str = "sk-runtime-test-key_123";
+
+    struct GuardedPromptOutput {
+        bytes: Vec<u8>,
+        echo_is_disabled: Arc<AtomicBool>,
+        reader_release: Arc<(Mutex<bool>, Condvar)>,
+    }
+
+    impl Write for GuardedPromptOutput {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            assert!(self.echo_is_disabled.load(Ordering::Acquire));
+            self.bytes.extend_from_slice(bytes);
+            let (released, wake_reader) = &*self.reader_release;
+            *released.lock().unwrap() = true;
+            wake_reader.notify_one();
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
 
     fn environment(root: &TempDir, work_dir: &Path) -> QuickstartEnvironment {
         let home_dir = root.path().join("home");
@@ -708,6 +828,40 @@ mod tests {
             },
         );
         (result, String::from_utf8(output).unwrap())
+    }
+
+    #[test]
+    fn hidden_secret_prompt_is_published_only_after_echo_is_disabled() {
+        let echo_is_disabled = Arc::new(AtomicBool::new(false));
+        let reader_release = Arc::new((Mutex::new(false), Condvar::new()));
+        let reader_release_for_thread = Arc::clone(&reader_release);
+        let read_password = move || {
+            let (released, wake_reader) = &*reader_release_for_thread;
+            let mut released = released.lock().unwrap();
+            while !*released {
+                released = wake_reader.wait(released).unwrap();
+            }
+            Ok("secret".to_string())
+        };
+        let echo_for_probe = Arc::clone(&echo_is_disabled);
+        let mut probe_count = 0;
+        let mut output = GuardedPromptOutput {
+            bytes: Vec::new(),
+            echo_is_disabled,
+            reader_release,
+        };
+
+        let secret =
+            prompt_hidden_password_with("Runtime key", &mut output, read_password, move || {
+                probe_count += 1;
+                let disabled = probe_count > 1;
+                echo_for_probe.store(disabled, Ordering::Release);
+                Ok(disabled)
+            })
+            .unwrap();
+
+        assert_eq!(secret, "secret");
+        assert_eq!(output.bytes, b"Runtime key: ");
     }
 
     #[test]
@@ -901,6 +1055,32 @@ mod tests {
             fs::read_to_string(config_path).unwrap(),
             r#"{"openaiTunnel":"invalid"}"#
         );
+        assert!(!credentials.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_config_fails_before_writing_credentials() {
+        use std::os::unix::fs::symlink;
+
+        let root = TempDir::new().unwrap();
+        let project = root.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+        let target = project.join("actual.json");
+        let config_path = project.join("codex.config.json");
+        fs::write(&target, "{}").unwrap();
+        symlink(&target, &config_path).unwrap();
+        let environment = environment(&root, &project);
+        let credentials = environment.home_dir.join(".codexify");
+
+        let (result, _) = run_test_wizard(args(config_path, &project), environment, "", &[]);
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("refusing to replace symlinked config file")
+        );
+        assert_eq!(fs::read_to_string(target).unwrap(), "{}");
         assert!(!credentials.exists());
     }
 

@@ -333,6 +333,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "walkdir",
+ "windows-sys 0.59.0",
  "zeroize",
  "zip",
 ]
