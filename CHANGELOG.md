@@ -14,6 +14,15 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   now capped in RAM, keeping the head and tail and eliding the middle with a
   byte count, independent of the per-call token truncation.
 
+### Changed
+
+- The release workflow now publishes a `checksums.txt` covering every release
+  archive and fails if any published asset is missing a checksum, giving
+  downloaders something to verify against.
+- The release workflow asserts the pushed tag matches the `Cargo.toml` version
+  before building, so a mistagged release can no longer ship a binary whose
+  `--version` disagrees with its tag.
+
 ## [1.1.0] - 2026-08-24
 
 ### Added

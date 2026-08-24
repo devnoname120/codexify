@@ -22,6 +22,17 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: Verify tag matches Cargo.toml version
+        run: |
+          MANIFEST="$(cargo metadata --format-version=1 --no-deps \
+            | jq -r '.packages[] | select(.name == "codexify") | .version')"
+          EXPECTED="v${MANIFEST}"
+          if [ "${GITHUB_REF_NAME}" != "${EXPECTED}" ]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} does not match Cargo.toml version (${EXPECTED}). Bump Cargo.toml or retag."
+            exit 1
+          fi
+          echo "Tag ${GITHUB_REF_NAME} matches Cargo.toml version ${EXPECTED}."
+
       - name: Format
         run: cargo fmt --all --check
 
@@ -131,6 +142,25 @@ jobs:
         with:
           path: artifacts
           merge-multiple: true
+
+      - name: Create checksums
+        working-directory: artifacts
+        run: |
+          # Name the archives explicitly so checksums.txt cannot hash itself.
+          sha256sum codexify-* > checksums.txt
+          cat checksums.txt
+
+      - name: Verify every published asset is checksummed
+        working-directory: artifacts
+        run: |
+          status=0
+          for f in codexify-*; do
+            if ! grep -q "  ${f}\$" checksums.txt; then
+              echo "::error::Asset ${f} is missing from checksums.txt"
+              status=1
+            fi
+          done
+          exit "${status}"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
