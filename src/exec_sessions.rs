@@ -601,12 +601,37 @@ impl SessionState {
             return Ok(config.clone());
         }
 
-        let Some(project_root) = self.project_root.lock().unwrap().clone() else {
+        let Some(stored_root) = self.project_root.lock().unwrap().clone() else {
             return Err(format!(
                 "No project root is selected for this MCP transport session. If the exact path is unknown, call `list_projects` first. Then call `set_project_root` with a directory relative to the access root `{}`, followed by `get_agent_brief` before using project tools.",
                 config.work_dir.display()
             ));
         };
+
+        let access_root = std::fs::canonicalize(&config.work_dir).map_err(|error| {
+            format!(
+                "The configured project access root no longer exists or cannot be resolved: {}: {error}",
+                config.work_dir.display()
+            )
+        })?;
+        let project_root = std::fs::canonicalize(&stored_root).map_err(|error| {
+            format!(
+                "The project bound to this MCP transport session no longer exists or cannot be resolved: {}: {error}. Open a new session for another project.",
+                stored_root.display()
+            )
+        })?;
+        if !project_root.is_dir() {
+            return Err(format!(
+                "The project bound to this MCP transport session is no longer a directory: {}. Open a new session for another project.",
+                project_root.display()
+            ));
+        }
+        if project_root != access_root && !project_root.starts_with(&access_root) {
+            return Err(format!(
+                "The project bound to this MCP transport session now resolves outside the configured access root: {}. Open a new session for another project.",
+                project_root.display()
+            ));
+        }
 
         let mut effective = config.clone();
         effective.work_dir = project_root;

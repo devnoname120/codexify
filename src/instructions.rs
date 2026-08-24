@@ -61,6 +61,16 @@ pub const AGENT_BRIEF: &str = concat!(
     "- Offer natural next steps briefly — tests, a commit, a build — and say plainly what you could not verify yourself.",
 );
 
+fn configured_agent_brief(config: &AppConfig) -> String {
+    if !config.artifact_ingress.enabled {
+        return AGENT_BRIEF.to_string();
+    }
+
+    format!(
+        "{AGENT_BRIEF}\n\n## Host files\n\n- Use import_host_file when the user attaches a file or asks you to place a ChatGPT-generated file into the project. Do not reconstruct binary files through write_file or substitute an arbitrary URL."
+    )
+}
+
 /// The initialize-time instructions. Multi-project initialization deliberately
 /// omits project state because ChatGPT's conversation ID arrives on tool calls,
 /// after the MCP initialize exchange.
@@ -73,7 +83,7 @@ pub fn build_initial_instructions(config: &AppConfig) -> String {
     environment.cwd = "<not selected>".to_string();
 
     [
-        AGENT_BRIEF.to_string(),
+        configured_agent_brief(config),
         String::new(),
         "## Project selection".to_string(),
         String::new(),
@@ -102,7 +112,7 @@ pub fn build_initial_instructions(config: &AppConfig) -> String {
 pub fn build_instructions(config: &AppConfig) -> String {
     let doc = load_project_doc(config);
     let mut lines: Vec<String> = vec![
-        AGENT_BRIEF.to_string(),
+        configured_agent_brief(config),
         String::new(),
         "## Environment".to_string(),
         String::new(),

@@ -13,6 +13,7 @@ pub mod git_push;
 pub mod git_status;
 pub mod glob;
 pub mod grep;
+pub mod import_host_file;
 pub mod list_directory;
 pub mod list_projects;
 pub mod read_file;

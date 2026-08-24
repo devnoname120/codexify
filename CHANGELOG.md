@@ -40,6 +40,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A self-contained MCP Apps review resource linked from `show_changes`. Compatible
   ChatGPT developer connectors render file summaries and patches interactively;
   ordinary MCP clients continue to receive the same text and structured result.
+- Native ChatGPT file ingress through `import_host_file`. The tool declares the
+  OpenAI native-file parameter contract, streams one attachment or generated file
+  into a new active-project path, and returns the byte count and SHA-256 receipt.
+- `artifactIngress` configuration for enablement, per-file size, whole-request and
+  idle timeouts, redirect limits, and process-wide concurrent import limits.
 
 ### Fixed
 
@@ -58,6 +63,17 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   only hashed conversation identifiers in the dedicated `refs/codexify/review/`
   namespace. Mutating calls and reviews for one conversation/project scope are
   serialized through tool completion.
+- Native-file source URLs are restricted to HTTPS on OpenAI-owned
+  `oaiusercontent.com` hosts, with every redirect revalidated and ambient proxy
+  credentials disabled. Legacy Azure Blob hostnames are rejected because a
+  registrable storage-account prefix is not an ownership proof. Signed URLs and
+  file IDs are never returned or logged; RMCP framework events are excluded from
+  the tracing layer even when `RUST_LOG` requests them.
+- Imported files are written through a capability-confined project directory to a
+  private partial and atomically published without overwrite only after size,
+  synchronization, and SHA-256 processing complete. Traversal, moved or replaced
+  project roots, parent symlink escapes, existing destinations, partial visibility,
+  and concurrent replacement races fail closed.
 
 ## [1.2.0] - 2026-08-24
 

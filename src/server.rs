@@ -39,7 +39,7 @@ use crate::exec_sessions::{ConversationExecSessionStore, SessionState};
 use crate::instructions::build_initial_instructions;
 use crate::openai_tunnel::TunnelHealth;
 use crate::project_bindings::{ConversationIdentity, ProjectBindingStore};
-use crate::registry::load_tools_for_mode;
+use crate::registry::load_tools_for_config;
 use crate::review::{ReviewAvailability, ReviewCheckpointManager, ReviewOwner};
 use crate::review_ui;
 use crate::tool::{Tool, ToolRequestContext};
@@ -126,6 +126,26 @@ fn to_call_tool_result(result: ToolResult) -> CallToolResult {
     ctr
 }
 
+fn advertised_tool(tool: &dyn Tool, config: &AppConfig) -> rmcp::model::Tool {
+    let schema = tool.input_schema().as_object().cloned().unwrap_or_default();
+    let mut advertised = rmcp::model::Tool::new(tool.name(), tool.describe(config), schema);
+    if let Some(title) = tool.title() {
+        advertised = advertised.with_title(title);
+    }
+    if let Some(annotations) = tool.annotations() {
+        advertised = advertised.with_annotations(annotations);
+    }
+    if let Some(meta) = tool.meta() {
+        advertised = advertised.with_meta(meta);
+    }
+    if let Some(output) = tool.output_schema()
+        && let Some(object) = output.as_object()
+    {
+        advertised = advertised.with_raw_output_schema(Arc::new(object.clone()));
+    }
+    advertised
+}
+
 impl ServerHandler for CodexHandler {
     fn get_info(&self) -> ServerInfo {
         let mut capabilities = ServerCapabilities::builder()
@@ -154,23 +174,7 @@ impl ServerHandler for CodexHandler {
         let tools = self
             .tools
             .iter()
-            .map(|tool| {
-                let schema = tool.input_schema().as_object().cloned().unwrap_or_default();
-                let mut mcp_tool =
-                    rmcp::model::Tool::new(tool.name(), tool.describe(&self.config), schema);
-                if let Some(title) = tool.title() {
-                    mcp_tool = mcp_tool.with_title(title);
-                }
-                if let Some(meta) = tool.meta() {
-                    mcp_tool = mcp_tool.with_meta(meta);
-                }
-                if let Some(out) = tool.output_schema()
-                    && let Some(obj) = out.as_object()
-                {
-                    mcp_tool = mcp_tool.with_raw_output_schema(Arc::new(obj.clone()));
-                }
-                mcp_tool
-            })
+            .map(|tool| advertised_tool(tool.as_ref(), &self.config))
             .collect();
         Ok(ListToolsResult::with_all_items(tools))
     }
@@ -215,6 +219,7 @@ impl ServerHandler for CodexHandler {
         let tool_context = ToolRequestContext {
             conversation: conversation.clone(),
             review_checkpoints: self.review_checkpoints.clone(),
+            cancellation: context.ct.clone(),
         };
 
         // Keep `tool` as an Option so that even an unknown-tool call flows through
@@ -435,7 +440,7 @@ pub async fn start_http_server(mut config: AppConfig) -> anyhow::Result<()> {
     let bridge_report = bridge.report;
     let _bridge_services = bridge.services;
 
-    let mut all_tools = load_tools_for_mode(config.multi_project);
+    let mut all_tools = load_tools_for_config(&config);
     let native: std::collections::HashSet<&'static str> =
         all_tools.iter().map(|t| t.name()).collect();
     let mut seen = native.clone();
@@ -902,6 +907,28 @@ mod tests {
                     extensions.contains_key(review_ui::MCP_APPS_EXTENSION_ID)
                 })
         );
+    }
+
+    #[test]
+    fn tool_descriptor_preserves_native_file_metadata_and_annotations() {
+        let root = tempfile::tempdir().unwrap();
+        let config = crate::config::default_config(root.path().to_path_buf());
+        let tool = crate::tools::import_host_file::ImportHostFile::default();
+
+        let advertised = advertised_tool(&tool, &config);
+        assert_eq!(advertised.title.as_deref(), Some("Import attached file"));
+        assert_eq!(
+            advertised
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.get("openai/fileParams")),
+            Some(&json!(["file"]))
+        );
+        let annotations = advertised.annotations.unwrap();
+        assert_eq!(annotations.read_only_hint, Some(false));
+        assert_eq!(annotations.destructive_hint, Some(false));
+        assert_eq!(annotations.idempotent_hint, Some(false));
+        assert_eq!(annotations.open_world_hint, Some(true));
     }
 
     #[tokio::test]

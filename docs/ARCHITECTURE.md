@@ -4,7 +4,8 @@ A Rust port of the `codexify` MCP bridge. codexify is a local [Model Context
 Protocol](https://modelcontextprotocol.io) server that exposes Codex-style agent
 tools over **Streamable HTTP**, scoped either to one configured working directory
 or to a project root selected independently by each ChatGPT conversation, and can
-additionally **aggregate other local MCP servers** and **surface local skills**.
+additionally **aggregate other local MCP servers**, **surface local skills**, and
+materialize ChatGPT-native files inside the active project.
 Clients without ChatGPT conversation metadata use an MCP-transport-session fallback.
 
 This document explains how it is put together and why. For usage, see
@@ -89,7 +90,8 @@ Four surfaces reach the model:
    conversation identity arrives in request `_meta` on tool calls, after
    initialization.
 3. `tools/list` → `CodexHandler::list_tools` maps the shared tool registry into
-   rmcp `Tool` definitions, including optional titles and MCP Apps resource metadata.
+   rmcp `Tool` definitions, including optional titles, behavioral annotations,
+   OpenAI file-parameter metadata, and MCP Apps resource metadata.
    `resources/list` / `resources/read` expose the embedded review HTML.
 4. `tools/call` → `CodexHandler::call_tool` reads `openai/session` from rmcp's
    `RequestContext::meta`. rmcp moves wire-level request `_meta` into that context
@@ -149,6 +151,7 @@ trait Tool: Send + Sync {
     fn description(&self) -> String;
     fn describe(&self, cfg: &AppConfig) -> String;      // config-aware override
     fn title(&self) -> Option<String>;                  // host-facing card title
+    fn annotations(&self) -> Option<ToolAnnotations>;  // MCP behavior hints
     fn meta(&self) -> Option<MetaObject>;               // MCP Apps and extensions
     fn input_schema(&self) -> Value;
     fn output_schema(&self) -> Option<Value>;
@@ -209,7 +212,7 @@ The fully-resolved config handed to every tool. `config.rs` parses
 user-level Codex MCP definitions through `codex_mcp.rs`, opportunistically adds
 plugin-provided entries from the Codex CLI's effective catalogue, then applies
 explicit `mcpServers` entries as field overlays. Optional sub-configs (`projectDoc`,
-`projectCatalog`, `output`, `review`, `memory`, `skills`, `ignore`, `audit`) fall
+`projectCatalog`, `output`, `review`, `artifactIngress`, `memory`, `skills`, `ignore`, `audit`) fall
 back to per-module defaults. In multi-project mode, dispatch clones this config per
 call and substitutes the conversation's selected root—or the transport fallback—for
 `work_dir`; the static server policy, catalogue overlay, and bridge configuration
@@ -250,6 +253,9 @@ ordinary supervised server lifecycle; there is no separate quickstart runtime.
   version, tools/resources capabilities, the `io.modelcontextprotocol/ui` extension,
   and the `instructions`. The review resource is embedded in the binary and has no
   external network or asset dependency.
+- **Tool descriptors** preserve generic titles, MCP annotations and `_meta`
+  extensions. `import_host_file` uses this path for
+  `_meta["openai/fileParams"]`; the server has no tool-name special case.
 - **Errors**: a tool that fails returns `Ok(CallToolResult::error(...))`
   (`isError: true`) so the caller sees the message; only an unknown tool name is
   an error *result* as well. Protocol errors are avoided.
@@ -290,11 +296,11 @@ a private per-run temporary directory and are removed after shutdown.
 
 ---
 
-## 5. Native tools (26 default, 28 multi-project)
+## 5. Native tools (27 default, 29 multi-project)
 
 | Group | Tools |
 |-------|-------|
-| File / code | `read_file`, `write_file`, `apply_patch`, `glob`, `grep`, `list_directory`, `tree`, `view_image` |
+| File / code | `read_file`, `write_file`, `import_host_file`, `apply_patch`, `glob`, `grep`, `list_directory`, `tree`, `view_image` |
 | Commands | `run_command` (allowlisted argv), `exec_command` / `write_stdin` (resident shell sessions) |
 | Git / review | `git_status`, `show_changes`, `git_push`, `git_commit`, `git_log` |
 | Environment / project | `get_environment`, `get_project_doc`, `get_agent_brief` |
@@ -304,10 +310,11 @@ a private per-run temporary directory and are removed after shutdown.
 | Project selection (multi-project only) | `list_projects`, `set_project_root` |
 
 Multi-project mode prepends `list_projects` and `set_project_root`. Both are
-omitted entirely in the default registry, preserving the original 26-tool surface
-and behaviour. Catalogue discovery, selection, clocks, and bridged/gateway tools
-are project-independent; every other native tool is blocked until a conversation
-binding or transport fallback is available.
+omitted entirely in the default registry, preserving the 27-tool default surface
+and behaviour. `artifactIngress.enabled = false` independently removes
+`import_host_file`, reducing either count by one. Catalogue discovery, selection,
+clocks, and bridged/gateway tools are project-independent; every other native tool
+is blocked until a conversation binding or transport fallback is available.
 
 Each lives in `src/tools/<name>.rs`; the registry (`registry.rs`) lists them in
 the original order and rejects duplicate names.
@@ -319,6 +326,8 @@ the original order and rejects duplicate names.
 | Module | Responsibility |
 |--------|----------------|
 | `safe_path.rs` | Lexical path-traversal guard (no `canonicalize`; component-wise containment). The security boundary for every filesystem tool. |
+| `artifact_ingress/` | OpenAI native-file validation and streaming plus capability-confined, atomic no-overwrite workspace publication. It never accepts an arbitrary URL or local source path. |
+| `logging.rs` | Tracing initialization plus a non-overridable filter that suppresses RMCP framework events, preventing native-file bearer URLs from appearing in logs before tool dispatch or malformed-session errors. |
 | `output_budget.rs` | Line/byte windowing and list caps, each cut announced with the continuation argument. |
 | `audit.rs` | Private append-only JSONL tool lifecycle records, stable hashed identities, redacted argument summaries, output accounting, and opt-in bounded command previews. |
 | `logging.rs` | Default tracing filters for normal, `-v`, and `-vv` operation; an explicit `RUST_LOG` remains authoritative. |
@@ -462,6 +471,9 @@ startup banner prints the exact file with `Config:`). All fields optional.
   "review": { "maxPatchBytes": 524288 },
   "audit": { "logFile": null, "includeCommandPreview": false,
              "commandPreviewMaxBytes": 512, "redactEnv": [] },
+  "artifactIngress": { "enabled": true, "maxFileBytes": 104857600,
+                       "requestTimeoutMs": 120000, "idleTimeoutMs": 30000,
+                       "maxRedirects": 3, "maxConcurrentDownloads": 2 },
   "projectDoc": { "maxBytes": 32768, "fallbackFilenames": [], "rootMarkers": [".git"] },
   "memory": { "enabled": true, "dir": "…", "maxBytes": 16384 },
   "skills": { "enabled": true, "dirs": ["…"], "includePlugins": true },
@@ -504,7 +516,7 @@ Audit command previews: disabled
   internal bearer are never printed.
 - Multi-project startup also prints `Project access root:`, `Project mode:
   persistent ChatGPT conversation binding`, and the conversation-binding state
-  directory; its native count is 28 because the selectors are present.
+  directory; its native count is 29 because the selectors are present.
 - `-v` and `-vv` increase Codexify diagnostics without dumping raw tool payloads;
   `RUST_LOG` overrides those defaults. When audit logging is configured, the banner
   prints its destination and whether command previews are enabled.
@@ -543,6 +555,10 @@ units to match the TS `text.length` / `text.slice`.
   byte-for-byte real-index preservation, persistent and transport owners, live ref
   reset, mutation/review serialization, incremental baselines, unborn repositories,
   malformed Git state, renames, deletions, binaries, relative patches, and patch-budget omission.
+- `artifact_ingress` unit tests use scripted response bodies and capability-rooted
+  temporary directories to cover provider-host validation, redirects, declared
+  and streamed size limits, idle and caller cancellation, exact hashes, partial
+  cleanup, symlink escapes, no-overwrite publication, and concurrent writers.
 - `tests/review_fixes.rs` locks the behavioral-fidelity fixes found by the
   adversarial review of the port. The bridge/gateway/skills code was reviewed the
   same way; the confirmed low-severity findings (name-collision dedup, YAML-safe
@@ -561,8 +577,10 @@ Run: `cargo test`. Build a standalone binary: `cargo build --release`.
 |---------|-------------|
 | Bridged tools don't appear; banner shows `-> FAILED` | The `command` path isn't a runnable stdio binary **on the machine where codexify runs**. Fix the path or run the server locally. |
 | Banner shows a server you didn't configure (e.g. `idasql -> disabled`) | codexify loaded a *different* `codex.config.json` than you edited. Check the `Config:` line and edit that file, or pass `--config`. |
-| codexify exposes the tools (`Tools loaded (109)`) but the client shows only 25 | The client caches the tool manifest — **remove and re-add the connector** so it re-fetches `tools/list`. There is no tool-count cap at 109 (the hard API cap is 128). |
+| codexify exposes a newer tool set but the client still shows the old one | The client caches the tool manifest — **remove and re-add the connector** so it re-fetches `tools/list`. |
 | A client won't surface a large bridged set at all | Use `"mode": "gateway"` to collapse the server into one tool + a skill, or `"tools": [...]` to expose a curated few. |
 | Upstream `type: "sse"`/`"http"` | Not bridged yet (stdio only); reported as unsupported instead of breaking the config. |
 | Native tunnel never becomes ready | Check the banner's loopback `/readyz` and `/metrics` URLs and the redacted startup error. Codexify requires runtime readiness plus one successful control-plane poll; the runtime key needs the applicable Tunnels **Read** + **Use** permissions. The runtime-only binary has no `/ui` or `/api/status` surface. |
 | Native tunnel key is rejected before startup | `apiKeyRef` must be `env:NAME` or `file:/path`. The referenced value must exist; on Unix, key files must not grant group/other access. |
+| `import_host_file` is missing | `artifactIngress.enabled` is false, or the connector cached an older manifest. Enable it and remove/re-add the connector so ChatGPT refreshes `tools/list`. |
+| Native file import reports an untrusted URL | The supplied value was not a ChatGPT-native file parameter or its temporary provider URL no longer matches the supported OpenAI file-service boundary. Reattach or regenerate the file instead of passing a URL manually. |

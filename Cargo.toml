@@ -40,12 +40,19 @@ getrandom = "0.2"
 tokio-util = "0.7"
 zeroize = "1"
 rpassword = "7"
+bytes = "1"
+cap-std = "4.0.3"
+same-file = "1"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Console"] }
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_Console",
+    "Win32_Storage_FileSystem",
+] }
 
 # `thin` LTO keeps nearly all of full-LTO's runtime benefit for an I/O-bound
 # MCP server while cutting release build time roughly in half; the default

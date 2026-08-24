@@ -17,7 +17,7 @@ use tempfile::TempDir;
 
 use codexify::config::default_config;
 use codexify::exec_sessions::SessionState;
-use codexify::registry::{load_tools, load_tools_for_mode};
+use codexify::registry::{load_tools, load_tools_for_config, load_tools_for_mode};
 use codexify::safe_path::resolve_safe_path;
 use codexify::tool::Tool;
 use codexify::types::{AppConfig, ToolContent, ToolResult};
@@ -25,17 +25,29 @@ use codexify::types::{AppConfig, ToolContent, ToolResult};
 // ─── registry.test.ts ──────────────────────────────────────────────────
 
 #[test]
-fn loads_all_26_tools() {
+fn loads_all_27_tools() {
     let tools = load_tools();
-    assert_eq!(tools.len(), 26);
+    assert_eq!(tools.len(), 27);
 }
 
 #[test]
 fn multi_project_mode_adds_catalogue_and_session_selector() {
     let tools = load_tools_for_mode(true);
-    assert_eq!(tools.len(), 28);
+    assert_eq!(tools.len(), 29);
     assert_eq!(tools[0].name(), "list_projects");
     assert_eq!(tools[1].name(), "set_project_root");
+}
+
+#[test]
+fn artifact_ingress_can_be_omitted_by_configuration() {
+    let mut config = default_config(PathBuf::from("/tmp"));
+    config.artifact_ingress.enabled = false;
+    let names = load_tools_for_config(&config)
+        .into_iter()
+        .map(|tool| tool.name())
+        .collect::<Vec<_>>();
+    assert_eq!(names.len(), 26);
+    assert!(!names.contains(&"import_host_file"));
 }
 
 #[test]
@@ -73,6 +85,7 @@ fn includes_expected_tool_names() {
     for expected in [
         "read_file",
         "write_file",
+        "import_host_file",
         "run_command",
         "git_status",
         "show_changes",
@@ -368,6 +381,7 @@ fn tools_that_need_their_own_structured_content() {
             "exec_command".to_string(),
             "get_environment".to_string(),
             "get_project_doc".to_string(),
+            "import_host_file".to_string(),
             "show_changes".to_string(),
             "skills_list".to_string(),
             "write_stdin".to_string(),

@@ -140,6 +140,43 @@ async fn sessions_are_isolated_to_their_selected_roots() {
     assert!(sibling.joined_text().contains("within work directory"));
 }
 
+#[test]
+fn transport_project_binding_fails_closed_when_the_selected_root_disappears() {
+    let root = TempDir::new().unwrap();
+    let access = root.path().join("projects");
+    let project = access.join("alpha");
+    fs::create_dir_all(&project).unwrap();
+    let config = multi_project_config(&access);
+    let session = SessionState::new();
+    session.select_project_root(&config, "alpha").unwrap();
+
+    fs::remove_dir_all(&project).unwrap();
+    let error = session.effective_config(&config).unwrap_err();
+    assert!(error.contains("no longer exists"), "{error}");
+}
+
+#[cfg(unix)]
+#[test]
+fn transport_project_binding_rejects_a_replacement_symlink_outside_the_access_root() {
+    let root = TempDir::new().unwrap();
+    let access = root.path().join("projects");
+    let project = access.join("alpha");
+    let outside = root.path().join("outside");
+    fs::create_dir_all(&project).unwrap();
+    fs::create_dir_all(&outside).unwrap();
+    let config = multi_project_config(&access);
+    let session = SessionState::new();
+    session.select_project_root(&config, "alpha").unwrap();
+
+    fs::remove_dir_all(&project).unwrap();
+    std::os::unix::fs::symlink(&outside, &project).unwrap();
+    let error = session.effective_config(&config).unwrap_err();
+    assert!(
+        error.contains("outside the configured access root"),
+        "{error}"
+    );
+}
+
 #[tokio::test]
 async fn command_and_git_tools_use_the_selected_root() {
     let root = TempDir::new().unwrap();

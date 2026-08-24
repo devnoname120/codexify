@@ -7,8 +7,9 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use rmcp::model::MetaObject;
+use rmcp::model::{MetaObject, ToolAnnotations};
 use serde_json::Value;
+use tokio_util::sync::CancellationToken;
 
 use crate::exec_sessions::SessionState;
 use crate::project_bindings::ConversationIdentity;
@@ -19,6 +20,9 @@ use crate::types::{AppConfig, ToolResult};
 pub struct ToolRequestContext {
     pub conversation: Option<ConversationIdentity>,
     pub review_checkpoints: Arc<ReviewCheckpointManager>,
+    /// Cancelled when the transport drops or a per-call deadline (e.g. the
+    /// artifact-ingress idle timeout) fires, so long-running tools can abort.
+    pub cancellation: CancellationToken,
 }
 
 #[async_trait]
@@ -38,6 +42,11 @@ pub trait Tool: Send + Sync {
 
     /// Optional human-readable title for hosts that render tool cards.
     fn title(&self) -> Option<String> {
+        None
+    }
+
+    /// Optional MCP tool annotations (read-only / destructive hints).
+    fn annotations(&self) -> Option<ToolAnnotations> {
         None
     }
 

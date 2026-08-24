@@ -7,20 +7,46 @@
 
 use crate::tool::Tool;
 use crate::tools;
+use crate::types::{AppConfig, DEFAULT_ARTIFACT_MAX_CONCURRENT_DOWNLOADS};
 
 pub fn load_tools() -> Vec<Box<dyn Tool>> {
-    load_tools_for_mode(false)
+    load_tools_with_options(false, true, DEFAULT_ARTIFACT_MAX_CONCURRENT_DOWNLOADS)
 }
 
 pub fn load_tools_for_mode(multi_project: bool) -> Vec<Box<dyn Tool>> {
+    load_tools_with_options(
+        multi_project,
+        true,
+        DEFAULT_ARTIFACT_MAX_CONCURRENT_DOWNLOADS,
+    )
+}
+
+pub fn load_tools_for_config(config: &AppConfig) -> Vec<Box<dyn Tool>> {
+    load_tools_with_options(
+        config.multi_project,
+        config.artifact_ingress.enabled,
+        config.artifact_ingress.max_concurrent_downloads,
+    )
+}
+
+fn load_tools_with_options(
+    multi_project: bool,
+    artifact_ingress_enabled: bool,
+    max_concurrent_downloads: usize,
+) -> Vec<Box<dyn Tool>> {
     let mut all: Vec<Box<dyn Tool>> = Vec::new();
     if multi_project {
         all.push(Box::new(tools::list_projects::ListProjects));
         all.push(Box::new(tools::set_project_root::SetProjectRoot));
     }
+    all.push(Box::new(tools::read_file::ReadFile));
+    all.push(Box::new(tools::write_file::WriteFile));
+    if artifact_ingress_enabled {
+        all.push(Box::new(tools::import_host_file::ImportHostFile::new(
+            max_concurrent_downloads,
+        )));
+    }
     all.extend([
-        Box::new(tools::read_file::ReadFile),
-        Box::new(tools::write_file::WriteFile),
         Box::new(tools::run_command::RunCommand),
         Box::new(tools::git_status::GitStatus),
         Box::new(tools::show_changes::ShowChanges),
@@ -52,7 +78,7 @@ pub fn load_tools_for_mode(multi_project: bool) -> Vec<Box<dyn Tool>> {
         // Codex's skills.list / skills.read.
         Box::new(tools::skills_list::SkillsList),
         Box::new(tools::skills_read::SkillsRead),
-    ] as [Box<dyn Tool>; 26]);
+    ] as [Box<dyn Tool>; 24]);
 
     let mut seen = std::collections::HashSet::new();
     for tool in &all {
