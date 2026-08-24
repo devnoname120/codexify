@@ -6,6 +6,16 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Optional Codex CLI enrichment for MCP discovery. By default Codexify uses
+  `codex mcp list/get --json` when the executable is available, adding MCP
+  servers contributed by enabled Codex plugins while retaining direct
+  `config.toml` parsing as the standalone fallback. Missing or incompatible CLI
+  discovery warns in automatic mode; `--codex-cli` makes it a startup error.
+  `codexMcp.useCli` disables enrichment and `codexMcp.cliPath` selects an
+  explicit executable.
+
 ## [1.2.0] - 2026-08-24
 
 ### Added

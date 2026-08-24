@@ -4,6 +4,7 @@
 //! original camelCase name, absent sections fall back to the same defaults the
 //! TypeScript used, and a missing config file is tolerated.
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use clap::Parser;
@@ -11,7 +12,10 @@ use serde::Deserialize;
 
 use std::collections::HashMap;
 
-use crate::codex_mcp::{codex_config_path, discover_codex_mcp_servers};
+use crate::codex_mcp::{
+    CodexMcpImport, codex_config_path, discover_additional_codex_mcp_servers_with_cli,
+    discover_codex_mcp_servers,
+};
 use crate::types::{
     AppConfig, CommandConfig, ExecConfig, ExecMode, IgnoreConfig, McpServerSpec, MemoryConfig,
     OpenAiTunnelConfig, OutputConfig, ProjectDocConfig, SkillsConfig, TreeConfig,
@@ -43,6 +47,11 @@ pub struct Cli {
     /// Config file path. Default: ./codex.config.json (tolerated if missing).
     #[arg(long)]
     pub config: Option<String>,
+
+    /// Require Codex CLI-backed MCP discovery. Without this flag, the CLI is
+    /// used automatically when available and config.toml remains the fallback.
+    #[arg(long = "codex-cli")]
+    pub codex_cli: bool,
 
     /// Existing OpenAI Secure MCP Tunnel id. Enables the outbound native tunnel.
     #[arg(long = "openai-tunnel-id")]
@@ -146,11 +155,17 @@ struct PartialOpenAiTunnel {
 #[serde(rename_all = "camelCase")]
 struct CodexMcpConfig {
     enabled: Option<bool>,
+    use_cli: Option<bool>,
+    cli_path: Option<String>,
 }
 
 impl CodexMcpConfig {
     fn enabled(&self) -> bool {
         self.enabled.unwrap_or(true)
+    }
+
+    fn use_cli(&self) -> bool {
+        self.use_cli.unwrap_or(true)
     }
 }
 
@@ -279,45 +294,126 @@ fn merge_mcp_servers(
     (imported, report)
 }
 
-fn resolve_mcp_servers(file: &mut FileConfig) -> HashMap<String, McpServerSpec> {
-    let discovery_enabled = file.codex_mcp.take().unwrap_or_default().enabled();
+fn codex_cli_command(settings: &CodexMcpConfig) -> OsString {
+    let raw = settings
+        .cli_path
+        .as_ref()
+        .filter(|value| !value.trim().is_empty())
+        .map(OsString::from)
+        .or_else(|| std::env::var_os("CODEX_CLI_PATH").filter(|value| !value.is_empty()))
+        .unwrap_or_else(|| OsString::from("codex"));
+    let path = PathBuf::from(&raw);
+    if path.is_absolute() || path.components().count() > 1 {
+        if path.is_absolute() {
+            path.into_os_string()
+        } else {
+            std::env::current_dir()
+                .unwrap_or_default()
+                .join(path)
+                .into_os_string()
+        }
+    } else {
+        raw
+    }
+}
+
+fn print_discovery_report(header: &str, report: &[String]) {
+    if report.is_empty() {
+        return;
+    }
+    println!("{header}");
+    for line in report {
+        println!("  {line}");
+    }
+}
+
+fn resolve_mcp_servers(
+    file: &mut FileConfig,
+    cli: &Cli,
+) -> Result<HashMap<String, McpServerSpec>, String> {
+    resolve_mcp_servers_from(file, cli, codex_config_path(), None)
+}
+
+fn resolve_mcp_servers_from(
+    file: &mut FileConfig,
+    cli: &Cli,
+    config_path_result: Result<PathBuf, String>,
+    command_override: Option<OsString>,
+) -> Result<HashMap<String, McpServerSpec>, String> {
+    let settings = file.codex_mcp.take().unwrap_or_default();
+    let discovery_enabled = cli.codex_cli || settings.enabled();
     let explicit = file.mcp_servers.take().unwrap_or_default();
 
     if !discovery_enabled {
         println!("Codex MCP discovery: disabled by codexMcp.enabled=false");
-        return merge_mcp_servers(HashMap::new(), explicit).0;
+        return Ok(merge_mcp_servers(HashMap::new(), explicit).0);
     }
 
-    let path = match codex_config_path() {
-        Ok(path) => path,
+    let mut imported = CodexMcpImport::default();
+    let config_path = match config_path_result {
+        Ok(path) => Some(path),
         Err(error) => {
-            println!("Codex MCP discovery: skipped ({error})");
-            return merge_mcp_servers(HashMap::new(), explicit).0;
+            println!("Codex MCP config discovery: skipped ({error})");
+            None
         }
     };
 
-    let discovery = match discover_codex_mcp_servers(&path) {
-        Ok(Some(discovery)) => discovery,
-        Ok(None) => return merge_mcp_servers(HashMap::new(), explicit).0,
-        Err(error) => {
-            println!(
-                "Codex MCP discovery: failed for {} ({error})",
-                path.display()
-            );
-            return merge_mcp_servers(HashMap::new(), explicit).0;
+    if let Some(path) = &config_path {
+        match discover_codex_mcp_servers(path) {
+            Ok(Some(discovery)) => imported = discovery,
+            Ok(None) => {}
+            Err(error) => {
+                println!(
+                    "Codex MCP config discovery: failed for {} ({error})",
+                    path.display()
+                );
+            }
         }
-    };
+        print_discovery_report(
+            &format!("Codex MCP config discovery: {}", path.display()),
+            &imported.report,
+        );
+    }
 
-    let (servers, overlay_report) = merge_mcp_servers(discovery.servers, explicit);
-    let mut report = discovery.report;
-    report.extend(overlay_report);
-    if !report.is_empty() {
-        println!("Codex MCP discovery: {}", path.display());
-        for line in report {
-            println!("  {line}");
+    if cli.codex_cli || settings.use_cli() {
+        let command = command_override.unwrap_or_else(|| codex_cli_command(&settings));
+        let cwd = config_path
+            .as_deref()
+            .and_then(Path::parent)
+            .filter(|path| path.is_dir());
+        match discover_additional_codex_mcp_servers_with_cli(&command, cwd, &imported.servers) {
+            Ok(cli_import) => {
+                let command_display = Path::new(&command).display();
+                if cli_import.report.is_empty() {
+                    println!(
+                        "Codex CLI MCP discovery: {command_display} (no additional MCP servers)"
+                    );
+                } else {
+                    print_discovery_report(
+                        &format!("Codex CLI MCP discovery: {command_display}"),
+                        &cli_import.report,
+                    );
+                }
+                for (name, spec) in cli_import.servers {
+                    imported.servers.entry(name).or_insert(spec);
+                }
+            }
+            Err(error) if cli.codex_cli => {
+                return Err(format!(
+                    "Codex CLI MCP discovery was required by --codex-cli, but failed: {error}"
+                ));
+            }
+            Err(error) => {
+                eprintln!(
+                    "Warning: Codex CLI MCP discovery is unavailable ({error}). Continuing without CLI enrichment; only directly parsed config.toml MCP servers are available, so servers contributed by Codex plugins may be missing. Pass --codex-cli to make this a startup error."
+                );
+            }
         }
     }
-    servers
+
+    let (servers, overlay_report) = merge_mcp_servers(imported.servers, explicit);
+    print_discovery_report("Codex MCP overrides:", &overlay_report);
+    Ok(servers)
 }
 
 /// A fully-defaulted config for a given work directory, matching what
@@ -544,7 +640,7 @@ pub fn load_config(cli: Cli) -> Result<AppConfig, String> {
         }
     }
 
-    let mcp_servers = resolve_mcp_servers(&mut file);
+    let mcp_servers = resolve_mcp_servers(&mut file, &cli)?;
     let openai_tunnel = resolve_openai_tunnel(file.openai_tunnel, &cli)?;
     let api_key = cli.api_key.or(file.api_key);
     if api_key.is_some() && openai_tunnel.is_some() {
@@ -603,6 +699,7 @@ mod tests {
             port: None,
             api_key: None,
             config: Some(config.to_string_lossy().into_owned()),
+            codex_cli: false,
             openai_tunnel_id: None,
             openai_tunnel_api_key_ref: None,
             openai_tunnel_client: None,
@@ -661,7 +758,11 @@ mod tests {
     fn json_config_accepts_partial_camel_case_overlay() {
         let file: FileConfig = serde_json::from_str(
             r#"{
-                "codexMcp": { "enabled": false },
+                "codexMcp": {
+                    "enabled": false,
+                    "useCli": false,
+                    "cliPath": "/opt/codex/bin/codex"
+                },
                 "mcpServers": {
                     "demo": {
                         "mode": "gateway",
@@ -672,7 +773,10 @@ mod tests {
         )
         .unwrap();
 
-        assert!(!file.codex_mcp.as_ref().unwrap().enabled());
+        let codex_mcp = file.codex_mcp.as_ref().unwrap();
+        assert!(!codex_mcp.enabled());
+        assert!(!codex_mcp.use_cli());
+        assert_eq!(codex_mcp.cli_path.as_deref(), Some("/opt/codex/bin/codex"));
         let demo = file.mcp_servers.as_ref().unwrap().get("demo").unwrap();
         assert_eq!(demo.mode.as_deref(), Some("gateway"));
         assert_eq!(
@@ -683,12 +787,106 @@ mod tests {
     }
 
     #[test]
+    fn codex_cli_flag_marks_cli_discovery_as_required() {
+        let parsed = Cli::try_parse_from(["codexify", "--work-dir", ".", "--codex-cli"]).unwrap();
+        assert!(parsed.codex_cli);
+    }
+
+    #[test]
+    fn automatic_cli_failure_falls_back_but_explicit_flag_errors() {
+        let root = tempfile::tempdir().unwrap();
+        let codex_config = root.path().join("config.toml");
+        std::fs::write(
+            &codex_config,
+            "[mcp_servers.global]\ncommand = \"global-server\"\n",
+        )
+        .unwrap();
+        let missing_cli = root.path().join("missing-codex-cli").into_os_string();
+
+        let mut automatic_file = FileConfig {
+            codex_mcp: Some(CodexMcpConfig {
+                enabled: Some(true),
+                use_cli: Some(true),
+                cli_path: None,
+            }),
+            ..Default::default()
+        };
+        let automatic = resolve_mcp_servers_from(
+            &mut automatic_file,
+            &cli(root.path(), &root.path().join("codex.config.json")),
+            Ok(codex_config.clone()),
+            Some(missing_cli.clone()),
+        )
+        .unwrap();
+        assert_eq!(
+            automatic
+                .get("global")
+                .and_then(|server| server.command.as_deref()),
+            Some("global-server")
+        );
+
+        let mut required_file = FileConfig {
+            codex_mcp: Some(CodexMcpConfig {
+                enabled: Some(false),
+                use_cli: Some(false),
+                cli_path: None,
+            }),
+            ..Default::default()
+        };
+        let mut required_cli = cli(root.path(), &root.path().join("codex.config.json"));
+        required_cli.codex_cli = true;
+        let error = resolve_mcp_servers_from(
+            &mut required_file,
+            &required_cli,
+            Ok(codex_config),
+            Some(missing_cli),
+        )
+        .unwrap_err();
+        assert!(error.contains("required by --codex-cli"));
+        assert!(error.contains("was not found"));
+    }
+
+    #[test]
+    fn use_cli_false_keeps_direct_import_without_starting_the_cli() {
+        let root = tempfile::tempdir().unwrap();
+        let codex_config = root.path().join("config.toml");
+        std::fs::write(
+            &codex_config,
+            "[mcp_servers.global]\ncommand = \"global-server\"\n",
+        )
+        .unwrap();
+        let mut file = FileConfig {
+            codex_mcp: Some(CodexMcpConfig {
+                enabled: Some(true),
+                use_cli: Some(false),
+                cli_path: None,
+            }),
+            ..Default::default()
+        };
+
+        let servers = resolve_mcp_servers_from(
+            &mut file,
+            &cli(root.path(), &root.path().join("codex.config.json")),
+            Ok(codex_config),
+            Some(root.path().join("missing-codex-cli").into_os_string()),
+        )
+        .unwrap();
+
+        assert_eq!(
+            servers
+                .get("global")
+                .and_then(|server| server.command.as_deref()),
+            Some("global-server")
+        );
+    }
+
+    #[test]
     fn loads_native_tunnel_with_a_secret_reference_default() {
         let root = tempfile::tempdir().unwrap();
         let config_path = root.path().join("config.json");
         std::fs::write(
             &config_path,
-            r#"{"openaiTunnel":{"tunnelId":"tunnel_0123456789abcdef0123456789abcdef"}}"#,
+            r#"{"codexMcp":{"useCli":false},"openaiTunnel":{"tunnelId":"tunnel_0123456789abcdef0123456789abcdef"}}"#,
         )
         .unwrap();
 
@@ -705,7 +903,7 @@ mod tests {
         let config_path = root.path().join("config.json");
         std::fs::write(
             &config_path,
-            r#"{"openaiTunnel":{"tunnelId":"tunnel_0123456789abcdef0123456789abcdef","apiKeyRef":"sk-literal-secret-value"}}"#,
+            r#"{"codexMcp":{"useCli":false},"openaiTunnel":{"tunnelId":"tunnel_0123456789abcdef0123456789abcdef","apiKeyRef":"sk-literal-secret-value"}}"#,
         )
         .unwrap();
 
@@ -719,7 +917,7 @@ mod tests {
         let config_path = root.path().join("config.json");
         std::fs::write(
             &config_path,
-            r#"{"apiKey":"local-token","openaiTunnel":{"tunnelId":"tunnel_0123456789abcdef0123456789abcdef"}}"#,
+            r#"{"codexMcp":{"useCli":false},"apiKey":"local-token","openaiTunnel":{"tunnelId":"tunnel_0123456789abcdef0123456789abcdef"}}"#,
         )
         .unwrap();
 
@@ -733,7 +931,7 @@ mod tests {
         let config_path = root.path().join("config.json");
         std::fs::write(
             &config_path,
-            r#"{"openaiTunnel":{"tunnelId":"tunnel_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","apiKeyRef":"env:OLD_KEY"}}"#,
+            r#"{"codexMcp":{"useCli":false},"openaiTunnel":{"tunnelId":"tunnel_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","apiKeyRef":"env:OLD_KEY"}}"#,
         )
         .unwrap();
         let mut args = cli(root.path(), &config_path);
@@ -756,7 +954,7 @@ mod tests {
         let config_path = root.path().join("config.json");
         std::fs::write(
             &config_path,
-            r#"{"openaiTunnel":{"tunnelId":"tunnel_NOT_HEX"}}"#,
+            r#"{"codexMcp":{"useCli":false},"openaiTunnel":{"tunnelId":"tunnel_NOT_HEX"}}"#,
         )
         .unwrap();
 
@@ -765,7 +963,7 @@ mod tests {
 
         std::fs::write(
             &config_path,
-            r#"{"openaiTunnel":{"tunnelId":"tunnel_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}}"#,
+            r#"{"codexMcp":{"useCli":false},"openaiTunnel":{"tunnelId":"tunnel_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}}"#,
         )
         .unwrap();
         let error = load_config(cli(root.path(), &config_path)).unwrap_err();
@@ -773,7 +971,7 @@ mod tests {
 
         std::fs::write(
             &config_path,
-            r#"{"openaiTunnel":{"tunnelId":"tunnel_0123456789abcdefghijklmnopqrstuv"}}"#,
+            r#"{"codexMcp":{"useCli":false},"openaiTunnel":{"tunnelId":"tunnel_0123456789abcdefghijklmnopqrstuv"}}"#,
         )
         .unwrap();
         assert!(load_config(cli(root.path(), &config_path)).is_ok());

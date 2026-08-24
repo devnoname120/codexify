@@ -142,8 +142,9 @@ intentionally not persisted across reconnects.
 ### `AppConfig` (`types.rs`)
 The fully-resolved config handed to every tool. `config.rs` parses
 `codex.config.json` with camelCase field names for backward compatibility, imports
-user-level Codex MCP definitions through `codex_mcp.rs`, then applies explicit
-`mcpServers` entries as field overlays. Optional sub-configs (`projectDoc`,
+user-level Codex MCP definitions through `codex_mcp.rs`, opportunistically adds
+plugin-provided entries from the Codex CLI's effective catalogue, then applies
+explicit `mcpServers` entries as field overlays. Optional sub-configs (`projectDoc`,
 `output`, `memory`, `skills`, `ignore`) fall back to per-module defaults. In
 multi-project mode, dispatch clones this config per call and substitutes the
 conversation's selected root—or the transport fallback—for `work_dir`; the static
@@ -246,7 +247,7 @@ the original order and rejects duplicate names.
 | `process_env.rs` | Child-process environment boundaries: isolate the tunnel runtime and remove tunnel credentials from model-controlled and upstream subprocesses. |
 | `project_doc.rs` | `AGENTS.md` discovery from project root down to the work dir under a byte budget. Multi-project mode treats the selected directory as the exact project root and never walks into the common access-root parent. |
 | `skills.rs` | `SKILL.md` discovery (see §8). |
-| `codex_mcp.rs` | Read-only import of local stdio MCP definitions from `$CODEX_HOME/config.toml` or `~/.codex/config.toml`, with secret-safe diagnostics. |
+| `codex_mcp.rs` | Read-only import of local stdio MCP definitions from `$CODEX_HOME/config.toml` or `~/.codex/config.toml`, plus bounded `codex mcp list/get --json` enrichment for plugin-provided servers, with secret-safe diagnostics. |
 | `instructions.rs` | Assembles the agent brief + environment + saved state + skills + project doc. Multi-project initialization emits a project-neutral selector brief because conversation metadata is available only on subsequent tool calls; `get_agent_brief` builds the full brief after restoring or creating a binding. |
 | `environment.rs` | OS / shell / policy description, shared by `get_environment` and the instructions. |
 
@@ -260,9 +261,16 @@ tools at startup, and re-expose them. Implemented in `bridge.rs`; wired in
 
 ### Discovery
 Before bridging, `config.rs` imports compatible `[mcp_servers.<name>]` entries
-from Codex's user-level config. Explicit `codex.config.json.mcpServers` fields
-overlay imports with the same name; `codexMcp.enabled = false` disables the
-import. HTTP and non-local Codex entries are reported and skipped.
+from Codex's user-level config. Unless `codexMcp.useCli = false`, it then runs
+`codex mcp list --json` and fetches each additional server with `codex mcp get`
+so plugin-provided enablement and tool filters are preserved. `CODEX_CLI_PATH`
+or `codexMcp.cliPath` selects the executable; otherwise `codex` is resolved from
+`PATH`. Missing or incompatible CLI discovery is a warning in the default auto
+mode and a startup error when `--codex-cli` is supplied. Explicit
+`codex.config.json.mcpServers` fields overlay the combined imports with the same
+name; `codexMcp.enabled = false` disables automatic Codex import unless
+`--codex-cli` explicitly requires it. HTTP and non-local entries are reported
+and skipped.
 
 For each resulting server entry (sorted, non-disabled), `connect_one`:
 1. Launches the `command` as a stdio child process (`TokioChildProcess`).

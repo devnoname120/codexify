@@ -542,7 +542,11 @@ fn multi_project_mode_can_be_enabled_by_config_or_cli() {
     fs::create_dir_all(&access).unwrap();
 
     let enabled_config = root.path().join("enabled.json");
-    fs::write(&enabled_config, r#"{ "multiProject": true }"#).unwrap();
+    fs::write(
+        &enabled_config,
+        r#"{ "multiProject": true, "codexMcp": { "useCli": false } }"#,
+    )
+    .unwrap();
     let from_file = Cli::try_parse_from([
         "codexify",
         "--work-dir",
@@ -554,7 +558,11 @@ fn multi_project_mode_can_be_enabled_by_config_or_cli() {
     assert!(load_config(from_file).unwrap().multi_project);
 
     let disabled_config = root.path().join("disabled.json");
-    fs::write(&disabled_config, r#"{ "multiProject": false }"#).unwrap();
+    fs::write(
+        &disabled_config,
+        r#"{ "multiProject": false, "codexMcp": { "useCli": false } }"#,
+    )
+    .unwrap();
     let from_cli = Cli::try_parse_from([
         "codexify",
         "--work-dir",

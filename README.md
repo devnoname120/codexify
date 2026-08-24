@@ -37,6 +37,7 @@ flowchart LR
     Bindings[("~/.codexify\nconversation-projects")]
     SkillDirs[(".agents/skills\n.codex/skills\n.claude/skills")]
     CodexCfg[("$CODEX_HOME\nconfig.toml")]
+    CodexCli["optional Codex CLI\nmcp list/get --json"]
     Upstream[("Upstream MCP\nservers (stdio)")]
 
     ChatGPT <-->|"connector calls"| OpenAITunnel
@@ -68,11 +69,12 @@ flowchart LR
     Skills --> SkillDirs
     SetRoot --> Bindings
     SetRoot -.->|"selects"| WorkDir
-    CodexCfg -.->|"auto-import"| Bridge
+    CodexCfg -.->|"direct fallback"| Bridge
+    CodexCli -.->|"plugin/effective MCPs"| Bridge
     Bridge --> Upstream
 ```
 
-Dotted edges are conditional: `set_project_root` appears only in [multi-project mode](#multi-project-mode) and binds this conversation's project root, and the aggregator [auto-imports](#automatic-discovery-from-codex) the stdio MCP servers configured in Codex's own `config.toml` on top of any declared in `codex.config.json`.
+Dotted edges are conditional: `set_project_root` appears only in [multi-project mode](#multi-project-mode) and binds this conversation's project root. The aggregator [auto-imports](#automatic-discovery-from-codex) user-configured servers directly from Codex's `config.toml`, then uses the Codex CLI when available to add plugin-provided servers before applying any `codex.config.json` overlays.
 
 ## Quick start
 
@@ -138,6 +140,7 @@ Each release ships a compiled binary per platform — `windows-x64`, `linux-x64`
 | `--port` | No | `3000` | Server port |
 | `--api-key` | No | - | Bearer token for auth |
 | `--config` | No | `./codex.config.json` | Config file path (tolerated if missing) |
+| `--codex-cli` | No | Auto when available | Require successful Codex CLI-backed MCP discovery. When omitted, failure produces a warning and direct `config.toml` parsing remains the fallback |
 | `--openai-tunnel-id` | No | - | Existing OpenAI Secure MCP Tunnel ID; enables native tunnel mode |
 | `--openai-tunnel-api-key-ref` | No | `env:CONTROL_PLANE_API_KEY` | Runtime key reference in `env:NAME` or `file:/path` form |
 | `--openai-tunnel-client` | No | managed pinned runtime | Explicit `tunnel-client` or `tunnel-client-runtime` binary |
@@ -258,7 +261,8 @@ All project-scoped paths are resolved relative to the active project root: `--wo
     "includePlugins": true
   },
   "codexMcp": {
-    "enabled": true
+    "enabled": true,
+    "useCli": true
   },
   "openaiTunnel": {
     "tunnelId": "tunnel_0123456789abcdef0123456789abcdef",
@@ -344,7 +348,9 @@ The `codexMcp` block controls [automatic import of MCP servers configured in Cod
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `enabled` | `true` | Read the user-level Codex `config.toml` and merge its MCP servers into `mcpServers`; `false` disables all Codex-config discovery |
+| `enabled` | `true` | Import Codex MCP servers; `false` disables direct config and CLI discovery unless the explicit `--codex-cli` requirement overrides it |
+| `useCli` | `true` | Enrich direct config parsing with `codex mcp list/get --json`, which includes MCP servers contributed by enabled Codex plugins. `false` keeps direct `config.toml` parsing but does not invoke Codex |
+| `cliPath` | `CODEX_CLI_PATH`, then `codex` on `PATH` | Codex executable used for CLI enrichment. Relative paths resolve from the directory where Codexify was launched |
 
 The `openaiTunnel` block, `allowedHosts` array, and `mcpServers` map are covered under [Native OpenAI tunnel](#native-openai-tunnel-recommended), [Host allowlist](#host-allowlist), and [Bridging other MCP servers](#bridging-other-mcp-servers).
 
@@ -519,7 +525,7 @@ Codexify can also act as an **MCP aggregator**: it connects to your other local 
 
 ### Automatic discovery from Codex
 
-By default, Codexify imports the MCP servers from Codex's user-level configuration: `$CODEX_HOME/config.toml` when `CODEX_HOME` is set, otherwise `~/.codex/config.toml`. The file is read only; Codexify never rewrites it. This initial implementation intentionally does not reproduce Codex's project-local configuration layers or trust decisions.
+Codexify always has a standalone fallback: it reads `$CODEX_HOME/config.toml` when `CODEX_HOME` is set, otherwise `~/.codex/config.toml`. The file is read only; Codexify never rewrites it. This direct parser imports user-configured MCP servers without requiring a `codex` executable.
 
 For each `[mcp_servers.<name>]` entry, Codexify imports the fields it can preserve:
 
@@ -528,7 +534,11 @@ For each `[mcp_servers.<name>]` entry, Codexify imports the fields it can preser
 - `enabled = false` as a disabled upstream;
 - `enabled_tools` as an allow-list and `disabled_tools` as a deny-list applied afterwards.
 
-Streamable-HTTP entries (`url`) and non-local execution environments are skipped because the bridge currently supports only local stdio children. Other Codex-only fields are ignored explicitly: the startup report names those fields, but never prints environment values or other configuration values. A missing or unreadable Codex config does not prevent servers declared directly in `codex.config.json` from loading.
+By default, Codexify also tries `codex mcp list --json`. Servers present in Codex's effective catalogue but absent from `config.toml` are fetched with `codex mcp get <name> --json` so plugin-provided enablement and tool allow/deny lists are preserved. The executable is selected from `codexMcp.cliPath`, then `CODEX_CLI_PATH`, then `codex` on `PATH`. Each invocation is bounded to 30 seconds and 4 MiB of stdout, and its JSON is parsed in memory without logging literal environment values.
+
+When the CLI is missing, fails, times out, or returns incompatible JSON, normal startup continues with the direct `config.toml` result and prints a warning that plugin-provided MCP servers may be missing. Pass `--codex-cli` to make successful CLI discovery mandatory instead; the same condition then becomes a startup error. Set `"codexMcp": { "useCli": false }` to suppress CLI invocation while retaining direct config parsing.
+
+Streamable-HTTP entries (`url`) and non-local execution environments are skipped because the bridge currently supports only local stdio children. Other Codex-only fields are ignored explicitly: the startup report names those fields, but never prints environment values or other configuration values. A missing or unreadable Codex config does not prevent CLI-discovered or explicitly declared `codex.config.json` servers from loading.
 
 Disable discovery while retaining explicit upstreams with:
 
@@ -536,6 +546,14 @@ Disable discovery while retaining explicit upstreams with:
 {
   "codexMcp": { "enabled": false },
   "mcpServers": {}
+}
+```
+
+To keep direct Codex config import but never start the Codex CLI:
+
+```json
+{
+  "codexMcp": { "enabled": true, "useCli": false }
 }
 ```
 
@@ -573,8 +591,11 @@ Set an empty array or object to replace an imported collection with an empty one
 At startup you'll see, e.g.:
 
 ```
-Codex MCP discovery: /home/user/.codex/config.toml
-  idasql -> imported from Codex
+Codex MCP config discovery: /home/user/.codex/config.toml
+  idasql -> imported from Codex config
+Codex CLI MCP discovery: codex
+  idalib -> imported from Codex CLI (not present in config.toml)
+Codex MCP overrides:
   remote-exec -> imported fields overlaid by codex.config.json
 bridged MCP server 'idasql': 12 tool(s)
 Tools loaded (37): 25 native + 12 bridged from upstream MCP servers
@@ -649,7 +670,7 @@ Native tunnel mode ignores `allowedHosts` and forces the accepted authorities to
 - **Bounded state writes outside the work directory**: `remember` and `update_plan` write `memory.json` under `~/.codexify/projects/`. Multi-project mode also writes one small project-binding record under `~/.codexify/conversation-projects/` for each ChatGPT conversation and access root. Both use atomic replacement and per-record locks. The binding filename is derived from a hash of `openai/session`; the raw identifier is not stored. Set `memory.enabled` to `false` to disable plans and notes; delete `~/.codexify/conversation-projects/` separately to forget conversation bindings. See [Context and memory](#context-and-memory).
 - **Bounded reads outside the work directory**: [skills](#skills) may live in `~/.agents/skills`, `~/.codex/skills`, `~/.claude/skills` or an installed Claude Code plugin. `skills_read` opens files there, but only inside a skill package that already exists — the `resource` path is checked against the skill's own directory, so it cannot walk out into the rest of your home directory. `skills_list` reports the absolute path of every skill it found. Set `skills.enabled` to `false` to switch it off, or `skills.dirs` to point the user scope somewhere you choose.
 - **Command allowlist**: `run_command` only runs binaries listed in `allowedCommands`; everything else is rejected. `exec_command` checks the same list plus `exec.extraAllowedCommands`, at every command position in the string.
-- **Bridged servers run with your privileges**: an explicit `mcpServers` entry or an automatically imported Codex MCP launches a real process on your machine and forwards the model's calls to it verbatim. Only bridge servers you trust, prefer `tools`/`disabledTools` filters or `gateway` mode to keep the exposed surface small, and set `codexMcp.enabled` to `false` when Codex contains servers that should not be exposed through ChatGPT. A bad `command` path is reported, never silently ignored.
+- **Bridged servers run with your privileges**: an explicit `mcpServers` entry or an automatically imported Codex MCP—including one contributed by a Codex plugin—launches a real process on your machine and forwards the model's calls to it verbatim. Only bridge servers you trust, prefer `tools`/`disabledTools` filters or `gateway` mode to keep the exposed surface small, set `codexMcp.useCli` to `false` to exclude plugin-only discovery, or set `codexMcp.enabled` to `false` to disable all automatic Codex import. A bad `command` path is reported, never silently ignored.
 - **Native OpenAI tunnel is outbound-only**: Codexify binds its MCP listener to loopback and supervises OpenAI's official runtime-only tunnel client. Startup fails unless the runtime reports `/readyz` and completes a control-plane poll. Failure of either process stops the other, and HTTP shutdown has a bounded grace period before remaining connections are aborted.
 - **The loopback MCP hop is authenticated**: native mode generates a random per-process bearer token and configures the tunnel runtime to send it on MCP requests and discovery probes. The token is never printed, written to the config file, or inherited by model-launched commands and bridged MCP children.
 - **Verified tunnel-client installation**: the managed client is pinned to a specific official release and per-platform archive SHA-256 embedded in Codexify, extracted by exact filename under size limits, installed atomically with private permissions, and hash-checked against its installation manifest on subsequent starts. Set `clientPath` to opt out of managed installation while retaining compatibility checks.
