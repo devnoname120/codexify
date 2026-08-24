@@ -40,21 +40,20 @@ impl Tool for WriteStdin {
         Some(unified_exec_output_schema())
     }
 
+    fn uses_exec_session_state(&self) -> bool {
+        true
+    }
+
     async fn call(&self, args: Value, _config: &AppConfig, session: &SessionState) -> ToolResult {
         let Some(session_id) = arg_u64(&args, "session_id") else {
             return ToolResult::error("session_id must be a number");
         };
 
-        let exec_session = {
-            let map = session.exec_sessions.lock().unwrap();
-            map.get(&session_id).cloned()
-        };
+        let exec_session = session.exec_session(session_id);
         let Some(exec_session) = exec_session else {
             let live: Vec<String> = session
-                .exec_sessions
-                .lock()
-                .unwrap()
-                .keys()
+                .exec_session_ids()
+                .into_iter()
                 .map(|k| k.to_string())
                 .collect();
             let suffix = if live.is_empty() {
@@ -112,7 +111,7 @@ impl Tool for WriteStdin {
         let is_error = if exited {
             let code = exec_session.exit_code();
             result.exit_code = code;
-            session.exec_sessions.lock().unwrap().remove(&session_id);
+            session.remove_exec_session(session_id);
             code.unwrap_or(0) != 0
         } else {
             result.session_id = Some(session_id);

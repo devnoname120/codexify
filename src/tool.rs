@@ -49,6 +49,13 @@ pub trait Tool: Send + Sync {
         true
     }
 
+    /// Whether resident command state should follow a stable ChatGPT conversation
+    /// across replacement MCP transports. Only the unified exec pair opts in;
+    /// other mutable tool state retains transport-session ownership.
+    fn uses_exec_session_state(&self) -> bool {
+        false
+    }
+
     /// Run the tool. `args` is the arguments object (or `Value::Null` when the
     /// call named none).
     async fn call(&self, args: Value, config: &AppConfig, session: &SessionState) -> ToolResult;

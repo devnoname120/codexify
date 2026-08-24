@@ -17,7 +17,9 @@ use tokio::process::{ChildStdin, Command};
 use tokio::sync::{Mutex as TokioMutex, Notify};
 
 use crate::process_env::scrub_untrusted_child_env;
-use crate::project_bindings::{ProjectBindingScope, ProjectRootSelection, resolve_project_root};
+use crate::project_bindings::{
+    ConversationIdentity, ProjectBindingScope, ProjectRootSelection, resolve_project_root,
+};
 use crate::types::{AppConfig, PlanState};
 
 // Codex constants (shell_spec.rs). Kept as code, not config, because they are
@@ -328,25 +330,198 @@ impl ExecSession {
     }
 }
 
-/// Per-MCP-transport mutable state. A fresh instance is created for every MCP
-/// transport session so concurrent transports never share exec sessions or
-/// in-memory plans.
-/// Project-root state here is the fallback for clients without a durable
-/// conversation identifier.
+/// The resident-process portion of a session. Keeping this behind an `Arc`
+/// separates process lifetime from the lightweight per-call [`SessionState`]
+/// view used by tools. The last owner kills any still-running process trees.
+struct ExecSessionState {
+    sessions: StdMutex<HashMap<u64, Arc<ExecSession>>>,
+    next_id: AtomicU64,
+}
+
+impl ExecSessionState {
+    fn new() -> Self {
+        Self {
+            sessions: StdMutex::new(HashMap::new()),
+            next_id: AtomicU64::new(1),
+        }
+    }
+
+    fn session(&self, id: u64) -> Option<Arc<ExecSession>> {
+        self.sessions.lock().unwrap().get(&id).cloned()
+    }
+
+    fn session_ids(&self) -> Vec<u64> {
+        let mut ids = self
+            .sessions
+            .lock()
+            .unwrap()
+            .keys()
+            .copied()
+            .collect::<Vec<_>>();
+        ids.sort_unstable();
+        ids
+    }
+
+    fn remove(&self, id: u64) -> Option<Arc<ExecSession>> {
+        self.sessions.lock().unwrap().remove(&id)
+    }
+
+    fn len(&self) -> usize {
+        self.sessions.lock().unwrap().len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.sessions.lock().unwrap().is_empty()
+    }
+
+    fn next_id(&self) -> u64 {
+        self.next_id.fetch_add(1, Ordering::SeqCst)
+    }
+
+    fn insert(&self, session: Arc<ExecSession>) {
+        self.sessions.lock().unwrap().insert(session.id, session);
+    }
+
+    fn reap(&self, idle_timeout: Duration) -> Vec<Arc<ExecSession>> {
+        reap_sessions(&mut self.sessions.lock().unwrap(), idle_timeout)
+    }
+
+    /// Starts a transport-owned reaper. It holds only a weak reference, so it
+    /// exits when the transport's last [`SessionState`] view is dropped.
+    fn spawn_idle_reaper(self: &Arc<Self>, idle_timeout: Duration) {
+        if idle_timeout.is_zero() || tokio::runtime::Handle::try_current().is_err() {
+            return;
+        }
+        let weak = Arc::downgrade(self);
+        let interval = reaper_interval(idle_timeout);
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(interval);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                ticker.tick().await;
+                let Some(state) = weak.upgrade() else {
+                    break;
+                };
+                for session in state.reap(idle_timeout) {
+                    kill_exec_session(&session);
+                }
+            }
+        });
+    }
+}
+
+impl Drop for ExecSessionState {
+    fn drop(&mut self) {
+        if let Ok(sessions) = self.sessions.lock() {
+            for session in sessions.values() {
+                if session.exit_code().is_none() {
+                    kill_pid(session.pid);
+                }
+            }
+        }
+    }
+}
+
+type ConversationExecStates = HashMap<ConversationIdentity, Arc<ExecSessionState>>;
+
+/// Server-process ownership for ChatGPT resident commands. ChatGPT can replace
+/// its MCP transport between adjacent tool calls while retaining the same
+/// `_meta["openai/session"]`; this store makes that stable identity, rather than
+/// the transient transport, own `exec_command` sessions.
+#[derive(Default)]
+pub struct ConversationExecSessionStore {
+    states: Arc<StdMutex<ConversationExecStates>>,
+}
+
+impl ConversationExecSessionStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Return a tool-call view that shares the transport's non-exec state but
+    /// substitutes the resident-process state owned by this conversation.
+    pub fn session_for(
+        &self,
+        identity: &ConversationIdentity,
+        transport_session: &SessionState,
+    ) -> SessionState {
+        let exec = self
+            .states
+            .lock()
+            .unwrap()
+            .entry(identity.clone())
+            .or_insert_with(|| Arc::new(ExecSessionState::new()))
+            .clone();
+        transport_session.with_exec_state(exec)
+    }
+
+    /// Reap inactive conversation-owned processes and discard empty ownership
+    /// records. Unlike transport state, this task persists across MCP reconnects
+    /// and stops only when the server drops the store.
+    pub fn spawn_idle_reaper(&self, idle_timeout: Duration) {
+        if tokio::runtime::Handle::try_current().is_err() {
+            return;
+        }
+        let weak = Arc::downgrade(&self.states);
+        let interval = if idle_timeout.is_zero() {
+            Duration::from_secs(30)
+        } else {
+            reaper_interval(idle_timeout)
+        };
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(interval);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                ticker.tick().await;
+                let Some(states) = weak.upgrade() else {
+                    break;
+                };
+                let killed = reap_conversation_states(&states, idle_timeout);
+                for session in killed {
+                    kill_exec_session(&session);
+                }
+            }
+        });
+    }
+}
+
+fn reaper_interval(idle_timeout: Duration) -> Duration {
+    idle_timeout
+        .min(Duration::from_secs(30))
+        .max(Duration::from_secs(1))
+}
+
+fn reap_conversation_states(
+    states: &StdMutex<ConversationExecStates>,
+    idle_timeout: Duration,
+) -> Vec<Arc<ExecSession>> {
+    let mut killed = Vec::new();
+    let mut states = states.lock().unwrap();
+    states.retain(|_, state| {
+        killed.extend(state.reap(idle_timeout));
+        // A concurrent tool call owns another Arc. Keep the map entry until that
+        // call finishes so it cannot publish a session into a detached state.
+        !(state.is_empty() && Arc::strong_count(state) == 1)
+    });
+    killed
+}
+
+/// Per-MCP-transport mutable state. The fallback project root and current plan
+/// remain transport-scoped. Resident commands use this transport-owned exec
+/// state for generic MCP clients, while ChatGPT calls receive a temporary view
+/// backed by [`ConversationExecSessionStore`].
 pub struct SessionState {
-    pub exec_sessions: Arc<StdMutex<HashMap<u64, Arc<ExecSession>>>>,
-    next_exec_id: AtomicU64,
-    pub plan: StdMutex<Option<PlanState>>,
-    project_root: StdMutex<Option<PathBuf>>,
+    exec: Arc<ExecSessionState>,
+    pub plan: Arc<StdMutex<Option<PlanState>>>,
+    project_root: Arc<StdMutex<Option<PathBuf>>>,
 }
 
 impl Default for SessionState {
     fn default() -> Self {
         Self {
-            exec_sessions: Arc::new(StdMutex::new(HashMap::new())),
-            next_exec_id: AtomicU64::new(1),
-            plan: StdMutex::new(None),
-            project_root: StdMutex::new(None),
+            exec: Arc::new(ExecSessionState::new()),
+            plan: Arc::new(StdMutex::new(None)),
+            project_root: Arc::new(StdMutex::new(None)),
         }
     }
 }
@@ -356,40 +531,37 @@ impl SessionState {
         Self::default()
     }
 
-    /// Starts a background task that kills and reaps exec sessions idle beyond
-    /// `idle_timeout`. The task holds only a weak reference to the session map,
-    /// so it exits on its own once this `SessionState` is dropped (the MCP
-    /// transport closed). A zero timeout, or the absence of a Tokio runtime
-    /// (as in unit tests), is a no-op.
-    pub fn spawn_idle_reaper(&self, idle_timeout: Duration) {
-        if idle_timeout.is_zero() || tokio::runtime::Handle::try_current().is_err() {
-            return;
+    fn with_exec_state(&self, exec: Arc<ExecSessionState>) -> Self {
+        Self {
+            exec,
+            plan: self.plan.clone(),
+            project_root: self.project_root.clone(),
         }
-        let weak = Arc::downgrade(&self.exec_sessions);
-        // Check often enough to enforce the timeout promptly, but never busier
-        // than once a second nor rarer than every 30s.
-        let interval = idle_timeout
-            .min(Duration::from_secs(30))
-            .max(Duration::from_secs(1));
-        tokio::spawn(async move {
-            let mut ticker = tokio::time::interval(interval);
-            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            loop {
-                ticker.tick().await;
-                let Some(map) = weak.upgrade() else {
-                    break; // SessionState dropped — nothing left to reap.
-                };
-                // Kill outside the lock: terminating a process can block
-                // (Windows `taskkill`), and other tools take this same lock.
-                let killed = {
-                    let mut guard = map.lock().unwrap();
-                    reap_sessions(&mut guard, idle_timeout)
-                };
-                for session in killed {
-                    kill_exec_session(&session);
-                }
-            }
-        });
+    }
+
+    /// Starts cleanup for generic-client, transport-owned resident commands.
+    pub fn spawn_idle_reaper(&self, idle_timeout: Duration) {
+        self.exec.spawn_idle_reaper(idle_timeout);
+    }
+
+    pub fn exec_session(&self, id: u64) -> Option<Arc<ExecSession>> {
+        self.exec.session(id)
+    }
+
+    pub fn exec_session_ids(&self) -> Vec<u64> {
+        self.exec.session_ids()
+    }
+
+    pub fn remove_exec_session(&self, id: u64) -> Option<Arc<ExecSession>> {
+        self.exec.remove(id)
+    }
+
+    fn exec_session_count(&self) -> usize {
+        self.exec.len()
+    }
+
+    fn reap_exec_sessions(&self, idle_timeout: Duration) -> Vec<Arc<ExecSession>> {
+        self.exec.reap(idle_timeout)
     }
 
     pub fn effective_config(&self, config: &AppConfig) -> Result<AppConfig, String> {
@@ -453,22 +625,10 @@ impl SessionState {
     }
 }
 
-impl Drop for SessionState {
-    fn drop(&mut self) {
-        // Kill any exec_command processes still resident so a disconnecting
-        // client cannot leave orphaned shells behind (TS `transport.onclose`).
-        if let Ok(map) = self.exec_sessions.lock() {
-            for session in map.values() {
-                kill_pid(session.pid);
-            }
-        }
-    }
-}
-
 /// Removes finished-and-empty sessions and, when `idle_timeout` is non-zero,
-/// selects sessions idle beyond it for termination. Returns the idle sessions
-/// removed so the caller can kill them without holding the map lock (killing
-/// can block, e.g. Windows `taskkill`). Finished sessions need no kill.
+/// removes every session idle beyond it. Running idle sessions are returned so
+/// the caller can kill them without holding the map lock; completed sessions
+/// whose final output was never polled are simply expired.
 fn reap_sessions(
     map: &mut HashMap<u64, Arc<ExecSession>>,
     idle_timeout: Duration,
@@ -478,8 +638,10 @@ fn reap_sessions(
         if s.exit_code().is_some() && s.pending.lock().unwrap().is_empty() {
             return false;
         }
-        if !idle_timeout.is_zero() && s.exit_code().is_none() && s.idle_for() >= idle_timeout {
-            killed.push(s.clone());
+        if !idle_timeout.is_zero() && s.idle_for() >= idle_timeout {
+            if s.exit_code().is_none() {
+                killed.push(s.clone());
+            }
             return false;
         }
         true
@@ -491,8 +653,7 @@ fn reap_sessions(
 /// Idle enforcement is the background reaper's job (see `spawn_idle_reaper`),
 /// so this opportunistic pass never kills a running session.
 pub fn reap_finished_sessions(state: &SessionState) {
-    let mut map = state.exec_sessions.lock().unwrap();
-    let _ = reap_sessions(&mut map, Duration::ZERO);
+    let _ = state.reap_exec_sessions(Duration::ZERO);
 }
 
 /// Spawns `cmd` through a shell and registers it as a resident session. The
@@ -506,7 +667,7 @@ pub fn start_exec_session(
 ) -> Result<Arc<ExecSession>, String> {
     reap_finished_sessions(state);
     {
-        let live = state.exec_sessions.lock().unwrap().len();
+        let live = state.exec_session_count();
         if live >= config.exec.max_sessions {
             return Err(format!(
                 "Too many live exec sessions ({}). Finish or terminate an existing session before starting another.",
@@ -582,7 +743,7 @@ pub fn start_exec_session(
         *exit_for_waiter.lock().unwrap() = Some(code);
     });
 
-    let id = state.next_exec_id.fetch_add(1, Ordering::SeqCst);
+    let id = state.exec.next_id();
     let session = Arc::new(ExecSession {
         id,
         command: cmd.to_string(),
@@ -595,11 +756,7 @@ pub fn start_exec_session(
         last_activity: StdMutex::new(Instant::now()),
     });
 
-    state
-        .exec_sessions
-        .lock()
-        .unwrap()
-        .insert(id, session.clone());
+    state.exec.insert(session.clone());
     Ok(session)
 }
 
@@ -656,7 +813,9 @@ pub fn kill_pid(pid: Option<u32>) {
 
 /// Kills a session's process tree.
 pub fn kill_exec_session(session: &ExecSession) {
-    kill_pid(session.pid);
+    if session.exit_code().is_none() {
+        kill_pid(session.pid);
+    }
 }
 
 static CHUNK_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -669,6 +828,11 @@ pub fn generate_chunk_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tool::Tool;
+    use crate::tools::exec_command::ExecCommand;
+    use crate::tools::write_stdin::WriteStdin;
+    use crate::types::ExecMode;
+    use serde_json::json;
 
     #[test]
     fn classifies_shells() {
@@ -764,6 +928,89 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn conversation_owned_exec_session_survives_replacement_transport() {
+        let dir = std::env::temp_dir();
+        let mut config = crate::config::default_config(dir.clone());
+        config.exec.mode = ExecMode::Unrestricted;
+        let store = ConversationExecSessionStore::new();
+        let identity =
+            ConversationIdentity::from_openai_session("conversation-resident-process").unwrap();
+
+        let first_transport = SessionState::new();
+        let first_call = store.session_for(&identity, &first_transport);
+        let started = ExecCommand
+            .call(
+                json!({
+                    "cmd": resident_sleep_command(),
+                    "yield_time_ms": EXEC_MIN_YIELD_MS
+                }),
+                &config,
+                &first_call,
+            )
+            .await;
+        assert!(!started.is_error, "{}", started.joined_text());
+        let session_id = started
+            .structured_content
+            .as_ref()
+            .and_then(|value| value.get("session_id"))
+            .and_then(serde_json::Value::as_u64)
+            .expect("resident command should return a session id");
+        let resident = first_call.exec_session(session_id).unwrap();
+
+        drop(first_call);
+        drop(first_transport);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(resident.exit_code().is_none());
+
+        let replacement_transport = SessionState::new();
+        let replacement_call = store.session_for(&identity, &replacement_transport);
+        let resumed = WriteStdin
+            .call(
+                json!({
+                    "session_id": session_id,
+                    "chars": "x",
+                    "yield_time_ms": 1
+                }),
+                &config,
+                &replacement_call,
+            )
+            .await;
+        assert!(!resumed.is_error, "{}", resumed.joined_text());
+        assert_eq!(
+            resumed
+                .structured_content
+                .as_ref()
+                .and_then(|value| value.get("session_id"))
+                .and_then(serde_json::Value::as_u64),
+            Some(session_id)
+        );
+
+        replacement_call.remove_exec_session(session_id);
+        kill_exec_session(&resident);
+    }
+
+    #[test]
+    fn conversation_exec_states_are_isolated_and_empty_states_are_reclaimed() {
+        let store = ConversationExecSessionStore::new();
+        let transport = SessionState::new();
+        let first = ConversationIdentity::from_openai_session("first-conversation").unwrap();
+        let second = ConversationIdentity::from_openai_session("second-conversation").unwrap();
+
+        let first_call = store.session_for(&first, &transport);
+        let second_call = store.session_for(&second, &transport);
+        assert!(!Arc::ptr_eq(&first_call.exec, &second_call.exec));
+        assert_eq!(store.states.lock().unwrap().len(), 2);
+
+        assert!(reap_conversation_states(&store.states, Duration::ZERO).is_empty());
+        assert_eq!(store.states.lock().unwrap().len(), 2);
+
+        drop(first_call);
+        drop(second_call);
+        assert!(reap_conversation_states(&store.states, Duration::ZERO).is_empty());
+        assert!(store.states.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn reap_sessions_only_kills_running_sessions_past_the_idle_timeout() {
         let dir = std::env::temp_dir();
         let config = crate::config::default_config(dir.clone());
@@ -771,32 +1018,27 @@ mod tests {
         let session =
             start_exec_session(&state, &config, &resident_sleep_command(), &dir, None).unwrap();
         assert!(session.exit_code().is_none());
-        assert_eq!(state.exec_sessions.lock().unwrap().len(), 1);
+        assert_eq!(state.exec_session_count(), 1);
 
         // Disabled (0) never touches a running session.
-        {
-            let mut map = state.exec_sessions.lock().unwrap();
-            assert!(reap_sessions(&mut map, Duration::ZERO).is_empty());
-            assert_eq!(map.len(), 1);
-        }
+        assert!(state.reap_exec_sessions(Duration::ZERO).is_empty());
+        assert_eq!(state.exec_session_count(), 1);
         // Still well within a generous timeout.
-        {
-            let mut map = state.exec_sessions.lock().unwrap();
-            assert!(reap_sessions(&mut map, Duration::from_secs(3600)).is_empty());
-            assert_eq!(map.len(), 1);
-        }
+        assert!(
+            state
+                .reap_exec_sessions(Duration::from_secs(3600))
+                .is_empty()
+        );
+        assert_eq!(state.exec_session_count(), 1);
 
         // Once idle past a tiny timeout, it is selected, killed and removed.
         tokio::time::sleep(Duration::from_millis(80)).await;
-        let killed = {
-            let mut map = state.exec_sessions.lock().unwrap();
-            reap_sessions(&mut map, Duration::from_millis(50))
-        };
+        let killed = state.reap_exec_sessions(Duration::from_millis(50));
         assert_eq!(killed.len(), 1);
         for session in &killed {
             kill_exec_session(session);
         }
-        assert!(state.exec_sessions.lock().unwrap().is_empty());
+        assert_eq!(state.exec_session_count(), 0);
     }
 
     #[tokio::test]
@@ -809,11 +1051,11 @@ mod tests {
 
         tokio::time::sleep(Duration::from_millis(80)).await;
         session.touch(); // a fresh write_stdin/yield would do this
-        {
-            let mut map = state.exec_sessions.lock().unwrap();
-            // Idle clock reset, so a 50ms timeout must not reap it.
-            assert!(reap_sessions(&mut map, Duration::from_millis(50)).is_empty());
-        }
+        assert!(
+            state
+                .reap_exec_sessions(Duration::from_millis(50))
+                .is_empty()
+        );
         kill_exec_session(&session);
     }
 
@@ -833,7 +1075,7 @@ mod tests {
         let mut reaped = false;
         for _ in 0..40 {
             tokio::time::sleep(Duration::from_millis(100)).await;
-            if state.exec_sessions.lock().unwrap().is_empty() {
+            if state.exec_session_count() == 0 {
                 reaped = true;
                 break;
             }

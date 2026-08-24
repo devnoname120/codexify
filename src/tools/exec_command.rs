@@ -107,6 +107,10 @@ impl Tool for ExecCommand {
         Some(unified_exec_output_schema())
     }
 
+    fn uses_exec_session_state(&self) -> bool {
+        true
+    }
+
     async fn call(&self, args: Value, config: &AppConfig, session: &SessionState) -> ToolResult {
         let cmd = arg_str(&args, "cmd").unwrap_or("");
         if cmd.trim().is_empty() {
@@ -172,11 +176,7 @@ impl Tool for ExecCommand {
         let is_error = if exited {
             let code = exec_session.exit_code();
             result.exit_code = code;
-            session
-                .exec_sessions
-                .lock()
-                .unwrap()
-                .remove(&exec_session.id);
+            session.remove_exec_session(exec_session.id);
             code.unwrap_or(0) != 0
         } else {
             result.session_id = Some(exec_session.id);

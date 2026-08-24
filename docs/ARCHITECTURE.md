@@ -44,9 +44,13 @@ ChatGPT / MCP client
 │    • openai/session hash → project root       │
 │    • persistent atomic binding records        │
 │                                               │
+│  shared ConversationExecSessionStore          │
+│    • openai/session hash → resident commands  │
+│    • in-memory ownership + idle cleanup       │
+│                                               │
 │  per-transport SessionState                   │
 │    • fallback root for generic MCP clients    │
-│    • exec sessions + current plan             │
+│    • generic-client exec sessions + plan      │
 └──────────────────────────────────────────────┘
         │ reads/writes           │ stdio child processes
         ▼                        ▼
@@ -93,9 +97,15 @@ Three surfaces reach the model:
    the transport-session fallback when no conversation identity exists, then
    receive an effective clone of `AppConfig` whose `work_dir` is that root. The
    server fills in default `structuredContent` when appropriate.
-8. When the transport session ends, rmcp drops the `CodexHandler`; its
-   `SessionState::Drop` kills resident `exec_command` shells. The conversation
-   binding remains on disk and is restored by a later transport or server process.
+8. `exec_command` and `write_stdin` opt into resident-process routing. With a
+   ChatGPT conversation identity, dispatch substitutes the shared conversation's
+   exec state while retaining the transport's other mutable state. Without one,
+   the ordinary transport-owned state is used.
+9. When a transport ends, its generic-client exec state loses its last owner and
+   kills resident process trees. Conversation-owned process state remains in the
+   server for later connector calls, subject to idle cleanup; server shutdown
+   drops the shared store and kills anything still running. Project bindings are
+   independently durable across server restarts, but process handles are not.
 
 Cross-cutting HTTP concerns live in the axum layer: a `/health` route, a
 bearer-auth middleware that bypasses `/health`, and—in externally exposed
@@ -119,6 +129,7 @@ trait Tool: Send + Sync {
     fn output_schema(&self) -> Option<Value>;
     fn fills_structured_content(&self) -> bool;         // opt out of default-fill
     fn requires_project_root(&self) -> bool;            // true by default
+    fn uses_exec_session_state(&self) -> bool;          // false by default
     async fn call(&self, args: Value, cfg: &AppConfig, session: &SessionState) -> ToolResult;
 }
 ```
@@ -138,12 +149,18 @@ hash, written atomically under a per-record lock, and validated again on every
 load so a deleted project or changed symlink fails closed. A new store instance
 can recover the same binding after a server restart.
 
-### `SessionState` (`exec_sessions.rs`)
-Per-MCP-transport mutable state: the optional fallback project root used only when
-the client provides no stable ChatGPT conversation identity, the map of resident
-`exec_command` shells, and the current plan. Created fresh by the service factory;
-the fallback root is immutable and `Drop` disposes shells. Live process handles are
-intentionally not persisted across reconnects.
+### `ConversationExecSessionStore` and `SessionState` (`exec_sessions.rs`)
+`SessionState` is the per-MCP-transport view: it owns the optional fallback
+project root for generic clients, the current plan, and a transport-owned exec
+state. The exec state is reference-counted and kills running process trees when
+its last owner disappears.
+
+`ConversationExecSessionStore` is shared by all handlers in the server process.
+For the two unified-exec tools, dispatch uses the hashed `openai/session` identity
+to substitute conversation-owned exec state into a temporary `SessionState`
+view. That state survives replacement transports, is isolated from other
+conversations, and is removed after its sessions finish or expire. It is not
+written to disk and therefore does not survive server restart.
 
 ### `AppConfig` (`types.rs`)
 The fully-resolved config handed to every tool. `config.rs` parses
@@ -181,11 +198,13 @@ ordinary supervised server lifecycle; there is no separate quickstart runtime.
   loopback authorities, omits permissive CORS, and requires a random
   process-private bearer token generated at startup.
 - **Session model**: the factory runs per MCP transport session. `SessionState`
-  therefore owns only transport-lifetime resources such as resident commands and
-  the generic-client root fallback. ChatGPT project identity is taken from
-  `RequestContext::meta["openai/session"]` and resolved through the shared,
-  persistent `ProjectBindingStore`. Upstream MCP connections, the binding store,
-  and the tool registry are shared (`Arc`) across transports.
+  owns the generic-client root fallback, current plan, and generic-client
+  resident commands. ChatGPT identity is taken from
+  `RequestContext::meta["openai/session"]`: the persistent
+  `ProjectBindingStore` resolves its project, while the in-memory
+  `ConversationExecSessionStore` resolves resident commands across replacement
+  transports. Upstream MCP connections, both stores, and the tool registry are
+  shared (`Arc`) across transports.
 - **`get_info`** advertises server name `codexify` (wire-compatible identity),
   version, `tools` capability, and the `instructions`.
 - **Errors**: a tool that fails returns `Ok(CallToolResult::error(...))`
@@ -262,7 +281,7 @@ the original order and rejects duplicate names.
 | `exec_policy.rs` | Shell-string allowlist guard for `exec_command` (a guardrail, not a sandbox). |
 | `project_bindings.rs` | Canonical project-root validation plus durable ChatGPT conversation bindings keyed by a hash of `openai/session`, namespaced by access root, locked per record, and atomically written. |
 | `project_catalog.rs` | Live, read-only project discovery from native Codex plus explicit metadata; canonical access-root filtering, deduplication, deterministic query ranking, sanitized MCP warnings, and local diagnostics. |
-| `exec_sessions.rs` | Generic-client transport fallback plus unified-exec sessions: shell resolution, PowerShell exit-code wrapping, background stdout/stderr drain tasks, process-group kill, output truncation (UTF-16 units to match the TS). |
+| `exec_sessions.rs` | Generic-client transport fallback plus conversation-owned unified-exec sessions: shell resolution, PowerShell exit-code wrapping, background stdout/stderr drain tasks, process-group kill, idle cleanup, and output truncation (UTF-16 units to match the TS). |
 | `apply_patch.rs` | The Codex patch format: parse then apply, atomically, with fuzzy context matching and CRLF preservation. |
 | `memory.rs` | Working memory outside the repo, keyed by a hash of the normalized active root, with `O_EXCL` locking and atomic writes. In multi-project mode, a configured `memory.dir` is a base containing one hashed child per project. |
 | `quickstart.rs` | Interactive first-install wizard for project scope, native tunnel credentials, JSON config merging, and the ChatGPT developer-mode connector handoff. |
