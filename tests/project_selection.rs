@@ -1,5 +1,5 @@
 use std::fs;
-use std::sync::{Arc, Barrier};
+use std::sync::Arc;
 
 use clap::Parser;
 use codexify::config::{Cli, default_config, load_config};
@@ -15,6 +15,7 @@ use codexify::tools::recall::Recall;
 use codexify::tools::remember::Remember;
 use codexify::tools::run_command::RunCommand;
 use codexify::tools::set_project_root::SetProjectRoot;
+use codexify::types::WorktreeMode;
 use rmcp::model::RequestMetaObject;
 use serde_json::json;
 use tempfile::TempDir;
@@ -22,6 +23,7 @@ use tempfile::TempDir;
 fn multi_project_config(access_root: &std::path::Path) -> codexify::types::AppConfig {
     let mut config = default_config(access_root.to_path_buf());
     config.multi_project = true;
+    config.worktrees.mode = WorktreeMode::Never;
     config.skills.enabled = Some(false);
     config
 }
@@ -140,15 +142,15 @@ async fn sessions_are_isolated_to_their_selected_roots() {
     assert!(sibling.joined_text().contains("within work directory"));
 }
 
-#[test]
-fn transport_project_binding_fails_closed_when_the_selected_root_disappears() {
+#[tokio::test]
+async fn transport_project_binding_fails_closed_when_the_selected_root_disappears() {
     let root = TempDir::new().unwrap();
     let access = root.path().join("projects");
     let project = access.join("alpha");
     fs::create_dir_all(&project).unwrap();
     let config = multi_project_config(&access);
     let session = SessionState::new();
-    session.select_project_root(&config, "alpha").unwrap();
+    session.select_project_root(&config, "alpha").await.unwrap();
 
     fs::remove_dir_all(&project).unwrap();
     let error = session.effective_config(&config).unwrap_err();
@@ -156,8 +158,8 @@ fn transport_project_binding_fails_closed_when_the_selected_root_disappears() {
 }
 
 #[cfg(unix)]
-#[test]
-fn transport_project_binding_rejects_a_replacement_symlink_outside_the_access_root() {
+#[tokio::test]
+async fn transport_project_binding_rejects_a_replacement_symlink_outside_the_access_root() {
     let root = TempDir::new().unwrap();
     let access = root.path().join("projects");
     let project = access.join("alpha");
@@ -166,7 +168,7 @@ fn transport_project_binding_rejects_a_replacement_symlink_outside_the_access_ro
     fs::create_dir_all(&outside).unwrap();
     let config = multi_project_config(&access);
     let session = SessionState::new();
-    session.select_project_root(&config, "alpha").unwrap();
+    session.select_project_root(&config, "alpha").await.unwrap();
 
     fs::remove_dir_all(&project).unwrap();
     std::os::unix::fs::symlink(&outside, &project).unwrap();
@@ -286,8 +288,8 @@ fn openai_conversation_identity_is_read_from_request_metadata() {
     assert!(ConversationIdentity::from_request_meta(&meta).is_none());
 }
 
-#[test]
-fn chatgpt_project_binding_survives_transport_reconnect_and_server_restart() {
+#[tokio::test]
+async fn chatgpt_project_binding_survives_transport_reconnect_and_server_restart() {
     let root = TempDir::new().unwrap();
     let access = root.path().join("projects");
     let project = access.join("alpha");
@@ -301,6 +303,7 @@ fn chatgpt_project_binding_survives_transport_reconnect_and_server_restart() {
     let first_process = ProjectBindingStore::new(state_dir.clone());
     let selected = first_process
         .select_project_root(&config, &identity, "alpha")
+        .await
         .unwrap();
     assert!(selected.newly_selected);
     assert_eq!(selected.scope, ProjectBindingScope::ChatGptConversation);
@@ -317,12 +320,13 @@ fn chatgpt_project_binding_survives_transport_reconnect_and_server_restart() {
 
     let repeated = restarted_process
         .select_project_root(&config, &identity, "alpha/.")
+        .await
         .unwrap();
     assert!(!repeated.newly_selected);
 }
 
-#[test]
-fn chatgpt_conversations_keep_independent_project_bindings() {
+#[tokio::test]
+async fn chatgpt_conversations_keep_independent_project_bindings() {
     let root = TempDir::new().unwrap();
     let access = root.path().join("projects");
     let alpha = access.join("alpha");
@@ -335,8 +339,14 @@ fn chatgpt_conversations_keep_independent_project_bindings() {
     let first = conversation_identity("conversation-alpha");
     let second = conversation_identity("conversation-beta");
 
-    store.select_project_root(&config, &first, "alpha").unwrap();
-    store.select_project_root(&config, &second, "beta").unwrap();
+    store
+        .select_project_root(&config, &first, "alpha")
+        .await
+        .unwrap();
+    store
+        .select_project_root(&config, &second, "beta")
+        .await
+        .unwrap();
 
     assert_eq!(
         store.effective_config(&config, &first).unwrap().work_dir,
@@ -348,8 +358,8 @@ fn chatgpt_conversations_keep_independent_project_bindings() {
     );
 }
 
-#[test]
-fn chatgpt_conversation_cannot_switch_projects_after_restart() {
+#[tokio::test]
+async fn chatgpt_conversation_cannot_switch_projects_after_restart() {
     let root = TempDir::new().unwrap();
     let access = root.path().join("projects");
     fs::create_dir_all(access.join("alpha")).unwrap();
@@ -360,17 +370,19 @@ fn chatgpt_conversation_cannot_switch_projects_after_restart() {
     let identity = conversation_identity("immutable-conversation");
     ProjectBindingStore::new(state_dir.clone())
         .select_project_root(&config, &identity, "alpha")
+        .await
         .unwrap();
 
     let error = ProjectBindingStore::new(state_dir)
         .select_project_root(&config, &identity, "beta")
+        .await
         .unwrap_err();
     assert!(error.contains("already bound"));
     assert!(error.contains("Start a new chat"));
 }
 
-#[test]
-fn concurrent_chatgpt_bindings_choose_one_project_without_overwriting() {
+#[tokio::test]
+async fn concurrent_chatgpt_bindings_choose_one_project_without_overwriting() {
     let root = TempDir::new().unwrap();
     let access = root.path().join("projects");
     let alpha = access.join("alpha");
@@ -381,21 +393,23 @@ fn concurrent_chatgpt_bindings_choose_one_project_without_overwriting() {
     let config = multi_project_config(&access);
     let state_dir = root.path().join("bindings");
     let identity = conversation_identity("concurrent-conversation");
-    let barrier = Arc::new(Barrier::new(3));
+    let barrier = Arc::new(tokio::sync::Barrier::new(3));
 
     let attempts = ["alpha", "beta"].map(|project| {
         let barrier = barrier.clone();
         let config = config.clone();
         let identity = identity.clone();
         let store = ProjectBindingStore::new(state_dir.clone());
-        std::thread::spawn(move || {
-            barrier.wait();
-            store.select_project_root(&config, &identity, project)
+        tokio::spawn(async move {
+            barrier.wait().await;
+            store.select_project_root(&config, &identity, project).await
         })
     });
-    barrier.wait();
+    barrier.wait().await;
 
-    let results = attempts.map(|attempt| attempt.join().unwrap());
+    let [first, second] = attempts;
+    let (first, second) = tokio::join!(first, second);
+    let results = [first.unwrap(), second.unwrap()];
     assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
     assert_eq!(results.iter().filter(|result| result.is_err()).count(), 1);
 
@@ -408,8 +422,8 @@ fn concurrent_chatgpt_bindings_choose_one_project_without_overwriting() {
     );
 }
 
-#[test]
-fn missing_bound_project_fails_closed_instead_of_rebinding() {
+#[tokio::test]
+async fn missing_bound_project_fails_closed_instead_of_rebinding() {
     let root = TempDir::new().unwrap();
     let access = root.path().join("projects");
     let alpha = access.join("alpha");
@@ -421,6 +435,7 @@ fn missing_bound_project_fails_closed_instead_of_rebinding() {
     let identity = conversation_identity("missing-project-conversation");
     store
         .select_project_root(&config, &identity, "alpha")
+        .await
         .unwrap();
     fs::remove_dir_all(alpha).unwrap();
 
@@ -429,12 +444,13 @@ fn missing_bound_project_fails_closed_instead_of_rebinding() {
 
     let rebind_error = store
         .select_project_root(&config, &identity, "beta")
+        .await
         .unwrap_err();
     assert!(rebind_error.contains("no longer exists"));
 }
 
-#[test]
-fn conversation_binding_is_namespaced_by_access_root_and_hides_the_session_id() {
+#[tokio::test]
+async fn conversation_binding_is_namespaced_by_access_root_and_hides_the_session_id() {
     let root = TempDir::new().unwrap();
     let first_access = root.path().join("first");
     let second_access = root.path().join("second");
@@ -450,6 +466,7 @@ fn conversation_binding_is_namespaced_by_access_root_and_hides_the_session_id() 
 
     store
         .select_project_root(&first_config, &identity, "project")
+        .await
         .unwrap();
     assert!(
         store
@@ -459,6 +476,7 @@ fn conversation_binding_is_namespaced_by_access_root_and_hides_the_session_id() 
     );
     store
         .select_project_root(&second_config, &identity, "project")
+        .await
         .unwrap();
 
     let mut pending = vec![state_dir];

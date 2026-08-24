@@ -22,8 +22,9 @@ use crate::types::{
     AppConfig, ArtifactIngressConfig, AuditConfig, CodexProjectCatalogConfig, CommandConfig,
     ExecConfig, ExecMode, IgnoreConfig, McpServerSpec, MemoryConfig, OpenAiTunnelConfig,
     OutputConfig, ProjectCatalogConfig, ProjectCatalogEntryConfig, ProjectDocConfig, ReviewConfig,
-    SkillsConfig, TreeConfig,
+    SkillsConfig, TreeConfig, WorktreeConfig, WorktreeMode, WorktreeUpstreamRefreshMode,
 };
+use crate::util::home_dir;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -54,6 +55,14 @@ pub struct Cli {
     /// Other MCP clients fall back to transport-session binding.
     #[arg(long = "multi-project")]
     pub multi_project: bool,
+
+    /// Worktree policy for new multi-project conversation bindings.
+    #[arg(long = "worktree-mode", value_enum)]
+    pub worktree_mode: Option<WorktreeMode>,
+
+    /// Managed-worktree root. Default: Codex's configured Worktree location.
+    #[arg(long = "worktree-root")]
+    pub worktree_root: Option<String>,
 
     /// Server port. Default: 3000 (or the config file's value).
     #[arg(long)]
@@ -236,6 +245,16 @@ struct PartialAudit {
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct PartialWorktrees {
+    mode: Option<WorktreeMode>,
+    root: Option<String>,
+    upstream_refresh_mode: Option<WorktreeUpstreamRefreshMode>,
+    auto_cleanup_enabled: Option<bool>,
+    keep_count: Option<usize>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct CodexMcpConfig {
     enabled: Option<bool>,
     use_cli: Option<bool>,
@@ -364,6 +383,7 @@ struct FileConfig {
     api_key: Option<String>,
     port: Option<u16>,
     multi_project: Option<bool>,
+    worktrees: Option<PartialWorktrees>,
     allowed_commands: Option<Vec<String>>,
     tree: Option<PartialTree>,
     command: Option<PartialCommand>,
@@ -556,6 +576,7 @@ pub fn default_config(work_dir: std::path::PathBuf) -> AppConfig {
         work_dir,
         multi_project: false,
         project_catalog: ProjectCatalogConfig::default(),
+        worktrees: default_worktree_config(),
         api_key: None,
         port: 3000,
         allowed_commands: default_allowed_commands(),
@@ -575,6 +596,117 @@ pub fn default_config(work_dir: std::path::PathBuf) -> AppConfig {
         mcp_servers: HashMap::new(),
         generated_skills_dir: None,
     }
+}
+
+#[derive(Debug, Default)]
+struct NativeWorktreeSettings {
+    root: Option<PathBuf>,
+    upstream_refresh_mode: Option<WorktreeUpstreamRefreshMode>,
+    auto_cleanup_enabled: Option<bool>,
+    keep_count: Option<usize>,
+}
+
+fn codex_home_path() -> PathBuf {
+    codex_config_path()
+        .ok()
+        .and_then(|path| path.parent().map(Path::to_path_buf))
+        .or_else(|| home_dir().map(|path| path.join(".codex")))
+        .unwrap_or_else(|| PathBuf::from(".codex"))
+}
+
+fn default_worktree_config() -> WorktreeConfig {
+    WorktreeConfig {
+        mode: WorktreeMode::Auto,
+        root: codex_home_path().join("worktrees"),
+        upstream_refresh_mode: WorktreeUpstreamRefreshMode::Never,
+        auto_cleanup_enabled: true,
+        keep_count: 15,
+    }
+}
+
+fn native_worktree_settings() -> NativeWorktreeSettings {
+    let Ok(path) = codex_config_path() else {
+        return NativeWorktreeSettings::default();
+    };
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return NativeWorktreeSettings::default();
+        }
+        Err(_) => {
+            println!(
+                "Codex worktree settings: could not read {} — using built-in defaults",
+                path.display()
+            );
+            return NativeWorktreeSettings::default();
+        }
+    };
+    let root: toml::Value = match toml::from_str(&raw) {
+        Ok(root) => root,
+        Err(_) => {
+            println!(
+                "Codex worktree settings: invalid TOML at {} — using built-in defaults",
+                path.display()
+            );
+            return NativeWorktreeSettings::default();
+        }
+    };
+    let Some(desktop) = root.get("desktop").and_then(toml::Value::as_table) else {
+        return NativeWorktreeSettings::default();
+    };
+
+    let root = desktop
+        .get("git-worktree-root")
+        .and_then(toml::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(resolve_path);
+    let upstream_refresh_mode = match desktop
+        .get("worktree-upstream-refresh-mode")
+        .and_then(toml::Value::as_str)
+    {
+        Some("best-effort") => Some(WorktreeUpstreamRefreshMode::BestEffort),
+        Some("never") => Some(WorktreeUpstreamRefreshMode::Never),
+        _ => None,
+    };
+    let auto_cleanup_enabled = desktop
+        .get("worktree-auto-cleanup-enabled")
+        .and_then(toml::Value::as_bool);
+    let keep_count = desktop
+        .get("worktree-keep-count")
+        .and_then(toml::Value::as_integer)
+        .and_then(|value| usize::try_from(value).ok());
+
+    NativeWorktreeSettings {
+        root,
+        upstream_refresh_mode,
+        auto_cleanup_enabled,
+        keep_count,
+    }
+}
+
+fn resolve_worktree_config(file: Option<PartialWorktrees>, cli: &Cli) -> WorktreeConfig {
+    let native = native_worktree_settings();
+    let file = file.unwrap_or_default();
+    let mut config = default_worktree_config();
+    config.mode = cli.worktree_mode.or(file.mode).unwrap_or_default();
+    config.root = cli
+        .worktree_root
+        .as_deref()
+        .map(resolve_path)
+        .or_else(|| file.root.as_deref().map(resolve_path))
+        .or(native.root)
+        .unwrap_or(config.root);
+    config.upstream_refresh_mode = file
+        .upstream_refresh_mode
+        .or(native.upstream_refresh_mode)
+        .unwrap_or_default();
+    config.auto_cleanup_enabled = file
+        .auto_cleanup_enabled
+        .or(native.auto_cleanup_enabled)
+        .unwrap_or(true);
+    config.keep_count = file.keep_count.or(native.keep_count).unwrap_or(15).max(1);
+    config
 }
 
 /// Resolve `work_dir` against the current directory when relative. The path is
@@ -823,6 +955,7 @@ pub fn load_config(cli: Cli) -> Result<AppConfig, String> {
     let mcp_servers = resolve_mcp_servers(&mut file, &cli)?;
     let openai_tunnel = resolve_openai_tunnel(file.openai_tunnel, &cli)?;
     let audit = resolve_audit(file.audit, &cli)?;
+    let worktrees = resolve_worktree_config(file.worktrees.take(), &cli);
     let api_key = cli.api_key.or(file.api_key);
     if api_key.is_some() && openai_tunnel.is_some() {
         return Err(
@@ -838,6 +971,7 @@ pub fn load_config(cli: Cli) -> Result<AppConfig, String> {
         work_dir,
         multi_project: cli.multi_project || file.multi_project.unwrap_or(false),
         project_catalog,
+        worktrees,
         api_key,
         port: cli.port.or(file.port).unwrap_or(3000),
         allowed_commands: file
@@ -899,6 +1033,8 @@ mod tests {
             command: None,
             work_dir: Some(work_dir.to_string_lossy().into_owned()),
             multi_project: false,
+            worktree_mode: None,
+            worktree_root: None,
             port: None,
             api_key: None,
             config: Some(config.to_string_lossy().into_owned()),

@@ -277,10 +277,12 @@ impl ServerHandler for CodexHandler {
             None => ToolResult::error(format!("Unknown tool: {name}")),
             Some(tool) if name == SetProjectRoot::NAME => {
                 if let Some(identity) = conversation.as_ref() {
-                    select_and_render(&args, |path| {
+                    select_and_render(&args, |path| async move {
                         self.project_bindings
-                            .select_project_root(&self.config, identity, path)
+                            .select_project_root(&self.config, identity, &path)
+                            .await
                     })
+                    .await
                 } else {
                     tool.call_with_context(args, &self.config, session, &tool_context)
                         .await
@@ -426,12 +428,27 @@ pub async fn start_http_server(mut config: AppConfig) -> anyhow::Result<()> {
         .join(config.port.to_string());
     let _ = std::fs::remove_dir_all(&gen_dir);
     config.generated_skills_dir = Some(gen_dir);
-    let config = Arc::new(config);
     let project_bindings = Arc::new(ProjectBindingStore::for_current_user());
     let conversation_exec_sessions = Arc::new(ConversationExecSessionStore::new());
     conversation_exec_sessions
         .spawn_idle_reaper(Duration::from_millis(config.exec.idle_timeout_ms));
     let review_checkpoints = Arc::new(ReviewCheckpointManager::new());
+
+    // Sweep managed worktrees left by conversations that are no longer bound
+    // before taking ownership of `config` behind an `Arc`.
+    if config.multi_project && config.worktrees.auto_cleanup_enabled {
+        match project_bindings.referenced_managed_project_roots(&config) {
+            Ok(referenced) => {
+                for warning in
+                    crate::worktrees::cleanup_managed_worktrees(&config, &referenced).await
+                {
+                    tracing::warn!("managed-worktree cleanup: {warning}");
+                }
+            }
+            Err(error) => tracing::warn!("managed-worktree cleanup skipped: {error}"),
+        }
+    }
+    let config = Arc::new(config);
 
     // Connect to any configured upstream MCP servers and merge their tools in.
     // The returned services must stay alive for the whole server lifetime, so

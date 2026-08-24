@@ -431,6 +431,45 @@ impl Default for CodexProjectCatalogConfig {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+#[value(rename_all = "kebab-case")]
+#[derive(Default)]
+pub enum WorktreeMode {
+    #[default]
+    Auto,
+    Always,
+    Never,
+}
+
+impl WorktreeMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Always => "always",
+            Self::Never => "never",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+#[derive(Default)]
+pub enum WorktreeUpstreamRefreshMode {
+    #[default]
+    Never,
+    BestEffort,
+}
+
+impl WorktreeUpstreamRefreshMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Never => "never",
+            Self::BestEffort => "best-effort",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct AuditConfig {
     pub log_file: Option<std::path::PathBuf>,
@@ -464,6 +503,15 @@ pub struct ProjectCatalogConfig {
     pub entries: Vec<ProjectCatalogEntryConfig>,
 }
 
+#[derive(Debug, Clone)]
+pub struct WorktreeConfig {
+    pub mode: WorktreeMode,
+    pub root: std::path::PathBuf,
+    pub upstream_refresh_mode: WorktreeUpstreamRefreshMode,
+    pub auto_cleanup_enabled: bool,
+    pub keep_count: usize,
+}
+
 /// The fully-resolved server configuration handed to every tool.
 ///
 /// `work_dir` and `port` are always concrete. `project_catalog`, `projectDoc`,
@@ -474,6 +522,7 @@ pub struct AppConfig {
     pub work_dir: std::path::PathBuf,
     pub multi_project: bool,
     pub project_catalog: ProjectCatalogConfig,
+    pub worktrees: WorktreeConfig,
     pub api_key: Option<String>,
     pub port: u16,
     pub allowed_commands: Vec<String>,

@@ -1,4 +1,6 @@
 use async_trait::async_trait;
+use std::future::Future;
+
 use serde_json::{Value, json};
 
 use crate::exec_sessions::SessionState;
@@ -12,15 +14,16 @@ impl SetProjectRoot {
     pub const NAME: &'static str = "set_project_root";
 }
 
-pub fn select_and_render(
-    args: &Value,
-    select: impl FnOnce(&str) -> Result<ProjectRootSelection, String>,
-) -> ToolResult {
+pub async fn select_and_render<F, Fut>(args: &Value, select: F) -> ToolResult
+where
+    F: FnOnce(String) -> Fut,
+    Fut: Future<Output = Result<ProjectRootSelection, String>>,
+{
     let Some(path) = arg_str(args, "path") else {
         return ToolResult::error("path must be a string");
     };
 
-    let selection = match select(path) {
+    let selection = match select(path.to_string()).await {
         Ok(selection) => selection,
         Err(error) => return ToolResult::error(error),
     };
@@ -32,21 +35,55 @@ pub fn select_and_render(
     };
     let persistence = match selection.scope {
         ProjectBindingScope::ChatGptConversation => {
-            "This ChatGPT conversation is permanently bound to that project. The binding survives MCP reconnects and server restarts; start a new chat for another project."
+            "This ChatGPT conversation is permanently bound to that source project and active checkout. The binding survives MCP reconnects and server restarts; start a new chat for another project."
         }
         ProjectBindingScope::McpTransportSession => {
-            "This MCP transport session is permanently bound to that project. Clients that do not provide a stable conversation identifier must select again after reconnecting."
+            "This MCP transport session is permanently bound to that source project and active checkout. Clients that do not provide a stable conversation identifier must select again after reconnecting."
         }
     };
+    let placement = if selection.managed_worktree {
+        format!(
+            "Active project root: {}\nSource project root: {}\nManaged detached worktree Git root: {}\nManaged-worktree location: {}",
+            selection.project_root.display(),
+            selection.source_project_root.display(),
+            selection
+                .worktree_git_root
+                .as_deref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "<unknown>".to_string()),
+            selection
+                .worktrees_root
+                .as_deref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "<unknown>".to_string())
+        )
+    } else {
+        format!(
+            "Active project root: {}\nSource project root: {}\nThe source checkout is used directly under worktree mode `{}`.",
+            selection.project_root.display(),
+            selection.source_project_root.display(),
+            selection.worktree_mode.as_str()
+        )
+    };
+    let warning_text = if selection.warnings.is_empty() {
+        String::new()
+    } else {
+        format!("\nWarnings:\n- {}", selection.warnings.join("\n- "))
+    };
     let content = format!(
-        "{state}: {}\nAccess root: {}\n{persistence}\nCall `get_agent_brief` now so the environment, saved state, skills, and project instructions are loaded from the selected root.",
-        selection.project_root.display(),
+        "{state}\n{placement}\nAccess root: {}\n{persistence}{warning_text}\nCall `get_agent_brief` now so the environment, saved state, skills, and project instructions are loaded from the active root.",
         selection.access_root.display()
     );
 
     ToolResult::text(content.clone()).with_structured(json!({
         "access_root": selection.access_root.to_string_lossy(),
+        "source_project_root": selection.source_project_root.to_string_lossy(),
         "project_root": selection.project_root.to_string_lossy(),
+        "managed_worktree": selection.managed_worktree,
+        "worktree_git_root": selection.worktree_git_root.as_ref().map(|path| path.to_string_lossy()),
+        "worktrees_root": selection.worktrees_root.as_ref().map(|path| path.to_string_lossy()),
+        "worktree_mode": selection.worktree_mode.as_str(),
+        "warnings": selection.warnings,
         "newly_selected": selection.newly_selected,
         "binding_scope": selection.scope.as_str(),
         "content": content
@@ -60,7 +97,7 @@ impl Tool for SetProjectRoot {
     }
 
     fn description(&self) -> String {
-        "Bind the current ChatGPT conversation to one project directory beneath the server's configured access root. ChatGPT bindings survive MCP reconnects and server restarts and cannot be changed; start a new chat for another project. Clients without ChatGPT's stable conversation metadata fall back to binding the current MCP transport session. When the exact path is unknown, call list_projects first and pass one unambiguous result's selector as path. Do not guess among plausible projects. In multi-project mode, bind a new conversation before any filesystem, search, edit, command, git, project-instruction, skill, memory, or plan tool, then call get_agent_brief.".into()
+        "Bind the current ChatGPT conversation to one source project directory beneath the server's configured access root. Depending on the configured worktree mode and existing assignments, Codexify either uses that checkout directly or creates a detached managed worktree so concurrent conversations do not edit the same checkout. ChatGPT bindings survive MCP reconnects and server restarts and cannot be changed; start a new chat for another project. Clients without ChatGPT's stable conversation metadata fall back to binding the current MCP transport session. When the exact path is unknown, call list_projects first and pass one unambiguous result's selector as path. Do not guess among plausible projects. In multi-project mode, bind a new conversation before any filesystem, search, edit, command, git, project-instruction, skill, memory, or plan tool, then call get_agent_brief.".into()
     }
 
     fn describe(&self, config: &AppConfig) -> String {
@@ -94,12 +131,18 @@ impl Tool for SetProjectRoot {
             "type": "object",
             "properties": {
                 "access_root": { "type": "string" },
+                "source_project_root": { "type": "string" },
                 "project_root": { "type": "string" },
+                "managed_worktree": { "type": "boolean" },
+                "worktree_git_root": { "type": ["string", "null"] },
+                "worktrees_root": { "type": ["string", "null"] },
+                "worktree_mode": { "type": "string", "enum": ["auto", "always", "never"] },
+                "warnings": { "type": "array", "items": { "type": "string" } },
                 "newly_selected": { "type": "boolean" },
                 "binding_scope": { "type": "string", "enum": ["chatgpt_conversation", "mcp_transport_session"] },
                 "content": { "type": "string" }
             },
-            "required": ["access_root", "project_root", "newly_selected", "binding_scope", "content"]
+            "required": ["access_root", "source_project_root", "project_root", "managed_worktree", "worktree_git_root", "worktrees_root", "worktree_mode", "warnings", "newly_selected", "binding_scope", "content"]
         }))
     }
 
@@ -112,6 +155,9 @@ impl Tool for SetProjectRoot {
     }
 
     async fn call(&self, args: Value, config: &AppConfig, session: &SessionState) -> ToolResult {
-        select_and_render(&args, |path| session.select_project_root(config, path))
+        select_and_render(&args, |path| async move {
+            session.select_project_root(config, &path).await
+        })
+        .await
     }
 }

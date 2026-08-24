@@ -195,6 +195,8 @@ Each release ships a compiled binary per platform — `windows-x64`, `linux-x64`
 |------|----------|---------|-------------|
 | `--work-dir` | Yes | - | Project directory for server mode, or the project access root with `--multi-project` and `projects list` |
 | `--multi-project` | No | Disabled | Let each ChatGPT conversation bind once to a project beneath `--work-dir`; other clients fall back to transport-session binding |
+| `--worktree-mode` | No | `auto` | Multi-project worktree policy: `auto`, `always`, or `never` |
+| `--worktree-root` | No | Codex worktree location | Directory for managed conversation worktrees |
 | `--port` | No | `3000` | Server port |
 | `--api-key` | No | - | Bearer token for auth |
 | `--config` | No | `./codex.config.json` | Config file path (tolerated if missing) |
@@ -302,6 +304,13 @@ All project-scoped paths are resolved relative to the active project root: `--wo
 ```json
 {
   "multiProject": false,
+  "worktrees": {
+    "mode": "auto",
+    "root": "/path/to/worktrees",
+    "upstreamRefreshMode": "never",
+    "autoCleanupEnabled": true,
+    "keepCount": 15
+  },
   "allowedCommands": ["bun", "npm", "npx", "node", "git", "python", "pip", "cargo", "make"],
   "port": 3000,
   "tree": {
@@ -451,6 +460,18 @@ Native mode deliberately cannot be combined with a caller-supplied `apiKey` / `-
 The OpenAI runtime key authenticates the outbound control-plane connection. Codexify resolves the configured `env:NAME` or `file:/path` reference once, passes the value to the tunnel child under a private synthetic environment name, and removes the original environment variable from model-launched commands and bridged MCP children. The tunnel runtime starts with a small allowlist of ordinary OS variables rather than inheriting tunnel-client configuration, proxy, header, or trust-store overrides from the launching shell. On Unix, a referenced key file must not be readable by group or other users. These measures prevent accidental inheritance; they do not create a secret boundary against hostile code running as the same OS user, which can potentially inspect same-user processes or read an accessible key file.
 
 The top-level `multiProject` key is the config-file equivalent of `--multi-project`. In that mode the process still reads one static `codex.config.json`; project selection changes the effective work directory used by project-scoped tools, not the server configuration itself. The native Codex project table is the exception to the startup snapshot: `list_projects` rereads it on every call so newly trusted projects become discoverable without restarting Codexify. ChatGPT conversation bindings are independent of the `memory` block and remain enabled even when `memory.enabled` is `false`.
+
+The `worktrees` block controls isolation between conversations selecting the same Git project:
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `mode` | `"auto"` | `"auto"` lets the first conversation use the selected checkout and gives later conversations managed worktrees; `"always"` isolates every conversation; `"never"` preserves direct-checkout sharing |
+| `root` | Codex worktree location | Parent directory for managed worktrees; overridden by `--worktree-root` |
+| `upstreamRefreshMode` | Codex setting or `"never"` | `"best-effort"` refreshes a tracked upstream before worktree creation without making fetch failure fatal |
+| `autoCleanupEnabled` | Codex setting or `true` | On startup, remove old unreferenced worktrees only when their working trees are clean |
+| `keepCount` | Codex setting or `15` | Number of newest unreferenced managed worktrees retained before cleanup candidates are considered |
+
+When these values are absent, Codexify reads Codex Desktop's `[desktop]` worktree settings from `$CODEX_HOME/config.toml`, including `git-worktree-root`, `worktree-upstream-refresh-mode`, `worktree-auto-cleanup-enabled`, and `worktree-keep-count`. The final location falls back to `$CODEX_HOME/worktrees` (normally `~/.codex/worktrees`).
 
 The `exec` block governs `exec_command` and `write_stdin`:
 
@@ -613,6 +634,8 @@ Each conversation binds a project exactly once, through the [`set_project_root`]
 
 - The path is relative to the access root or absolute, but its canonical target must be an existing directory inside that root. Traversal (`..`) and symlink escapes are rejected *after* canonicalisation, so a link pointing outside the root cannot smuggle a selection past the check.
 - The binding belongs to the **ChatGPT conversation**, keyed from `_meta["openai/session"]` (the raw identifier is hashed, never stored), so simultaneous chats can hold different projects and a later turn recovers its own root after MCP reconnects or a server restart. A client that sends no ChatGPT conversation metadata falls back to a binding that lasts only the current MCP transport session.
+- With the default worktree mode, the first conversation selecting a Git project uses the source checkout directly. Once that logical project is already assigned, another conversation receives a detached managed worktree under the configured Codex worktree location, preventing concurrent chats from editing the same checkout. `always` and `never` make either behavior unconditional.
+- Worktree identity uses the repository's Git common directory plus the selected path relative to its Git root. Linked worktrees are therefore recognised as the same repository, while separate subprojects in a monorepo remain distinct.
 - A conversation cannot switch roots once bound — start another chat for a different project. Re-selecting the same canonical path is idempotent.
 - Until a root is selected, project-scoped tools are unavailable and say why. `list_projects` and `set_project_root` are the two project-independent tools present for this workflow.
 
@@ -635,7 +658,7 @@ The native table is read live for every `list_projects` call. The file is read-o
 
 Per-conversation separation extends to saved state: with an explicit `memory.dir`, each selected project gets its own hashed child directory (see the [`memory` block](#config-file)), and conversation bindings stay enabled even when `memory.enabled` is `false`. The end-to-end onboarding flow — select, then request the brief — is in [Starting a chat](#starting-a-chat).
 
-To clear a stray binding, delete its file under `~/.codexify/conversation-projects/`; there is no tool to re-point an already-bound conversation.
+To clear a stray binding, delete its file under `~/.codexify/conversation-projects/`; there is no tool to re-point an already-bound conversation. A managed worktree remains referenced while that binding exists. Startup cleanup skips referenced or dirty worktrees and only removes older clean, unreferenced entries beyond `keepCount`.
 
 ## Review checkpoints and ChatGPT UI
 

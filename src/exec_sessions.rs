@@ -21,7 +21,8 @@ use crate::project_bindings::{
     ConversationIdentity, ProjectBindingScope, ProjectRootSelection, resolve_project_root,
 };
 use crate::review::TransportReviewState;
-use crate::types::{AppConfig, PlanState};
+use crate::types::{AppConfig, PlanState, WorktreeMode};
+use crate::worktrees::create_managed_worktree;
 
 // Codex constants (shell_spec.rs). Kept as code, not config, because they are
 // part of matching Codex's tool semantics rather than local policy.
@@ -532,11 +533,26 @@ fn reap_conversation_states(
 pub struct SessionState {
     exec: Arc<ExecSessionState>,
     pub plan: Arc<StdMutex<Option<PlanState>>>,
-    project_root: Arc<StdMutex<Option<PathBuf>>>,
+    /// The transport-session project binding. Shared (behind `Arc`) with any
+    /// conversation-scoped view derived through `with_exec_state`, and carries
+    /// the managed-worktree details when worktree isolation is enabled.
+    project_binding: Arc<StdMutex<Option<TransportProjectBinding>>>,
+    /// Serializes concurrent `set_project_root` calls on this transport session
+    /// so a managed worktree is created at most once. Shared with derived views.
+    project_selection_lock: Arc<TokioMutex<()>>,
     review: TransportReviewState,
     /// Stable per-transport identifier stamped into audit-log events. Shared by
     /// any conversation-scoped view derived from this transport session.
     audit_id: u64,
+}
+
+#[derive(Debug, Clone)]
+struct TransportProjectBinding {
+    source_project_root: PathBuf,
+    project_root: PathBuf,
+    managed_worktree: bool,
+    worktree_git_root: Option<PathBuf>,
+    worktrees_root: Option<PathBuf>,
 }
 
 impl Default for SessionState {
@@ -544,7 +560,8 @@ impl Default for SessionState {
         Self {
             exec: Arc::new(ExecSessionState::new()),
             plan: Arc::new(StdMutex::new(None)),
-            project_root: Arc::new(StdMutex::new(None)),
+            project_binding: Arc::new(StdMutex::new(None)),
+            project_selection_lock: Arc::new(TokioMutex::new(())),
             review: TransportReviewState::new(),
             audit_id: TRANSPORT_SESSION_COUNTER.fetch_add(1, Ordering::Relaxed),
         }
@@ -560,7 +577,8 @@ impl SessionState {
         Self {
             exec,
             plan: self.plan.clone(),
-            project_root: self.project_root.clone(),
+            project_binding: self.project_binding.clone(),
+            project_selection_lock: self.project_selection_lock.clone(),
             review: self.review.clone(),
             audit_id: self.audit_id,
         }
@@ -601,7 +619,7 @@ impl SessionState {
             return Ok(config.clone());
         }
 
-        let Some(stored_root) = self.project_root.lock().unwrap().clone() else {
+        let Some(binding) = self.project_binding.lock().unwrap().clone() else {
             return Err(format!(
                 "No project root is selected for this MCP transport session. If the exact path is unknown, call `list_projects` first. Then call `set_project_root` with a directory relative to the access root `{}`, followed by `get_agent_brief` before using project tools.",
                 config.work_dir.display()
@@ -614,21 +632,34 @@ impl SessionState {
                 config.work_dir.display()
             )
         })?;
-        let project_root = std::fs::canonicalize(&stored_root).map_err(|error| {
+        // The originally selected source must still resolve inside the access
+        // root; this catches a project deleted, moved, or replaced since it was
+        // bound. A managed worktree lives outside the access root by design, so
+        // this containment check is applied to the source selection, not the
+        // effective work directory below.
+        let source_root = std::fs::canonicalize(&binding.source_project_root).map_err(|error| {
             format!(
                 "The project bound to this MCP transport session no longer exists or cannot be resolved: {}: {error}. Open a new session for another project.",
-                stored_root.display()
+                binding.source_project_root.display()
+            )
+        })?;
+        if source_root != access_root && !source_root.starts_with(&access_root) {
+            return Err(format!(
+                "The project bound to this MCP transport session now resolves outside the configured access root: {}. Open a new session for another project.",
+                source_root.display()
+            ));
+        }
+        // The effective work directory (the source itself, or a managed
+        // worktree created under the worktrees root) must still be a directory.
+        let project_root = std::fs::canonicalize(&binding.project_root).map_err(|error| {
+            format!(
+                "The working directory bound to this MCP transport session no longer exists or cannot be resolved: {}: {error}. Open a new session for another project.",
+                binding.project_root.display()
             )
         })?;
         if !project_root.is_dir() {
             return Err(format!(
-                "The project bound to this MCP transport session is no longer a directory: {}. Open a new session for another project.",
-                project_root.display()
-            ));
-        }
-        if project_root != access_root && !project_root.starts_with(&access_root) {
-            return Err(format!(
-                "The project bound to this MCP transport session now resolves outside the configured access root: {}. Open a new session for another project.",
+                "The working directory bound to this MCP transport session is no longer a directory: {}. Open a new session for another project.",
                 project_root.display()
             ));
         }
@@ -638,7 +669,7 @@ impl SessionState {
         Ok(effective)
     }
 
-    pub fn select_project_root(
+    pub async fn select_project_root(
         &self,
         config: &AppConfig,
         input: &str,
@@ -650,35 +681,78 @@ impl SessionState {
             );
         }
 
-        let (access_root, project_root) = resolve_project_root(config, input)?;
+        let _selection_guard = self.project_selection_lock.lock().await;
+        let (access_root, source_project_root) = resolve_project_root(config, input)?;
 
-        let mut selected = self.project_root.lock().unwrap();
-        match selected.as_ref() {
-            Some(current) if current == &project_root => Ok(ProjectRootSelection {
-                access_root,
-                project_root,
-                newly_selected: false,
-                scope: ProjectBindingScope::McpTransportSession,
-            }),
-            Some(current) => Err(format!(
-                "This MCP transport session is already bound to project root `{}` and cannot switch to `{}`. Open a new session for another project.",
-                current.display(),
-                project_root.display()
-            )),
-            None => {
-                *selected = Some(project_root.clone());
-                Ok(ProjectRootSelection {
+        if let Some(current) = self.project_binding.lock().unwrap().clone() {
+            if current.source_project_root == source_project_root {
+                return Ok(ProjectRootSelection {
                     access_root,
-                    project_root,
-                    newly_selected: true,
+                    source_project_root: current.source_project_root,
+                    project_root: current.project_root,
+                    managed_worktree: current.managed_worktree,
+                    worktree_git_root: current.worktree_git_root,
+                    worktrees_root: current.worktrees_root,
+                    worktree_mode: config.worktrees.mode,
+                    warnings: Vec::new(),
+                    newly_selected: false,
                     scope: ProjectBindingScope::McpTransportSession,
-                })
+                });
             }
+            return Err(format!(
+                "This MCP transport session is already bound to source project `{}` and cannot switch to `{}`. Open a new session for another project.",
+                current.source_project_root.display(),
+                source_project_root.display()
+            ));
         }
+
+        let create_worktree = config.worktrees.mode != WorktreeMode::Never;
+        let managed = if create_worktree {
+            Some(create_managed_worktree(config, &source_project_root).await?)
+        } else {
+            None
+        };
+        let binding = match managed.as_ref() {
+            Some(worktree) => TransportProjectBinding {
+                source_project_root: source_project_root.clone(),
+                project_root: worktree.project_root.clone(),
+                managed_worktree: true,
+                worktree_git_root: Some(worktree.worktree_git_root.clone()),
+                worktrees_root: Some(worktree.worktrees_root.clone()),
+            },
+            None => TransportProjectBinding {
+                source_project_root: source_project_root.clone(),
+                project_root: source_project_root.clone(),
+                managed_worktree: false,
+                worktree_git_root: None,
+                worktrees_root: None,
+            },
+        };
+        *self.project_binding.lock().unwrap() = Some(binding.clone());
+
+        Ok(ProjectRootSelection {
+            access_root,
+            source_project_root: binding.source_project_root,
+            project_root: binding.project_root,
+            managed_worktree: binding.managed_worktree,
+            worktree_git_root: binding.worktree_git_root,
+            worktrees_root: binding.worktrees_root,
+            worktree_mode: config.worktrees.mode,
+            warnings: managed
+                .as_ref()
+                .map(|worktree| worktree.warnings.clone())
+                .unwrap_or_default(),
+            newly_selected: true,
+            scope: ProjectBindingScope::McpTransportSession,
+        })
     }
 
     pub fn selected_project_root(&self) -> Option<PathBuf> {
-        self.project_root.lock().unwrap().clone()
+        self.project_binding
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|binding| binding.project_root.clone())
     }
 
     pub fn review_state(&self) -> TransportReviewState {

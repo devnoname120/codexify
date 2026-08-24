@@ -236,47 +236,14 @@ pub fn assert_exec_allowed(cmd: &str, config: &AppConfig) -> Result<(), ExecPoli
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{
-        ArtifactIngressConfig, AuditConfig, CommandConfig, ExecConfig, IgnoreConfig, MemoryConfig,
-        OutputConfig, ProjectDocConfig, ReviewConfig, SkillsConfig, TreeConfig,
-    };
+    use crate::config::default_config;
 
     fn cfg(mode: ExecMode) -> AppConfig {
-        AppConfig {
-            work_dir: std::path::PathBuf::from("/w"),
-            multi_project: false,
-            project_catalog: crate::types::ProjectCatalogConfig::default(),
-            api_key: None,
-            port: 3000,
-            allowed_commands: vec!["git".into(), "node".into()],
-            tree: TreeConfig {
-                default_depth: 3,
-                ignore: vec![],
-            },
-            command: CommandConfig {
-                default_timeout: 30000,
-                max_timeout: 120000,
-            },
-            exec: ExecConfig {
-                mode,
-                extra_allowed_commands: vec!["ls".into(), "cat".into(), "grep".into()],
-                max_sessions: 8,
-                default_shell: None,
-                idle_timeout_ms: 0,
-            },
-            project_doc: ProjectDocConfig::default(),
-            output: OutputConfig::default(),
-            review: ReviewConfig::default(),
-            artifact_ingress: ArtifactIngressConfig::default(),
-            memory: MemoryConfig::default(),
-            skills: SkillsConfig::default(),
-            ignore: IgnoreConfig::default(),
-            audit: AuditConfig::default(),
-            allowed_hosts: vec![],
-            openai_tunnel: None,
-            mcp_servers: std::collections::HashMap::new(),
-            generated_skills_dir: None,
-        }
+        let mut config = default_config(std::path::PathBuf::from("/w"));
+        config.allowed_commands = vec!["git".into(), "node".into()];
+        config.exec.mode = mode;
+        config.exec.extra_allowed_commands = vec!["ls".into(), "cat".into(), "grep".into()];
+        config
     }
 
     #[test]

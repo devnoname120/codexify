@@ -8,6 +8,12 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Optional Git worktree isolation for concurrent conversations. In multi-project
+  mode, `set_project_root` can bind each conversation to a detached managed
+  worktree (`worktrees.mode`) created under a configurable worktrees root, so
+  simultaneous chats never edit the same checkout. Stale managed worktrees are
+  swept on startup when `worktrees.autoCleanupEnabled` is set, bounded by
+  `worktrees.keepCount`.
 - Optional Codex CLI enrichment for MCP discovery. By default Codexify uses
   `codex mcp list/get --json` when the executable is available, adding MCP
   servers contributed by enabled Codex plugins while retaining direct
