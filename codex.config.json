@@ -20,6 +20,7 @@
       "ls", "cat", "grep", "find", "head", "tail", "wc", "echo", "pwd",
       "which", "rg", "sed", "awk", "sort", "uniq", "diff", "true", "false"
     ],
-    "maxSessions": 8
+    "maxSessions": 8,
+    "idleTimeoutMs": 300000
   }
 }
