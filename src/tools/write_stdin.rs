@@ -109,16 +109,15 @@ impl Tool for WriteStdin {
             ..Default::default()
         };
 
-        let is_error;
-        if exited {
+        let is_error = if exited {
             let code = exec_session.exit_code();
             result.exit_code = code;
             session.exec_sessions.lock().unwrap().remove(&session_id);
-            is_error = code.unwrap_or(0) != 0;
+            code.unwrap_or(0) != 0
         } else {
             result.session_id = Some(session_id);
-            is_error = false;
-        }
+            false
+        };
 
         let structured = serde_json::to_value(&result).unwrap_or(Value::Null);
         ToolResult {
