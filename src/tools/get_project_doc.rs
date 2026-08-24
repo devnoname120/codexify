@@ -95,7 +95,12 @@ impl Tool for GetProjectDoc {
         };
         let content = doc.as_ref().map(|d| d.text.clone()).unwrap_or_default();
         let text = render_project_doc(doc.as_ref());
+        let truncated = doc
+            .as_ref()
+            .is_some_and(|document| document.entries.iter().any(|entry| entry.truncated));
 
-        ToolResult::text(text).with_structured(json!({ "files": files, "content": content }))
+        ToolResult::text(text)
+            .with_structured(json!({ "files": files, "content": content }))
+            .with_truncation(truncated)
     }
 }

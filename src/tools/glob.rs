@@ -149,6 +149,6 @@ impl Tool for Glob {
         } else {
             items.join("\n")
         };
-        ToolResult::text(text)
+        ToolResult::text(text).with_truncation(dropped > 0)
     }
 }

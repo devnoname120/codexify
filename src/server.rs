@@ -8,6 +8,7 @@
 //! state and review checkpoints that survive transport replacement. The embedded
 //! review resource remains presentation-only.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -30,6 +31,9 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tower_http::cors::{Any, CorsLayer};
 
+use crate::audit::{
+    AuditLogger, AuditScope, argument_field_names, summarize_arguments, summarize_output,
+};
 use crate::auth::{generate_internal_bearer_token, require_auth};
 use crate::exec_sessions::{ConversationExecSessionStore, SessionState};
 use crate::instructions::build_initial_instructions;
@@ -69,7 +73,37 @@ pub struct CodexHandler {
     project_bindings: Arc<ProjectBindingStore>,
     conversation_exec_sessions: Arc<ConversationExecSessionStore>,
     review_checkpoints: Arc<ReviewCheckpointManager>,
+    audit: Option<Arc<AuditLogger>>,
     session: SessionState,
+}
+
+impl CodexHandler {
+    fn selected_project_root(
+        &self,
+        conversation: Option<&ConversationIdentity>,
+    ) -> Option<PathBuf> {
+        if !self.config.multi_project {
+            return Some(self.config.work_dir.clone());
+        }
+        match conversation {
+            Some(identity) => self
+                .project_bindings
+                .selected_project_root(&self.config, identity)
+                .ok()
+                .flatten(),
+            None => self.session.selected_project_root(),
+        }
+    }
+
+    fn audit_scope(&self, conversation: Option<&ConversationIdentity>) -> AuditScope {
+        let project_root = self.selected_project_root(conversation);
+        AuditScope::new(
+            self.session.audit_id(),
+            conversation,
+            &self.config.work_dir,
+            project_root.as_deref(),
+        )
+    }
 }
 
 /// Convert this repo's [`ToolResult`] into rmcp's `CallToolResult`.
@@ -176,20 +210,54 @@ impl ServerHandler for CodexHandler {
                 .as_ref()
                 .and_then(ConversationIdentity::from_request_meta)
         });
-        let name = request.name.as_ref();
+        let name = request.name.as_ref().to_string();
         let args = request.arguments.map(Value::Object).unwrap_or(Value::Null);
         let tool_context = ToolRequestContext {
             conversation: conversation.clone(),
             review_checkpoints: self.review_checkpoints.clone(),
         };
 
-        let Some(tool) = self.tools.iter().find(|t| t.name() == name) else {
-            let result =
-                CallToolResult::error(vec![ContentBlock::text(format!("Unknown tool: {name}"))]);
-            return Ok(result.into());
-        };
+        // Keep `tool` as an Option so that even an unknown-tool call flows through
+        // the audit begin/finish pairing below rather than short-circuiting.
+        let tool = self.tools.iter().find(|t| t.name() == name);
 
-        let conversation_exec_session = if tool.uses_exec_session_state() {
+        // Verbose-diagnostics / audit preamble (#15). `needs_scope` gates the cost
+        // of building an audit scope and argument summaries to the cases that will
+        // actually consume them.
+        let needs_scope = self.audit.is_some()
+            || tracing::enabled!(target: "codexify::tool", tracing::Level::DEBUG);
+        let input_schema = needs_scope
+            .then(|| tool.map(|tool| tool.input_schema()))
+            .flatten();
+        let start_scope = needs_scope.then(|| self.audit_scope(conversation.as_ref()));
+        let audit_call = self.audit.as_ref().and_then(|audit| {
+            start_scope
+                .as_ref()
+                .map(|scope| audit.begin_tool(&name, &args, input_schema.as_ref(), scope))
+        });
+        if let Some(scope) = start_scope.as_ref() {
+            tracing::debug!(
+                target: "codexify::tool",
+                tool = %name,
+                transport_session_id = scope.transport_session_id,
+                conversation_id = scope.conversation_id.as_deref().unwrap_or("-"),
+                project_id = scope.project_id.as_deref().unwrap_or("-"),
+                argument_fields = %argument_field_names(&args, input_schema.as_ref()),
+                "tool started"
+            );
+        }
+        if tracing::enabled!(target: "codexify::tool", tracing::Level::TRACE) {
+            tracing::trace!(
+                target: "codexify::tool",
+                tool = %name,
+                argument_summary = %summarize_arguments(&args, input_schema.as_ref()),
+                "tool arguments summarized"
+            );
+        }
+
+        // A ChatGPT conversation gets its own exec-session view (#12); generic MCP
+        // clients fall back to the transport-owned session.
+        let conversation_exec_session = if tool.is_some_and(|t| t.uses_exec_session_state()) {
             conversation.as_ref().map(|identity| {
                 self.conversation_exec_sessions
                     .session_for(identity, &self.session)
@@ -199,18 +267,21 @@ impl ServerHandler for CodexHandler {
         };
         let session = conversation_exec_session.as_ref().unwrap_or(&self.session);
 
-        let mut result = if name == SetProjectRoot::NAME {
-            if let Some(identity) = conversation.as_ref() {
-                select_and_render(&args, |path| {
-                    self.project_bindings
-                        .select_project_root(&self.config, identity, path)
-                })
-            } else {
-                tool.call_with_context(args, &self.config, session, &tool_context)
-                    .await
+        let started = Instant::now();
+        let mut result = match tool {
+            None => ToolResult::error(format!("Unknown tool: {name}")),
+            Some(tool) if name == SetProjectRoot::NAME => {
+                if let Some(identity) = conversation.as_ref() {
+                    select_and_render(&args, |path| {
+                        self.project_bindings
+                            .select_project_root(&self.config, identity, path)
+                    })
+                } else {
+                    tool.call_with_context(args, &self.config, session, &tool_context)
+                        .await
+                }
             }
-        } else {
-            let effective_config = if tool.requires_project_root() {
+            Some(tool) if tool.requires_project_root() => {
                 let resolved = match conversation.as_ref() {
                     Some(identity) => self
                         .project_bindings
@@ -218,69 +289,71 @@ impl ServerHandler for CodexHandler {
                     None => session.effective_config(&self.config),
                 };
                 match resolved {
-                    Ok(config) => Some(config),
-                    Err(error) => {
-                        let result = ToolResult::error(error);
-                        tracing::info!("  tool: {name} -> error");
-                        return Ok(to_call_tool_result(result).into());
+                    Err(error) => ToolResult::error(error),
+                    Ok(effective_config) => {
+                        let owner = match conversation.as_ref() {
+                            Some(identity) => ReviewOwner::conversation(identity),
+                            None => ReviewOwner::transport(self.session.review_state()),
+                        };
+                        if tool.may_modify_project() {
+                            // Fail closed: refuse a mutating tool when the review
+                            // checkpoint cannot be captured. The refusal is returned
+                            // as a value (not an early return) so the audit
+                            // finish_tool below still pairs with begin_tool.
+                            match self
+                                .review_checkpoints
+                                .begin_mutation(&effective_config, owner)
+                                .await
+                            {
+                                Ok((availability, guard)) => {
+                                    if let ReviewAvailability::Unavailable(reason) = &availability {
+                                        tracing::debug!(
+                                            "review checkpoints unavailable for {name}: {reason}"
+                                        );
+                                    }
+                                    let result = tool
+                                        .call_with_context(
+                                            args,
+                                            &effective_config,
+                                            session,
+                                            &tool_context,
+                                        )
+                                        .await;
+                                    drop(guard);
+                                    result
+                                }
+                                Err(error) => ToolResult::error(format!(
+                                    "Refusing to run mutating tool `{name}` because the project review checkpoint could not be captured: {error}"
+                                )),
+                            }
+                        } else {
+                            match self
+                                .review_checkpoints
+                                .ensure_initialized(&effective_config, owner)
+                                .await
+                            {
+                                Ok(ReviewAvailability::Ready) => {}
+                                Ok(ReviewAvailability::Unavailable(reason)) => {
+                                    tracing::debug!(
+                                        "review checkpoints unavailable for {name}: {reason}"
+                                    );
+                                }
+                                Err(error) => {
+                                    tracing::debug!(
+                                        "review checkpoint initialization skipped for {name}: {error}"
+                                    );
+                                }
+                            }
+                            tool.call_with_context(args, &effective_config, session, &tool_context)
+                                .await
+                        }
                     }
                 }
-            } else {
-                None
-            };
-            let call_config = effective_config
-                .as_ref()
-                .unwrap_or_else(|| self.config.as_ref());
-            let review_guard = if tool.requires_project_root() {
-                let owner = match conversation.as_ref() {
-                    Some(identity) => ReviewOwner::conversation(identity),
-                    None => ReviewOwner::transport(self.session.review_state()),
-                };
-                if tool.may_modify_project() {
-                    match self
-                        .review_checkpoints
-                        .begin_mutation(call_config, owner)
-                        .await
-                    {
-                        Ok((ReviewAvailability::Ready, guard)) => Some(guard),
-                        Ok((ReviewAvailability::Unavailable(reason), guard)) => {
-                            tracing::debug!("review checkpoints unavailable for {name}: {reason}");
-                            Some(guard)
-                        }
-                        Err(error) => {
-                            let result = ToolResult::error(format!(
-                                "Refusing to run mutating tool `{name}` because the project review checkpoint could not be captured: {error}"
-                            ));
-                            tracing::info!("  tool: {name} -> error");
-                            return Ok(to_call_tool_result(result).into());
-                        }
-                    }
-                } else {
-                    match self
-                        .review_checkpoints
-                        .ensure_initialized(call_config, owner)
-                        .await
-                    {
-                        Ok(ReviewAvailability::Ready) => {}
-                        Ok(ReviewAvailability::Unavailable(reason)) => {
-                            tracing::debug!("review checkpoints unavailable for {name}: {reason}");
-                        }
-                        Err(error) => {
-                            tracing::debug!(
-                                "review checkpoint initialization skipped for {name}: {error}"
-                            );
-                        }
-                    }
-                    None
-                }
-            } else {
-                None
-            };
-            let result = tool
-                .call_with_context(args, call_config, session, &tool_context)
-                .await;
-            drop(review_guard);
-            result
+            }
+            Some(tool) => {
+                tool.call_with_context(args, &self.config, session, &tool_context)
+                    .await
+            }
         };
 
         // Fill in the `structuredContent` the MCP spec expects from any tool that
@@ -288,7 +361,8 @@ impl ServerHandler for CodexHandler {
         // schema, for which the text they return *is* the structured form; tools
         // with a different schema build their own and pass through. Errors are
         // left alone — the spec exempts `isError` results.
-        if tool.output_schema().is_some()
+        if let Some(tool) = tool
+            && tool.output_schema().is_some()
             && tool.fills_structured_content()
             && !result.is_error
             && result.structured_content.is_none()
@@ -296,10 +370,32 @@ impl ServerHandler for CodexHandler {
             result.structured_content = Some(json!({ "content": result.joined_text() }));
         }
 
+        let duration_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
         tracing::info!(
-            "  tool: {name} -> {}",
-            if result.is_error { "error" } else { "ok" }
+            target: "codexify::tool",
+            tool = %name,
+            status = if result.is_error { "error" } else { "ok" },
+            duration_ms,
+            "tool completed"
         );
+        if tracing::enabled!(target: "codexify::tool", tracing::Level::DEBUG) {
+            tracing::debug!(
+                target: "codexify::tool",
+                tool = %name,
+                output_summary = %summarize_output(&result),
+                "tool output summarized"
+            );
+        }
+        if let (Some(audit), Some(call), Some(start_scope)) =
+            (&self.audit, audit_call.as_ref(), start_scope.as_ref())
+        {
+            if name == SetProjectRoot::NAME {
+                let finish_scope = self.audit_scope(conversation.as_ref());
+                audit.finish_tool(call, &name, &result, duration_ms, &finish_scope);
+            } else {
+                audit.finish_tool(call, &name, &result, duration_ms, start_scope);
+            }
+        }
         Ok(to_call_tool_result(result).into())
     }
 }
@@ -317,6 +413,7 @@ pub async fn start_http_server(mut config: AppConfig) -> anyhow::Result<()> {
         }
         config.api_key = Some(generate_internal_bearer_token()?);
     }
+    let audit = AuditLogger::open(&config)?.map(Arc::new);
     // Gateway-mode upstreams write their generated skills here; keyed by port so
     // concurrent instances don't clobber each other, and rebuilt fresh per start.
     let gen_dir = std::env::temp_dir()
@@ -379,6 +476,7 @@ pub async fn start_http_server(mut config: AppConfig) -> anyhow::Result<()> {
     let factory_project_bindings = project_bindings.clone();
     let factory_conversation_exec_sessions = conversation_exec_sessions.clone();
     let factory_review_checkpoints = review_checkpoints.clone();
+    let factory_audit = audit.clone();
     let service = StreamableHttpService::new(
         move || {
             let session = SessionState::new();
@@ -389,6 +487,7 @@ pub async fn start_http_server(mut config: AppConfig) -> anyhow::Result<()> {
                 project_bindings: factory_project_bindings.clone(),
                 conversation_exec_sessions: factory_conversation_exec_sessions.clone(),
                 review_checkpoints: factory_review_checkpoints.clone(),
+                audit: factory_audit.clone(),
                 session,
             })
         },
@@ -458,6 +557,17 @@ pub async fn start_http_server(mut config: AppConfig) -> anyhow::Result<()> {
         println!("Auth: enabled (bearer token)");
     } else {
         println!("Auth: disabled (no --api-key)");
+    }
+    if let Some(audit) = audit.as_ref() {
+        println!("Audit log: {}", audit.path().display());
+        println!(
+            "Audit command previews: {}",
+            if audit.command_previews_enabled() {
+                "enabled (bounded and redacted)"
+            } else {
+                "disabled"
+            }
+        );
     }
     if !native_tunnel {
         println!("\nAdd to ChatGPT > Plugins > New Plugin:");
@@ -778,6 +888,7 @@ mod tests {
             project_bindings: Arc::new(ProjectBindingStore::new(root.path().join("bindings"))),
             conversation_exec_sessions: Arc::new(ConversationExecSessionStore::new()),
             review_checkpoints: Arc::new(ReviewCheckpointManager::new()),
+            audit: None,
             session: SessionState::new(),
         };
 

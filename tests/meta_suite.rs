@@ -225,6 +225,7 @@ impl Tool for FakeTool {
             content: vec![],
             is_error: false,
             structured_content: None,
+            audit: Default::default(),
         }
     }
 }
@@ -247,6 +248,7 @@ fn derives_content_from_text_blocks() {
         content: vec![ToolContent::Text("hello".into())],
         is_error: false,
         structured_content: None,
+        audit: Default::default(),
     };
     let filled = apply_default_structured(&tool, &result);
     assert_eq!(
@@ -269,6 +271,7 @@ fn joins_multiple_text_blocks_and_skips_non_text() {
         ],
         is_error: false,
         structured_content: None,
+        audit: Default::default(),
     };
     let filled = apply_default_structured(&tool, &result);
     assert_eq!(
@@ -284,6 +287,7 @@ fn leaves_tools_own_structured_content_alone() {
         content: vec![ToolContent::Text("{}".into())],
         is_error: false,
         structured_content: Some(json!({ "current_time": "2026-01-01 00:00:00 UTC" })),
+        audit: Default::default(),
     };
     let filled = apply_default_structured(&tool, &result);
     assert_eq!(
@@ -299,6 +303,7 @@ fn adds_nothing_when_tool_declares_no_output_schema() {
         content: vec![ToolContent::Text("hello".into())],
         is_error: false,
         structured_content: None,
+        audit: Default::default(),
     };
     let filled = apply_default_structured(&tool, &result);
     assert_eq!(filled.structured_content, None);
@@ -311,6 +316,7 @@ fn adds_nothing_to_an_error_result() {
         content: vec![ToolContent::Text("boom".into())],
         is_error: true,
         structured_content: None,
+        audit: Default::default(),
     };
     let filled = apply_default_structured(&tool, &result);
     assert_eq!(filled.structured_content, None);
@@ -323,6 +329,7 @@ fn does_not_mutate_the_result_it_was_given() {
         content: vec![ToolContent::Text("hello".into())],
         is_error: false,
         structured_content: None,
+        audit: Default::default(),
     };
     let _ = apply_default_structured(&tool, &result);
     assert_eq!(result.structured_content, None);

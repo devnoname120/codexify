@@ -194,6 +194,10 @@ Each release ships a compiled binary per platform — `windows-x64`, `linux-x64`
 | `--api-key` | No | - | Bearer token for auth |
 | `--config` | No | `./codex.config.json` | Config file path (tolerated if missing) |
 | `--codex-cli` | No | Auto when available | Require successful Codex CLI-backed MCP discovery. When omitted, failure produces a warning and direct `config.toml` parsing remains the fallback |
+| `-v`, `--verbose` | No | Info logs | Enable Codexify debug diagnostics; repeat (`-vv`) for trace diagnostics (`--log-tool-calls` is an alias) |
+| `--audit <FILE>` | No | Disabled | Append privacy-preserving tool activity events to a JSONL file (`--audit-log` is an alias) |
+| `--audit-command-preview` | No | Disabled | Add bounded, redacted previews for `exec_command` and `run_command` to the audit log |
+| `--audit-redact-env <NAME>` | No | - | Redact the current value of an environment variable from command previews; repeat for multiple names |
 | `--openai-tunnel-id` | No | - | Existing OpenAI Secure MCP Tunnel ID; enables native tunnel mode |
 | `--openai-tunnel-api-key-ref` | No | `env:CONTROL_PLANE_API_KEY` | Runtime key reference in `env:NAME` or `file:/path` form |
 | `--openai-tunnel-client` | No | managed pinned runtime | Explicit `tunnel-client` or `tunnel-client-runtime` binary |
@@ -330,6 +334,12 @@ All project-scoped paths are resolved relative to the active project root: `--wo
   "review": {
     "maxPatchBytes": 524288
   },
+  "audit": {
+    "logFile": null,
+    "includeCommandPreview": false,
+    "commandPreviewMaxBytes": 512,
+    "redactEnv": []
+  },
   "memory": {
     "enabled": true,
     "maxBytes": 16384
@@ -359,6 +369,52 @@ All project-scoped paths are resolved relative to the active project root: `--wo
 ```
 
 CLI flags override values from the config file.
+
+## Diagnostics and audit logging
+
+The default tracing level remains `info`. `-v` changes the default filter to `codexify=debug,rmcp=warn`, which adds tool-start events, hashed conversation/project context, argument field names, duration, and output accounting without dumping protocol traffic. `-vv` changes Codexify to `trace` while keeping `rmcp` at `warn`, and adds the fully redacted argument-shape summary. An explicit `RUST_LOG` value takes precedence over `-v`/`-vv` when protocol-level diagnostics are required:
+
+```bash
+codexify -v --work-dir /path/to/project
+RUST_LOG=codexify=trace,rmcp=warn codexify --work-dir /path/to/project
+```
+
+Audit logging is separate from diagnostic tracing and is disabled unless a file is configured:
+
+```bash
+codexify \
+  --work-dir /path/to/project \
+  --audit ~/.codexify/audit/tools.jsonl
+```
+
+The append-only JSONL stream begins with `audit_started`, which identifies the server version, OS process, random run ID, and command-preview policy, then emits `tool_start` and `tool_finish` records. Tool records carry an RFC 3339 timestamp, monotonic call ID, transport-session ID, hashed ChatGPT conversation and project identifiers, tool name, duration, status, argument shape, returned byte/token counts, truncation status when the tool can report it, and resident `exec_command` session/PID metadata. Argument summaries include only fields declared by the tool's input schema; unknown keys and dynamic maps are counted but their key names are omitted. Raw conversation identifiers, project paths, scalar argument values, image data, structured output, and returned text are not written.
+
+Command previews are a separate opt-in because shell commands can contain credentials, source code, paths, and environment values:
+
+```bash
+codexify \
+  --work-dir /path/to/project \
+  --audit ~/.codexify/audit/tools.jsonl \
+  --audit-command-preview \
+  --audit-redact-env GITHUB_TOKEN
+```
+
+Before a preview is written, Codexify replaces the local MCP bearer, configured MCP-server environment values, the referenced OpenAI tunnel key when readable, values named by `audit.redactEnv` / `--audit-redact-env`, common secret-bearing process environment variables, and common `--token`, `API_KEY=…`, and `Bearer …` forms. The preview is then capped at `commandPreviewMaxBytes`. This is defense in depth, not a proof that an arbitrary command contains no sensitive literal; leave previews disabled when command text itself is sensitive.
+
+The `audit` config block has the same controls:
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `logFile` | `null` | JSONL destination; a relative path resolves from the launch directory. Setting it enables auditing |
+| `includeCommandPreview` | `false` | Include bounded, redacted `exec_command` / `run_command` previews |
+| `commandPreviewMaxBytes` | `512` | Maximum UTF-8 byte length of a command preview; accepted range is `1`-`16384` |
+| `redactEnv` | `[]` | Environment-variable names whose current values must be removed from previews |
+
+`--audit` replaces `audit.logFile`; `--audit-command-preview` only enables previews; and repeated `--audit-redact-env` values are merged with `audit.redactEnv` so a CLI invocation cannot accidentally remove configured redactions.
+
+Startup fails if an enabled audit file cannot be opened safely. On Unix, newly created files use mode `0600`, symbolic-link targets are rejected, and an existing file with group/other permission bits is rejected. A later append or flush error is emitted as an error-level diagnostic without changing the result of a tool that may already have had side effects.
+
+This is an operational activity log, not a tamper-evident security boundary. Model-launched commands run as the same OS user and can modify any audit file they can locate and access. Keep the file outside the project access root, restrict its directory permissions, and forward it to a separately protected collector when independent evidence is required.
 
 The `openaiTunnel` block enables OpenAI's native outbound tunnel:
 
@@ -865,6 +921,7 @@ Native tunnel mode ignores `allowedHosts` and forces the accepted authorities to
 - **Tunnel secrets are references, not config values**: `openaiTunnel.apiKeyRef` accepts only `env:NAME` or `file:/path`; literal API keys are rejected. Codexify resolves the value and exposes it only to the tunnel child under a synthetic environment name, while the child receives a clean, allowlisted environment. Use a restricted runtime key with Tunnels **Read** + **Use**, not an admin key. Private key-file permissions are enforced on Unix. Same-user process inspection and same-user file access remain outside this boundary.
 - **Optional bearer token auth in non-native mode**: set `--api-key` to require an `Authorization: Bearer <key>` header on all requests except `/health`. Native mode instead owns its private per-process bearer token. ChatGPT Plugins do not support simple bearer token auth for URL-based connectors.
 - **Host allowlist**: set `allowedHosts` to pin the accepted `Host` header for DNS-rebinding protection. See [Host allowlist](#host-allowlist).
+- **Audit records exclude payloads by default**: `--audit` writes hashes, timings, result sizes, and redacted argument shape rather than source, file paths, credentials, or returned output. Command previews require a separate opt-in and remain potentially sensitive even after configured and heuristic redaction, so protect the audit file as operational data.
 
 The allowlist is a **guardrail against accidents, not a sandbox**. It catches a model reaching for `curl` or `rm -rf`; it does not contain a determined one. The defaults already include `node`, `python` and `cargo`, each of which runs arbitrary code — `node -e "..."` can do anything the server process can. Shell redirection and explicit absolute or parent paths can also reach outside the active project root even though each command starts with that root as its cwd. Multi-project selection isolates Codexify's structured tools and logical per-conversation project state; it is not an operating-system sandbox. Treat everything below as reachable by whoever is authorized to use the configured connector or external endpoint:
 

@@ -25,7 +25,7 @@ use codexify::tools::list_directory::ListDirectory;
 use codexify::tools::read_file::ReadFile;
 use codexify::tools::tree::Tree;
 use codexify::tools::write_file::WriteFile;
-use codexify::types::AppConfig;
+use codexify::types::{AppConfig, ToolResult};
 
 // --- helpers -----------------------------------------------------------
 
@@ -46,9 +46,13 @@ fn ignore_config(root: &Path) -> AppConfig {
     config
 }
 
-async fn run_text(tool: &dyn Tool, args: serde_json::Value, config: &AppConfig) -> String {
+async fn run_result(tool: &dyn Tool, args: serde_json::Value, config: &AppConfig) -> ToolResult {
     let session = SessionState::new();
-    tool.call(args, config, &session).await.joined_text()
+    tool.call(args, config, &session).await
+}
+
+async fn run_text(tool: &dyn Tool, args: serde_json::Value, config: &AppConfig) -> String {
+    run_result(tool, args, config).await.joined_text()
 }
 
 // --- toRelPosix --------------------------------------------------------
@@ -513,7 +517,9 @@ async fn caps_read_file_stops_at_line_budget_and_names_offset() {
     let mut config = default_config(dir.path().to_path_buf());
     config.output.max_file_lines = Some(10);
 
-    let out = run_text(&ReadFile, json!({ "path": "big.txt" }), &config).await;
+    let result = run_result(&ReadFile, json!({ "path": "big.txt" }), &config).await;
+    let out = result.joined_text();
+    assert_eq!(result.audit.truncated, Some(true));
     assert!(out.contains("10\tline10"), "{out}");
     assert!(!out.contains("11\tline11"), "{out}");
     assert!(
@@ -549,7 +555,9 @@ async fn caps_read_file_small_file_comes_back_whole_no_notice() {
     write(dir.path(), "small.txt", "a\nb");
     let config = default_config(dir.path().to_path_buf());
 
-    let out = run_text(&ReadFile, json!({ "path": "small.txt" }), &config).await;
+    let result = run_result(&ReadFile, json!({ "path": "small.txt" }), &config).await;
+    let out = result.joined_text();
+    assert_eq!(result.audit.truncated, Some(false));
     assert_eq!(out, "1\ta\n2\tb");
 }
 
@@ -574,7 +582,9 @@ async fn caps_glob_cuts_match_list_and_says_how_to_narrow() {
     let mut config = default_config(dir.path().to_path_buf());
     config.output.max_entries = Some(5);
 
-    let out = run_text(&Glob, json!({ "pattern": "*.ts" }), &config).await;
+    let result = run_result(&Glob, json!({ "pattern": "*.ts" }), &config).await;
+    let out = result.joined_text();
+    assert_eq!(result.audit.truncated, Some(true));
     let ts_lines = out.lines().filter(|l| l.ends_with(".ts")).count();
     assert_eq!(ts_lines, 5, "{out}");
     assert!(out.contains("(showing 5 of 20 matches"), "{out}");
@@ -600,7 +610,9 @@ async fn caps_list_directory_cuts_entry_list_and_points_at_glob() {
     let mut config = default_config(dir.path().to_path_buf());
     config.output.max_entries = Some(5);
 
-    let out = run_text(&ListDirectory, json!({}), &config).await;
+    let result = run_result(&ListDirectory, json!({}), &config).await;
+    let out = result.joined_text();
+    assert_eq!(result.audit.truncated, Some(true));
     assert!(out.contains("(showing 5 of 20 entries"), "{out}");
     assert!(out.contains("use glob"), "{out}");
 }
@@ -625,7 +637,9 @@ async fn caps_tree_stops_at_node_budget_and_says_how_to_get_less() {
     let mut config = default_config(dir.path().to_path_buf());
     config.output.max_tree_nodes = Some(6);
 
-    let out = run_text(&Tree, json!({}), &config).await;
+    let result = run_result(&Tree, json!({}), &config).await;
+    let out = result.joined_text();
+    assert_eq!(result.audit.truncated, Some(true));
     assert!(out.contains("(stopped at 6 nodes"), "{out}");
     assert!(out.contains("lower \"depth\""), "{out}");
 }

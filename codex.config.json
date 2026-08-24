@@ -32,5 +32,11 @@
   },
   "review": {
     "maxPatchBytes": 524288
+  },
+  "audit": {
+    "logFile": null,
+    "includeCommandPreview": false,
+    "commandPreviewMaxBytes": 512,
+    "redactEnv": []
   }
 }

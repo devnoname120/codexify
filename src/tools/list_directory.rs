@@ -110,7 +110,7 @@ impl Tool for ListDirectory {
         } else {
             lines.join("\n")
         };
-        ToolResult::text(text)
+        ToolResult::text(text).with_truncation(dropped > 0)
     }
 }
 

@@ -72,6 +72,7 @@ impl Tool for ReadFile {
             .unwrap_or(0);
         let limit = arg_f64(&args, "limit").map(|f| if f <= 0.0 { 0 } else { f.trunc() as usize });
         let window = window_file_lines(&lines, offset, limit, file_budget(config));
+        let truncated = window.notice.is_some();
 
         let numbered = window
             .lines
@@ -85,6 +86,6 @@ impl Tool for ReadFile {
             Some(notice) => format!("{numbered}\n\n{notice}"),
             None => numbered,
         };
-        ToolResult::text(body)
+        ToolResult::text(body).with_truncation(truncated)
     }
 }

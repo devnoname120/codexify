@@ -59,6 +59,10 @@ impl ConversationIdentity {
     pub(crate) fn stable_key(&self) -> &str {
         &self.key
     }
+
+    pub fn audit_hash(&self) -> &str {
+        &self.key[..24]
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

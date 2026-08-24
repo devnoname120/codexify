@@ -5,6 +5,7 @@
 //! original TypeScript.
 
 pub mod apply_patch;
+mod audit;
 pub mod auth;
 pub mod bridge;
 pub mod codex_config;
@@ -15,6 +16,7 @@ pub mod exec_policy;
 pub mod exec_sessions;
 pub mod ignore_rules;
 pub mod instructions;
+pub mod logging;
 pub mod memory;
 pub mod openai_tunnel;
 pub mod output_budget;

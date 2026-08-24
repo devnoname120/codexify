@@ -129,6 +129,7 @@ fn map_call_result(result: CallToolResult) -> ToolResult {
         content,
         is_error: result.is_error.unwrap_or(false),
         structured_content: result.structured_content,
+        audit: Default::default(),
     }
 }
 

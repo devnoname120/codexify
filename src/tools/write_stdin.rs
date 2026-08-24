@@ -8,7 +8,7 @@ use crate::exec_sessions::{
 };
 use crate::tool::{Tool, arg_str, arg_u64};
 use crate::tools::exec_command::{render_unified_exec_output, unified_exec_output_schema};
-use crate::types::{AppConfig, ToolContent, ToolResult};
+use crate::types::{AppConfig, ToolAuditMetadata, ToolContent, ToolResult};
 
 pub struct WriteStdin;
 
@@ -101,7 +101,8 @@ impl Tool for WriteStdin {
             }
         }
 
-        let (output, exited) = exec_session.yield_output(yield_ms).await;
+        let (output, exited, buffer_truncated) =
+            exec_session.yield_output_with_metadata(yield_ms).await;
         let (text, original_token_count) = truncate_output(&output, max_output_tokens);
 
         let mut result = UnifiedExecOutput {
@@ -127,6 +128,13 @@ impl Tool for WriteStdin {
             content: vec![ToolContent::Text(render_unified_exec_output(&result))],
             is_error,
             structured_content: Some(structured),
+            audit: ToolAuditMetadata {
+                truncated: Some(buffer_truncated || original_token_count.is_some()),
+                original_output_tokens: original_token_count,
+                exec_session_id: Some(session_id),
+                process_id: exec_session.pid,
+                resident: Some(!exited),
+            },
         }
     }
 }

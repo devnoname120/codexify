@@ -9,7 +9,7 @@ use crate::exec_sessions::{
 };
 use crate::safe_path::resolve_safe_path;
 use crate::tool::{Tool, arg_str, arg_u64};
-use crate::types::{AppConfig, ExecMode, ToolResult};
+use crate::types::{AppConfig, ExecMode, ToolAuditMetadata, ToolResult};
 
 /// The output schema shared by `exec_command` and `write_stdin`.
 pub fn unified_exec_output_schema() -> Value {
@@ -166,7 +166,8 @@ impl Tool for ExecCommand {
                 }
             };
 
-        let (output, exited) = exec_session.yield_output(yield_ms).await;
+        let (output, exited, buffer_truncated) =
+            exec_session.yield_output_with_metadata(yield_ms).await;
         let (text, original_token_count) = truncate_output(&output, max_output_tokens);
 
         let mut result = UnifiedExecOutput {
@@ -194,6 +195,41 @@ impl Tool for ExecCommand {
             ))],
             is_error,
             structured_content: Some(structured),
+            audit: ToolAuditMetadata {
+                truncated: Some(buffer_truncated || original_token_count.is_some()),
+                original_output_tokens: original_token_count,
+                exec_session_id: Some(exec_session.id),
+                process_id: exec_session.pid,
+                resident: Some(!exited),
+            },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::default_config;
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn completed_command_reports_process_audit_metadata() {
+        let root = tempfile::tempdir().unwrap();
+        let config = default_config(root.path().to_path_buf());
+        let session = SessionState::new();
+
+        let result = ExecCommand
+            .call(
+                json!({ "cmd": "echo audit", "yield_time_ms": 1000 }),
+                &config,
+                &session,
+            )
+            .await;
+
+        assert!(!result.is_error, "{}", result.joined_text());
+        assert_eq!(result.audit.truncated, Some(false));
+        assert_eq!(result.audit.resident, Some(false));
+        assert!(result.audit.exec_session_id.is_some());
+        assert!(result.audit.process_id.is_some());
     }
 }

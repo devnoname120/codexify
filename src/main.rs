@@ -7,6 +7,7 @@ use anyhow::Context;
 use codexify::config::{
     Cli, CliCommand, ProjectsCommand, ProjectsListArgs, load_config, load_project_catalog_for_cli,
 };
+use codexify::logging;
 use codexify::project_catalog::{
     MAX_PROJECT_LIMIT, ProjectCatalogDiagnostic, ProjectListOutput, ProjectSource,
     ProjectTrustLevel,
@@ -119,11 +120,7 @@ async fn main() {
         return;
     }
 
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
-        .init();
+    logging::init(cli.verbose);
 
     if let Err(error) = run().await {
         eprintln!("Error: {error:#}");

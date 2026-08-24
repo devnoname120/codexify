@@ -216,6 +216,6 @@ impl Tool for Grep {
         if truncated {
             output.push_str(&format!("\n\n(truncated at {max_results} matches)"));
         }
-        ToolResult::text(output)
+        ToolResult::text(output).with_truncation(truncated)
     }
 }

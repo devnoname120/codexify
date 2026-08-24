@@ -100,6 +100,7 @@ impl Tool for SkillsRead {
         let offset = arg_u64(&args, "offset").unwrap_or(0) as usize;
         let limit = arg_u64(&args, "limit").map(|n| n as usize);
         let window = window_file_lines(&lines, offset, limit, file_budget(config));
+        let truncated = window.notice.is_some();
 
         let mut parts: Vec<String> = vec![
             format!("{} — {}", skill.name, path.display()),
@@ -124,6 +125,6 @@ impl Tool for SkillsRead {
             }
         }
 
-        ToolResult::text(parts.join("\n"))
+        ToolResult::text(parts.join("\n")).with_truncation(truncated)
     }
 }

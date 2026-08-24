@@ -70,7 +70,7 @@ impl Tool for Tree {
         } else {
             state.lines.join("\n")
         };
-        ToolResult::text(text)
+        ToolResult::text(text).with_truncation(state.stopped)
     }
 }
 
