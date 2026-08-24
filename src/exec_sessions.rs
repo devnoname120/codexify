@@ -267,12 +267,25 @@ pub struct ExecSession {
     pending: Arc<StdMutex<PendingBuffer>>,
     exit_code: Arc<StdMutex<Option<i32>>>,
     drain_done: Arc<Notify>,
+    /// Last time a tool interacted with this session (output yield or stdin
+    /// write). The idle reaper measures inactivity from here.
+    last_activity: StdMutex<Instant>,
 }
 
 impl ExecSession {
     /// The exit code, or `None` while the process is still running.
     pub fn exit_code(&self) -> Option<i32> {
         *self.exit_code.lock().unwrap()
+    }
+
+    /// Mark the session as just used, resetting its idle clock.
+    fn touch(&self) {
+        *self.last_activity.lock().unwrap() = Instant::now();
+    }
+
+    /// How long the session has sat idle since the last tool interaction.
+    fn idle_for(&self) -> Duration {
+        self.last_activity.lock().unwrap().elapsed()
     }
 
     /// Take everything buffered so far, clearing the buffer.
@@ -282,6 +295,7 @@ impl ExecSession {
 
     /// Write `chars` to the process's stdin and flush.
     pub async fn write_stdin(&self, chars: &str) -> std::io::Result<()> {
+        self.touch();
         let mut guard = self.stdin.lock().await;
         if let Some(stdin) = guard.as_mut() {
             stdin.write_all(chars.as_bytes()).await?;
@@ -295,6 +309,7 @@ impl ExecSession {
     /// Wait until the process exits or `yield_ms` elapses, then hand back
     /// everything buffered so far and clear the buffer.
     pub async fn yield_output(&self, yield_ms: u64) -> (String, bool) {
+        self.touch();
         let deadline = Instant::now() + Duration::from_millis(yield_ms);
         while Instant::now() < deadline && self.exit_code().is_none() {
             let remaining = deadline.saturating_duration_since(Instant::now());
@@ -319,7 +334,7 @@ impl ExecSession {
 /// Project-root state here is the fallback for clients without a durable
 /// conversation identifier.
 pub struct SessionState {
-    pub exec_sessions: StdMutex<HashMap<u64, Arc<ExecSession>>>,
+    pub exec_sessions: Arc<StdMutex<HashMap<u64, Arc<ExecSession>>>>,
     next_exec_id: AtomicU64,
     pub plan: StdMutex<Option<PlanState>>,
     project_root: StdMutex<Option<PathBuf>>,
@@ -328,7 +343,7 @@ pub struct SessionState {
 impl Default for SessionState {
     fn default() -> Self {
         Self {
-            exec_sessions: StdMutex::new(HashMap::new()),
+            exec_sessions: Arc::new(StdMutex::new(HashMap::new())),
             next_exec_id: AtomicU64::new(1),
             plan: StdMutex::new(None),
             project_root: StdMutex::new(None),
@@ -339,6 +354,42 @@ impl Default for SessionState {
 impl SessionState {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Starts a background task that kills and reaps exec sessions idle beyond
+    /// `idle_timeout`. The task holds only a weak reference to the session map,
+    /// so it exits on its own once this `SessionState` is dropped (the MCP
+    /// transport closed). A zero timeout, or the absence of a Tokio runtime
+    /// (as in unit tests), is a no-op.
+    pub fn spawn_idle_reaper(&self, idle_timeout: Duration) {
+        if idle_timeout.is_zero() || tokio::runtime::Handle::try_current().is_err() {
+            return;
+        }
+        let weak = Arc::downgrade(&self.exec_sessions);
+        // Check often enough to enforce the timeout promptly, but never busier
+        // than once a second nor rarer than every 30s.
+        let interval = idle_timeout
+            .min(Duration::from_secs(30))
+            .max(Duration::from_secs(1));
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(interval);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                ticker.tick().await;
+                let Some(map) = weak.upgrade() else {
+                    break; // SessionState dropped — nothing left to reap.
+                };
+                // Kill outside the lock: terminating a process can block
+                // (Windows `taskkill`), and other tools take this same lock.
+                let killed = {
+                    let mut guard = map.lock().unwrap();
+                    reap_sessions(&mut guard, idle_timeout)
+                };
+                for session in killed {
+                    kill_exec_session(&session);
+                }
+            }
+        });
     }
 
     pub fn effective_config(&self, config: &AppConfig) -> Result<AppConfig, String> {
@@ -414,10 +465,34 @@ impl Drop for SessionState {
     }
 }
 
+/// Removes finished-and-empty sessions and, when `idle_timeout` is non-zero,
+/// selects sessions idle beyond it for termination. Returns the idle sessions
+/// removed so the caller can kill them without holding the map lock (killing
+/// can block, e.g. Windows `taskkill`). Finished sessions need no kill.
+fn reap_sessions(
+    map: &mut HashMap<u64, Arc<ExecSession>>,
+    idle_timeout: Duration,
+) -> Vec<Arc<ExecSession>> {
+    let mut killed = Vec::new();
+    map.retain(|_, s| {
+        if s.exit_code().is_some() && s.pending.lock().unwrap().is_empty() {
+            return false;
+        }
+        if !idle_timeout.is_zero() && s.exit_code().is_none() && s.idle_for() >= idle_timeout {
+            killed.push(s.clone());
+            return false;
+        }
+        true
+    });
+    killed
+}
+
 /// Removes sessions whose process already exited and left nothing buffered.
+/// Idle enforcement is the background reaper's job (see `spawn_idle_reaper`),
+/// so this opportunistic pass never kills a running session.
 pub fn reap_finished_sessions(state: &SessionState) {
     let mut map = state.exec_sessions.lock().unwrap();
-    map.retain(|_, s| !(s.exit_code().is_some() && s.pending.lock().unwrap().is_empty()));
+    let _ = reap_sessions(&mut map, Duration::ZERO);
 }
 
 /// Spawns `cmd` through a shell and registers it as a resident session. The
@@ -517,6 +592,7 @@ pub fn start_exec_session(
         pending,
         exit_code,
         drain_done,
+        last_activity: StdMutex::new(Instant::now()),
     });
 
     state
@@ -675,6 +751,99 @@ mod tests {
         assert!(out.starts_with("aaaa"));
         assert!(out.ends_with("aaaa"));
         assert!(buf.is_empty());
+    }
+
+    /// A command that keeps the shell resident for a while, picked to match the
+    /// platform's default shell so the test works on POSIX and Windows alike.
+    fn resident_sleep_command() -> String {
+        match shell_type_of(&default_shell_bin()) {
+            ShellType::PowerShell => "Start-Sleep -Seconds 30".to_string(),
+            ShellType::Cmd => "ping 127.0.0.1 -n 30 > nul".to_string(),
+            ShellType::Posix => "sleep 30".to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn reap_sessions_only_kills_running_sessions_past_the_idle_timeout() {
+        let dir = std::env::temp_dir();
+        let config = crate::config::default_config(dir.clone());
+        let state = SessionState::new();
+        let session =
+            start_exec_session(&state, &config, &resident_sleep_command(), &dir, None).unwrap();
+        assert!(session.exit_code().is_none());
+        assert_eq!(state.exec_sessions.lock().unwrap().len(), 1);
+
+        // Disabled (0) never touches a running session.
+        {
+            let mut map = state.exec_sessions.lock().unwrap();
+            assert!(reap_sessions(&mut map, Duration::ZERO).is_empty());
+            assert_eq!(map.len(), 1);
+        }
+        // Still well within a generous timeout.
+        {
+            let mut map = state.exec_sessions.lock().unwrap();
+            assert!(reap_sessions(&mut map, Duration::from_secs(3600)).is_empty());
+            assert_eq!(map.len(), 1);
+        }
+
+        // Once idle past a tiny timeout, it is selected, killed and removed.
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        let killed = {
+            let mut map = state.exec_sessions.lock().unwrap();
+            reap_sessions(&mut map, Duration::from_millis(50))
+        };
+        assert_eq!(killed.len(), 1);
+        for session in &killed {
+            kill_exec_session(session);
+        }
+        assert!(state.exec_sessions.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn touch_resets_the_idle_clock() {
+        let dir = std::env::temp_dir();
+        let config = crate::config::default_config(dir.clone());
+        let state = SessionState::new();
+        let session =
+            start_exec_session(&state, &config, &resident_sleep_command(), &dir, None).unwrap();
+
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        session.touch(); // a fresh write_stdin/yield would do this
+        {
+            let mut map = state.exec_sessions.lock().unwrap();
+            // Idle clock reset, so a 50ms timeout must not reap it.
+            assert!(reap_sessions(&mut map, Duration::from_millis(50)).is_empty());
+        }
+        kill_exec_session(&session);
+    }
+
+    #[tokio::test]
+    async fn background_idle_reaper_removes_an_idle_session_then_stops_on_drop() {
+        let dir = std::env::temp_dir();
+        let mut config = crate::config::default_config(dir.clone());
+        config.exec.idle_timeout_ms = 50;
+        let state = SessionState::new();
+        state.spawn_idle_reaper(Duration::from_millis(config.exec.idle_timeout_ms));
+        let session =
+            start_exec_session(&state, &config, &resident_sleep_command(), &dir, None).unwrap();
+        let pid = session.pid;
+        drop(session);
+
+        // The reaper's check interval floors at 1s; give it a few ticks.
+        let mut reaped = false;
+        for _ in 0..40 {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            if state.exec_sessions.lock().unwrap().is_empty() {
+                reaped = true;
+                break;
+            }
+        }
+        assert!(
+            reaped,
+            "background reaper should have removed the idle session"
+        );
+        // Best-effort: make sure the process is gone even if the assert path changes.
+        kill_pid(pid);
     }
 
     #[test]

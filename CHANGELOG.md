@@ -6,6 +6,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Idle timeout for resident `exec_command` sessions. A background reaper closes a
+  session that has neither produced output nor received stdin for
+  `exec.idleTimeoutMs` (default 5 minutes; `0` disables it), so a forgotten or
+  wedged interactive process no longer lingers holding a process slot.
+
 ### Fixed
 
 - Bound the in-memory output buffer of resident `exec_command` sessions. A shell

@@ -139,6 +139,11 @@ pub struct ExecConfig {
     pub max_sessions: usize,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub default_shell: Option<String>,
+    /// Milliseconds a resident exec_command session may sit idle (no
+    /// `write_stdin` / output yield) before it is killed and reaped. `0`
+    /// disables the idle reaper. Guards against abandoned sessions leaking
+    /// processes for the lifetime of a long-lived MCP transport.
+    pub idle_timeout_ms: u64,
 }
 
 /// Governs `AGENTS.md` discovery. Every field is optional; `project_doc.rs`

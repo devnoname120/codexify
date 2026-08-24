@@ -103,6 +103,7 @@ fn default_exec() -> ExecConfig {
         extra_allowed_commands: default_extra_allowed(),
         max_sessions: 8,
         default_shell: None,
+        idle_timeout_ms: 300_000,
     }
 }
 
@@ -129,6 +130,7 @@ struct PartialExec {
     extra_allowed_commands: Option<Vec<String>>,
     max_sessions: Option<usize>,
     default_shell: Option<String>,
+    idle_timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -536,6 +538,9 @@ pub fn load_config(cli: Cli) -> Result<AppConfig, String> {
         }
         if e.default_shell.is_some() {
             exec.default_shell = e.default_shell;
+        }
+        if let Some(idle) = e.idle_timeout_ms {
+            exec.idle_timeout_ms = idle;
         }
     }
 

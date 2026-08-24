@@ -244,11 +244,13 @@ pub async fn start_http_server(mut config: AppConfig) -> anyhow::Result<()> {
     let factory_project_bindings = project_bindings.clone();
     let service = StreamableHttpService::new(
         move || {
+            let session = SessionState::new();
+            session.spawn_idle_reaper(Duration::from_millis(factory_config.exec.idle_timeout_ms));
             Ok(CodexHandler {
                 config: factory_config.clone(),
                 tools: factory_tools.clone(),
                 project_bindings: factory_project_bindings.clone(),
-                session: SessionState::new(),
+                session,
             })
         },
         Arc::new(LocalSessionManager::default()),

@@ -261,6 +261,7 @@ mod tests {
                 extra_allowed_commands: vec!["ls".into(), "cat".into(), "grep".into()],
                 max_sessions: 8,
                 default_shell: None,
+                idle_timeout_ms: 0,
             },
             project_doc: ProjectDocConfig::default(),
             output: OutputConfig::default(),
