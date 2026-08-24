@@ -399,7 +399,7 @@ impl SessionState {
 
         let Some(project_root) = self.project_root.lock().unwrap().clone() else {
             return Err(format!(
-                "No project root is selected for this MCP transport session. Call `set_project_root` with a directory relative to the access root `{}`, then call `get_agent_brief` before using project tools.",
+                "No project root is selected for this MCP transport session. If the exact path is unknown, call `list_projects` first. Then call `set_project_root` with a directory relative to the access root `{}`, followed by `get_agent_brief` before using project tools.",
                 config.work_dir.display()
             ));
         };

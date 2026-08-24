@@ -30,6 +30,7 @@ flowchart LR
     Env["get_agent_brief\nget_environment\nget_project_doc"]
     Mem["remember\nrecall"]
     Skills["skills_list\nskills_read"]
+    ListProjects["list_projects"]
     SetRoot["set_project_root"]
     Bridge["MCP aggregator\n(bridge.rs)"]
     WorkDir[("Project root\nper-conversation in\nmulti-project mode")]
@@ -55,6 +56,7 @@ flowchart LR
     Tools --> Env
     Tools --> Mem
     Tools --> Skills
+    Tools -.->|"multi-project mode"| ListProjects
     Tools -.->|"multi-project mode"| SetRoot
     Tools --> Bridge
 
@@ -67,14 +69,16 @@ flowchart LR
     Env --> WorkDir
     Mem --> State
     Skills --> SkillDirs
+    ListProjects -.->|"selector"| SetRoot
     SetRoot --> Bindings
     SetRoot -.->|"selects"| WorkDir
-    CodexCfg -.->|"direct fallback"| Bridge
+    CodexCfg -.->|"project candidates"| ListProjects
+    CodexCfg -.->|"auto-import"| Bridge
     CodexCli -.->|"plugin/effective MCPs"| Bridge
     Bridge --> Upstream
 ```
 
-Dotted edges are conditional: `set_project_root` appears only in [multi-project mode](#multi-project-mode) and binds this conversation's project root. The aggregator [auto-imports](#automatic-discovery-from-codex) user-configured servers directly from Codex's `config.toml`, then uses the Codex CLI when available to add plugin-provided servers before applying any `codex.config.json` overlays.
+Dotted edges are conditional: `list_projects` and `set_project_root` appear only in [multi-project mode](#multi-project-mode). The first discovers selectable candidates from Codex's project trust table plus optional local metadata; the second binds this conversation's project root. Independently, the aggregator [auto-imports](#automatic-discovery-from-codex) user-configured servers directly from Codex's `config.toml`, then uses the Codex CLI when available to add plugin-provided servers before applying any `codex.config.json` overlays.
 
 ## Quick start
 
@@ -118,7 +122,7 @@ To reuse one server across several independent projects, point it at their commo
 cargo run --release -- --work-dir /path/to/projects --multi-project
 ```
 
-Here `--work-dir` is an **access root**, not the active project. In ChatGPT, `set_project_root` binds the current conversation to one existing directory beneath that root. Codexify keys the binding from ChatGPT's `_meta["openai/session"]` conversation identifier and persists it outside the repository, so later turns in the same chat recover the project after an MCP reconnect or codexify restart. A new chat gets a new binding and an existing chat cannot switch projects. Clients that do not provide `openai/session` fall back to a one-time MCP transport-session binding and must select again after reconnecting.
+Here `--work-dir` is an **access root**, not the active project. In ChatGPT, call `set_project_root` directly when the exact relative path is known; otherwise `list_projects` can search the read-only project catalogue by name, alias, description, or relative selector first. Codexify keys the resulting binding from ChatGPT's `_meta["openai/session"]` conversation identifier and persists it outside the repository, so later turns in the same chat recover the project after an MCP reconnect or codexify restart. A new chat gets a new binding and an existing chat cannot switch projects. Clients that do not provide `openai/session` fall back to a one-time MCP transport-session binding and must select again after reconnecting.
 
 To build a standalone binary:
 
@@ -135,7 +139,7 @@ Each release ships a compiled binary per platform — `windows-x64`, `linux-x64`
 
 | Flag | Required | Default | Description |
 |------|----------|---------|-------------|
-| `--work-dir` | Yes | - | Project directory, or the project access root with `--multi-project` |
+| `--work-dir` | Yes | - | Project directory for server mode, or the project access root with `--multi-project` and `projects list` |
 | `--multi-project` | No | Disabled | Let each ChatGPT conversation bind once to a project beneath `--work-dir`; other clients fall back to transport-session binding |
 | `--port` | No | `3000` | Server port |
 | `--api-key` | No | - | Bearer token for auth |
@@ -145,6 +149,17 @@ Each release ships a compiled binary per platform — `windows-x64`, `linux-x64`
 | `--openai-tunnel-api-key-ref` | No | `env:CONTROL_PLANE_API_KEY` | Runtime key reference in `env:NAME` or `file:/path` form |
 | `--openai-tunnel-client` | No | managed pinned runtime | Explicit `tunnel-client` or `tunnel-client-runtime` binary |
 | `--openai-tunnel-organization-id` | No | - | Optional OpenAI organization ID sent by the tunnel client |
+
+The project catalogue also has a local diagnostic command. It does not start the HTTP server, tunnel, or bridged MCP children:
+
+```bash
+codexify projects list --work-dir /path/to/projects
+codexify projects list --work-dir /path/to/projects --query "codexify"
+codexify projects list --work-dir /path/to/projects --json
+codexify projects list --work-dir /path/to/projects --show-skipped
+```
+
+`--show-skipped` is deliberately local-only: it prints the configured paths rejected as missing, untrusted, or outside the access root, plus duplicate entries that were merged. Normal CLI output and the MCP tool expose only aggregate warnings, so an agent does not learn absolute paths it cannot select.
 
 ## Tools
 
@@ -190,15 +205,16 @@ Five always-on tools have no Codex counterpart:
 | `remember` | Save one durable note about the task under a short key |
 | `recall` | Return the plan and notes saved by earlier turns or earlier conversations |
 
-Multi-project mode adds one project-control tool:
+Multi-project mode adds two project-control tools:
 
 | Tool | Description |
 |------|-------------|
+| `list_projects` | Search the read-only project catalogue before binding. Returns relative selectors for existing canonical directories authorized beneath the access root, plus names, aliases, descriptions, trust metadata, sources, and sanitized warnings. It never selects a project |
 | `set_project_root` | Bind the current ChatGPT conversation to one existing directory beneath the configured access root; repeated selection of the same canonical directory is idempotent, but switching is rejected. Without ChatGPT conversation metadata, the binding lasts for the MCP transport session |
 
 Codex needs the first three for none of these reasons: it puts its agent brief in the system prompt, the OS and shell in an `<environment_context>` message, and `AGENTS.md` straight into the prompt, all before the first turn. An MCP server has none of those channels — it can only expose tools — so the same facts are tool calls here as well as part of the server's `instructions`. It needs `remember` and `recall` for the opposite reason: its context is large and its session state lives in the CLI process, whereas the client here is a chat window that loses the conversation. See [Context and memory](#context-and-memory), [Acting as a Codex agent](#acting-as-a-codex-agent), [Shells and the host](#shells-and-the-host), [AGENTS.md](#agentsmd) and [Skills](#skills).
 
-That is 25 native tools in the default single-project mode and 26 in multi-project mode. When [MCP bridging](#bridging-other-mcp-servers) is configured, the tools of your other MCP servers are re-exposed here too, on top of these.
+That is 25 native tools in the default single-project mode and 27 in multi-project mode. When [MCP bridging](#bridging-other-mcp-servers) is configured, the tools of your other MCP servers are re-exposed here too, on top of these.
 
 Two deliberate differences from Codex:
 
@@ -264,6 +280,13 @@ All project-scoped paths are resolved relative to the active project root: `--wo
     "enabled": true,
     "useCli": true
   },
+  "projectCatalog": {
+    "codexConfig": {
+      "enabled": true,
+      "trustedOnly": true
+    },
+    "entries": []
+  },
   "openaiTunnel": {
     "tunnelId": "tunnel_0123456789abcdef0123456789abcdef",
     "apiKeyRef": "env:CONTROL_PLANE_API_KEY"
@@ -288,7 +311,7 @@ Native mode deliberately cannot be combined with a caller-supplied `apiKey` / `-
 
 The OpenAI runtime key authenticates the outbound control-plane connection. Codexify resolves the configured `env:NAME` or `file:/path` reference once, passes the value to the tunnel child under a private synthetic environment name, and removes the original environment variable from model-launched commands and bridged MCP children. The tunnel runtime starts with a small allowlist of ordinary OS variables rather than inheriting tunnel-client configuration, proxy, header, or trust-store overrides from the launching shell. On Unix, a referenced key file must not be readable by group or other users. These measures prevent accidental inheritance; they do not create a secret boundary against hostile code running as the same OS user, which can potentially inspect same-user processes or read an accessible key file.
 
-The top-level `multiProject` key is the config-file equivalent of `--multi-project`. In that mode the process still reads one static `codex.config.json`; project selection changes the effective work directory used by project-scoped tools, not the server configuration itself. ChatGPT conversation bindings are independent of the `memory` block and remain enabled even when `memory.enabled` is `false`.
+The top-level `multiProject` key is the config-file equivalent of `--multi-project`. In that mode the process still reads one static `codex.config.json`; project selection changes the effective work directory used by project-scoped tools, not the server configuration itself. The native Codex project table is the exception to the startup snapshot: `list_projects` rereads it on every call so newly trusted projects become discoverable without restarting Codexify. ChatGPT conversation bindings are independent of the `memory` block and remain enabled even when `memory.enabled` is `false`.
 
 The `exec` block governs `exec_command` and `write_stdin`:
 
@@ -348,9 +371,50 @@ The `codexMcp` block controls [automatic import of MCP servers configured in Cod
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `enabled` | `true` | Import Codex MCP servers; `false` disables direct config and CLI discovery unless the explicit `--codex-cli` requirement overrides it |
+| `enabled` | `true` | Import Codex MCP servers (direct `config.toml` parsing plus CLI discovery); `false` disables only MCP-server import — project catalogue discovery is unaffected — unless the explicit `--codex-cli` requirement overrides it |
 | `useCli` | `true` | Enrich direct config parsing with `codex mcp list/get --json`, which includes MCP servers contributed by enabled Codex plugins. `false` keeps direct `config.toml` parsing but does not invoke Codex |
 | `cliPath` | `CODEX_CLI_PATH`, then `codex` on `PATH` | Codex executable used for CLI enrichment. Relative paths resolve from the directory where Codexify was launched |
+
+The `projectCatalog` block controls project discovery in [multi-project mode](#multi-project-mode). It is independent from `codexMcp`: disabling imported MCP servers does not disable native project discovery, and vice versa.
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `codexConfig.enabled` | `true` | Read the top-level native Codex `[projects]` table as one candidate provider |
+| `codexConfig.trustedOnly` | `true` | Include only native entries whose `trust_level` is `"trusted"`; this is a discovery filter, not the Codexify authorization boundary |
+| `entries` | `[]` | Optional explicit paths and semantic metadata. An entry may augment an imported path or add a path absent from native Codex, but it cannot escape `--work-dir` |
+
+Each `entries` element supports:
+
+| Key | Required | Description |
+|-----|----------|-------------|
+| `path` | Yes | Absolute path or a path relative to the access root |
+| `name` | No | Display name; defaults to the canonical directory basename |
+| `aliases` | No | Additional case-insensitive intent-matching names |
+| `description` | No | Short explanation of the project's purpose, searched by `list_projects` |
+
+For example:
+
+```json
+{
+  "multiProject": true,
+  "projectCatalog": {
+    "codexConfig": {
+      "enabled": true,
+      "trustedOnly": true
+    },
+    "entries": [
+      {
+        "path": "codexify",
+        "name": "Codexify",
+        "aliases": ["ChatGPT MCP bridge"],
+        "description": "Rust MCP bridge exposing local programming tools to ChatGPT"
+      }
+    ]
+  }
+}
+```
+
+Metadata overlays are merged by canonical path. Explicit entries are operator-authored providers in their own right, so they may include a path that native Codex marks untrusted or does not record; they still cannot widen the access-root boundary. Aliases are deduplicated case-insensitively, and aliases shared by different projects produce a warning because they make intent matching ambiguous. Catalogue construction never opens a candidate's README, source, `.codex/`, or `AGENTS.md`; project contents remain unread until the conversation has selected that project.
 
 The `openaiTunnel` block, `allowedHosts` array, and `mcpServers` map are covered under [Native OpenAI tunnel](#native-openai-tunnel-recommended), [Host allowlist](#host-allowlist), and [Bridging other MCP servers](#bridging-other-mcp-servers).
 
@@ -360,12 +424,29 @@ By default the server is pinned to one project: `--work-dir` *is* the project ro
 
 Enable it with `--multi-project` or `"multiProject": true` (see [CLI flags](#cli-flags) and [Config file](#config-file)). One static `codex.config.json` is still read once at startup; selection changes only the effective work directory the project tools use, never the server configuration itself.
 
-Each conversation binds a project exactly once, through the [`set_project_root`](#tools) tool:
+Each conversation binds a project exactly once, through the [`set_project_root`](#tools) tool. When the exact path is not already known, [`list_projects`](#tools) provides a project-independent enumeration step first:
 
 - The path is relative to the access root or absolute, but its canonical target must be an existing directory inside that root. Traversal (`..`) and symlink escapes are rejected *after* canonicalisation, so a link pointing outside the root cannot smuggle a selection past the check.
 - The binding belongs to the **ChatGPT conversation**, keyed from `_meta["openai/session"]` (the raw identifier is hashed, never stored), so simultaneous chats can hold different projects and a later turn recovers its own root after MCP reconnects or a server restart. A client that sends no ChatGPT conversation metadata falls back to a binding that lasts only the current MCP transport session.
 - A conversation cannot switch roots once bound — start another chat for a different project. Re-selecting the same canonical path is idempotent.
-- Until a root is selected, project-scoped tools are unavailable and say why; `set_project_root` is the one project tool always present in this mode.
+- Until a root is selected, project-scoped tools are unavailable and say why. `list_projects` and `set_project_root` are the two project-independent tools present for this workflow.
+
+### Project catalogue semantics
+
+Native Codex records trust decisions in its user-level configuration:
+
+```toml
+[projects."/absolute/path/to/project"]
+trust_level = "trusted"
+```
+
+Codexify reads those paths as candidates. It does not treat the table as exhaustive: entries may be stale, may represent separate worktrees, and contain no semantic description beyond the path. Explicit `projectCatalog.entries` can therefore add aliases/descriptions or supply projects absent from the native table.
+
+Every candidate still passes Codexify's own checks. Its path must exist, resolve to a directory, and canonicalize to the access root itself or a descendant; missing entries, files, and symlink escapes are skipped, while duplicate canonical targets are merged into one candidate. Native Codex trust is only catalogue metadata plus the default `trustedOnly` filter. It never grants Codexify access to a path outside `--work-dir`, and an explicit catalogue entry does not widen that boundary either.
+
+`list_projects` returns a selector relative to the access root, which can be passed unchanged as `set_project_root.path`. Its optional query matches names, aliases, descriptions, and selectors case-insensitively with deterministic exact/prefix/substring ranking. The tool never binds automatically. If several results remain plausible, the agent instructions require asking the user rather than guessing, because a wrong binding cannot be changed in that conversation.
+
+The native table is read live for every `list_projects` call. The file is read-only, the `codex` executable is not required, and project-local `.codex/config.toml` layers are not scanned because they are meaningful only after a project has been selected.
 
 Per-conversation separation extends to saved state: with an explicit `memory.dir`, each selected project gets its own hashed child directory (see the [`memory` block](#config-file)), and conversation bindings stay enabled even when `memory.enabled` is `false`. The end-to-end onboarding flow — select, then request the brief — is in [Starting a chat](#starting-a-chat).
 
@@ -389,7 +470,7 @@ Task state lives in `~/.codexify/projects/<name>-<hash>/memory.json`, keyed by t
 
 ChatGPT project bindings live separately under `~/.codexify/conversation-projects/<access-root-hash>/<conversation-hash>.json`. The raw `openai/session` value is never written to disk; only its SHA-256-derived key is used as the filename. Each small record contains the canonical access root and selected project root. Delete this directory to forget all conversation bindings. A missing or stale project fails closed rather than silently rebinding the conversation to another directory.
 
-In single-project mode, `instructions` is rebuilt for every MCP session, so a new conversation opens with the saved plan and notes already in front of it, under a `## Saved state` heading between the environment and `AGENTS.md`. In multi-project mode the initialize-time instructions deliberately remain project-neutral: ChatGPT supplies its stable conversation identifier on tool calls, after the MCP initialize exchange. Calling `get_agent_brief` restores an existing conversation binding automatically; for a new conversation it reports that `set_project_root` is required. After binding, `get_agent_brief` returns the environment, saved state, skills, and `AGENTS.md` for the selected project. If the client ignores `instructions`, one `recall` gets the same saved state after selection.
+In single-project mode, `instructions` is rebuilt for every MCP session, so a new conversation opens with the saved plan and notes already in front of it, under a `## Saved state` heading between the environment and `AGENTS.md`. In multi-project mode the initialize-time instructions deliberately remain project-neutral: ChatGPT supplies its stable conversation identifier on tool calls, after the MCP initialize exchange. Calling `get_agent_brief` restores an existing conversation binding automatically; for a new conversation it reports that `set_project_root` is required and directs the agent to `list_projects` when the exact path is unknown. After binding, `get_agent_brief` returns the environment, saved state, skills, and `AGENTS.md` for the selected project. If the client ignores `instructions`, one `recall` gets the same saved state after selection.
 
 The division of labour is worth keeping straight: `AGENTS.md` is what is true of the **project** and belongs in the repo; notes are what is true of the **task in flight** and belong here.
 
@@ -421,7 +502,7 @@ Task: <what you want done>
 
 Everything else — the shell you're on, the allowlist, your repo's `AGENTS.md` — arrives with that one call. If a chat starts drifting back into generic-assistant behaviour, asking for the brief again re-anchors it.
 
-For a new chat in multi-project mode, select before requesting the brief:
+For a new chat in multi-project mode with an exact path, select before requesting the brief:
 
 ```
 Call set_project_root with path "my-project", then call get_agent_brief and follow it for the rest of this chat.
@@ -430,6 +511,14 @@ Task: <what you want done>
 ```
 
 The path may be relative to the configured access root or absolute, but its canonical target must be an existing directory inside that root. The binding belongs to the ChatGPT conversation, not to the current HTTP/MCP transport, so simultaneous chats may select different projects and later turns recover their respective project roots after reconnects or server restarts. A conversation cannot switch roots after binding; start another chat for another project. Calling `set_project_root` again with the same canonical path is harmless.
+
+When the task names a project by intent rather than an exact path, let the agent search first:
+
+```
+Call list_projects with a query derived from the task. If exactly one candidate is unambiguous, pass its selector to set_project_root; otherwise ask me which project I mean. Then call get_agent_brief and follow it for the rest of this chat.
+
+Task: <what you want done>
+```
 
 On a later turn in an already-bound chat, the path does not need to be repeated:
 
@@ -525,7 +614,7 @@ Codexify can also act as an **MCP aggregator**: it connects to your other local 
 
 ### Automatic discovery from Codex
 
-Codexify always has a standalone fallback: it reads `$CODEX_HOME/config.toml` when `CODEX_HOME` is set, otherwise `~/.codex/config.toml`. The file is read only; Codexify never rewrites it. This direct parser imports user-configured MCP servers without requiring a `codex` executable.
+Codexify always has a standalone fallback: it reads `$CODEX_HOME/config.toml` when `CODEX_HOME` is set, otherwise `~/.codex/config.toml`. The file is read only; Codexify never rewrites it. This direct parser imports user-configured MCP servers without requiring a `codex` executable. MCP-server import intentionally does not reproduce Codex's project-local configuration layers or use project trust decisions; [project catalogue discovery](#project-catalogue-semantics) is a separate consumer of the same user-level file.
 
 For each `[mcp_servers.<name>]` entry, Codexify imports the fields it can preserve:
 
@@ -644,7 +733,7 @@ When `remote-exec` was imported from Codex, that overlay is sufficient; include 
 3. In ChatGPT's connector/plugin settings, create a developer-mode connector with **Connection type: Tunnel**.
 4. Select the same tunnel ID that Codexify reports as ready. Set **Authentication** to **None**.
 5. Set the connector's permissions to **Allow all actions** if you do not want per-call confirmations.
-6. Enable the connector in a new chat, then open with `Call get_agent_brief and follow it for the rest of this chat.` — see [Acting as a Codex agent](#acting-as-a-codex-agent). In multi-project mode (`--multi-project`), call `set_project_root` first in a new chat; later follow-ups in that same chat can call `get_agent_brief` directly, since the project binding is restored from ChatGPT's conversation metadata.
+6. Enable the connector in a new chat, then open with `Call get_agent_brief and follow it for the rest of this chat.` — see [Acting as a Codex agent](#acting-as-a-codex-agent). In multi-project mode (`--multi-project`), call `set_project_root` first when the path is known or `list_projects` first when it is not; later follow-ups in that same chat can call `get_agent_brief` directly, since the project binding is restored from ChatGPT's conversation metadata.
 
 There is no server URL to enter in this mode. OpenAI routes the selected tunnel to the supervised client, which supplies Codexify's generated per-process bearer on the local hop. The startup banner prints the runtime-only `/readyz` and `/metrics` URLs. It does not advertise an admin UI because `tunnel-client-runtime` deliberately omits that full-client surface.
 
@@ -665,10 +754,11 @@ Native tunnel mode ignores `allowedHosts` and forces the accepted authorities to
 
 ## Security
 
-- **Path traversal prevention**: every filesystem tool — including `apply_patch` and `view_image` — resolves paths through a guard that rejects anything outside the active project root. In multi-project mode, `set_project_root` canonicalizes both the configured access root and the requested directory, so `..` and symlinks cannot bind a conversation or transport session outside the access root.
+- **Path traversal prevention**: every filesystem tool — including `apply_patch` and `view_image` — resolves paths through a guard that rejects anything outside the active project root. In multi-project mode, both catalogue discovery and `set_project_root` canonicalize the configured access root and candidate directory, so `..` and symlinks cannot expose or bind a project outside the access root.
 - **One bounded exception in single-project mode**: [AGENTS.md](#agentsmd) discovery may read above `--work-dir`, up to the nearest `.git`. It is read-only, opens only `AGENTS.override.md`, `AGENTS.md` and any `projectDoc.fallbackFilenames`, and `get_project_doc` reports the absolute path of every file it used. Set `projectDoc.maxBytes` to `0` to switch it off, or `projectDoc.rootMarkers` to `[]` to keep the search inside the work directory. Multi-project mode does not perform this upward walk; its selected directory is the exact project root.
 - **Bounded state writes outside the work directory**: `remember` and `update_plan` write `memory.json` under `~/.codexify/projects/`. Multi-project mode also writes one small project-binding record under `~/.codexify/conversation-projects/` for each ChatGPT conversation and access root. Both use atomic replacement and per-record locks. The binding filename is derived from a hash of `openai/session`; the raw identifier is not stored. Set `memory.enabled` to `false` to disable plans and notes; delete `~/.codexify/conversation-projects/` separately to forget conversation bindings. See [Context and memory](#context-and-memory).
 - **Bounded reads outside the work directory**: [skills](#skills) may live in `~/.agents/skills`, `~/.codex/skills`, `~/.claude/skills` or an installed Claude Code plugin. `skills_read` opens files there, but only inside a skill package that already exists — the `resource` path is checked against the skill's own directory, so it cannot walk out into the rest of your home directory. `skills_list` reports the absolute path of every skill it found. Set `skills.enabled` to `false` to switch it off, or `skills.dirs` to point the user scope somewhere you choose.
+- **Read-only Codex configuration discovery**: MCP import and the project catalogue read the user-level Codex `config.toml` without rewriting it. Project discovery inspects only the top-level `projects` table, does not read candidate project contents, and suppresses rejected absolute paths from MCP output. Set `projectCatalog.codexConfig.enabled` to `false` to disable that provider. Native Codex trust does not override the Codexify access-root boundary.
 - **Command allowlist**: `run_command` only runs binaries listed in `allowedCommands`; everything else is rejected. `exec_command` checks the same list plus `exec.extraAllowedCommands`, at every command position in the string.
 - **Bridged servers run with your privileges**: an explicit `mcpServers` entry or an automatically imported Codex MCP—including one contributed by a Codex plugin—launches a real process on your machine and forwards the model's calls to it verbatim. Only bridge servers you trust, prefer `tools`/`disabledTools` filters or `gateway` mode to keep the exposed surface small, set `codexMcp.useCli` to `false` to exclude plugin-only discovery, or set `codexMcp.enabled` to `false` to disable all automatic Codex import. A bad `command` path is reported, never silently ignored.
 - **Native OpenAI tunnel is outbound-only**: Codexify binds its MCP listener to loopback and supervises OpenAI's official runtime-only tunnel client. Startup fails unless the runtime reports `/readyz` and completes a control-plane poll. Failure of either process stops the other, and HTTP shutdown has a bounded grace period before remaining connections are aborted.

@@ -14,6 +14,7 @@ pub mod git_status;
 pub mod glob;
 pub mod grep;
 pub mod list_directory;
+pub mod list_projects;
 pub mod read_file;
 pub mod recall;
 pub mod remember;

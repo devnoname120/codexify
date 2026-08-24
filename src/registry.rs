@@ -15,6 +15,7 @@ pub fn load_tools() -> Vec<Box<dyn Tool>> {
 pub fn load_tools_for_mode(multi_project: bool) -> Vec<Box<dyn Tool>> {
     let mut all: Vec<Box<dyn Tool>> = Vec::new();
     if multi_project {
+        all.push(Box::new(tools::list_projects::ListProjects));
         all.push(Box::new(tools::set_project_root::SetProjectRoot));
     }
     all.extend([

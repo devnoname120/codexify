@@ -31,10 +31,11 @@ fn loads_all_25_tools() {
 }
 
 #[test]
-fn multi_project_mode_adds_only_the_session_selector() {
+fn multi_project_mode_adds_catalogue_and_session_selector() {
     let tools = load_tools_for_mode(true);
-    assert_eq!(tools.len(), 26);
-    assert_eq!(tools[0].name(), "set_project_root");
+    assert_eq!(tools.len(), 27);
+    assert_eq!(tools[0].name(), "list_projects");
+    assert_eq!(tools[1].name(), "set_project_root");
 }
 
 #[test]

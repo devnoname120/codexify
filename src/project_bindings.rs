@@ -132,7 +132,7 @@ impl ProjectBindingStore {
 
         let Some(project_root) = self.selected_project_root(config, identity)? else {
             return Err(format!(
-                "No project root is selected for this ChatGPT conversation. Call `set_project_root` with a directory relative to the access root `{}`, then call `get_agent_brief` before using project tools. The selection is stored by ChatGPT conversation ID and will survive MCP reconnects and server restarts.",
+                "No project root is selected for this ChatGPT conversation. If the exact path is unknown, call `list_projects` first. Then call `set_project_root` with a directory relative to the access root `{}`, followed by `get_agent_brief` before using project tools. The selection is stored by ChatGPT conversation ID and will survive MCP reconnects and server restarts.",
                 config.work_dir.display()
             ));
         };

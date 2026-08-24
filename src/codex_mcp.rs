@@ -4,7 +4,7 @@
 use std::collections::{BTreeSet, HashMap};
 use std::ffi::{OsStr, OsString};
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::thread;
@@ -12,8 +12,10 @@ use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 
+use crate::codex_config::load_codex_config;
+#[cfg(test)]
+use crate::codex_config::parse_codex_config;
 use crate::types::McpServerSpec;
-use crate::util::home_dir;
 
 const CODEX_CLI_TIMEOUT: Duration = Duration::from_secs(30);
 const CODEX_CLI_MAX_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
@@ -334,64 +336,26 @@ fn codex_cli_server_to_spec(
     })
 }
 
-pub fn codex_config_path() -> Result<PathBuf, String> {
-    let codex_home = std::env::var_os("CODEX_HOME").filter(|value| !value.as_os_str().is_empty());
-    codex_config_path_from(codex_home, home_dir())
-}
-
-fn codex_config_path_from(
-    codex_home: Option<OsString>,
-    default_home: Option<PathBuf>,
-) -> Result<PathBuf, String> {
-    if let Some(value) = codex_home {
-        let path = PathBuf::from(value);
-        let metadata = std::fs::metadata(&path).map_err(|_| {
-            format!(
-                "CODEX_HOME points to {}, but that path does not exist or cannot be read",
-                path.display()
-            )
-        })?;
-        if !metadata.is_dir() {
-            return Err(format!(
-                "CODEX_HOME points to {}, but that path is not a directory",
-                path.display()
-            ));
-        }
-        let canonical = path
-            .canonicalize()
-            .map_err(|_| format!("failed to canonicalize CODEX_HOME at {}", path.display()))?;
-        return Ok(canonical.join("config.toml"));
-    }
-
-    let home =
-        default_home.ok_or_else(|| "could not find the user's home directory".to_string())?;
-    Ok(home.join(".codex").join("config.toml"))
-}
-
 pub fn discover_codex_mcp_servers(path: &Path) -> Result<Option<CodexMcpImport>, String> {
-    let contents = match std::fs::read_to_string(path) {
-        Ok(contents) => contents,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(_) => {
-            return Err(format!(
-                "failed to read Codex configuration at {}",
-                path.display()
-            ));
-        }
+    let Some(root) = load_codex_config(path)? else {
+        return Ok(None);
     };
-
-    parse_codex_mcp_servers(&contents, &|name| std::env::var(name).ok()).map(Some)
+    parse_codex_mcp_table(&root, &|name| std::env::var(name).ok()).map(Some)
 }
 
+#[cfg(test)]
 fn parse_codex_mcp_servers(
     contents: &str,
     env_lookup: &dyn Fn(&str) -> Option<String>,
 ) -> Result<CodexMcpImport, String> {
-    let root: toml::Value = toml::from_str(contents)
-        .map_err(|_| "Codex config.toml contains invalid TOML".to_string())?;
-    let root = root
-        .as_table()
-        .ok_or_else(|| "Codex config.toml must contain a TOML table".to_string())?;
+    let root = parse_codex_config(contents)?;
+    parse_codex_mcp_table(&root, env_lookup)
+}
+
+fn parse_codex_mcp_table(
+    root: &toml::Table,
+    env_lookup: &dyn Fn(&str) -> Option<String>,
+) -> Result<CodexMcpImport, String> {
     let Some(value) = root.get("mcp_servers") else {
         return Ok(CodexMcpImport::default());
     };
@@ -633,26 +597,6 @@ fn optional_string_map(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn explicit_codex_home_is_canonicalized() {
-        let temp = tempfile::TempDir::new().unwrap();
-        let path = codex_config_path_from(
-            Some(temp.path().as_os_str().to_os_string()),
-            Some(PathBuf::from("/unused")),
-        )
-        .unwrap();
-        assert_eq!(
-            path,
-            temp.path().canonicalize().unwrap().join("config.toml")
-        );
-    }
-
-    #[test]
-    fn default_codex_home_uses_dot_codex() {
-        let path = codex_config_path_from(None, Some(PathBuf::from("/home/tester"))).unwrap();
-        assert_eq!(path, PathBuf::from("/home/tester/.codex/config.toml"));
-    }
 
     #[test]
     fn imports_stdio_fields_and_filters_without_leaking_values() {

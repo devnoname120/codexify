@@ -35,7 +35,8 @@ ChatGPT / MCP client
 │        ▼                                      │
 │  registry: Vec<Box<dyn Tool>>                 │
 │    • 25 native tools                          │
-│    • + set_project_root in multi-project mode │
+│    • + list_projects + set_project_root       │
+│      in multi-project mode                    │
 │    • bridged tools  ← upstream MCP servers    │
 │    • gateway tools  ← upstream MCP servers    │
 │                                               │
@@ -78,16 +79,21 @@ Three surfaces reach the model:
 4. `tools/call` → `CodexHandler::call_tool` reads `openai/session` from rmcp's
    `RequestContext::meta`. rmcp moves wire-level request `_meta` into that context
    before dispatch, so the typed tool parameters are not the authoritative source.
-5. In multi-project mode, `set_project_root` canonicalizes an existing directory
-   below the configured access root. With `openai/session`, it writes an immutable
-   conversation binding through the shared `ProjectBindingStore`; without it, the
-   root is stored in the current `SessionState`. Re-selecting the same canonical
-   root is idempotent and selecting a different root is rejected.
-6. Other project-scoped calls resolve the durable conversation binding first, or
+5. In multi-project mode, `list_projects` may run before selection. It rebuilds a
+   read-only catalogue from the user-level native Codex `[projects]` table and the
+   static `projectCatalog.entries` overlay, canonicalizes and filters candidates
+   against the access root, and returns relative selectors without reading project
+   content or creating a binding.
+6. `set_project_root` canonicalizes an existing directory below the configured
+   access root. With `openai/session`, it writes an immutable conversation binding
+   through the shared `ProjectBindingStore`; without it, the root is stored in the
+   current `SessionState`. Re-selecting the same canonical root is idempotent and
+   selecting a different root is rejected.
+7. Other project-scoped calls resolve the durable conversation binding first, or
    the transport-session fallback when no conversation identity exists, then
    receive an effective clone of `AppConfig` whose `work_dir` is that root. The
    server fills in default `structuredContent` when appropriate.
-7. When the transport session ends, rmcp drops the `CodexHandler`; its
+8. When the transport session ends, rmcp drops the `CodexHandler`; its
    `SessionState::Drop` kills resident `exec_command` shells. The conversation
    binding remains on disk and is restored by a later transport or server process.
 
@@ -145,10 +151,12 @@ The fully-resolved config handed to every tool. `config.rs` parses
 user-level Codex MCP definitions through `codex_mcp.rs`, opportunistically adds
 plugin-provided entries from the Codex CLI's effective catalogue, then applies
 explicit `mcpServers` entries as field overlays. Optional sub-configs (`projectDoc`,
-`output`, `memory`, `skills`, `ignore`) fall back to per-module defaults. In
-multi-project mode, dispatch clones this config per call and substitutes the
-conversation's selected root—or the transport fallback—for `work_dir`; the static
-server policy and bridge configuration remain shared.
+`projectCatalog`, `output`, `memory`, `skills`, `ignore`) fall back to per-module
+defaults. In multi-project mode, dispatch clones this config per call and
+substitutes the conversation's selected root—or the transport fallback—for
+`work_dir`; the static server policy, catalogue overlay, and bridge configuration
+remain shared. Native Codex project entries are intentionally re-read when the
+catalogue tool is called rather than copied into `AppConfig` at startup.
 
 ---
 
@@ -209,7 +217,7 @@ a private per-run temporary directory and are removed after shutdown.
 
 ---
 
-## 5. Native tools (25 default, 26 multi-project)
+## 5. Native tools (25 default, 27 multi-project)
 
 | Group | Tools |
 |-------|-------|
@@ -220,11 +228,13 @@ a private per-run temporary directory and are removed after shutdown.
 | Task state | `update_plan`, `remember`, `recall` |
 | Skills | `skills_list`, `skills_read` |
 | Timing | `clock_curr_time`, `clock_sleep` |
+| Project selection (multi-project only) | `list_projects`, `set_project_root` |
 
-Multi-project mode prepends `set_project_root`. It is omitted entirely in the
-default registry, preserving the original 25-tool surface and behaviour. Clocks
-and bridged/gateway tools are project-independent; every other native tool is
-blocked until a conversation binding or transport fallback is available.
+Multi-project mode prepends `list_projects` and `set_project_root`. Both are
+omitted entirely in the default registry, preserving the original 25-tool surface
+and behaviour. Catalogue discovery, selection, clocks, and bridged/gateway tools
+are project-independent; every other native tool is blocked until a conversation
+binding or transport fallback is available.
 
 Each lives in `src/tools/<name>.rs`; the registry (`registry.rs`) lists them in
 the original order and rejects duplicate names.
@@ -240,6 +250,7 @@ the original order and rejects duplicate names.
 | `ignore_rules.rs` | One `.gitignore`-accurate matcher (the `ignore` crate) shared by glob/grep/tree/list_directory. |
 | `exec_policy.rs` | Shell-string allowlist guard for `exec_command` (a guardrail, not a sandbox). |
 | `project_bindings.rs` | Canonical project-root validation plus durable ChatGPT conversation bindings keyed by a hash of `openai/session`, namespaced by access root, locked per record, and atomically written. |
+| `project_catalog.rs` | Live, read-only project discovery from native Codex plus explicit metadata; canonical access-root filtering, deduplication, deterministic query ranking, sanitized MCP warnings, and local diagnostics. |
 | `exec_sessions.rs` | Generic-client transport fallback plus unified-exec sessions: shell resolution, PowerShell exit-code wrapping, background stdout/stderr drain tasks, process-group kill, output truncation (UTF-16 units to match the TS). |
 | `apply_patch.rs` | The Codex patch format: parse then apply, atomically, with fuzzy context matching and CRLF preservation. |
 | `memory.rs` | Working memory outside the repo, keyed by a hash of the normalized active root, with `O_EXCL` locking and atomic writes. In multi-project mode, a configured `memory.dir` is a base containing one hashed child per project. |
@@ -247,7 +258,8 @@ the original order and rejects duplicate names.
 | `process_env.rs` | Child-process environment boundaries: isolate the tunnel runtime and remove tunnel credentials from model-controlled and upstream subprocesses. |
 | `project_doc.rs` | `AGENTS.md` discovery from project root down to the work dir under a byte budget. Multi-project mode treats the selected directory as the exact project root and never walks into the common access-root parent. |
 | `skills.rs` | `SKILL.md` discovery (see §8). |
-| `codex_mcp.rs` | Read-only import of local stdio MCP definitions from `$CODEX_HOME/config.toml` or `~/.codex/config.toml`, plus bounded `codex mcp list/get --json` enrichment for plugin-provided servers, with secret-safe diagnostics. |
+| `codex_config.rs` | Shared secret-safe resolver and TOML reader for `$CODEX_HOME/config.toml` or `~/.codex/config.toml`. |
+| `codex_mcp.rs` | Read-only import of local stdio MCP definitions from the shared native Codex configuration reader, plus bounded `codex mcp list/get --json` enrichment for plugin-provided servers, with secret-safe diagnostics. |
 | `instructions.rs` | Assembles the agent brief + environment + saved state + skills + project doc. Multi-project initialization emits a project-neutral selector brief because conversation metadata is available only on subsequent tool calls; `get_agent_brief` builds the full brief after restoring or creating a binding. |
 | `environment.rs` | OS / shell / policy description, shared by `get_environment` and the instructions. |
 

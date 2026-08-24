@@ -291,15 +291,45 @@ pub struct OpenAiTunnelConfig {
     pub client_path: Option<std::path::PathBuf>,
 }
 
+#[derive(Debug, Clone)]
+pub struct CodexProjectCatalogConfig {
+    pub enabled: bool,
+    pub trusted_only: bool,
+}
+
+impl Default for CodexProjectCatalogConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            trusted_only: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ProjectCatalogEntryConfig {
+    pub path: Option<String>,
+    pub name: Option<String>,
+    pub aliases: Vec<String>,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ProjectCatalogConfig {
+    pub codex_config: CodexProjectCatalogConfig,
+    pub entries: Vec<ProjectCatalogEntryConfig>,
+}
+
 /// The fully-resolved server configuration handed to every tool.
 ///
-/// `work_dir` and `port` are always concrete. `projectDoc`, `output`, `memory`,
-/// `skills` and `ignore` are passed through as-is and each implementing module
-/// owns what an absent field falls back to.
+/// `work_dir` and `port` are always concrete. `project_catalog`, `projectDoc`,
+/// `output`, `memory`, `skills` and `ignore` carry their resolved/defaultable
+/// module settings.
 #[derive(Debug, Clone)]
 pub struct AppConfig {
     pub work_dir: std::path::PathBuf,
     pub multi_project: bool,
+    pub project_catalog: ProjectCatalogConfig,
     pub api_key: Option<String>,
     pub port: u16,
     pub allowed_commands: Vec<String>,

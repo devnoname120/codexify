@@ -245,6 +245,7 @@ mod tests {
         AppConfig {
             work_dir: std::path::PathBuf::from("/w"),
             multi_project: false,
+            project_catalog: crate::types::ProjectCatalogConfig::default(),
             api_key: None,
             port: 3000,
             allowed_commands: vec!["git".into(), "node".into()],

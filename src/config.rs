@@ -7,18 +7,20 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
-use clap::Parser;
+use clap::{Args, Parser, Subcommand};
 use serde::Deserialize;
 
 use std::collections::HashMap;
 
+use crate::codex_config::codex_config_path;
 use crate::codex_mcp::{
-    CodexMcpImport, codex_config_path, discover_additional_codex_mcp_servers_with_cli,
-    discover_codex_mcp_servers,
+    CodexMcpImport, discover_additional_codex_mcp_servers_with_cli, discover_codex_mcp_servers,
 };
+use crate::project_catalog::{ProjectCatalog, discover_project_catalog_at};
 use crate::types::{
-    AppConfig, CommandConfig, ExecConfig, ExecMode, IgnoreConfig, McpServerSpec, MemoryConfig,
-    OpenAiTunnelConfig, OutputConfig, ProjectDocConfig, SkillsConfig, TreeConfig,
+    AppConfig, CodexProjectCatalogConfig, CommandConfig, ExecConfig, ExecMode, IgnoreConfig,
+    McpServerSpec, MemoryConfig, OpenAiTunnelConfig, OutputConfig, ProjectCatalogConfig,
+    ProjectCatalogEntryConfig, ProjectDocConfig, SkillsConfig, TreeConfig,
 };
 
 #[derive(Parser, Debug)]
@@ -27,9 +29,12 @@ use crate::types::{
     about = "Codexify MCP bridge (Rust): expose Codex-style agent tools over Streamable HTTP."
 )]
 pub struct Cli {
-    /// Project directory, or the access root when --multi-project is enabled.
-    #[arg(long = "work-dir")]
-    pub work_dir: String,
+    #[command(subcommand)]
+    pub command: Option<CliCommand>,
+
+    /// Project directory for serving, or the access root for multi-project and catalogue modes.
+    #[arg(long = "work-dir", global = true)]
+    pub work_dir: Option<String>,
 
     /// Let each ChatGPT conversation bind once to a project below --work-dir.
     /// Other MCP clients fall back to transport-session binding.
@@ -45,7 +50,7 @@ pub struct Cli {
     pub api_key: Option<String>,
 
     /// Config file path. Default: ./codex.config.json (tolerated if missing).
-    #[arg(long)]
+    #[arg(long, global = true)]
     pub config: Option<String>,
 
     /// Require Codex CLI-backed MCP discovery. Without this flag, the CLI is
@@ -68,6 +73,40 @@ pub struct Cli {
     /// Optional OpenAI organization id sent by tunnel-client.
     #[arg(long = "openai-tunnel-organization-id")]
     pub openai_tunnel_organization_id: Option<String>,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum CliCommand {
+    /// Inspect the read-only project catalogue used by multi-project mode.
+    Projects {
+        #[command(subcommand)]
+        command: ProjectsCommand,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ProjectsCommand {
+    /// List selectable projects without starting the MCP server.
+    List(ProjectsListArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct ProjectsListArgs {
+    /// Case-insensitive filter over names, aliases, descriptions, and selectors.
+    #[arg(long)]
+    pub query: Option<String>,
+
+    /// Maximum number of matching projects to print (1-200).
+    #[arg(long, default_value_t = crate::project_catalog::MAX_PROJECT_LIMIT)]
+    pub limit: usize,
+
+    /// Emit stable machine-readable JSON.
+    #[arg(long)]
+    pub json: bool,
+
+    /// Include skipped paths and detailed local diagnostics.
+    #[arg(long = "show-skipped")]
+    pub show_skipped: bool,
 }
 
 fn default_allowed_commands() -> Vec<String> {
@@ -171,6 +210,29 @@ impl CodexMcpConfig {
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct PartialCodexProjectCatalogConfig {
+    enabled: Option<bool>,
+    trusted_only: Option<bool>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PartialProjectCatalogEntry {
+    path: Option<String>,
+    name: Option<String>,
+    aliases: Option<Vec<String>>,
+    description: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PartialProjectCatalog {
+    codex_config: Option<PartialCodexProjectCatalogConfig>,
+    entries: Option<Vec<PartialProjectCatalogEntry>>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct PartialMcpServerSpec {
     command: Option<String>,
     args: Option<Vec<String>>,
@@ -268,9 +330,32 @@ struct FileConfig {
     skills: Option<SkillsConfig>,
     ignore: Option<IgnoreConfig>,
     codex_mcp: Option<CodexMcpConfig>,
+    project_catalog: Option<PartialProjectCatalog>,
     allowed_hosts: Option<Vec<String>>,
     openai_tunnel: Option<PartialOpenAiTunnel>,
     mcp_servers: Option<HashMap<String, PartialMcpServerSpec>>,
+}
+
+fn resolve_project_catalog(file: &mut FileConfig) -> ProjectCatalogConfig {
+    let catalog = file.project_catalog.take().unwrap_or_default();
+    let codex = catalog.codex_config.unwrap_or_default();
+    ProjectCatalogConfig {
+        codex_config: CodexProjectCatalogConfig {
+            enabled: codex.enabled.unwrap_or(true),
+            trusted_only: codex.trusted_only.unwrap_or(true),
+        },
+        entries: catalog
+            .entries
+            .unwrap_or_default()
+            .into_iter()
+            .map(|entry| ProjectCatalogEntryConfig {
+                path: entry.path,
+                name: entry.name,
+                aliases: entry.aliases.unwrap_or_default(),
+                description: entry.description,
+            })
+            .collect(),
+    }
 }
 
 fn merge_mcp_servers(
@@ -423,6 +508,7 @@ pub fn default_config(work_dir: std::path::PathBuf) -> AppConfig {
     AppConfig {
         work_dir,
         multi_project: false,
+        project_catalog: ProjectCatalogConfig::default(),
         api_key: None,
         port: 3000,
         allowed_commands: default_allowed_commands(),
@@ -451,6 +537,60 @@ fn resolve_work_dir(raw: &str) -> PathBuf {
         p.to_path_buf()
     } else {
         std::env::current_dir().unwrap_or_default().join(p)
+    }
+}
+
+fn resolve_cli_work_dir(cli: &Cli) -> Result<PathBuf, String> {
+    let raw = cli
+        .work_dir
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "missing required --work-dir".to_string())?;
+    let work_dir = resolve_work_dir(raw);
+    match std::fs::metadata(&work_dir) {
+        Ok(metadata) if metadata.is_dir() => Ok(work_dir),
+        Ok(_) => Err(format!(
+            "work-dir is not a directory: {}",
+            work_dir.display()
+        )),
+        Err(_) => Err(format!("work-dir does not exist: {}", work_dir.display())),
+    }
+}
+
+fn config_file_path(cli: &Cli) -> PathBuf {
+    cli.config
+        .as_deref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("codex.config.json"))
+}
+
+fn load_file_config(cli: &Cli, announce: bool) -> Result<FileConfig, String> {
+    let config_path = config_file_path(cli);
+    let display_path = if config_path.is_absolute() {
+        config_path.clone()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_default()
+            .join(&config_path)
+    };
+    match std::fs::read_to_string(&config_path) {
+        Ok(text) => {
+            if announce {
+                println!("Config: {}", display_path.display());
+            }
+            serde_json::from_str(&text)
+                .map_err(|error| format!("invalid config file {}: {error}", config_path.display()))
+        }
+        Err(_) => {
+            if announce {
+                println!(
+                    "Config: no file at {} — using built-in defaults (pass --config to point elsewhere)",
+                    display_path.display()
+                );
+            }
+            Ok(FileConfig::default())
+        }
     }
 }
 
@@ -557,49 +697,8 @@ fn resolve_openai_tunnel(
 /// Load and merge config. Errors are returned as strings for the caller to
 /// print and exit on, mirroring the TS which validates and `process.exit`s.
 pub fn load_config(cli: Cli) -> Result<AppConfig, String> {
-    let work_dir = resolve_work_dir(&cli.work_dir);
-
-    // Validate work-dir exists and is a directory.
-    match std::fs::metadata(&work_dir) {
-        Ok(m) if m.is_dir() => {}
-        Ok(_) => {
-            return Err(format!(
-                "work-dir is not a directory: {}",
-                work_dir.display()
-            ));
-        }
-        Err(_) => return Err(format!("work-dir does not exist: {}", work_dir.display())),
-    }
-
-    let config_path = cli
-        .config
-        .clone()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("codex.config.json"));
-
-    // Show the absolute path of the config actually loaded, so it is obvious
-    // when codexify picked up a different file than the one being edited.
-    let display_path = if config_path.is_absolute() {
-        config_path.clone()
-    } else {
-        std::env::current_dir()
-            .unwrap_or_default()
-            .join(&config_path)
-    };
-    let mut file: FileConfig = match std::fs::read_to_string(&config_path) {
-        Ok(text) => {
-            println!("Config: {}", display_path.display());
-            serde_json::from_str(&text)
-                .map_err(|e| format!("invalid config file {}: {e}", config_path.display()))?
-        }
-        Err(_) => {
-            println!(
-                "Config: no file at {} — using built-in defaults (pass --config to point elsewhere)",
-                display_path.display()
-            );
-            FileConfig::default()
-        }
-    };
+    let work_dir = resolve_cli_work_dir(&cli)?;
+    let mut file = load_file_config(&cli, true)?;
 
     let mut tree = default_tree();
     if let Some(t) = file.tree.take() {
@@ -640,6 +739,7 @@ pub fn load_config(cli: Cli) -> Result<AppConfig, String> {
         }
     }
 
+    let project_catalog = resolve_project_catalog(&mut file);
     let mcp_servers = resolve_mcp_servers(&mut file, &cli)?;
     let openai_tunnel = resolve_openai_tunnel(file.openai_tunnel, &cli)?;
     let api_key = cli.api_key.or(file.api_key);
@@ -653,6 +753,7 @@ pub fn load_config(cli: Cli) -> Result<AppConfig, String> {
     Ok(AppConfig {
         work_dir,
         multi_project: cli.multi_project || file.multi_project.unwrap_or(false),
+        project_catalog,
         api_key,
         port: cli.port.or(file.port).unwrap_or(3000),
         allowed_commands: file
@@ -671,6 +772,18 @@ pub fn load_config(cli: Cli) -> Result<AppConfig, String> {
         mcp_servers,
         generated_skills_dir: None,
     })
+}
+
+pub fn load_project_catalog_for_cli(cli: &Cli) -> Result<ProjectCatalog, String> {
+    let work_dir = resolve_cli_work_dir(cli)?;
+    let mut file = load_file_config(cli, false)?;
+    let project_catalog = resolve_project_catalog(&mut file);
+    let codex_path = if project_catalog.codex_config.enabled {
+        Some(codex_config_path()?)
+    } else {
+        None
+    };
+    discover_project_catalog_at(&work_dir, &project_catalog, codex_path.as_deref())
 }
 
 #[cfg(test)]
@@ -694,7 +807,8 @@ mod tests {
 
     fn cli(work_dir: &Path, config: &Path) -> Cli {
         Cli {
-            work_dir: work_dir.to_string_lossy().into_owned(),
+            command: None,
+            work_dir: Some(work_dir.to_string_lossy().into_owned()),
             multi_project: false,
             port: None,
             api_key: None,
@@ -878,6 +992,110 @@ mod tests {
                 .and_then(|server| server.command.as_deref()),
             Some("global-server")
         );
+    }
+
+    #[test]
+    fn project_catalog_config_is_independent_from_codex_mcp_discovery() {
+        let mut file: FileConfig = serde_json::from_str(
+            r#"{
+                "codexMcp": { "enabled": false },
+                "projectCatalog": {
+                    "codexConfig": {
+                        "enabled": true,
+                        "trustedOnly": false
+                    },
+                    "entries": [
+                        {
+                            "path": "codexify",
+                            "name": "Codexify",
+                            "aliases": ["bridge"],
+                            "description": "Rust MCP bridge"
+                        }
+                    ]
+                }
+            }"#,
+        )
+        .unwrap();
+
+        assert!(!file.codex_mcp.as_ref().unwrap().enabled());
+        let catalog = resolve_project_catalog(&mut file);
+        assert!(catalog.codex_config.enabled);
+        assert!(!catalog.codex_config.trusted_only);
+        assert_eq!(catalog.entries.len(), 1);
+        assert_eq!(catalog.entries[0].path.as_deref(), Some("codexify"));
+        assert_eq!(catalog.entries[0].aliases, ["bridge"]);
+    }
+
+    #[test]
+    fn projects_list_cli_accepts_global_options_after_the_subcommand() {
+        let parsed = Cli::try_parse_from([
+            "codexify",
+            "projects",
+            "list",
+            "--work-dir",
+            "/tmp/projects",
+            "--config",
+            "/tmp/config.json",
+            "--query",
+            "bridge",
+            "--json",
+        ])
+        .unwrap();
+
+        assert_eq!(parsed.work_dir.as_deref(), Some("/tmp/projects"));
+        assert_eq!(parsed.config.as_deref(), Some("/tmp/config.json"));
+        let Some(CliCommand::Projects {
+            command: ProjectsCommand::List(args),
+        }) = parsed.command
+        else {
+            panic!("projects list subcommand was not parsed");
+        };
+        assert_eq!(args.query.as_deref(), Some("bridge"));
+        assert!(args.json);
+    }
+
+    #[test]
+    fn existing_server_cli_syntax_remains_valid() {
+        let parsed = Cli::try_parse_from([
+            "codexify",
+            "--work-dir",
+            "/tmp/project",
+            "--multi-project",
+            "--port",
+            "4000",
+        ])
+        .unwrap();
+
+        assert!(parsed.command.is_none());
+        assert_eq!(parsed.work_dir.as_deref(), Some("/tmp/project"));
+        assert!(parsed.multi_project);
+        assert_eq!(parsed.port, Some(4000));
+    }
+
+    #[test]
+    fn catalogue_cli_loading_does_not_validate_unrelated_tunnel_settings() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let config_path = root.path().join("config.json");
+        std::fs::write(
+            &config_path,
+            r#"{
+                "openaiTunnel": {
+                    "tunnelId": "not-a-valid-tunnel-id",
+                    "apiKeyRef": "literal-secret"
+                },
+                "projectCatalog": {
+                    "codexConfig": { "enabled": false },
+                    "entries": [{ "path": "project" }]
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let catalog = load_project_catalog_for_cli(&cli(root.path(), &config_path)).unwrap();
+        assert_eq!(catalog.projects.len(), 1);
+        assert_eq!(catalog.projects[0].selector, "project");
     }
 
     #[test]

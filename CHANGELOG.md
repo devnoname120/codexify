@@ -15,6 +15,16 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   discovery warns in automatic mode; `--codex-cli` makes it a startup error.
   `codexMcp.useCli` disables enrichment and `codexMcp.cliPath` selects an
   explicit executable.
+- A read-only multi-provider project catalogue for multi-project mode. The new
+  pre-binding `list_projects` MCP tool discovers trusted paths from native Codex's
+  user-level `[projects]` table, merges optional names, aliases, descriptions, and
+  explicit entries from `projectCatalog`, filters every candidate through the
+  existing canonical access-root boundary, and returns selectors accepted directly
+  by `set_project_root`. Native discovery is live, independent from `codexMcp`, and
+  requires no `codex` executable.
+- `codexify projects list` for local catalogue diagnostics, with query and JSON
+  output plus an explicit `--show-skipped` mode. Rejected absolute paths remain
+  hidden from MCP output and normal CLI output.
 
 ## [1.2.0] - 2026-08-24
 

@@ -60,7 +60,7 @@ impl Tool for SetProjectRoot {
     }
 
     fn description(&self) -> String {
-        "Bind the current ChatGPT conversation to one project directory beneath the server's configured access root. ChatGPT bindings survive MCP reconnects and server restarts and cannot be changed; start a new chat for another project. Clients without ChatGPT's stable conversation metadata fall back to binding the current MCP transport session. In multi-project mode, call this for a new unbound conversation before any filesystem, search, edit, command, git, project-instruction, skill, memory, or plan tool, then call get_agent_brief.".into()
+        "Bind the current ChatGPT conversation to one project directory beneath the server's configured access root. ChatGPT bindings survive MCP reconnects and server restarts and cannot be changed; start a new chat for another project. Clients without ChatGPT's stable conversation metadata fall back to binding the current MCP transport session. When the exact path is unknown, call list_projects first and pass one unambiguous result's selector as path. Do not guess among plausible projects. In multi-project mode, bind a new conversation before any filesystem, search, edit, command, git, project-instruction, skill, memory, or plan tool, then call get_agent_brief.".into()
     }
 
     fn describe(&self, config: &AppConfig) -> String {
@@ -81,7 +81,7 @@ impl Tool for SetProjectRoot {
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "Existing project directory, relative to the configured access root or an absolute path inside it"
+                    "description": "Existing project directory, relative to the configured access root or an absolute path inside it; a selector returned by list_projects is directly valid"
                 }
             },
             "required": ["path"],

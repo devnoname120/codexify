@@ -9,6 +9,7 @@ use codexify::memory::memory_dir;
 use codexify::project_bindings::{ConversationIdentity, ProjectBindingScope, ProjectBindingStore};
 use codexify::tool::Tool;
 use codexify::tools::git_status::GitStatus;
+use codexify::tools::list_projects::ListProjects;
 use codexify::tools::read_file::ReadFile;
 use codexify::tools::recall::Recall;
 use codexify::tools::remember::Remember;
@@ -38,6 +39,47 @@ fn project_tools_require_a_selection_in_multi_project_mode() {
     let error = session.effective_config(&config).unwrap_err();
     assert!(error.contains("set_project_root"));
     assert!(error.contains(root.path().to_string_lossy().as_ref()));
+}
+
+#[tokio::test]
+async fn catalogue_selector_can_bind_an_unbound_session() {
+    let root = TempDir::new().unwrap();
+    let access = root.path().join("projects");
+    let project = access.join("codexify");
+    fs::create_dir_all(&project).unwrap();
+    let mut config = multi_project_config(&access);
+    config.project_catalog.codex_config.enabled = false;
+    config
+        .project_catalog
+        .entries
+        .push(codexify::types::ProjectCatalogEntryConfig {
+            path: Some("codexify".to_string()),
+            name: Some("Codexify".to_string()),
+            aliases: vec!["ChatGPT bridge".to_string()],
+            description: Some("Rust MCP bridge".to_string()),
+        });
+    let session = SessionState::new();
+
+    let listed = ListProjects
+        .call(json!({ "query": "bridge" }), &config, &session)
+        .await;
+    assert!(!listed.is_error);
+    let selector = listed
+        .structured_content
+        .as_ref()
+        .and_then(|output| output["projects"][0]["selector"].as_str())
+        .unwrap();
+    assert_eq!(selector, "codexify");
+    assert!(session.effective_config(&config).is_err());
+
+    let selected = SetProjectRoot
+        .call(json!({ "path": selector }), &config, &session)
+        .await;
+    assert!(!selected.is_error);
+    assert_eq!(
+        session.effective_config(&config).unwrap().work_dir,
+        fs::canonicalize(project).unwrap()
+    );
 }
 
 #[tokio::test]
@@ -520,6 +562,7 @@ async fn initialize_instructions_defer_project_state_until_selection() {
     config.memory.enabled = Some(false);
 
     let initial = build_initial_instructions(&config);
+    assert!(initial.contains("list_projects"));
     assert!(initial.contains("set_project_root"));
     assert!(initial.contains("<not selected>"));
     assert!(!initial.contains("ACCESS-ROOT-INSTRUCTION"));

@@ -22,5 +22,12 @@
     ],
     "maxSessions": 8,
     "idleTimeoutMs": 300000
+  },
+  "projectCatalog": {
+    "codexConfig": {
+      "enabled": true,
+      "trustedOnly": true
+    },
+    "entries": []
   }
 }
