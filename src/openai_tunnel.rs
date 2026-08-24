@@ -52,10 +52,27 @@ struct ReleaseAsset {
     archive_sha256: &'static str,
 }
 
+/// Result of probing the tunnel-client's local health endpoints. Used both to
+/// gate startup readiness and to monitor a running tunnel. `Unreachable` means
+/// the probe itself failed (health endpoint down, connection refused/timeout);
+/// `Unhealthy` means the endpoint answered but reported the tunnel not ready
+/// (non-200, or the control-plane poll metric is missing/zero). The distinction
+/// is diagnostic — both count as a health failure for the supervisor.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum RuntimeReadiness {
-    Ready,
-    Pending(String),
+pub enum TunnelHealth {
+    Healthy,
+    Unhealthy(String),
+    Unreachable(String),
+}
+
+/// Builds the loopback-only HTTP client used to probe the tunnel-client's health
+/// endpoints. Shared by startup readiness and the running-tunnel health monitor.
+pub fn build_health_client() -> anyhow::Result<Client> {
+    Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(3))
+        .build()
+        .context("build loopback health client")
 }
 
 pub struct RunningOpenAiTunnel {
@@ -63,11 +80,18 @@ pub struct RunningOpenAiTunnel {
     _runtime_dir: TempDir,
     log_path: PathBuf,
     health_url: String,
+    base_url: Url,
 }
 
 impl RunningOpenAiTunnel {
     pub fn health_url(&self) -> &str {
         &self.health_url
+    }
+
+    /// Probes the running tunnel's local health endpoints. Cheap and side-effect
+    /// free, so the supervisor can call it on a fixed interval.
+    pub async fn check_health(&self, client: &Client) -> TunnelHealth {
+        probe_tunnel_health(client, &self.base_url).await
     }
 
     pub async fn wait_for_exit(&mut self) -> anyhow::Error {
@@ -138,19 +162,21 @@ pub async fn start(config: &AppConfig) -> anyhow::Result<RunningOpenAiTunnel> {
     drop(control_plane_api_key);
     drop(internal_mcp_authorization);
 
-    let health_url = match wait_until_ready(&mut child, &health_url_path, &log_path).await {
+    let base_url = match wait_until_ready(&mut child, &health_url_path, &log_path).await {
         Ok(url) => url,
         Err(error) => {
             let _ = terminate_child(&mut child).await;
             return Err(error);
         }
     };
+    let health_url = base_url.as_str().trim_end_matches('/').to_string();
 
     Ok(RunningOpenAiTunnel {
         child,
         _runtime_dir: runtime_dir,
         log_path,
         health_url,
+        base_url,
     })
 }
 
@@ -195,12 +221,8 @@ async fn wait_until_ready(
     child: &mut Child,
     health_url_path: &Path,
     log_path: &Path,
-) -> anyhow::Result<String> {
-    let client = Client::builder()
-        .no_proxy()
-        .timeout(Duration::from_secs(3))
-        .build()
-        .context("build loopback health client")?;
+) -> anyhow::Result<Url> {
+    let client = build_health_client()?;
     let deadline = Instant::now() + READY_TIMEOUT;
     let mut last_detail = "waiting for tunnel-client to publish its health URL".to_string();
 
@@ -214,11 +236,11 @@ async fn wait_until_ready(
 
         if let Ok(raw) = std::fs::read_to_string(health_url_path) {
             match parse_loopback_health_url(&raw) {
-                Ok(base_url) => match probe_runtime_readiness(&client, &base_url).await {
-                    RuntimeReadiness::Ready => {
-                        return Ok(base_url.as_str().trim_end_matches('/').to_string());
+                Ok(base_url) => match probe_tunnel_health(&client, &base_url).await {
+                    TunnelHealth::Healthy => return Ok(base_url),
+                    TunnelHealth::Unhealthy(detail) | TunnelHealth::Unreachable(detail) => {
+                        last_detail = detail
                     }
-                    RuntimeReadiness::Pending(detail) => last_detail = detail,
                 },
                 Err(error) => last_detail = error.to_string(),
             }
@@ -235,11 +257,11 @@ async fn wait_until_ready(
     }
 }
 
-async fn probe_runtime_readiness(client: &Client, base_url: &Url) -> RuntimeReadiness {
+async fn probe_tunnel_health(client: &Client, base_url: &Url) -> TunnelHealth {
     let ready_url = match base_url.join("readyz") {
         Ok(url) => url,
         Err(error) => {
-            return RuntimeReadiness::Pending(sanitize_detail(format!(
+            return TunnelHealth::Unhealthy(sanitize_detail(format!(
                 "could not build tunnel-client readiness URL: {error}"
             )));
         }
@@ -253,13 +275,13 @@ async fn probe_runtime_readiness(client: &Client, base_url: &Url) -> RuntimeRead
                 .await
                 .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
                 .unwrap_or_default();
-            return RuntimeReadiness::Pending(sanitize_detail(format!(
+            return TunnelHealth::Unhealthy(sanitize_detail(format!(
                 "/readyz returned {status}: {}",
                 body.trim()
             )));
         }
         Err(error) => {
-            return RuntimeReadiness::Pending(sanitize_detail(format!(
+            return TunnelHealth::Unreachable(sanitize_detail(format!(
                 "could not query tunnel-client /readyz: {error}"
             )));
         }
@@ -268,7 +290,7 @@ async fn probe_runtime_readiness(client: &Client, base_url: &Url) -> RuntimeRead
     let metrics_url = match base_url.join("metrics") {
         Ok(url) => url,
         Err(error) => {
-            return RuntimeReadiness::Pending(sanitize_detail(format!(
+            return TunnelHealth::Unhealthy(sanitize_detail(format!(
                 "could not build tunnel-client metrics URL: {error}"
             )));
         }
@@ -277,30 +299,30 @@ async fn probe_runtime_readiness(client: &Client, base_url: &Url) -> RuntimeRead
         Ok(response) if response.status() == StatusCode::OK => match response.text().await {
             Ok(text) => text,
             Err(error) => {
-                return RuntimeReadiness::Pending(sanitize_detail(format!(
+                return TunnelHealth::Unreachable(sanitize_detail(format!(
                     "could not read tunnel-client metrics: {error}"
                 )));
             }
         },
         Ok(response) => {
-            return RuntimeReadiness::Pending(format!(
+            return TunnelHealth::Unhealthy(format!(
                 "tunnel-client metrics returned {}",
                 response.status()
             ));
         }
         Err(error) => {
-            return RuntimeReadiness::Pending(sanitize_detail(format!(
+            return TunnelHealth::Unreachable(sanitize_detail(format!(
                 "could not query tunnel-client metrics: {error}"
             )));
         }
     };
 
     match parse_metric_value(&metrics, POLL_SUCCESS_METRIC) {
-        Some(value) if value > 0.0 => RuntimeReadiness::Ready,
-        Some(_) => RuntimeReadiness::Pending(
-            "waiting for the first successful OpenAI control-plane poll".into(),
-        ),
-        None => RuntimeReadiness::Pending(format!(
+        Some(value) if value > 0.0 => TunnelHealth::Healthy,
+        Some(_) => {
+            TunnelHealth::Unhealthy("waiting for a successful OpenAI control-plane poll".into())
+        }
+        None => TunnelHealth::Unhealthy(format!(
             "tunnel-client metrics did not expose {POLL_SUCCESS_METRIC}"
         )),
     }
@@ -925,8 +947,8 @@ mod tests {
             StatusCode::NOT_FOUND
         );
         assert_eq!(
-            probe_runtime_readiness(&client, &base_url).await,
-            RuntimeReadiness::Ready
+            probe_tunnel_health(&client, &base_url).await,
+            TunnelHealth::Healthy
         );
 
         server.abort();

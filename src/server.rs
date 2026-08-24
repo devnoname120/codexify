@@ -8,7 +8,7 @@
 //! stable conversation metadata and survives transport replacement.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::{Router, extract::State, response::Json, routing::get};
 use rmcp::{
@@ -30,6 +30,7 @@ use tower_http::cors::{Any, CorsLayer};
 use crate::auth::{generate_internal_bearer_token, require_auth};
 use crate::exec_sessions::SessionState;
 use crate::instructions::build_initial_instructions;
+use crate::openai_tunnel::TunnelHealth;
 use crate::project_bindings::{ConversationIdentity, ProjectBindingStore};
 use crate::registry::load_tools_for_mode;
 use crate::tool::Tool;
@@ -37,6 +38,22 @@ use crate::tools::set_project_root::{SetProjectRoot, select_and_render};
 use crate::types::{AppConfig, ToolContent, ToolResult};
 
 const HTTP_SERVER_STOP_TIMEOUT: Duration = Duration::from_secs(10);
+
+// Tunnel supervision (native OpenAI tunnel mode). The HTTP server stays up across
+// tunnel restarts; only the outbound tunnel-client process is replaced.
+/// How often the running tunnel's local health endpoints are probed.
+const TUNNEL_HEALTH_INTERVAL: Duration = Duration::from_secs(10);
+/// Consecutive failed health probes that mark the tunnel dead and trigger a restart.
+const TUNNEL_HEALTH_FAIL_THRESHOLD: u32 = 3;
+/// Circuit breaker: more than this many restarts inside [`TUNNEL_BREAKER_WINDOW`]
+/// means the tunnel is flapping unrecoverably, so supervision gives up.
+const TUNNEL_BREAKER_MAX_RESTARTS: usize = 5;
+const TUNNEL_BREAKER_WINDOW: Duration = Duration::from_secs(60);
+/// Backoff before a restart grows by this step per attempt in the current window,
+/// capped at [`TUNNEL_RESTART_BACKOFF_MAX`].
+const TUNNEL_RESTART_BACKOFF_STEP: Duration = Duration::from_secs(1);
+const TUNNEL_RESTART_BACKOFF_MAX: Duration = Duration::from_secs(5);
+
 type HttpServerTask = JoinHandle<Result<(), std::io::Error>>;
 
 /// One MCP session: shared config and tool registry, plus this session's own
@@ -71,7 +88,7 @@ fn to_call_tool_result(result: ToolResult) -> CallToolResult {
 impl ServerHandler for CodexHandler {
     fn get_info(&self) -> ServerInfo {
         InitializeResult::new(ServerCapabilities::builder().enable_tools().build())
-            .with_server_info(Implementation::new("codexify", "1.1.0"))
+            .with_server_info(Implementation::new("codexify", "1.2.0"))
             .with_instructions(build_initial_instructions(&self.config))
     }
 
@@ -331,6 +348,29 @@ pub async fn start_http_server(mut config: AppConfig) -> anyhow::Result<()> {
     run_with_openai_tunnel(listener, app, config, mcp_cancellation).await
 }
 
+/// What ended a supervision cycle for a running tunnel. Terminal events (server
+/// exit, shutdown signal) are handled inline in the select and never surface here.
+enum SuperviseEvent {
+    /// The tunnel process exited on its own; the string is the reason.
+    Died(String),
+    /// The health-probe interval fired; the tunnel must be probed.
+    HealthTick,
+}
+
+/// Records a restart at `now` in the sliding window, evicting entries older than
+/// [`TUNNEL_BREAKER_WINDOW`], and returns the attempt count (window length). The
+/// caller trips the circuit breaker once this reaches [`TUNNEL_BREAKER_MAX_RESTARTS`].
+fn record_restart(window: &mut Vec<Instant>, now: Instant) -> usize {
+    window.retain(|at| now.duration_since(*at) < TUNNEL_BREAKER_WINDOW);
+    window.push(now);
+    window.len()
+}
+
+/// Backoff before the `attempt`-th restart: linear in the attempt, capped.
+fn restart_backoff(attempt: usize) -> Duration {
+    (TUNNEL_RESTART_BACKOFF_STEP * attempt as u32).min(TUNNEL_RESTART_BACKOFF_MAX)
+}
+
 async fn run_with_openai_tunnel(
     listener: tokio::net::TcpListener,
     app: Router,
@@ -401,33 +441,138 @@ async fn run_with_openai_tunnel(
     println!("  Authentication: None");
     println!("  Permissions: Allow all actions\n");
 
-    tokio::select! {
-        server_result = &mut server_task => {
-            let shutdown_result = tunnel.shutdown().await;
-            flatten_server_result(server_result)?;
-            shutdown_result
-        }
-        tunnel_error = tunnel.wait_for_exit() => {
-            stop_http_server(
-                &mut shutdown_tx,
-                &mcp_cancellation,
-                server_task,
-                HTTP_SERVER_STOP_TIMEOUT,
-            ).await?;
-            Err(tunnel_error)
-        }
-        _ = shutdown_signal() => {
-            let (tunnel_result, server_result) = tokio::join!(
-                tunnel.shutdown(),
+    // Supervise the tunnel. The HTTP server keeps running across restarts; only
+    // the outbound tunnel-client process is replaced. A restart is triggered by
+    // the process exiting (#10) or by consecutive health-probe failures (#11),
+    // and is bounded by a circuit breaker so a flapping tunnel cannot loop
+    // forever.
+    let health_client = crate::openai_tunnel::build_health_client()?;
+    let mut health_interval = tokio::time::interval(TUNNEL_HEALTH_INTERVAL);
+    health_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    health_interval.tick().await; // consume the immediate first tick
+    let mut consecutive_failures: u32 = 0;
+    let mut restart_window: Vec<Instant> = Vec::new();
+
+    loop {
+        let event = tokio::select! {
+            server_result = &mut server_task => {
+                let shutdown_result = tunnel.shutdown().await;
+                flatten_server_result(server_result)?;
+                return shutdown_result;
+            }
+            tunnel_error = tunnel.wait_for_exit() => SuperviseEvent::Died(format!("{tunnel_error:#}")),
+            _ = health_interval.tick() => SuperviseEvent::HealthTick,
+            _ = shutdown_signal() => {
+                let (tunnel_result, server_result) = tokio::join!(
+                    tunnel.shutdown(),
+                    stop_http_server(
+                        &mut shutdown_tx,
+                        &mcp_cancellation,
+                        server_task,
+                        HTTP_SERVER_STOP_TIMEOUT,
+                    )
+                );
+                server_result?;
+                return tunnel_result;
+            }
+        };
+
+        let restart_reason = match event {
+            SuperviseEvent::Died(reason) => reason,
+            SuperviseEvent::HealthTick => match tunnel.check_health(&health_client).await {
+                TunnelHealth::Healthy => {
+                    consecutive_failures = 0;
+                    continue;
+                }
+                TunnelHealth::Unhealthy(detail) | TunnelHealth::Unreachable(detail) => {
+                    consecutive_failures += 1;
+                    tracing::warn!(
+                        "OpenAI tunnel health probe failed ({consecutive_failures}/{TUNNEL_HEALTH_FAIL_THRESHOLD}): {detail}"
+                    );
+                    if consecutive_failures < TUNNEL_HEALTH_FAIL_THRESHOLD {
+                        continue;
+                    }
+                    format!(
+                        "health probe failed {consecutive_failures} consecutive times: {detail}"
+                    )
+                }
+            },
+        };
+
+        // Restart, bounded by the circuit breaker.
+        consecutive_failures = 0;
+        let _ = tunnel.shutdown().await;
+        tracing::warn!("OpenAI tunnel down; restarting: {restart_reason}");
+
+        loop {
+            let attempt = record_restart(&mut restart_window, Instant::now());
+            if attempt >= TUNNEL_BREAKER_MAX_RESTARTS {
                 stop_http_server(
                     &mut shutdown_tx,
                     &mcp_cancellation,
                     server_task,
                     HTTP_SERVER_STOP_TIMEOUT,
                 )
+                .await?;
+                return Err(anyhow::anyhow!(
+                    "OpenAI tunnel restarted {} times within {}s; giving up ({restart_reason})",
+                    attempt - 1,
+                    TUNNEL_BREAKER_WINDOW.as_secs()
+                ));
+            }
+            let backoff = restart_backoff(attempt);
+            println!(
+                "OpenAI Secure MCP Tunnel: restart attempt {attempt} in {}s",
+                backoff.as_secs()
             );
-            server_result?;
-            tunnel_result
+
+            tokio::select! {
+                _ = tokio::time::sleep(backoff) => {}
+                server_result = &mut server_task => {
+                    return flatten_server_result(server_result);
+                }
+                _ = shutdown_signal() => {
+                    stop_http_server(
+                        &mut shutdown_tx,
+                        &mcp_cancellation,
+                        server_task,
+                        HTTP_SERVER_STOP_TIMEOUT,
+                    ).await?;
+                    return Ok(());
+                }
+            }
+
+            let start_tunnel = crate::openai_tunnel::start(&config);
+            tokio::pin!(start_tunnel);
+            tokio::select! {
+                started = &mut start_tunnel => match started {
+                    Ok(new_tunnel) => {
+                        tunnel = new_tunnel;
+                        health_interval.reset();
+                        println!(
+                            "OpenAI Secure MCP Tunnel: restarted; readiness {}/readyz",
+                            tunnel.health_url()
+                        );
+                        break;
+                    }
+                    Err(error) => {
+                        tracing::warn!("OpenAI tunnel restart attempt {attempt} failed: {error:#}");
+                        // Fall through to retry within the breaker window.
+                    }
+                },
+                server_result = &mut server_task => {
+                    return flatten_server_result(server_result);
+                }
+                _ = shutdown_signal() => {
+                    stop_http_server(
+                        &mut shutdown_tx,
+                        &mcp_cancellation,
+                        server_task,
+                        HTTP_SERVER_STOP_TIMEOUT,
+                    ).await?;
+                    return Ok(());
+                }
+            }
         }
     }
 }
@@ -523,5 +668,44 @@ mod tests {
 
         assert!(shutdown_tx.is_none());
         assert!(cancellation.is_cancelled());
+    }
+
+    #[test]
+    fn restart_window_evicts_entries_older_than_the_breaker_window() {
+        let base = Instant::now();
+        let mut window = Vec::new();
+
+        // Restarts spaced 40s apart: by t=80s the first (t=0) has aged out of the
+        // 60s window, so the count stays at 2 rather than growing to 3.
+        assert_eq!(record_restart(&mut window, base), 1);
+        assert_eq!(
+            record_restart(&mut window, base + Duration::from_secs(40)),
+            2
+        );
+        assert_eq!(
+            record_restart(&mut window, base + Duration::from_secs(80)),
+            2
+        );
+    }
+
+    #[test]
+    fn restart_window_trips_the_breaker_after_five_rapid_restarts() {
+        let base = Instant::now();
+        let mut window = Vec::new();
+        let mut last = 0;
+        for i in 0..TUNNEL_BREAKER_MAX_RESTARTS {
+            last = record_restart(&mut window, base + Duration::from_secs(i as u64));
+        }
+        // Five restarts inside the 60s window: the attempt count reaches the cap.
+        assert_eq!(last, TUNNEL_BREAKER_MAX_RESTARTS);
+        assert!(last >= TUNNEL_BREAKER_MAX_RESTARTS);
+    }
+
+    #[test]
+    fn restart_backoff_is_linear_then_capped() {
+        assert_eq!(restart_backoff(1), Duration::from_secs(1));
+        assert_eq!(restart_backoff(4), Duration::from_secs(4));
+        assert_eq!(restart_backoff(5), TUNNEL_RESTART_BACKOFF_MAX);
+        assert_eq!(restart_backoff(100), TUNNEL_RESTART_BACKOFF_MAX);
     }
 }
