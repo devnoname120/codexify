@@ -1,10 +1,9 @@
 //! Bridge to upstream MCP servers.
 //!
-//! codexify can act as an MCP *client* to other MCP servers, discover their
-//! tools at startup, and re-expose them through its own
-//! `tools/list` / `tools/call` so the ChatGPT-side agent can use them too. Each
-//! upstream tool is offered under a `<server>__<tool>` name and calls are
-//! forwarded to the upstream verbatim.
+//! codexify can act as an MCP *client* to other MCP servers and discover their
+//! complete tool catalogs at startup. Explicit compatibility modes can re-expose
+//! tools directly or through a gateway; catalog mode keeps transitive definitions
+//! private and exposes a fixed ranked discovery/schema/call surface instead.
 //!
 //! Local servers use stdio; remote servers use MCP Streamable HTTP.
 
@@ -15,8 +14,9 @@ use http::{HeaderName, HeaderValue, header::AUTHORIZATION};
 use rmcp::{
     RoleClient, ServiceExt,
     model::{
-        CallToolRequest, CallToolRequestParams, CallToolResult, ClientRequest, ContentBlock,
-        ServerResult,
+        CallToolRequest, CallToolRequestParams, CallToolResult, CancelledNotification,
+        CancelledNotificationParam, ClientRequest, ContentBlock, Icon, MetaObject, ServerResult,
+        ToolAnnotations,
     },
     service::{Peer, PeerRequestOptions, RunningService, ServiceError},
     transport::{
@@ -26,11 +26,13 @@ use rmcp::{
 };
 use serde_json::{Value, json};
 use tokio::process::Command;
+use tokio_util::sync::CancellationToken;
 
 use crate::exec_sessions::SessionState;
+use crate::mcp_catalog::{CatalogSourceInput, build_catalog_tools};
 use crate::process_env::scrub_untrusted_child_env;
-use crate::tool::Tool;
-use crate::types::{AppConfig, ToolContent, ToolResult};
+use crate::tool::{Tool, ToolRequestContext};
+use crate::types::{AppConfig, McpToolExposure, ToolContent, ToolResult};
 
 /// How long to wait for an upstream to start up and answer `tools/list` before
 /// giving up on it.
@@ -57,11 +59,36 @@ struct BridgedTool {
     original_name: String,
     /// The upstream server's config key, for error messages.
     server: String,
+    title: Option<String>,
     description: String,
     input_schema: Value,
     output_schema: Option<Value>,
+    annotations: Option<ToolAnnotations>,
+    icons: Option<Vec<Icon>>,
+    meta: Option<MetaObject>,
     peer: Peer<RoleClient>,
     tool_timeout: Option<Duration>,
+}
+
+impl BridgedTool {
+    async fn run(&self, args: Value, cancellation: Option<&CancellationToken>) -> ToolResult {
+        let mut params = CallToolRequestParams::new(self.original_name.clone());
+        if let Some(obj) = args.as_object()
+            && !obj.is_empty()
+        {
+            params = params.with_arguments(obj.clone());
+        }
+
+        forward_tool_call(
+            &self.peer,
+            params,
+            &self.server,
+            &self.original_name,
+            self.tool_timeout,
+            cancellation,
+        )
+        .await
+    }
 }
 
 #[async_trait]
@@ -72,6 +99,22 @@ impl Tool for BridgedTool {
 
     fn description(&self) -> String {
         self.description.clone()
+    }
+
+    fn title(&self) -> Option<String> {
+        self.title.clone()
+    }
+
+    fn annotations(&self) -> Option<ToolAnnotations> {
+        self.annotations.clone()
+    }
+
+    fn icons(&self) -> Option<Vec<Icon>> {
+        self.icons.clone()
+    }
+
+    fn meta(&self) -> Option<MetaObject> {
+        self.meta.clone()
     }
 
     fn input_schema(&self) -> Value {
@@ -93,38 +136,29 @@ impl Tool for BridgedTool {
     }
 
     async fn call(&self, args: Value, _config: &AppConfig, _session: &SessionState) -> ToolResult {
-        let mut params = CallToolRequestParams::new(self.original_name.clone());
-        if let Some(obj) = args.as_object()
-            && !obj.is_empty()
-        {
-            params = params.with_arguments(obj.clone());
-        }
+        self.run(args, None).await
+    }
 
-        forward_tool_call(
-            &self.peer,
-            params,
-            &self.server,
-            &self.original_name,
-            self.tool_timeout,
-        )
-        .await
+    async fn call_with_context(
+        &self,
+        args: Value,
+        _config: &AppConfig,
+        _session: &SessionState,
+        context: &ToolRequestContext,
+    ) -> ToolResult {
+        self.run(args, Some(&context.cancellation)).await
     }
 }
 
-async fn forward_tool_call(
+pub(crate) async fn forward_tool_call(
     peer: &Peer<RoleClient>,
     params: CallToolRequestParams,
     server: &str,
     tool: &str,
     tool_timeout: Option<Duration>,
+    cancellation: Option<&CancellationToken>,
 ) -> ToolResult {
-    let result = if let Some(limit) = tool_timeout {
-        call_tool_with_timeout(peer, params, limit).await
-    } else {
-        peer.call_tool(params)
-            .await
-            .map_err(|error| error.to_string())
-    };
+    let result = call_upstream_tool(peer, params, tool_timeout, cancellation).await;
 
     match result {
         Ok(result) => map_call_result(result),
@@ -134,19 +168,53 @@ async fn forward_tool_call(
     }
 }
 
-async fn call_tool_with_timeout(
+async fn call_upstream_tool(
     peer: &Peer<RoleClient>,
     params: CallToolRequestParams,
-    timeout: Duration,
+    timeout: Option<Duration>,
+    cancellation: Option<&CancellationToken>,
 ) -> Result<CallToolResult, String> {
     let request = ClientRequest::CallToolRequest(CallToolRequest::new(params));
+    let options = timeout
+        .map(PeerRequestOptions::with_timeout)
+        .unwrap_or_else(PeerRequestOptions::no_options);
     let handle = peer
-        .send_cancellable_request(request, PeerRequestOptions::with_timeout(timeout))
+        .send_cancellable_request(request, options)
         .await
         .map_err(|error| error.to_string())?;
-    let response = match handle.await_response().await {
+
+    if cancellation.is_some_and(CancellationToken::is_cancelled) {
+        let _ = handle
+            .cancel(Some("downstream request cancelled".to_string()))
+            .await;
+        return Err("cancelled by downstream client".to_string());
+    }
+
+    let response = if let Some(cancellation) = cancellation {
+        let request_id = handle.id.clone();
+        let cancel_peer = peer.clone();
+        let response = handle.await_response();
+        tokio::pin!(response);
+        tokio::select! {
+            response = &mut response => response,
+            _ = cancellation.cancelled() => {
+                let notification = CancelledNotification::new(CancelledNotificationParam::new(
+                    Some(request_id),
+                    Some("downstream request cancelled".to_string()),
+                ));
+                if let Err(error) = cancel_peer.send_notification(notification.into()).await {
+                    tracing::debug!("could not forward upstream MCP cancellation: {error}");
+                }
+                return Err("cancelled by downstream client".to_string());
+            }
+        }
+    } else {
+        handle.await_response().await
+    };
+
+    let response = match response {
         Ok(response) => response,
-        Err(ServiceError::Timeout { .. }) => {
+        Err(ServiceError::Timeout { timeout }) => {
             return Err(format!("timed out after {}s", timeout.as_secs_f64()));
         }
         Err(error) => return Err(error.to_string()),
@@ -164,9 +232,9 @@ async fn call_tool_with_timeout(
 }
 
 /// Translate an upstream `CallToolResult` into this server's [`ToolResult`],
-/// preserving text, images, error flag and structured content. Content blocks
-/// this server has no native representation for are rendered as JSON text so
-/// nothing is silently dropped.
+/// preserving text, images, error state, structured content, and result metadata.
+/// Content blocks this server has no native representation for are rendered as
+/// JSON text so nothing is silently dropped.
 fn map_call_result(result: CallToolResult) -> ToolResult {
     let content: Vec<ToolContent> = result
         .content
@@ -187,6 +255,7 @@ fn map_call_result(result: CallToolResult) -> ToolResult {
         content,
         is_error: result.is_error.unwrap_or(false),
         structured_content: result.structured_content,
+        meta: result.meta,
         audit: Default::default(),
     }
 }
@@ -237,12 +306,13 @@ fn unique_name(base: String, used: &std::collections::HashSet<String>) -> String
 }
 
 /// Connect to every configured upstream MCP server, discover its tools, and
-/// build the bridged tool proxies. A server that fails to launch or answer is
-/// logged and skipped — it never blocks startup.
+/// materialize its effective exposure mode. A server that fails to launch or
+/// answer is logged and skipped — it never blocks startup.
 pub async fn connect_upstreams(config: &AppConfig) -> Bridge {
     let mut tools: Vec<Box<dyn Tool>> = Vec::new();
     let mut services: Vec<RunningService<RoleClient, ()>> = Vec::new();
     let mut report: Vec<String> = Vec::new();
+    let mut catalog_sources = Vec::new();
 
     // Deterministic order so logs and tool ordering are stable across runs.
     let mut names: Vec<&String> = config.mcp_servers.keys().collect();
@@ -255,73 +325,97 @@ pub async fn connect_upstreams(config: &AppConfig) -> Bridge {
             continue;
         }
         let sanitized = sanitize(server_name);
-
-        let is_gateway = spec.mode.as_deref() == Some("gateway");
+        let exposure = spec.exposure();
 
         match connect_one(server_name, spec, config).await {
             Ok((service, upstream_tools, tool_timeout)) => {
                 let peer = service.peer().clone();
                 let count = upstream_tools.len();
 
-                if is_gateway {
-                    // Collapse the whole server into one dispatcher tool + a
-                    // generated skill documenting every function.
-                    let functions: Vec<GatewayFunction> = upstream_tools
-                        .iter()
-                        .map(|t| GatewayFunction {
-                            name: t.name.to_string(),
-                            description: t
-                                .description
-                                .as_ref()
-                                .map(|c| c.to_string())
-                                .unwrap_or_default(),
-                            input_schema: Value::Object((*t.input_schema).clone()),
-                        })
-                        .collect();
+                match exposure {
+                    McpToolExposure::Gateway => {
+                        let functions: Vec<GatewayFunction> = upstream_tools
+                            .iter()
+                            .map(|t| GatewayFunction {
+                                name: t.name.to_string(),
+                                description: t
+                                    .description
+                                    .as_ref()
+                                    .map(|c| c.to_string())
+                                    .unwrap_or_default(),
+                                input_schema: Value::Object((*t.input_schema).clone()),
+                            })
+                            .collect();
 
-                    write_gateway_skill(config, server_name, &sanitized, &functions);
+                        write_gateway_skill(config, server_name, &sanitized, &functions);
 
-                    let leaked: &'static str = Box::leak(sanitized.clone().into_boxed_str());
-                    tools.push(Box::new(GatewayTool {
-                        name: leaked,
-                        server: server_name.clone(),
-                        description: gateway_description(server_name, &functions),
-                        function_names: functions.iter().map(|f| f.name.clone()).collect(),
-                        peer: peer.clone(),
-                        tool_timeout,
-                    }));
-                    report.push(format!(
-                        "{server_name} -> gateway ({count} functions via `{sanitized}`)"
-                    ));
-                    tracing::info!(
-                        "bridged MCP server '{server_name}' as gateway: {count} function(s)"
-                    );
-                } else {
-                    report.push(format!("{server_name} -> {count} tool(s)"));
-                    // Ensure distinct downstream names: sanitising or 64-byte
-                    // truncation can map two upstream tools to the same name.
-                    let mut used: std::collections::HashSet<String> =
-                        std::collections::HashSet::new();
-                    for tool in upstream_tools {
-                        let original_name = tool.name.to_string();
-                        let display = unique_name(bridged_name(&sanitized, &original_name), &used);
-                        used.insert(display.clone());
-                        let leaked: &'static str = Box::leak(display.into_boxed_str());
-                        tools.push(Box::new(BridgedTool {
+                        let leaked: &'static str = Box::leak(sanitized.clone().into_boxed_str());
+                        tools.push(Box::new(GatewayTool {
                             name: leaked,
-                            original_name,
                             server: server_name.clone(),
-                            description: tool
-                                .description
-                                .map(|c| c.to_string())
-                                .unwrap_or_default(),
-                            input_schema: Value::Object((*tool.input_schema).clone()),
-                            output_schema: tool.output_schema.map(|s| Value::Object((*s).clone())),
+                            description: gateway_description(server_name, &functions),
+                            function_names: functions.iter().map(|f| f.name.clone()).collect(),
                             peer: peer.clone(),
                             tool_timeout,
                         }));
+                        report.push(format!(
+                            "{server_name} -> gateway ({count} functions via `{sanitized}`)"
+                        ));
+                        tracing::info!(
+                            "bridged MCP server '{server_name}' as gateway: {count} function(s)"
+                        );
                     }
-                    tracing::info!("bridged MCP server '{server_name}': {count} tool(s)");
+                    McpToolExposure::Direct => {
+                        report.push(format!("{server_name} -> direct ({count} tool(s))"));
+                        let mut used: std::collections::HashSet<String> =
+                            std::collections::HashSet::new();
+                        for tool in upstream_tools {
+                            let original_name = tool.name.to_string();
+                            let display =
+                                unique_name(bridged_name(&sanitized, &original_name), &used);
+                            used.insert(display.clone());
+                            let leaked: &'static str = Box::leak(display.into_boxed_str());
+                            tools.push(Box::new(BridgedTool {
+                                name: leaked,
+                                original_name,
+                                server: server_name.clone(),
+                                title: tool.title,
+                                description: tool
+                                    .description
+                                    .map(|c| c.to_string())
+                                    .unwrap_or_default(),
+                                input_schema: Value::Object((*tool.input_schema).clone()),
+                                output_schema: tool
+                                    .output_schema
+                                    .map(|schema| Value::Object((*schema).clone())),
+                                annotations: tool.annotations,
+                                icons: tool.icons,
+                                meta: tool.meta,
+                                peer: peer.clone(),
+                                tool_timeout,
+                            }));
+                        }
+                        tracing::info!(
+                            "bridged MCP server '{server_name}' directly: {count} tool(s)"
+                        );
+                    }
+                    McpToolExposure::Catalog => {
+                        report.push(format!(
+                            "{server_name} -> catalog ({count} private tool(s))"
+                        ));
+                        catalog_sources.push(CatalogSourceInput {
+                            raw_name: server_name.clone(),
+                            provenance: spec.provenance,
+                            transport: transport_label(spec),
+                            peer_info: peer.peer_info(),
+                            tools: upstream_tools,
+                            peer: peer.clone(),
+                            tool_timeout,
+                        });
+                        tracing::info!(
+                            "indexed MCP server '{server_name}' privately: {count} tool(s)"
+                        );
+                    }
                 }
                 services.push(service);
             }
@@ -331,6 +425,10 @@ pub async fn connect_upstreams(config: &AppConfig) -> Bridge {
             }
         }
     }
+
+    let mut catalog_tools = build_catalog_tools(catalog_sources);
+    catalog_tools.append(&mut tools);
+    tools = catalog_tools;
 
     Bridge {
         tools,
@@ -437,6 +535,45 @@ struct GatewayTool {
     tool_timeout: Option<Duration>,
 }
 
+impl GatewayTool {
+    async fn run(&self, args: Value, cancellation: Option<&CancellationToken>) -> ToolResult {
+        let Some(function) = args.get("function").and_then(|v| v.as_str()) else {
+            return ToolResult::error("`function` is required (the name of the function to call)");
+        };
+        if !self.function_names.iter().any(|f| f == function) {
+            return ToolResult::error(format!(
+                "Unknown {} function '{function}'. Read the '{}' skill for the list.",
+                self.server, self.server
+            ));
+        }
+
+        let mut params = CallToolRequestParams::new(function.to_string());
+        match args.get("arguments") {
+            None | Some(Value::Null) => {}
+            Some(Value::Object(obj)) => {
+                if !obj.is_empty() {
+                    params = params.with_arguments(obj.clone());
+                }
+            }
+            Some(_) => {
+                return ToolResult::error(
+                    "`arguments` must be a JSON object (an object mapping the function's parameter names to values)",
+                );
+            }
+        }
+
+        forward_tool_call(
+            &self.peer,
+            params,
+            &self.server,
+            function,
+            self.tool_timeout,
+            cancellation,
+        )
+        .await
+    }
+}
+
 #[async_trait]
 impl Tool for GatewayTool {
     fn name(&self) -> &'static str {
@@ -475,42 +612,17 @@ impl Tool for GatewayTool {
     }
 
     async fn call(&self, args: Value, _config: &AppConfig, _session: &SessionState) -> ToolResult {
-        let Some(function) = args.get("function").and_then(|v| v.as_str()) else {
-            return ToolResult::error("`function` is required (the name of the function to call)");
-        };
-        if !self.function_names.iter().any(|f| f == function) {
-            return ToolResult::error(format!(
-                "Unknown {} function '{function}'. Read the '{}' skill for the list.",
-                self.server, self.server
-            ));
-        }
+        self.run(args, None).await
+    }
 
-        let mut params = CallToolRequestParams::new(function.to_string());
-        // `arguments` is optional, but a present-but-malformed value must be
-        // rejected rather than silently dropped (which would call the function
-        // with no arguments).
-        match args.get("arguments") {
-            None | Some(Value::Null) => {}
-            Some(Value::Object(obj)) => {
-                if !obj.is_empty() {
-                    params = params.with_arguments(obj.clone());
-                }
-            }
-            Some(_) => {
-                return ToolResult::error(
-                    "`arguments` must be a JSON object (an object mapping the function's parameter names to values)",
-                );
-            }
-        }
-
-        forward_tool_call(
-            &self.peer,
-            params,
-            &self.server,
-            function,
-            self.tool_timeout,
-        )
-        .await
+    async fn call_with_context(
+        &self,
+        args: Value,
+        _config: &AppConfig,
+        _session: &SessionState,
+        context: &ToolRequestContext,
+    ) -> ToolResult {
+        self.run(args, Some(&context.cancellation)).await
     }
 }
 
@@ -534,6 +646,14 @@ async fn connect_one(
 enum UpstreamTransport<'a> {
     Stdio(&'a str),
     StreamableHttp(&'a str),
+}
+
+fn transport_label(spec: &crate::types::McpServerSpec) -> String {
+    if spec.command.is_some() {
+        "stdio".to_string()
+    } else {
+        "streamable-http".to_string()
+    }
 }
 
 fn select_transport(spec: &crate::types::McpServerSpec) -> Result<UpstreamTransport<'_>, String> {
@@ -836,7 +956,8 @@ fn tool_is_enabled(spec: &crate::types::McpServerSpec, name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::McpServerSpec;
+    use crate::mcp_catalog::{MCP_CALL_TOOL, MCP_GET_TOOL, MCP_LIST_SOURCES, MCP_SEARCH_TOOLS};
+    use crate::types::{McpServerProvenance, McpServerSpec, McpToolExposure, ToolContent};
     use axum::{
         Router,
         extract::{Request, State},
@@ -846,15 +967,15 @@ mod tests {
     use rmcp::{
         ErrorData as McpError, ServerHandler,
         model::{
-            CallToolResponse, Implementation, InitializeResult, ListToolsResult,
-            PaginatedRequestParams, ServerCapabilities, ServerInfo,
+            CallToolResponse, Icon, Implementation, InitializeResult, ListToolsResult, MetaObject,
+            PaginatedRequestParams, ServerCapabilities, ServerInfo, ToolAnnotations,
         },
         service::{RequestContext, RoleServer},
         transport::streamable_http_server::{
             StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
         },
     };
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     #[derive(Clone)]
     struct ExpectedHeaders {
@@ -956,6 +1077,231 @@ mod tests {
         (format!("http://{address}/mcp"), task)
     }
 
+    #[derive(Debug, Clone, PartialEq)]
+    struct RecordedCall {
+        name: String,
+        arguments: Option<serde_json::Map<String, Value>>,
+    }
+
+    #[derive(Clone)]
+    struct CatalogTestMcp {
+        calls: Arc<Mutex<Vec<RecordedCall>>>,
+    }
+
+    fn object_schema(value: Value) -> serde_json::Map<String, Value> {
+        value.as_object().cloned().unwrap()
+    }
+
+    fn catalog_test_tools() -> Vec<rmcp::model::Tool> {
+        let generic_schema = object_schema(json!({
+            "type": "object",
+            "properties": {
+                "value": {
+                    "type": "string",
+                    "description": "Value for this generic IDA operation"
+                }
+            },
+            "additionalProperties": false
+        }));
+        let mut tools = (0..66)
+            .map(|index| {
+                rmcp::model::Tool::new(
+                    format!("ida_operation_{index:02}"),
+                    format!("Generic IDA operation number {index}"),
+                    generic_schema.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let decompile_input = object_schema(json!({
+            "type": "object",
+            "properties": {
+                "location": {
+                    "type": "object",
+                    "description": "Target code location",
+                    "properties": {
+                        "virtual_address": {
+                            "type": "string",
+                            "description": "Function virtual address to decompile"
+                        }
+                    },
+                    "required": ["virtual_address"],
+                    "additionalProperties": false
+                }
+            },
+            "required": ["location"],
+            "additionalProperties": false
+        }));
+        let decompile_output = object_schema(json!({
+            "type": "object",
+            "properties": {
+                "rawTool": { "type": "string" },
+                "address": { "type": "string" }
+            },
+            "required": ["rawTool", "address"],
+            "additionalProperties": false
+        }));
+        let mut tool_meta = MetaObject::new();
+        tool_meta
+            .0
+            .insert("vendor".into(), Value::String("hex-rays".into()));
+        tools.push(
+            rmcp::model::Tool::new(
+                "decompile_function",
+                "Decompile a function and recover high-level pseudocode",
+                decompile_input,
+            )
+            .with_title("Decompile function")
+            .with_raw_output_schema(Arc::new(decompile_output))
+            .with_annotations(
+                ToolAnnotations::new()
+                    .read_only(true)
+                    .destructive(false)
+                    .idempotent(true)
+                    .open_world(false),
+            )
+            .with_icons(vec![Icon::new("https://example.invalid/decompiler.svg")])
+            .with_meta(tool_meta),
+        );
+        tools.push(rmcp::model::Tool::new(
+            "rename-function",
+            "Rename a function by address",
+            generic_schema.clone(),
+        ));
+        tools.push(rmcp::model::Tool::new(
+            "rename_function",
+            "Rename a function by symbol",
+            generic_schema.clone(),
+        ));
+        tools.push(rmcp::model::Tool::new(
+            "passthrough",
+            "Return mixed content, structured data, and result metadata",
+            generic_schema.clone(),
+        ));
+        tools.push(rmcp::model::Tool::new(
+            "error_result",
+            "Return a caller-visible tool error",
+            generic_schema,
+        ));
+        tools
+    }
+
+    impl ServerHandler for CatalogTestMcp {
+        fn get_info(&self) -> ServerInfo {
+            let mut implementation = Implementation::new("catalog-test-upstream", "9.8.7");
+            implementation.title = Some("IDA semantic analysis bridge".to_string());
+            implementation.description = Some("Metadata-rich many-tool MCP fixture".to_string());
+            InitializeResult::new(ServerCapabilities::builder().enable_tools().build())
+                .with_server_info(implementation)
+                .with_instructions(
+                    "Search for decompilation, renaming, and program-analysis operations.",
+                )
+        }
+
+        async fn list_tools(
+            &self,
+            _request: Option<PaginatedRequestParams>,
+            _context: RequestContext<RoleServer>,
+        ) -> Result<ListToolsResult, McpError> {
+            Ok(ListToolsResult::with_all_items(catalog_test_tools()))
+        }
+
+        async fn call_tool(
+            &self,
+            request: CallToolRequestParams,
+            _context: RequestContext<RoleServer>,
+        ) -> Result<CallToolResponse, McpError> {
+            self.calls.lock().unwrap().push(RecordedCall {
+                name: request.name.to_string(),
+                arguments: request.arguments.clone(),
+            });
+
+            match request.name.as_ref() {
+                "decompile_function" => {
+                    let address = request
+                        .arguments
+                        .as_ref()
+                        .and_then(|arguments| arguments.get("location"))
+                        .and_then(Value::as_object)
+                        .and_then(|location| location.get("virtual_address"))
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    Ok(CallToolResult::structured(json!({
+                        "rawTool": request.name,
+                        "address": address
+                    }))
+                    .into())
+                }
+                "passthrough" => {
+                    let mut result_meta = MetaObject::new();
+                    result_meta
+                        .0
+                        .insert("trace".into(), Value::String("fixture-result-meta".into()));
+                    let mut result = CallToolResult::success(vec![
+                        ContentBlock::text("mixed text"),
+                        ContentBlock::image("aGVsbG8=", "image/png"),
+                    ])
+                    .with_meta(Some(result_meta));
+                    result.structured_content = Some(json!({ "kind": "mixed", "ok": true }));
+                    Ok(result.into())
+                }
+                "error_result" => Ok(CallToolResult::error(vec![ContentBlock::text(
+                    "fixture tool error",
+                )])
+                .into()),
+                _ => Ok(CallToolResult::success(vec![ContentBlock::text(
+                    request.name.to_string(),
+                )])
+                .into()),
+            }
+        }
+    }
+
+    async fn spawn_catalog_upstream() -> (
+        String,
+        Arc<Mutex<Vec<RecordedCall>>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let factory_calls = calls.clone();
+        let mut config = StreamableHttpServerConfig::default();
+        config.json_response = true;
+        let service = StreamableHttpService::new(
+            move || {
+                Ok(CatalogTestMcp {
+                    calls: factory_calls.clone(),
+                })
+            },
+            Arc::new(LocalSessionManager::default()),
+            config,
+        );
+        let app = Router::new().nest_service("/mcp", service);
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (format!("http://{address}/mcp"), calls, task)
+    }
+
+    fn bridge_tool<'a>(bridge: &'a Bridge, name: &str) -> &'a dyn Tool {
+        bridge
+            .tools
+            .iter()
+            .find(|tool| tool.name() == name)
+            .map(|tool| tool.as_ref())
+            .unwrap_or_else(|| panic!("missing bridge tool {name}"))
+    }
+
+    async fn call_bridge_tool(bridge: &Bridge, name: &str, args: Value) -> ToolResult {
+        let config = crate::config::default_config(std::env::temp_dir());
+        bridge_tool(bridge, name)
+            .call(args, &config, &SessionState::new())
+            .await
+    }
+
     #[test]
     fn unique_name_dedups_with_suffix() {
         let mut used = std::collections::HashSet::new();
@@ -1020,6 +1366,551 @@ mod tests {
 
         let e = map_call_result(CallToolResult::error(vec![ContentBlock::text("boom")]));
         assert!(e.is_error);
+    }
+
+    #[tokio::test]
+    async fn catalog_mode_keeps_many_tools_private_and_supports_progressive_discovery() {
+        let (url, calls, server_task) = spawn_catalog_upstream().await;
+        let mut config = crate::config::default_config(std::env::temp_dir());
+        config.mcp_servers.insert(
+            "IDA MCP!".to_string(),
+            McpServerSpec {
+                url: Some(url),
+                provenance: McpServerProvenance::CodexConfig,
+                ..Default::default()
+            },
+        );
+
+        let bridge = connect_upstreams(&config).await;
+        let names = bridge
+            .tools
+            .iter()
+            .map(|tool| tool.name())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            [
+                MCP_LIST_SOURCES,
+                MCP_SEARCH_TOOLS,
+                MCP_GET_TOOL,
+                MCP_CALL_TOOL
+            ]
+        );
+        assert!(
+            bridge
+                .tools
+                .iter()
+                .all(|tool| !tool.requires_project_root())
+        );
+        assert!(bridge.tools.iter().all(|tool| tool.title().is_some()));
+        assert!(
+            bridge_tool(&bridge, MCP_LIST_SOURCES)
+                .output_schema()
+                .is_some()
+        );
+        assert!(
+            bridge_tool(&bridge, MCP_SEARCH_TOOLS)
+                .output_schema()
+                .is_some()
+        );
+        assert!(bridge_tool(&bridge, MCP_GET_TOOL).output_schema().is_some());
+        assert!(
+            bridge_tool(&bridge, MCP_CALL_TOOL)
+                .output_schema()
+                .is_none()
+        );
+        let discovery_annotations = bridge_tool(&bridge, MCP_SEARCH_TOOLS)
+            .annotations()
+            .unwrap();
+        assert_eq!(discovery_annotations.read_only_hint, Some(true));
+        assert_eq!(discovery_annotations.destructive_hint, Some(false));
+        assert_eq!(discovery_annotations.open_world_hint, Some(false));
+        let dispatcher_annotations = bridge_tool(&bridge, MCP_CALL_TOOL).annotations().unwrap();
+        assert_eq!(dispatcher_annotations.read_only_hint, Some(false));
+        assert_eq!(dispatcher_annotations.destructive_hint, Some(true));
+        assert_eq!(dispatcher_annotations.open_world_hint, Some(true));
+        let source_manifest = bridge_tool(&bridge, MCP_LIST_SOURCES).description();
+        assert!(source_manifest.contains("IDA_MCP_"));
+        assert!(source_manifest.contains("IDA MCP!"));
+        assert!(
+            bridge
+                .report
+                .iter()
+                .any(|line| line == "IDA MCP! -> catalog (71 private tool(s))")
+        );
+
+        let listed = call_bridge_tool(&bridge, MCP_LIST_SOURCES, json!({})).await;
+        assert!(!listed.is_error);
+        let listed = listed.structured_content.unwrap();
+        assert_eq!(listed["total"], 1);
+        assert_eq!(listed["sources"][0]["name"], "IDA MCP!");
+        assert_eq!(listed["sources"][0]["provenance"], "codex-config");
+        assert_eq!(listed["sources"][0]["transport"], "streamable-http");
+        assert_eq!(listed["sources"][0]["toolCount"], 71);
+        assert_eq!(
+            listed["sources"][0]["implementation"]["name"],
+            "catalog-test-upstream"
+        );
+        assert_eq!(
+            listed["sources"][0]["implementation"]["title"],
+            "IDA semantic analysis bridge"
+        );
+        assert!(
+            listed["sources"][0]["instructions"]
+                .as_str()
+                .unwrap()
+                .contains("program-analysis")
+        );
+        let source_id = listed["sources"][0]["id"].as_str().unwrap().to_string();
+        assert_eq!(source_id, "IDA_MCP_");
+
+        let filtered_sources = call_bridge_tool(
+            &bridge,
+            MCP_LIST_SOURCES,
+            json!({ "query": "semantic analysis" }),
+        )
+        .await
+        .structured_content
+        .unwrap();
+        assert_eq!(filtered_sources["total"], 1);
+        let missing_sources = call_bridge_tool(
+            &bridge,
+            MCP_LIST_SOURCES,
+            json!({ "query": "nonexistent system" }),
+        )
+        .await
+        .structured_content
+        .unwrap();
+        assert_eq!(missing_sources["total"], 0);
+
+        let searched = call_bridge_tool(
+            &bridge,
+            MCP_SEARCH_TOOLS,
+            json!({
+                "query": "decompile virtual address",
+                "source": source_id,
+                "limit": 5
+            }),
+        )
+        .await;
+        assert!(!searched.is_error);
+        let searched = searched.structured_content.unwrap();
+        assert_eq!(searched["matches"][0]["toolName"], "decompile_function");
+        let decompile_id = searched["matches"][0]["toolId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let definition = call_bridge_tool(
+            &bridge,
+            MCP_GET_TOOL,
+            json!({ "source": source_id, "tool": decompile_id }),
+        )
+        .await;
+        assert!(!definition.is_error);
+        let definition = definition.structured_content.unwrap();
+        assert_eq!(definition["tool"]["id"], "decompile_function");
+        assert_eq!(definition["tool"]["name"], "decompile_function");
+        assert_eq!(definition["tool"]["title"], "Decompile function");
+        assert_eq!(
+            definition["tool"]["inputSchema"]["properties"]["location"]["properties"]["virtual_address"]
+                ["description"],
+            "Function virtual address to decompile"
+        );
+        assert_eq!(definition["tool"]["annotations"]["readOnlyHint"], true);
+        assert_eq!(
+            definition["tool"]["icons"][0]["src"],
+            "https://example.invalid/decompiler.svg"
+        );
+        assert_eq!(definition["tool"]["_meta"]["vendor"], "hex-rays");
+        assert_eq!(
+            definition["tool"]["outputSchema"]["properties"]["address"]["type"],
+            "string"
+        );
+
+        let decompiled = call_bridge_tool(
+            &bridge,
+            MCP_CALL_TOOL,
+            json!({
+                "source": source_id,
+                "tool": decompile_id,
+                "arguments": {
+                    "location": { "virtual_address": "0x81000000" }
+                }
+            }),
+        )
+        .await;
+        assert!(!decompiled.is_error);
+        assert_eq!(
+            decompiled.structured_content,
+            Some(json!({
+                "rawTool": "decompile_function",
+                "address": "0x81000000"
+            }))
+        );
+        assert_eq!(
+            calls.lock().unwrap().last().unwrap().name,
+            "decompile_function"
+        );
+
+        let call_count = calls.lock().unwrap().len();
+        let malformed = call_bridge_tool(
+            &bridge,
+            MCP_CALL_TOOL,
+            json!({
+                "source": source_id,
+                "tool": decompile_id,
+                "arguments": ["not", "an", "object"]
+            }),
+        )
+        .await;
+        assert!(malformed.is_error);
+        assert!(malformed.joined_text().contains("must be a JSON object"));
+        assert_eq!(calls.lock().unwrap().len(), call_count);
+
+        let renamed = call_bridge_tool(
+            &bridge,
+            MCP_SEARCH_TOOLS,
+            json!({ "query": "rename function", "source": source_id, "limit": 10 }),
+        )
+        .await
+        .structured_content
+        .unwrap();
+        let renamed = renamed["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|entry| {
+                entry["toolName"] == "rename-function" || entry["toolName"] == "rename_function"
+            })
+            .map(|entry| {
+                (
+                    entry["toolId"].as_str().unwrap().to_string(),
+                    entry["toolName"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(renamed.len(), 2);
+        assert_ne!(renamed[0].0, renamed[1].0);
+        for (tool_id, raw_name) in &renamed {
+            let result = call_bridge_tool(
+                &bridge,
+                MCP_CALL_TOOL,
+                json!({
+                    "source": source_id,
+                    "tool": tool_id,
+                    "arguments": { "value": "new_name" }
+                }),
+            )
+            .await;
+            assert!(!result.is_error);
+            assert_eq!(result.joined_text(), *raw_name);
+            assert_eq!(calls.lock().unwrap().last().unwrap().name, *raw_name);
+        }
+
+        let passthrough = call_bridge_tool(
+            &bridge,
+            MCP_SEARCH_TOOLS,
+            json!({ "query": "passthrough", "source": source_id, "limit": 1 }),
+        )
+        .await
+        .structured_content
+        .unwrap();
+        let passthrough_id = passthrough["matches"][0]["toolId"].as_str().unwrap();
+        let passthrough = call_bridge_tool(
+            &bridge,
+            MCP_CALL_TOOL,
+            json!({ "source": source_id, "tool": passthrough_id, "arguments": {} }),
+        )
+        .await;
+        assert!(!passthrough.is_error);
+        assert_eq!(passthrough.content.len(), 2);
+        assert!(matches!(
+            &passthrough.content[0],
+            ToolContent::Text(text) if text == "mixed text"
+        ));
+        assert!(matches!(
+            &passthrough.content[1],
+            ToolContent::Image { data, mime_type }
+                if data == "aGVsbG8=" && mime_type == "image/png"
+        ));
+        assert_eq!(
+            passthrough.structured_content,
+            Some(json!({ "kind": "mixed", "ok": true }))
+        );
+        assert_eq!(
+            passthrough
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.0.get("trace")),
+            Some(&Value::String("fixture-result-meta".to_string()))
+        );
+
+        let failed = call_bridge_tool(
+            &bridge,
+            MCP_SEARCH_TOOLS,
+            json!({ "query": "error_result", "source": source_id, "limit": 1 }),
+        )
+        .await
+        .structured_content
+        .unwrap();
+        let failed_id = failed["matches"][0]["toolId"].as_str().unwrap();
+        let failed = call_bridge_tool(
+            &bridge,
+            MCP_CALL_TOOL,
+            json!({ "source": source_id, "tool": failed_id }),
+        )
+        .await;
+        assert!(failed.is_error);
+        assert_eq!(failed.joined_text(), "fixture tool error");
+
+        drop(bridge);
+        server_task.abort();
+        let _ = server_task.await;
+    }
+
+    #[tokio::test]
+    async fn catalog_mode_applies_allow_and_deny_filters_before_indexing() {
+        let (url, _calls, server_task) = spawn_catalog_upstream().await;
+        let mut config = crate::config::default_config(std::env::temp_dir());
+        config.mcp_servers.insert(
+            "filtered".to_string(),
+            McpServerSpec {
+                url: Some(url),
+                provenance: McpServerProvenance::CodexCli,
+                tools: Some(vec![
+                    "decompile_function".to_string(),
+                    "rename-function".to_string(),
+                    "error_result".to_string(),
+                ]),
+                disabled_tools: Some(vec!["error_result".to_string()]),
+                ..Default::default()
+            },
+        );
+
+        let bridge = connect_upstreams(&config).await;
+        assert_eq!(bridge.tools.len(), 4);
+        let listed = call_bridge_tool(&bridge, MCP_LIST_SOURCES, json!({}))
+            .await
+            .structured_content
+            .unwrap();
+        assert_eq!(listed["sources"][0]["toolCount"], 2);
+        assert_eq!(listed["sources"][0]["provenance"], "codex-cli");
+        let source_id = listed["sources"][0]["id"].as_str().unwrap();
+        let excluded = call_bridge_tool(
+            &bridge,
+            MCP_SEARCH_TOOLS,
+            json!({ "query": "error_result", "source": source_id }),
+        )
+        .await
+        .structured_content
+        .unwrap();
+        assert_eq!(excluded["total"], 0);
+        let included = call_bridge_tool(
+            &bridge,
+            MCP_SEARCH_TOOLS,
+            json!({ "query": "decompile", "source": source_id }),
+        )
+        .await
+        .structured_content
+        .unwrap();
+        assert_eq!(included["matches"][0]["toolName"], "decompile_function");
+
+        drop(bridge);
+        server_task.abort();
+        let _ = server_task.await;
+    }
+
+    #[tokio::test]
+    async fn catalog_source_ids_disambiguate_sanitized_name_collisions() {
+        let (first_url, first_calls, first_server_task) = spawn_catalog_upstream().await;
+        let (second_url, second_calls, second_server_task) = spawn_catalog_upstream().await;
+        let mut config = crate::config::default_config(std::env::temp_dir());
+        config.mcp_servers.insert(
+            "ida-mcp".to_string(),
+            McpServerSpec {
+                url: Some(first_url),
+                mode: Some(McpToolExposure::Catalog),
+                ..Default::default()
+            },
+        );
+        config.mcp_servers.insert(
+            "ida_mcp".to_string(),
+            McpServerSpec {
+                url: Some(second_url),
+                mode: Some(McpToolExposure::Catalog),
+                ..Default::default()
+            },
+        );
+
+        let bridge = connect_upstreams(&config).await;
+        assert_eq!(bridge.tools.len(), 4);
+        let listed = call_bridge_tool(&bridge, MCP_LIST_SOURCES, json!({}))
+            .await
+            .structured_content
+            .unwrap();
+        assert_eq!(listed["total"], 2);
+        let sources = listed["sources"].as_array().unwrap();
+        let ids = sources
+            .iter()
+            .map(|source| source["id"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        let names = sources
+            .iter()
+            .map(|source| source["name"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, ["ida_mcp", "ida_mcp_2"]);
+        assert_eq!(names, ["ida-mcp", "ida_mcp"]);
+
+        let searched = call_bridge_tool(
+            &bridge,
+            MCP_SEARCH_TOOLS,
+            json!({ "query": "decompile", "source": "ida_mcp_2", "limit": 1 }),
+        )
+        .await
+        .structured_content
+        .unwrap();
+        let tool_id = searched["matches"][0]["toolId"].as_str().unwrap();
+        let called = call_bridge_tool(
+            &bridge,
+            MCP_CALL_TOOL,
+            json!({
+                "source": "ida_mcp_2",
+                "tool": tool_id,
+                "arguments": { "location": { "virtual_address": "0x82000000" } }
+            }),
+        )
+        .await;
+        assert!(!called.is_error);
+        assert!(first_calls.lock().unwrap().is_empty());
+        assert_eq!(
+            second_calls.lock().unwrap().last().unwrap().name,
+            "decompile_function"
+        );
+
+        drop(bridge);
+        first_server_task.abort();
+        second_server_task.abort();
+        let _ = first_server_task.await;
+        let _ = second_server_task.await;
+    }
+
+    #[tokio::test]
+    async fn explicit_direct_mode_retains_per_tool_exposure_and_metadata() {
+        let (url, calls, server_task) = spawn_catalog_upstream().await;
+        let mut config = crate::config::default_config(std::env::temp_dir());
+        config.mcp_servers.insert(
+            "IDA MCP!".to_string(),
+            McpServerSpec {
+                url: Some(url),
+                mode: Some(McpToolExposure::Direct),
+                ..Default::default()
+            },
+        );
+
+        let bridge = connect_upstreams(&config).await;
+        assert_eq!(bridge.tools.len(), 71);
+        assert!(bridge.tools.iter().all(|tool| !matches!(
+            tool.name(),
+            MCP_LIST_SOURCES | MCP_SEARCH_TOOLS | MCP_GET_TOOL | MCP_CALL_TOOL
+        )));
+        let names = bridge
+            .tools
+            .iter()
+            .map(|tool| tool.name())
+            .collect::<Vec<_>>();
+        assert!(names.contains(&"IDA_MCP___rename_function"));
+        assert!(names.contains(&"IDA_MCP___rename_function_2"));
+
+        let decompile = bridge
+            .tools
+            .iter()
+            .find(|tool| tool.name() == "IDA_MCP___decompile_function")
+            .unwrap();
+        assert_eq!(decompile.title().as_deref(), Some("Decompile function"));
+        assert_eq!(
+            decompile
+                .annotations()
+                .and_then(|annotations| annotations.read_only_hint),
+            Some(true)
+        );
+        assert_eq!(decompile.icons().unwrap().len(), 1);
+        assert_eq!(
+            decompile
+                .meta()
+                .as_ref()
+                .and_then(|meta| meta.0.get("vendor")),
+            Some(&Value::String("hex-rays".to_string()))
+        );
+        assert!(decompile.output_schema().is_some());
+
+        let result = call_bridge_tool(
+            &bridge,
+            "IDA_MCP___decompile_function",
+            json!({ "location": { "virtual_address": "0xDEADBEEF" } }),
+        )
+        .await;
+        assert_eq!(
+            result.structured_content,
+            Some(json!({
+                "rawTool": "decompile_function",
+                "address": "0xDEADBEEF"
+            }))
+        );
+        assert_eq!(
+            calls.lock().unwrap().last().unwrap().name,
+            "decompile_function"
+        );
+
+        drop(bridge);
+        server_task.abort();
+        let _ = server_task.await;
+    }
+
+    #[tokio::test]
+    async fn explicit_gateway_mode_remains_a_single_compatible_dispatcher() {
+        let (url, calls, server_task) = spawn_catalog_upstream().await;
+        let generated = tempfile::tempdir().unwrap();
+        let mut config = crate::config::default_config(std::env::temp_dir());
+        config.generated_skills_dir = Some(generated.path().to_path_buf());
+        config.mcp_servers.insert(
+            "IDA MCP!".to_string(),
+            McpServerSpec {
+                url: Some(url),
+                mode: Some(McpToolExposure::Gateway),
+                ..Default::default()
+            },
+        );
+
+        let bridge = connect_upstreams(&config).await;
+        assert_eq!(bridge.tools.len(), 1);
+        assert_eq!(bridge.tools[0].name(), "IDA_MCP_");
+        assert!(generated.path().join("IDA MCP!").join("SKILL.md").is_file());
+
+        let result = call_bridge_tool(
+            &bridge,
+            "IDA_MCP_",
+            json!({ "function": "rename-function", "arguments": { "value": "new_name" } }),
+        )
+        .await;
+        assert!(!result.is_error);
+        assert_eq!(result.joined_text(), "rename-function");
+        assert_eq!(
+            calls.lock().unwrap().last().unwrap().name,
+            "rename-function"
+        );
+
+        let malformed = call_bridge_tool(
+            &bridge,
+            "IDA_MCP_",
+            json!({ "function": "rename-function", "arguments": "wrong" }),
+        )
+        .await;
+        assert!(malformed.is_error);
+
+        drop(bridge);
+        server_task.abort();
+        let _ = server_task.await;
     }
 
     #[test]
@@ -1179,6 +2070,7 @@ mod tests {
             "remote",
             "echo",
             tool_timeout,
+            None,
         )
         .await;
         assert!(!echo.is_error);
@@ -1191,10 +2083,39 @@ mod tests {
             "remote",
             "slow",
             tool_timeout,
+            None,
         )
         .await;
         assert!(slow.is_error);
         assert!(slow.joined_text().contains("timed out after"));
+
+        let cancellation = CancellationToken::new();
+        let cancel_task = {
+            let cancellation = cancellation.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+                cancellation.cancel();
+            })
+        };
+        let started = std::time::Instant::now();
+        let cancelled = forward_tool_call(
+            service.peer(),
+            CallToolRequestParams::new("slow")
+                .with_arguments(json!({ "text": "cancelled" }).as_object().cloned().unwrap()),
+            "remote",
+            "slow",
+            Some(Duration::from_secs(5)),
+            Some(&cancellation),
+        )
+        .await;
+        cancel_task.await.unwrap();
+        assert!(cancelled.is_error);
+        assert!(
+            cancelled
+                .joined_text()
+                .contains("cancelled by downstream client")
+        );
+        assert!(started.elapsed() < Duration::from_millis(150));
 
         drop(service);
         server_task.abort();

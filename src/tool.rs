@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use rmcp::model::{MetaObject, ToolAnnotations};
+use rmcp::model::{Icon, MetaObject, ToolAnnotations};
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
@@ -49,6 +49,11 @@ pub trait Tool: Send + Sync {
 
     /// Optional MCP tool annotations (read-only / destructive hints).
     fn annotations(&self) -> Option<ToolAnnotations> {
+        None
+    }
+
+    /// Optional icons advertised by the tool.
+    fn icons(&self) -> Option<Vec<Icon>> {
         None
     }
 

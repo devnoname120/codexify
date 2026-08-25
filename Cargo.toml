@@ -1,6 +1,6 @@
 [package]
 name = "codexify"
-version = "1.6.0"
+version = "1.7.0"
 edition = "2024"
 description = "Codexify MCP bridge, ported to Rust: a local Streamable-HTTP MCP server exposing Codex-style agent tools over a chosen work directory."
 license = "MIT"

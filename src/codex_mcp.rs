@@ -15,7 +15,7 @@ use serde::Deserialize;
 use crate::codex_config::load_codex_config;
 #[cfg(test)]
 use crate::codex_config::parse_codex_config;
-use crate::types::McpServerSpec;
+use crate::types::{McpServerProvenance, McpServerSpec};
 
 const CODEX_CLI_TIMEOUT: Duration = Duration::from_secs(30);
 const CODEX_CLI_MAX_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
@@ -341,6 +341,7 @@ fn codex_cli_server_to_spec(
             tools: server.enabled_tools,
             disabled_tools: server.disabled_tools,
             mode: None,
+            provenance: McpServerProvenance::CodexCli,
         });
     }
     if matches!(kind.as_str(), "sse" | "websocket" | "ws") {
@@ -406,6 +407,7 @@ fn codex_cli_server_to_spec(
         tools: server.enabled_tools,
         disabled_tools: server.disabled_tools,
         mode: None,
+        provenance: McpServerProvenance::CodexCli,
     })
 }
 
@@ -604,6 +606,7 @@ fn parse_server(
                 tools,
                 disabled_tools,
                 mode: None,
+                provenance: McpServerProvenance::CodexConfig,
             }),
             ignored_fields,
         });
@@ -651,6 +654,7 @@ fn parse_server(
             tools,
             disabled_tools,
             mode: None,
+            provenance: McpServerProvenance::CodexConfig,
         }),
         ignored_fields,
     })
@@ -800,6 +804,8 @@ STATIC_SECRET = "do-not-log-this"
         })
         .unwrap();
         let server = outcome.servers.get("demo").unwrap();
+        assert_eq!(server.provenance, McpServerProvenance::CodexConfig);
+        assert_eq!(server.exposure(), crate::types::McpToolExposure::Catalog);
         assert_eq!(server.command.as_deref(), Some("npx"));
         assert_eq!(server.args, ["-y", "demo-server"]);
         assert_eq!(server.cwd.as_deref(), Some("/tmp/demo"));
@@ -1018,6 +1024,8 @@ command = "good-server"
         );
         assert!(!outcome.servers.contains_key("global"));
         let plugin = outcome.servers.get("plugin").unwrap();
+        assert_eq!(plugin.provenance, McpServerProvenance::CodexCli);
+        assert_eq!(plugin.exposure(), crate::types::McpToolExposure::Catalog);
         assert_eq!(plugin.command.as_deref(), Some("uv"));
         assert_eq!(plugin.args, ["run", "plugin-mcp"]);
         assert_eq!(plugin.cwd.as_deref(), Some("/plugins/example"));
@@ -1077,6 +1085,8 @@ command = "good-server"
         )
         .unwrap();
         let server = outcome.servers.get("plugin-web").unwrap();
+        assert_eq!(server.provenance, McpServerProvenance::CodexCli);
+        assert_eq!(server.exposure(), crate::types::McpToolExposure::Catalog);
         assert_eq!(server.transport.as_deref(), Some("streamable-http"));
         assert_eq!(server.url.as_deref(), Some("https://example.invalid/mcp"));
         assert_eq!(server.bearer_token_env_var.as_deref(), Some("WEB_TOKEN"));

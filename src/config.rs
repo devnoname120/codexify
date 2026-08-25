@@ -24,10 +24,10 @@ use crate::openai_tunnel::validate_tunnel_id;
 use crate::project_catalog::{ProjectCatalog, discover_project_catalog_at};
 use crate::types::{
     AppConfig, ArtifactIngressConfig, AuditConfig, CodexProjectCatalogConfig, CommandConfig,
-    ConversationAuthToken, ExecConfig, ExecMode, IgnoreConfig, McpServerSpec, MemoryConfig,
-    OpenAiTunnelConfig, OutputConfig, ProjectCatalogConfig, ProjectCatalogEntryConfig,
-    ProjectDocConfig, ReviewConfig, SkillsConfig, TreeConfig, WorktreeConfig, WorktreeMode,
-    WorktreeUpstreamRefreshMode,
+    ConversationAuthToken, ExecConfig, ExecMode, IgnoreConfig, McpServerSpec, McpToolExposure,
+    MemoryConfig, OpenAiTunnelConfig, OutputConfig, ProjectCatalogConfig,
+    ProjectCatalogEntryConfig, ProjectDocConfig, ReviewConfig, SkillsConfig, TreeConfig,
+    WorktreeConfig, WorktreeMode, WorktreeUpstreamRefreshMode,
 };
 use crate::util::home_dir;
 
@@ -328,7 +328,7 @@ struct PartialMcpServerSpec {
     tool_timeout_sec: Option<f64>,
     tools: Option<Vec<String>>,
     disabled_tools: Option<Vec<String>>,
-    mode: Option<String>,
+    mode: Option<McpToolExposure>,
 }
 
 impl PartialMcpServerSpec {
@@ -1370,6 +1370,7 @@ mod tests {
             tools: Some(vec!["read".to_string()]),
             disabled_tools: Some(vec!["write".to_string()]),
             mode: None,
+            provenance: crate::types::McpServerProvenance::CodexConfig,
         }
     }
 
@@ -1690,7 +1691,7 @@ mod tests {
         let explicit = HashMap::from([(
             "demo".to_string(),
             PartialMcpServerSpec {
-                mode: Some("gateway".to_string()),
+                mode: Some(McpToolExposure::Gateway),
                 disabled: Some(false),
                 ..Default::default()
             },
@@ -1701,9 +1702,80 @@ mod tests {
         assert_eq!(server.command.as_deref(), Some("codex-server"));
         assert_eq!(server.args, ["--stdio"]);
         assert_eq!(server.env.get("TOKEN").map(String::as_str), Some("secret"));
-        assert_eq!(server.mode.as_deref(), Some("gateway"));
+        assert_eq!(server.mode, Some(McpToolExposure::Gateway));
+        assert_eq!(server.exposure(), McpToolExposure::Gateway);
+        assert_eq!(
+            server.provenance,
+            crate::types::McpServerProvenance::CodexConfig
+        );
         assert!(!server.disabled);
         assert_eq!(report.len(), 1);
+    }
+
+    #[test]
+    fn exposure_defaults_are_selected_by_server_provenance() {
+        let explicit = McpServerSpec::default();
+        assert_eq!(explicit.exposure(), McpToolExposure::Direct);
+
+        let imported_config = imported_server();
+        assert_eq!(imported_config.exposure(), McpToolExposure::Catalog);
+
+        let imported_cli = McpServerSpec {
+            provenance: crate::types::McpServerProvenance::CodexCli,
+            ..Default::default()
+        };
+        assert_eq!(imported_cli.exposure(), McpToolExposure::Catalog);
+    }
+
+    #[test]
+    fn explicit_overlays_preserve_imported_catalog_default_unless_mode_is_set() {
+        let imported = HashMap::from([("demo".to_string(), imported_server())]);
+        let explicit = HashMap::from([(
+            "demo".to_string(),
+            PartialMcpServerSpec {
+                disabled: Some(false),
+                ..Default::default()
+            },
+        )]);
+        let (merged, _) = merge_mcp_servers(imported, explicit);
+        let server = merged.get("demo").unwrap();
+        assert_eq!(server.exposure(), McpToolExposure::Catalog);
+        assert_eq!(
+            server.provenance,
+            crate::types::McpServerProvenance::CodexConfig
+        );
+
+        let imported = HashMap::from([("demo".to_string(), imported_server())]);
+        let explicit = HashMap::from([(
+            "demo".to_string(),
+            PartialMcpServerSpec {
+                mode: Some(McpToolExposure::Direct),
+                ..Default::default()
+            },
+        )]);
+        let (merged, _) = merge_mcp_servers(imported, explicit);
+        assert_eq!(
+            merged.get("demo").unwrap().exposure(),
+            McpToolExposure::Direct
+        );
+    }
+
+    #[test]
+    fn standalone_explicit_server_keeps_the_historical_direct_default() {
+        let explicit = HashMap::from([(
+            "local".to_string(),
+            PartialMcpServerSpec {
+                command: Some("local-server".to_string()),
+                ..Default::default()
+            },
+        )]);
+        let (merged, _) = merge_mcp_servers(HashMap::new(), explicit);
+        let server = merged.get("local").unwrap();
+        assert_eq!(
+            server.provenance,
+            crate::types::McpServerProvenance::Explicit
+        );
+        assert_eq!(server.exposure(), McpToolExposure::Direct);
     }
 
     #[test]
@@ -1833,7 +1905,7 @@ mod tests {
         );
         assert_eq!(demo.startup_timeout_sec, Some(12.5));
         assert_eq!(demo.tool_timeout_sec, Some(30.0));
-        assert_eq!(demo.mode.as_deref(), Some("gateway"));
+        assert_eq!(demo.mode, Some(McpToolExposure::Gateway));
         assert_eq!(
             demo.disabled_tools.as_deref(),
             Some(&["write".to_string()][..])

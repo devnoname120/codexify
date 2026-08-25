@@ -19,6 +19,7 @@ pub mod exec_sessions;
 pub mod ignore_rules;
 pub mod instructions;
 pub mod logging;
+mod mcp_catalog;
 pub mod memory;
 pub mod openai_tunnel;
 pub mod output_budget;

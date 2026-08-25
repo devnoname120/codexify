@@ -124,6 +124,7 @@ impl Tool for RunCommand {
             content: vec![crate::types::ToolContent::Text(out)],
             is_error: exit_code != 0,
             structured_content: None,
+            meta: None,
             audit: Default::default(),
         }
     }

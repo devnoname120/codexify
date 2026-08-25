@@ -149,6 +149,7 @@ fn to_call_tool_result(result: ToolResult) -> CallToolResult {
         CallToolResult::success(blocks)
     };
     ctr.structured_content = result.structured_content;
+    ctr.meta = result.meta;
     ctr
 }
 
@@ -160,6 +161,9 @@ fn advertised_tool(tool: &dyn Tool, config: &AppConfig) -> rmcp::model::Tool {
     }
     if let Some(annotations) = tool.annotations() {
         advertised = advertised.with_annotations(annotations);
+    }
+    if let Some(icons) = tool.icons() {
+        advertised = advertised.with_icons(icons);
     }
     if let Some(meta) = tool.meta() {
         advertised = advertised.with_meta(meta);
@@ -188,7 +192,7 @@ impl ServerHandler for CodexHandler {
         );
         capabilities.extensions = Some(extensions);
         InitializeResult::new(capabilities)
-            .with_server_info(Implementation::new("codexify", "1.6.0"))
+            .with_server_info(Implementation::new("codexify", "1.7.0"))
             .with_instructions(build_initial_instructions(&self.config))
     }
 
@@ -608,7 +612,7 @@ pub async fn start_http_server(mut config: AppConfig) -> anyhow::Result<()> {
         println!("Work directory: {}", config.work_dir.display());
     }
     println!(
-        "Tools loaded ({tool_count}): {} native + {bridged_count} bridged from upstream MCP servers",
+        "Tools loaded ({tool_count}): {} native + {bridged_count} upstream-facing MCP tools",
         tool_count - bridged_count
     );
     if !bridge_report.is_empty() {
@@ -1043,6 +1047,28 @@ mod tests {
         assert_eq!(annotations.destructive_hint, Some(false));
         assert_eq!(annotations.idempotent_hint, Some(false));
         assert_eq!(annotations.open_world_hint, Some(true));
+    }
+
+    #[test]
+    fn call_result_preserves_upstream_result_metadata() {
+        let mut meta = rmcp::model::MetaObject::new();
+        meta.0.insert("trace".to_string(), json!("upstream"));
+        let converted = to_call_tool_result(ToolResult {
+            content: vec![ToolContent::Text("ok".to_string())],
+            is_error: false,
+            structured_content: Some(json!({ "value": 1 })),
+            meta: Some(meta),
+            audit: Default::default(),
+        });
+
+        assert_eq!(converted.structured_content, Some(json!({ "value": 1 })));
+        assert_eq!(
+            converted
+                .meta
+                .as_ref()
+                .and_then(|metadata| metadata.0.get("trace")),
+            Some(&json!("upstream"))
+        );
     }
 
     #[tokio::test]

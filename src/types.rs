@@ -7,6 +7,7 @@
 use std::fmt;
 use std::ops::Deref;
 
+use rmcp::model::MetaObject;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use zeroize::Zeroize;
@@ -39,6 +40,7 @@ pub struct ToolResult {
     pub content: Vec<ToolContent>,
     pub is_error: bool,
     pub structured_content: Option<Value>,
+    pub meta: Option<MetaObject>,
     pub audit: ToolAuditMetadata,
 }
 
@@ -49,6 +51,7 @@ impl ToolResult {
             content: vec![ToolContent::Text(text.into())],
             is_error: false,
             structured_content: None,
+            meta: None,
             audit: ToolAuditMetadata::default(),
         }
     }
@@ -59,6 +62,7 @@ impl ToolResult {
             content: vec![ToolContent::Text(text.into())],
             is_error: true,
             structured_content: None,
+            meta: None,
             audit: ToolAuditMetadata::default(),
         }
     }
@@ -72,6 +76,7 @@ impl ToolResult {
             }],
             is_error: false,
             structured_content: None,
+            meta: None,
             audit: ToolAuditMetadata::default(),
         }
     }
@@ -399,10 +404,53 @@ pub struct CommandConfig {
     pub max_timeout: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum McpToolExposure {
+    Direct,
+    Gateway,
+    Catalog,
+}
+
+impl McpToolExposure {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Direct => "direct",
+            Self::Gateway => "gateway",
+            Self::Catalog => "catalog",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum McpServerProvenance {
+    #[default]
+    Explicit,
+    CodexConfig,
+    CodexCli,
+}
+
+impl McpServerProvenance {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Explicit => "explicit",
+            Self::CodexConfig => "codex-config",
+            Self::CodexCli => "codex-cli",
+        }
+    }
+
+    pub fn default_exposure(self) -> McpToolExposure {
+        match self {
+            Self::Explicit => McpToolExposure::Direct,
+            Self::CodexConfig | Self::CodexCli => McpToolExposure::Catalog,
+        }
+    }
+}
+
 /// One upstream MCP server to bridge, in the standard `mcpServers` shape. Its
-/// tools are discovered at startup and re-exposed under a `<server>__<tool>`
-/// name. A `command` selects stdio; a `url` selects Codex-compatible Streamable
-/// HTTP. Legacy SSE and WebSocket transports are rejected explicitly.
+/// tools are discovered at startup and materialized according to the effective
+/// exposure mode. A `command` selects stdio; a `url` selects Codex-compatible
+/// Streamable HTTP. Legacy SSE and WebSocket transports are rejected explicitly.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct McpServerSpec {
@@ -455,13 +503,28 @@ pub struct McpServerSpec {
     #[serde(default)]
     pub disabled_tools: Option<Vec<String>>,
     /// How the upstream's tools are exposed:
-    /// - `"direct"` (default): each upstream tool becomes its own `<server>__<tool>`.
+    /// - `"direct"`: each upstream tool becomes its own `<server>__<tool>`.
     /// - `"gateway"`: the whole server collapses into ONE dispatcher tool named
     ///   `<server>` taking `{function, arguments}`, plus an auto-generated skill
-    ///   documenting every function. Use it when a server has many tools and the
-    ///   client drops them.
+    ///   documenting every function.
+    /// - `"catalog"`: tools remain private and are reached through the fixed MCP
+    ///   source/search/schema/call surface.
+    ///
+    /// When absent, explicit `mcpServers` entries retain the historical direct
+    /// behavior, while automatically imported Codex/config/plugin entries use
+    /// catalog mode.
     #[serde(default)]
-    pub mode: Option<String>,
+    pub mode: Option<McpToolExposure>,
+    /// Internal origin used only to select the backward-compatible default mode.
+    #[serde(skip)]
+    pub provenance: McpServerProvenance,
+}
+
+impl McpServerSpec {
+    pub fn exposure(&self) -> McpToolExposure {
+        self.mode
+            .unwrap_or_else(|| self.provenance.default_exposure())
+    }
 }
 
 /// Configuration for OpenAI's outbound Secure MCP Tunnel runtime.
@@ -615,8 +678,8 @@ pub struct AppConfig {
     /// OpenAI's outbound tunnel, when enabled. The HTTP listener is restricted
     /// to loopback and its permissive browser CORS layer is disabled in this mode.
     pub openai_tunnel: Option<OpenAiTunnelConfig>,
-    /// Upstream MCP servers to bridge, keyed by name. Their tools are discovered
-    /// at startup and re-exposed as `<server>__<tool>`.
+    /// Upstream MCP servers, keyed by their raw configured names. Their tools are
+    /// discovered at startup and exposed according to each server's effective mode.
     pub mcp_servers: std::collections::HashMap<String, McpServerSpec>,
     /// Directory where gateway-mode servers write their auto-generated SKILL.md,
     /// added to skill discovery. Set at startup, not from the config file.

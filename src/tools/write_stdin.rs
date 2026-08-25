@@ -135,6 +135,7 @@ impl Tool for WriteStdin {
             content: vec![ToolContent::Text(render_unified_exec_output(&result))],
             is_error,
             structured_content: Some(structured),
+            meta: None,
             audit: ToolAuditMetadata {
                 truncated: Some(buffer_truncated || truncated),
                 original_output_tokens: truncated.then_some(original_token_count),

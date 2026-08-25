@@ -10,7 +10,7 @@ In native-tunnel mode, Codexify listens only on `127.0.0.1`, protects the MCP en
 
 The tool set covers the ones [Codex](https://github.com/openai/codex) gives its own agent — `apply_patch`, `exec_command`/`write_stdin`, `view_image`, `update_plan`, `clock_curr_time`/`clock_sleep` — so ChatGPT Web can work the way Codex does: patch files in place instead of rewriting them, drive interactive and long-running processes, and keep a plan across a task. It also bridges ChatGPT-native attachments and generated files into the active local project without base64 reconstruction. It carries the project's `AGENTS.md` and Codex's own agent brief, so the client is told how to behave and not just what it can call. It bounds what a tool call can return, keeps a plan and notes on disk across conversations, and records project-scoped review checkpoints so ChatGPT can inspect either the full task diff or only changes since the last review. And it loads Codex's skills: a `SKILL.md` in the repo or your home directory teaches the client how *you* do a recurring task, and only the ones that apply are ever read. Schemas and prompt are ported from the Codex source, not reimplemented from guesswork.
 
-Beyond the port, Codexify can **aggregate other MCP servers** — connecting to local stdio servers or remote Streamable HTTP endpoints and re-exposing their tools through its own endpoint, so the ChatGPT-side agent can call them too.
+Beyond the port, Codexify can **aggregate other MCP servers**. It connects to local stdio servers or remote Streamable HTTP endpoints, keeps automatically imported Codex/plugin tool catalogues private by default, and gives the ChatGPT-side agent a fixed ranked discovery/schema/call surface. Explicit direct flattening and the older one-tool gateway remain available as compatibility modes.
 
 ## Architecture
 
@@ -340,7 +340,7 @@ Multi-project mode adds two project-control tools:
 
 Codex needs the first three for none of these reasons: it puts its agent brief in the system prompt, the OS and shell in an `<environment_context>` message, and `AGENTS.md` straight into the prompt, all before the first turn. An MCP server has none of those channels — it can only expose tools — so the same facts are tool calls here as well as part of the server's `instructions`. It needs `remember` and `recall` for the opposite reason: its context is large and its session state lives in the CLI process, whereas the client here is a chat window that loses the conversation. See [Context and memory](#context-and-memory), [Acting as a Codex agent](#acting-as-a-codex-agent), [Shells and the host](#shells-and-the-host), [AGENTS.md](#agentsmd) and [Skills](#skills).
 
-That is 27 native tools in the default single-project mode and 29 in multi-project mode. Enabling conversation authorization adds `authenticate`, producing 28 or 30 respectively. Setting `artifactIngress.enabled` to `false` removes `import_host_file`, reducing the applicable count by one. When [MCP bridging](#bridging-other-mcp-servers) is configured, the tools of your other MCP servers are re-exposed here too, on top of these.
+That is 27 native tools in the default single-project mode and 29 in multi-project mode. Enabling conversation authorization adds `authenticate`, producing 28 or 30 respectively. Setting `artifactIngress.enabled` to `false` removes `import_host_file`, reducing the applicable count by one. One or more [catalog-mode MCP upstreams](#catalog-mode-default-for-automatic-imports) add one shared four-tool discovery/call surface regardless of how many transitive tools they contain. Direct mode adds one downstream tool per selected upstream tool; gateway mode adds one downstream dispatcher per upstream server.
 
 Two deliberate differences from Codex:
 
@@ -958,7 +958,42 @@ Discovery runs per MCP session, so adding a skill takes effect on the next conne
 
 ## Bridging other MCP servers
 
-Codexify can also act as an **MCP aggregator**: it connects to local stdio or remote Streamable HTTP MCP servers as a client, discovers their tools at startup, and re-exposes them through its own `/mcp` endpoint — so the ChatGPT-side agent sees and can call them too.
+Codexify can also act as an **MCP aggregator**: it connects to local stdio or remote Streamable HTTP MCP servers as a client and materializes their complete paginated `tools/list` catalogues at startup. Catalogue ownership and model exposure are separate. A server can keep its transitive tools private behind a fixed progressive-disclosure surface, expose each tool directly, or use the older one-tool gateway.
+
+### Exposure modes and defaults
+
+| `mode` | Default provenance | Downstream exposure |
+|--------|--------------------|---------------------|
+| `"catalog"` | Servers automatically imported from Codex `config.toml` or the Codex CLI/plugin catalogue | The complete filtered catalogue stays private. All catalog-mode sources share four fixed tools: `mcp_list_sources`, `mcp_search_tools`, `mcp_get_tool`, and `mcp_call_tool` |
+| `"direct"` | A standalone entry declared only in `codex.config.json.mcpServers` | Every selected upstream tool becomes `<server>__<tool>`, preserving the historical bridge behavior |
+| `"gateway"` | Never implicit; explicit compatibility opt-in only | The server becomes one `{ function, arguments }` dispatcher plus a generated skill containing every function schema |
+
+The default is based on **provenance**, not a brittle tool-count threshold. Automatically imported Codex/plugin servers use catalog mode even when they expose only a few tools. Standalone explicit entries remain direct by default for backward compatibility. An explicit entry that overlays an imported server inherits that imported provenance; set `mode` in the overlay to choose another exposure deliberately.
+
+To restore the pre-catalog behavior for an imported server:
+
+```json
+{
+  "mcpServers": {
+    "idasql": { "mode": "direct" }
+  }
+}
+```
+
+To keep a standalone explicit server out of the connector capability catalogue:
+
+```json
+{
+  "mcpServers": {
+    "remote-docs": {
+      "url": "https://mcp.example.com/mcp",
+      "mode": "catalog"
+    }
+  }
+}
+```
+
+`tools` and `disabledTools` are applied to raw upstream tool names before any mode is materialized. The fixed catalog tools and every direct/gateway proxy are project-independent: they remain callable before project selection in multi-project mode, subject to any configured conversation-authentication gate.
 
 ### Automatic discovery from Codex
 
@@ -974,7 +1009,7 @@ For each `[mcp_servers.<name>]` entry, Codexify imports the fields it can preser
 - `enabled = false` as a disabled upstream;
 - `enabled_tools` as an allow-list and `disabled_tools` as a deny-list applied afterwards.
 
-By default, Codexify also tries `codex mcp list --json`. Servers present in Codex's effective catalogue but absent from `config.toml` are fetched with `codex mcp get <name> --json` so plugin-provided enablement and tool allow/deny lists are preserved. The executable is selected from `codexMcp.cliPath`, then `CODEX_CLI_PATH`, then `codex` on `PATH`. Each invocation is bounded to 30 seconds and 4 MiB of stdout, and its JSON is parsed in memory without logging literal environment values.
+By default, Codexify also tries `codex mcp list --json`. Servers present in Codex's effective catalogue but absent from `config.toml` are fetched with `codex mcp get <name> --json` so plugin-provided enablement and tool allow/deny lists are preserved. The executable is selected from `codexMcp.cliPath`, then `CODEX_CLI_PATH`, then `codex` on `PATH`. Each invocation is bounded to 30 seconds and 4 MiB of stdout, and its JSON is parsed in memory without logging literal environment values. Both directly parsed and CLI/plugin imports carry imported provenance and therefore default to catalog exposure.
 
 When the CLI is missing, fails, times out, or returns incompatible JSON, normal startup continues with the direct `config.toml` result and prints a warning that plugin-provided MCP servers may be missing. Pass `--codex-cli` to make successful CLI discovery mandatory instead; the same condition then becomes a startup error. Set `"codexMcp": { "useCli": false }` to suppress CLI invocation while retaining direct config parsing.
 
@@ -999,7 +1034,7 @@ To keep direct Codex config import but never start the Codex CLI:
 
 ### Explicit servers and overrides
 
-The `mcpServers` map in `codex.config.json` remains supported. A local entry is a stdio command that Codexify launches and drives over stdin/stdout:
+The `mcpServers` map in `codex.config.json` remains supported. A local entry is a stdio command that Codexify launches and drives over stdin/stdout. Because this entry is standalone and has no `mode`, it uses direct exposure:
 
 ```json
 {
@@ -1060,48 +1095,72 @@ Codex CLI MCP discovery: codex
   idalib -> imported from Codex CLI (not present in config.toml)
 Codex MCP overrides:
   remote-exec -> imported fields overlaid by codex.config.json
-bridged MCP server 'idasql': 12 tool(s)
-Tools loaded (38): 26 native + 12 bridged from upstream MCP servers
-```
-
-Each upstream tool is offered as `<server>__<tool>` (for example `remote_exec__docker_ps`), and calls are forwarded to the upstream verbatim — text, images, structured content and error flags all pass through. An upstream that fails to launch, connect, authenticate, or answer is skipped; it never blocks startup or the native tools.
-
-Every configured server is reported in the startup banner, so a bad path or a failed handshake is never silent:
-
-```
+Tools loaded (31): 27 native + 4 upstream-facing MCP tools
 Upstream MCP servers:
-  remote-exec -> 84 tool(s)
-  idasql      -> FAILED: could not launch 'D:/wrong/path.exe': The system cannot find the path specified. (os error 3)
+  idalib      -> catalog (66 private tool(s))
+  idasql      -> catalog (12 private tool(s))
+  remote-exec -> gateway (2 functions via `remote_exec`)
 ```
 
-- `disabled: true` on an entry keeps its config but skips it (shown as `-> disabled`).
-- `tools: ["exec", "machine_list", ...]` limits which upstream tools are bridged (an allow-list on the upstream's own names).
-- `disabledTools: ["dangerous_write", ...]` removes tools after the allow-list has been applied.
-- `cwd` selects the child process's working directory.
-- `startupTimeoutSec` bounds initialization plus the initial `tools/list`; the default is 20 seconds.
-- `toolTimeoutSec` bounds each forwarded call and sends MCP cancellation when the limit expires.
-- Bridged names are sanitised to `[A-Za-z0-9_]` (e.g. `remote_exec__exec`) so function-calling layers that reject hyphens don't drop them.
-- A bridged name that would collide with a native tool is skipped with a warning.
-- `type` is inferred: `command` means `"stdio"`, while `url` means Streamable HTTP. Explicit HTTP aliases `"http"`, `"streamable-http"`, and `"streamable_http"` are accepted.
-- Legacy SSE and WebSocket transports are rejected explicitly because current Codex supports stdio and Streamable HTTP, not those legacy protocols.
+An upstream that fails to launch, connect, authenticate, or answer is skipped; it never blocks startup or the native tools. Every configured server is reported, so a bad path or failed handshake is not silent.
 
-OAuth authorization-code login and credential persistence are not implemented by this bridge. An OAuth-protected upstream must therefore be supplied a usable bearer token through `bearerTokenEnvVar` or an environment-backed `Authorization` header. MCP resources, resource templates, prompts, upstream initialization instructions, and dynamic `tools/list_changed` forwarding remain separate capability work; this transport support continues to expose tools only.
+### Catalog mode (default for automatic imports)
 
-If your server doesn't show up, **check the banner first** — the most common cause is a wrong `command` path.
+Catalog mode is the closest architecture an MCP-only bridge can provide to Codex's deferred tool exposure. Codexify still discovers and stores every filtered upstream definition internally, but downstream `tools/list` receives only a small fixed surface:
+
+| Tool | Contract |
+|------|----------|
+| `mcp_list_sources` | List or filter catalog-mode systems. Results include a unique model-facing source ID, the raw configured server name, provenance, transport, tool count, upstream implementation metadata, and initialization instructions when supplied |
+| `mcp_search_tools` | BM25-ranked full-text search over source/server metadata, model-facing and raw tool names, title, description, and recursively useful input/output-schema property names, descriptions, required names, and enum values. It can be restricted to one source ID |
+| `mcp_get_tool` | Return one exact upstream tool definition, including its separate model-facing ID and raw name, title, description, input/output schemas, annotations, icons, and `_meta` |
+| `mcp_call_tool` | Invoke the selected source/tool ID with an `arguments` object. Dispatch resolves the original server and raw tool name exactly |
+
+A typical agent flow is `mcp_list_sources` once when it needs to learn the available systems, `mcp_search_tools` with task-specific terminology, `mcp_get_tool` for the selected match when its exact schema or side-effect metadata matters, then `mcp_call_tool`. Search returns compact summaries rather than every schema, so a 66-tool IDA server still contributes only these four fixed connector capabilities.
+
+Model-facing IDs are sanitized and collision-disambiguated independently from raw names. The raw server/tool strings are never reconstructed from those IDs; dispatch uses the stored originals. This matters for names such as `rename-function` and `rename_function`, which can normalize to the same identifier but remain distinct upstream calls.
+
+Forwarded calls preserve upstream text blocks, images, structured content, the tool-error flag, and result `_meta`. Configured tool timeouts use RMCP cancellable requests, and cancellation of the downstream ChatGPT/MCP request is forwarded upstream. Unsupported content-block variants are retained through the existing JSON-text fallback rather than discarded.
+
+The generic dispatcher cannot reproduce the selected upstream tool's host-level approval semantics in ChatGPT because its downstream annotations are fixed before `source` and `tool` are known. `mcp_call_tool` therefore advertises conservative potentially-destructive/open-world hints. The agent can inspect the selected tool's exact annotations through `mcp_get_tool`, but the connector host still approves the generic dispatcher as one capability. Use direct mode when per-tool connector annotations and approval boundaries are required.
+
+The private catalogue is a startup snapshot. Dynamic upstream `tools/list_changed` notifications are not projected into the fixed surface; restart Codexify to rematerialize a changed catalogue.
+
+### Direct mode
+
+With `"mode": "direct"`, each upstream tool becomes a `BridgedTool` named `<server>__<tool>` (sanitized to `[A-Za-z0-9_]`, so `remote-exec` becomes `remote_exec__exec`). Calls use the tool's stored **raw upstream name**, not the downstream identifier. Input/output schemas, title, annotations, icons, and `_meta` are preserved in downstream `tools/list`; text, images, structured content, error state, and result metadata pass through on calls. A downstream name colliding with a native or previously registered tool is skipped with a warning.
+
+Direct mode is the strongest compatibility option, but it intentionally places every selected schema in the connector capability catalogue. Use `tools`/`disabledTools` to curate it when full exposure is unnecessary.
 
 ### Gateway mode
 
-Some clients (ChatGPT among them) won't reliably surface a large bridged tool set. **`mode: "gateway"`** collapses a whole server with many tools into a **single** dispatcher tool, plus a generated skill:
+**`mode: "gateway"`** retains the earlier compact compatibility mechanism: a whole server becomes one dispatcher tool plus a generated skill.
 
 ```json
-"mcpServers": {
-  "remote-exec": {
-    "mode": "gateway"
+{
+  "mcpServers": {
+    "remote-exec": {
+      "mode": "gateway"
+    }
   }
 }
 ```
 
-When `remote-exec` was imported from Codex, that overlay is sufficient; include its `command` and other launch fields when it exists only in `codex.config.json`. Gateway mode registers one tool named `remote_exec` taking `{ "function": "<name>", "arguments": { ... } }`, and auto-generates a skill (`skills_read name="remote-exec"`) documenting every function and its argument schema. The agent reads the skill, then calls the one tool — so an 84-tool server shows up as **1 tool + 1 skill** instead of 84 tools. `disabled`, `type`, `tools` and `disabledTools` all still apply.
+When `remote-exec` was imported from Codex, that overlay is sufficient; include its launch fields when it exists only in `codex.config.json`. Gateway mode registers one sanitized tool named `remote_exec` taking `{ "function": "<name>", "arguments": { ... } }`, and generates a skill (`skills_read name="remote-exec"`) documenting every raw function and argument schema. An 84-tool server therefore shows up as one tool plus one skill. This mode does not provide ranked search, exact per-tool metadata retrieval, or per-tool connector approval semantics; catalog mode is the preferred compact architecture for new configurations.
+
+### Common transport and filtering behavior
+
+- `disabled: true` keeps an entry configured but skips it (reported as `-> disabled`).
+- `tools: ["exec", "machine_list", ...]` is an allow-list over raw upstream names.
+- `disabledTools: ["dangerous_write", ...]` removes tools after the allow-list.
+- `cwd` selects a stdio child process's working directory.
+- `startupTimeoutSec` bounds initialization plus complete paginated `tools/list`; the default is 20 seconds.
+- `toolTimeoutSec` bounds each forwarded call and sends MCP cancellation when the limit expires.
+- `type` is inferred: `command` means `"stdio"`, while `url` means Streamable HTTP. Explicit HTTP aliases `"http"`, `"streamable-http"`, and `"streamable_http"` are accepted.
+- Legacy SSE and WebSocket transports are rejected explicitly because current Codex supports stdio and Streamable HTTP, not those legacy protocols.
+
+OAuth authorization-code login and credential persistence are not implemented by this bridge. An OAuth-protected upstream must therefore be supplied a usable bearer token through `bearerTokenEnvVar` or an environment-backed `Authorization` header. MCP resources, resource templates, and prompts remain separate capability work. Catalog mode reports upstream initialization instructions as source metadata, but does not inject them into Codexify's own initialization instructions.
+
+If your server doesn't show up, **check the banner first** — the most common cause is a wrong `command` path.
 
 ## Connecting to ChatGPT
 
@@ -1143,7 +1202,7 @@ Native tunnel mode ignores `allowedHosts` and forces the accepted authorities to
 - **Bounded reads outside the work directory**: [skills](#skills) may live in `~/.agents/skills`, `~/.codex/skills`, `~/.claude/skills` or an installed Claude Code plugin. `skills_read` opens files there, but only inside a skill package that already exists — the `resource` path is checked against the skill's own directory, so it cannot walk out into the rest of your home directory. `skills_list` reports the absolute path of every skill it found. Set `skills.enabled` to `false` to switch it off, or `skills.dirs` to point the user scope somewhere you choose.
 - **Read-only Codex configuration discovery**: MCP import and the project catalogue read the user-level Codex `config.toml` without rewriting it. Project discovery inspects only the top-level `projects` table, does not read candidate project contents, and suppresses rejected absolute paths from MCP output. Set `projectCatalog.codexConfig.enabled` to `false` to disable that provider. Native Codex trust does not override the Codexify access-root boundary.
 - **Command allowlist**: `run_command` only runs binaries listed in `allowedCommands`; everything else is rejected. `exec_command` checks the same list plus `exec.extraAllowedCommands`, at every command position in the string.
-- **Bridged servers carry delegated authority**: an explicit `mcpServers` entry or an automatically imported Codex MCP—including one contributed by a Codex plugin—forwards the model's calls verbatim. A stdio upstream launches a real process that runs as your OS user; a Streamable HTTP upstream receives model-directed calls plus its configured bearer token and HTTP headers. Only bridge servers you trust, prefer `tools`/`disabledTools` filters or `gateway` mode to keep the exposed surface small, keep secrets in `bearerTokenEnvVar`/`envHttpHeaders` rather than static JSON, set `codexMcp.useCli` to `false` to exclude plugin-only discovery, or set `codexMcp.enabled` to `false` to disable all automatic Codex import. Launch, connection, authentication, and handshake failures are reported rather than silently ignored.
+- **Bridged servers carry delegated authority**: an explicit `mcpServers` entry or an automatically imported Codex MCP—including one contributed by a Codex plugin—can receive model-directed calls. A stdio upstream launches a real process that runs as your OS user; a Streamable HTTP upstream receives calls plus its configured bearer token and HTTP headers. Catalog mode reduces connector-schema exposure, not runtime authority: `mcp_call_tool` can still dispatch any filtered catalogue entry. Only bridge servers you trust, use `tools`/`disabledTools` to narrow callable operations, prefer catalog mode to keep transitive schemas private, keep secrets in `bearerTokenEnvVar`/`envHttpHeaders` rather than static JSON, set `codexMcp.useCli` to `false` to exclude plugin-only discovery, or set `codexMcp.enabled` to `false` to disable all automatic Codex import. Launch, connection, authentication, and handshake failures are reported rather than silently ignored.
 - **Native OpenAI tunnel is outbound-only**: Codexify binds its MCP listener to loopback and supervises OpenAI's official runtime-only tunnel client. Startup fails unless the runtime reports `/readyz` and completes a control-plane poll. Failure of either process stops the other, and HTTP shutdown has a bounded grace period before remaining connections are aborted.
 - **The loopback MCP hop is authenticated**: native mode generates a random per-process bearer token and configures the tunnel runtime to send it on MCP requests and discovery probes. The token is never printed, written to the config file, or inherited by model-launched commands and bridged MCP children.
 - **Optional conversation-level authorization**: `conversationAuthToken` blocks all tools except `authenticate` until the stable ChatGPT conversation presents the token. Successful grants persist by hashed conversation identity and are invalidated by token rotation; clients without `openai/session` get transport-only grants. Initialization withholds the project-aware brief until authentication. This gate controls model conversations, not network callers: keep the native tunnel, reverse proxy, ChatGPT workspace, and local account secured independently. The token itself remains plaintext in `codex.config.json` because the server must compare chat-supplied values, so keep that file private and out of version control.
