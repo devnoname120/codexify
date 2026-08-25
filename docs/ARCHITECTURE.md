@@ -332,9 +332,10 @@ project behind an absolute `file:` reference. Config and credential replacement
 use temporary files in the destination directory. Once setup is complete, the
 same process can pass the generated paths back through `load_config` and enter the
 ordinary supervised server lifecycle; there is no separate quickstart runtime.
-The wizard can additionally generate `conversationAuthToken`, protect the config
-as a private file on Unix, and print a one-line instruction suitable for an
-individual chat or ChatGPT Project instructions.
+The wizard does not expose the advanced `conversationAuthToken` policy as an
+onboarding choice. If an existing config already contains a valid token, it
+preserves the value, protects the config as a private file on Unix, and prints the
+one-line instruction needed by an individual chat or ChatGPT Project.
 
 ---
 
@@ -451,7 +452,7 @@ the original order and rejects duplicate names.
 | `review_ui.rs` | Embedded MCP Apps resource and compatibility metadata for the interactive `show_changes` review card. |
 | `apply_patch.rs` | The Codex patch format: parse then apply, atomically, with fuzzy context matching and CRLF preservation. |
 | `memory.rs` | Working memory outside the repo, keyed by a hash of the normalized active root, with `O_EXCL` locking and atomic writes. In multi-project mode, a configured `memory.dir` is a base containing one hashed child per project. |
-| `quickstart.rs` | Interactive first-install wizard for project scope, native tunnel credentials, optional conversation-token generation, JSON config merging, and the ChatGPT developer-mode connector handoff. |
+| `quickstart.rs` | Interactive first-install wizard for project scope, native tunnel credentials, JSON config merging, preservation of preconfigured advanced conversation authorization, and the ChatGPT developer-mode connector handoff. |
 | `openai_tunnel.rs` | Verified installation and lifecycle supervision for OpenAI's outbound Secure MCP Tunnel runtime. |
 | `process_env.rs` | Child-process environment boundaries: isolate the tunnel runtime and remove tunnel credentials from model-controlled and upstream subprocesses. |
 | `project_doc.rs` | `AGENTS.md` discovery from project root down to the work dir under a byte budget. Multi-project mode treats the selected directory as the exact project root and never walks into the common access-root parent. |

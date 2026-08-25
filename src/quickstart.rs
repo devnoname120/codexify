@@ -9,9 +9,7 @@ use serde_json::{Map, Value};
 use tempfile::NamedTempFile;
 use zeroize::Zeroizing;
 
-use crate::conversation_auth::{
-    conversation_auth_prompt, generate_conversation_auth_token, validate_conversation_auth_token,
-};
+use crate::conversation_auth::{conversation_auth_prompt, validate_conversation_auth_token};
 use crate::openai_tunnel::{validate_runtime_api_key, validate_tunnel_id};
 use crate::util::home_dir;
 
@@ -222,26 +220,7 @@ where
 
     let default_connector_name = connector_name_default(&work_dir, multi_project);
     let connector_name = prompt_connector_name(&mut wizard, &default_connector_name)?;
-    let existing_conversation_auth_token = configured_conversation_auth_token(&file_config)?;
-    let conversation_auth_enabled = wizard.confirm(
-        "Require each new ChatGPT conversation to authenticate with a token?",
-        existing_conversation_auth_token.is_some(),
-    )?;
-    let conversation_auth_token = if conversation_auth_enabled {
-        match existing_conversation_auth_token {
-            Some(token)
-                if !wizard.confirm(
-                    "Generate a new conversation token and invalidate the current one after restart?",
-                    false,
-                )? =>
-            {
-                Some(token)
-            }
-            _ => Some(generate_conversation_auth_token()?),
-        }
-    } else {
-        None
-    };
+    let conversation_auth_token = configured_conversation_auth_token(&file_config)?;
 
     if file_config
         .get("apiKey")
@@ -1007,7 +986,7 @@ mod tests {
         let config_path = project.join("codex.config.json");
         let environment = environment(&root, &project);
         let home_dir = environment.home_dir.clone();
-        let input = format!("\n\n\n\n\n{TUNNEL_ID}\nn\n");
+        let input = format!("\n\n\n\n{TUNNEL_ID}\nn\n");
 
         let (result, output) = run_test_wizard(
             args(config_path.clone(), &project),
@@ -1044,6 +1023,8 @@ mod tests {
         assert!(output.contains("Connection: Tunnel"));
         assert!(output.contains("Authentication: No Authentication"));
         assert!(output.contains(TUNNEL_ID));
+        assert!(!output.contains("Require each new ChatGPT conversation"));
+        assert!(!output.contains("Configure ChatGPT conversation authentication"));
         assert!(!output.contains(RUNTIME_KEY));
 
         #[cfg(unix)]
@@ -1065,42 +1046,7 @@ mod tests {
     }
 
     #[test]
-    fn new_install_can_generate_a_conversation_token_and_project_instruction() {
-        let root = TempDir::new().unwrap();
-        let project = root.path().join("project");
-        fs::create_dir_all(&project).unwrap();
-        let config_path = project.join("codex.config.json");
-        let environment = environment(&root, &project);
-        let input = format!("\n\n\ny\n\n{TUNNEL_ID}\nn\n");
-
-        let (result, output) = run_test_wizard(
-            args(config_path.clone(), &project),
-            environment,
-            &input,
-            &[RUNTIME_KEY],
-        );
-        result.unwrap();
-
-        let config: Value =
-            serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
-        let token = config["conversationAuthToken"].as_str().unwrap();
-        validate_conversation_auth_token(token).unwrap();
-        assert!(output.contains(&conversation_auth_prompt(token)));
-        assert!(output.contains("ChatGPT Project's Project instructions"));
-        assert!(!output.contains(RUNTIME_KEY));
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            assert_eq!(
-                fs::metadata(&config_path).unwrap().permissions().mode() & 0o777,
-                0o600
-            );
-        }
-    }
-
-    #[test]
-    fn rerun_preserves_unrelated_config_and_can_keep_the_stored_key() {
+    fn rerun_preserves_advanced_conversation_auth_and_unrelated_config() {
         let root = TempDir::new().unwrap();
         let project = root.path().join("projects");
         fs::create_dir_all(&project).unwrap();
@@ -1128,7 +1074,7 @@ mod tests {
         let (result, output) = run_test_wizard(
             args(config_path.clone(), &project),
             environment,
-            "\n\n\n\n\n\n\n\nn\n",
+            "\n\n\n\n\n\nn\n",
             &[""],
         );
         let outcome = result.unwrap();
@@ -1137,11 +1083,13 @@ mod tests {
         assert_eq!(fs::read_to_string(&key_path).unwrap().trim(), RUNTIME_KEY);
 
         let config: Value =
-            serde_json::from_str(&fs::read_to_string(config_path).unwrap()).unwrap();
+            serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
         assert!(config.get("apiKey").is_none());
         assert_eq!(config["multiProject"], json!(true));
         assert_eq!(config["conversationAuthToken"], json!(CONVERSATION_TOKEN));
         assert!(output.contains(&conversation_auth_prompt(CONVERSATION_TOKEN)));
+        assert!(!output.contains("Require each new ChatGPT conversation"));
+        assert!(!output.contains("Generate a new conversation token"));
         assert_eq!(config["allowedCommands"], json!(["git"]));
         assert_eq!(
             config["openaiTunnel"]["organizationId"],
@@ -1151,6 +1099,15 @@ mod tests {
             config["openaiTunnel"]["apiKeyRef"],
             json!(format!("file:{}", key_path.display()))
         );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&config_path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
     }
 
     #[test]
@@ -1160,7 +1117,7 @@ mod tests {
         fs::create_dir_all(&project).unwrap();
         let config_path = project.join("codex.config.json");
         let environment = environment(&root, &project);
-        let input = format!("\nn\n\n\n\ninvalid-tunnel\n{TUNNEL_ID}\nn\n");
+        let input = format!("\nn\n\n\ninvalid-tunnel\n{TUNNEL_ID}\nn\n");
         let invalid_key = "not a valid key!";
 
         let (result, output) = run_test_wizard(

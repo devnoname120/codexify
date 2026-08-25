@@ -17,6 +17,14 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the access root). Branch and PR selections fetch the requested ref and use an
   isolated detached worktree when the source checkout is on another commit.
 
+### Changed
+
+- Quickstart no longer offers to enable, generate, or rotate the advanced
+  `conversationAuthToken` gate. Conversation authorization remains disabled unless
+  configured manually; rerunning quickstart preserves an existing valid token and
+  prints its required ChatGPT instruction without surfacing the feature to new
+  installs.
+
 ### Security
 
 - GitHub project cloning and target fetching are restricted to normalized

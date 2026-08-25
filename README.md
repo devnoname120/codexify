@@ -115,11 +115,10 @@ cargo run --release -- quickstart
 The wizard asks which project directory ChatGPT may access and whether that
 directory is one project or a multi-project access root. It then walks through
 creating an OpenAI Secure MCP Tunnel, entering the tunnel ID and runtime API key,
-and creating the matching ChatGPT developer-mode connector. It can also generate
-an optional per-conversation authorization token and prints the exact one-line
-instruction to paste into a chat or into a ChatGPT Project's Project instructions.
-The relevant OpenAI and ChatGPT links are printed together with the exact
-connection values to use.
+and creating the matching ChatGPT developer-mode connector. Advanced policies,
+including optional per-conversation authorization, are configured manually rather
+than presented during first-run onboarding. The relevant OpenAI and ChatGPT links
+are printed together with the exact connection values to use.
 
 The runtime key is entered without terminal echo and stored in a dedicated
 per-tunnel file under `~/.codexify/openai-tunnel/credentials/`. On Unix, the
@@ -129,10 +128,10 @@ settings are preserved. At the end, the wizard can start Codexify immediately
 so ChatGPT can scan the live connector. Keep that process running while using the
 connector.
 
-The optional conversation token is deliberately different from the tunnel runtime
-key: it is stored directly as `conversationAuthToken` in the JSON config so the
-server can verify chat-supplied values. When enabled, quickstart restricts the
-config file to the current user on Unix. Keep that config out of version control
+When an existing config already contains `conversationAuthToken`, quickstart
+preserves it, restricts the config file to the current user on Unix, and prints the
+one-line instruction required to authorize a chat. It does not offer to enable or
+rotate this advanced feature. Keep a token-bearing config out of version control
 and do not share it.
 
 Use `codexify quickstart --config /path/to/codex.config.json` to update a
@@ -183,7 +182,12 @@ Here `--work-dir` is an **access root**, not the active project. In ChatGPT, cal
 
 ### Optional per-conversation authorization
 
-Set a high-entropy token in the config, or let `quickstart` generate one:
+Set a high-entropy token manually in the config. For example, this generates a
+256-bit URL-safe value:
+
+```bash
+python -c 'import secrets; print("codexify_chat_" + secrets.token_urlsafe(32))'
+```
 
 ```json
 {
@@ -456,12 +460,14 @@ All project-scoped paths are resolved relative to the active project root: `--wo
 CLI flags override values from the config file.
 
 `conversationAuthToken` has no CLI override. A non-null value must contain 32 to
-256 ASCII bytes using only letters, digits, `_`, and `-`. `quickstart` generates a
-256-bit URL-safe token with the `codexify_chat_` prefix and writes the copyable
-ChatGPT instruction shown above. Because the token is intentionally stored in
-this file, use a config path outside the repository or add it to the repository's
-ignore rules. On Unix, quickstart changes the config mode to `0600` when this
-feature is enabled; manually created configs should be protected equivalently.
+256 ASCII bytes using only letters, digits, `_`, and `-`. Generate it with a
+cryptographically secure random source. `quickstart` does not enable or rotate the
+feature; if the selected config already contains a valid token, it preserves the
+value and prints the copyable ChatGPT instruction shown above. Because the token
+is intentionally stored in this file, use a config path outside the repository or
+add it to the repository's ignore rules. On Unix, quickstart changes the config
+mode to `0600` when it preserves a token-bearing config; manually created configs
+should be protected equivalently.
 
 ## Diagnostics and audit logging
 
@@ -1083,7 +1089,7 @@ When `remote-exec` was imported from Codex, that overlay is sufficient; include 
 3. In ChatGPT's connector/plugin settings, create a developer-mode connector with **Connection type: Tunnel**.
 4. Select the same tunnel ID that Codexify reports as ready. Set **Authentication** to **None**.
 5. Set the connector's permissions to **Allow all actions** if you do not want per-call confirmations.
-6. Enable the connector in a new chat. Without conversation authorization, open with `Call get_agent_brief and follow it for the rest of this chat.` With `conversationAuthToken`, first supply the one-line `authenticate` instruction printed by quickstart; after it succeeds, follow its project-selection or `get_agent_brief` direction. See [Acting as a Codex agent](#acting-as-a-codex-agent). In multi-project mode (`--multi-project`), call `set_project_root` first when an exact path or GitHub repository, branch, or pull-request URL is known, or `list_projects` first when only the local project identity is known; later follow-ups in that same chat recover both authorization and the project binding from ChatGPT's conversation metadata.
+6. Enable the connector in a new chat. Without conversation authorization, open with `Call get_agent_brief and follow it for the rest of this chat.` With `conversationAuthToken`, first supply the one-line `authenticate` instruction from [Optional per-conversation authorization](#optional-per-conversation-authorization); after it succeeds, follow its project-selection or `get_agent_brief` direction. In multi-project mode (`--multi-project`), call `set_project_root` first when an exact path or GitHub repository, branch, or pull-request URL is known, or `list_projects` first when only the local project identity is known; later follow-ups in that same chat recover both authorization and the project binding from ChatGPT's conversation metadata.
 
 There is no server URL to enter in this mode. OpenAI routes the selected tunnel to the supervised client, which supplies Codexify's generated per-process bearer on the local hop. The startup banner prints the runtime-only `/readyz` and `/metrics` URLs. It does not advertise an admin UI because `tunnel-client-runtime` deliberately omits that full-client surface.
 
