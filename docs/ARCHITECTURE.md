@@ -119,10 +119,18 @@ Five surfaces reach the model:
    against the access root, and returns relative selectors without reading project
    content or creating a binding.
 7. `set_project_root` canonicalizes an existing directory below the configured
-   access root. With `openai/session`, it writes an immutable conversation binding
-   through the shared `ProjectBindingStore`; without it, the root is stored in the
-   current `SessionState`. Re-selecting the same canonical root is idempotent and
-   selecting a different root is rejected.
+   access root, or parses a strict GitHub repository, branch, or pull-request URL.
+   URL resolution first looks for a matching local Git top level; when none exists,
+   it clones beneath `projectCloneDir` and verifies the resulting remote. A branch
+   URL fetches `refs/heads/<branch>` and a PR URL fetches
+   `refs/pull/<number>/head`. If an existing source checkout is not already at the
+   fetched commit, the binding path creates a detached managed worktree at that
+   commit rather than moving the source checkout; worktree mode `Never` rejects
+   that case. With `openai/session`, the immutable selection is written through the
+   shared `ProjectBindingStore`; without it, it is stored in the current
+   `SessionState`. Re-selecting the same canonical root or exact URL selection is
+   idempotent, selecting a different one is rejected before cloning or fetching,
+   and a clone destination collision never overwrites existing data.
 8. Other project-scoped calls resolve the durable conversation binding first, or
    the transport-session fallback when no conversation identity exists, then
    receive an effective clone of `AppConfig` whose `work_dir` is that root. Before
@@ -197,7 +205,34 @@ ChatGPT's `openai/session` value before it reaches a filename; no raw conversati
 identifier is written to disk. Records are namespaced by canonical access-root
 hash, written atomically under a per-record lock, and validated again on every
 load so a deleted project or changed symlink fails closed. A new store instance
-can recover the same binding after a server restart.
+can recover the same binding after a server restart. URL-created bindings also
+persist the canonical GitHub selection URL, allowing transport/case variants of a
+repository root—and equivalent encodings of an exact branch or PR selection—to
+remain idempotent without another remote inspection.
+
+### GitHub project resolution (`project_clone.rs`)
+`ProjectReference` distinguishes ordinary filesystem selectors from HTTPS/SSH
+GitHub repository-root URLs and HTTPS GitHub branch or pull-request URLs without
+widening `set_project_root` to arbitrary Git transports. Parsing accepts repository
+roots, `/tree/<branch>`, and `/pull/<number>` on `github.com`; it rejects
+credentials, queries, fragments, unsupported subpages, and insecure/non-GitHub
+transports. Repository identity is normalized case-insensitively as
+owner/repository, while checkout identity retains the case-sensitive branch name or
+PR number and the parser retains a safe HTTPS or SSH clone URL.
+
+Resolution revalidates `projectCloneDir` beneath the canonical access root, then
+checks the normal `<clone-dir>/<repository-name>` destination, live catalogue
+candidates, and immediate clone-directory children by inspecting each Git top
+level's remotes. One match is reused; multiple matches require an explicit path.
+When cloning is necessary, a repository-keyed cross-process lock serializes
+requests, `git clone` runs non-interactively under a bounded timeout into a private
+temporary directory, the remote is verified, and publication refuses an existing
+destination. Binding locks are acquired and checked before this resolver runs, so
+an already-bound conversation/session cannot produce a rejected clone side effect.
+For an explicit checkout target, resolution fetches the exact GitHub ref into a
+private deterministic ref and resolves its commit. Fresh branch clones check out
+the named branch; fresh PR clones detach at the PR head. Existing matching source
+checkouts are only fetched, never checked out or reset.
 
 ### `ConversationAuthorizationStore` (`conversation_auth.rs`)
 Optional conversation-level access control. The configured token is validated at
@@ -215,10 +250,13 @@ In multi-project mode, `set_project_root` can bind a conversation to a **detache
 managed Git worktree** instead of the source checkout, so two chats editing the
 same repository never share a working tree. `worktrees.mode` selects the policy:
 `Never` binds the source root directly, `Always` requires a worktree, and `Auto`
-(the default) creates one when the selected root is a Git working tree and falls
-back to the source root otherwise. Managed worktrees are created with
+(the default) uses an unassigned source checkout directly but creates a worktree
+when that checkout is already assigned. An explicit branch or PR selection also
+forces a worktree in `Auto` when the source is on another commit; `Never` rejects
+that mismatch rather than mutating the source. Managed worktrees are created with
 `git worktree add --detach` under `worktrees.root` (default: Codex's configured
-worktree location), one per conversation-and-repository.
+worktree location), one per conversation-and-repository, at either the ordinary
+starting commit or the exact fetched target commit.
 
 The binding therefore carries two roots: `source_project_root`, the operator-
 authorized directory beneath the access root, and `project_root`, the managed
@@ -405,7 +443,8 @@ the original order and rejects duplicate names.
 | `ignore_rules.rs` | One `.gitignore`-accurate matcher (the `ignore` crate) shared by glob/grep/tree/list_directory. |
 | `exec_policy.rs` | Shell-string allowlist guard for `exec_command` (a guardrail, not a sandbox). |
 | `project_bindings.rs` | Canonical project-root validation plus durable ChatGPT conversation bindings keyed by a hash of `openai/session`, namespaced by access root, locked per record, and atomically written. |
-| `worktrees.rs` | Per-conversation managed Git worktree lifecycle: create or reuse a detached checkout under `worktrees.root` via `git worktree add`, dual source/worktree root tracking, startup sweep bounded by `keepCount`, Windows `\\?\`-prefix handling, and the opt-in `allowSetupScript` gate for per-worktree environment setup. |
+| `project_clone.rs` | Strict GitHub repository/branch/PR URL parsing, normalized remote matching, existing-checkout discovery, exact target-ref fetching, bounded non-interactive cloning below `projectCloneDir`, cross-process repository locks, collision refusal, and post-clone verification. |
+| `worktrees.rs` | Per-conversation managed Git worktree lifecycle: create a detached checkout under `worktrees.root` via `git worktree add`, optionally at an exact fetched commit, dual source/worktree root tracking, startup sweep bounded by `keepCount`, Windows `\\?\`-prefix handling, and the opt-in `allowSetupScript` gate for per-worktree environment setup. |
 | `project_catalog.rs` | Live, read-only project discovery from native Codex plus explicit metadata; canonical access-root filtering, deduplication, deterministic query ranking, sanitized MCP warnings, and local diagnostics. |
 | `exec_sessions.rs` | Generic-client transport fallback plus conversation-owned unified-exec sessions and transport-local review state: shell resolution, PowerShell exit-code wrapping, background stdout/stderr drain tasks, process-group kill, idle cleanup, and output truncation (UTF-16 units to match the TS). |
 | `review.rs` | Project-scoped Git snapshots, persistent conversation refs, transport-local fallbacks, incremental compare-and-swap checkpoints, diff parsing and result budgets. |
@@ -547,6 +586,7 @@ startup banner prints the exact file with `Config:`). All fields optional.
   "apiKey": "…",                      // or --api-key; bearer token
   "conversationAuthToken": "codexify_chat_…", // optional per-chat tool gate
   "multiProject": false,               // or --multi-project; work-dir becomes access root
+  "projectCloneDir": ".",             // existing path below access root; or --project-clone-dir
   "allowedCommands": ["git", "node", …],   // run_command allowlist
   "allowedHosts": [],                  // DNS-rebinding allowlist; empty = any host
   "openaiTunnel": {

@@ -73,6 +73,14 @@ pub async fn create_managed_worktree(
     config: &AppConfig,
     source_project_root: &Path,
 ) -> Result<ManagedWorktree, String> {
+    create_managed_worktree_at(config, source_project_root, None).await
+}
+
+pub async fn create_managed_worktree_at(
+    config: &AppConfig,
+    source_project_root: &Path,
+    requested_commit: Option<&str>,
+) -> Result<ManagedWorktree, String> {
     let source_project_root = fs::canonicalize(source_project_root).map_err(|error| {
         format!(
             "Could not resolve project root {} before creating a worktree: {error}",
@@ -96,7 +104,22 @@ pub async fn create_managed_worktree(
         allocate_worktree_path(&worktrees_root, &source_git_root)?;
     let project_root = worktree_git_root.join(&workspace_relative);
     let mut warnings = Vec::new();
-    let starting_commit = resolve_starting_commit(config, &source_git_root, &mut warnings).await?;
+    let starting_commit = match requested_commit {
+        Some(commit) => {
+            required_git_text(
+                config,
+                &source_git_root,
+                &[
+                    OsString::from("rev-parse"),
+                    OsString::from("--verify"),
+                    OsString::from(format!("{commit}^{{commit}}")),
+                ],
+                "resolve the requested worktree commit",
+            )
+            .await?
+        }
+        None => resolve_starting_commit(config, &source_git_root, &mut warnings).await?,
+    };
     let filter_overrides = safe_attribute_filter_overrides(config, &source_git_root).await?;
 
     let creation = async {

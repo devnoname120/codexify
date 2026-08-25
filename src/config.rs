@@ -58,6 +58,11 @@ pub struct Cli {
     #[arg(long = "multi-project")]
     pub multi_project: bool,
 
+    /// Existing directory below --work-dir where GitHub repositories are cloned.
+    /// Default: --work-dir.
+    #[arg(long = "project-clone-dir")]
+    pub project_clone_dir: Option<String>,
+
     /// Worktree policy for new multi-project conversation bindings.
     #[arg(long = "worktree-mode", value_enum)]
     pub worktree_mode: Option<WorktreeMode>,
@@ -436,6 +441,7 @@ struct FileConfig {
     conversation_auth_token: Option<String>,
     port: Option<u16>,
     multi_project: Option<bool>,
+    project_clone_dir: Option<String>,
     worktrees: Option<PartialWorktrees>,
     allowed_commands: Option<Vec<String>>,
     tree: Option<PartialTree>,
@@ -626,6 +632,7 @@ fn resolve_mcp_servers_from(
 /// embedding the server without a config file.
 pub fn default_config(work_dir: std::path::PathBuf) -> AppConfig {
     AppConfig {
+        project_clone_dir: work_dir.clone(),
         work_dir,
         multi_project: false,
         project_catalog: ProjectCatalogConfig::default(),
@@ -796,6 +803,53 @@ fn resolve_cli_work_dir(cli: &Cli) -> Result<PathBuf, String> {
         )),
         Err(_) => Err(format!("work-dir does not exist: {}", work_dir.display())),
     }
+}
+
+fn resolve_project_clone_dir(
+    work_dir: &Path,
+    cli_value: Option<&str>,
+    file_value: Option<&str>,
+) -> Result<PathBuf, String> {
+    let Some(raw) = cli_value
+        .or(file_value)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(work_dir.to_path_buf());
+    };
+
+    let configured = Path::new(raw);
+    let candidate = if configured.is_absolute() {
+        configured.to_path_buf()
+    } else {
+        work_dir.join(configured)
+    };
+    let access_root = std::fs::canonicalize(work_dir).map_err(|error| {
+        format!(
+            "could not resolve project access root {} while validating projectCloneDir: {error}",
+            work_dir.display()
+        )
+    })?;
+    let clone_dir = std::fs::canonicalize(&candidate).map_err(|error| {
+        format!(
+            "projectCloneDir/--project-clone-dir must name an existing directory: {}: {error}",
+            candidate.display()
+        )
+    })?;
+    if !clone_dir.is_dir() {
+        return Err(format!(
+            "projectCloneDir/--project-clone-dir is not a directory: {}",
+            clone_dir.display()
+        ));
+    }
+    if clone_dir != access_root && !clone_dir.starts_with(&access_root) {
+        return Err(format!(
+            "projectCloneDir/--project-clone-dir must resolve inside the project access root {}: {}",
+            access_root.display(),
+            clone_dir.display()
+        ));
+    }
+    Ok(clone_dir)
 }
 
 fn config_file_path(cli: &Cli) -> PathBuf {
@@ -969,6 +1023,11 @@ fn resolve_audit(file: Option<PartialAudit>, cli: &Cli) -> Result<AuditConfig, S
 pub fn load_config(cli: Cli) -> Result<AppConfig, String> {
     let work_dir = resolve_cli_work_dir(&cli)?;
     let mut file = load_file_config(&cli, true)?;
+    let project_clone_dir = resolve_project_clone_dir(
+        &work_dir,
+        cli.project_clone_dir.as_deref(),
+        file.project_clone_dir.as_deref(),
+    )?;
     let conversation_auth_token = file.conversation_auth_token.take();
     if let Some(token) = conversation_auth_token.as_deref() {
         validate_conversation_auth_token(token)?;
@@ -1033,6 +1092,7 @@ pub fn load_config(cli: Cli) -> Result<AppConfig, String> {
     Ok(AppConfig {
         work_dir,
         multi_project: cli.multi_project || file.multi_project.unwrap_or(false),
+        project_clone_dir,
         project_catalog,
         worktrees,
         api_key,
@@ -1102,6 +1162,7 @@ mod tests {
             command: None,
             work_dir: Some(work_dir.to_string_lossy().into_owned()),
             multi_project: false,
+            project_clone_dir: None,
             worktree_mode: None,
             worktree_root: None,
             port: None,
@@ -1140,6 +1201,66 @@ mod tests {
         assert_eq!(parsed.audit_log.as_deref(), Some("/tmp/audit.jsonl"));
         assert!(parsed.audit_command_preview);
         assert_eq!(parsed.audit_redact_env, ["GITHUB_TOKEN", "CUSTOM_SECRET"]);
+    }
+
+    #[test]
+    fn project_clone_dir_defaults_to_the_access_root_and_accepts_an_inner_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let access = root.path().join("projects");
+        let clones = access.join("cloned");
+        std::fs::create_dir_all(&clones).unwrap();
+
+        let default_path = root.path().join("default.json");
+        std::fs::write(&default_path, r#"{"codexMcp":{"enabled":false}}"#).unwrap();
+        let default = load_config(cli(&access, &default_path)).unwrap();
+        assert_eq!(default.project_clone_dir, access);
+
+        let nested_path = root.path().join("nested.json");
+        std::fs::write(
+            &nested_path,
+            r#"{"codexMcp":{"enabled":false},"projectCloneDir":"cloned"}"#,
+        )
+        .unwrap();
+        let nested = load_config(cli(&access, &nested_path)).unwrap();
+        assert_eq!(
+            nested.project_clone_dir,
+            std::fs::canonicalize(clones).unwrap()
+        );
+    }
+
+    #[test]
+    fn project_clone_dir_cli_overrides_file_and_cannot_escape_the_access_root() {
+        let root = tempfile::tempdir().unwrap();
+        let access = root.path().join("projects");
+        let file_dir = access.join("from-file");
+        let cli_dir = access.join("from-cli");
+        let outside = root.path().join("outside");
+        for directory in [&file_dir, &cli_dir, &outside] {
+            std::fs::create_dir_all(directory).unwrap();
+        }
+        let config_path = root.path().join("config.json");
+        std::fs::write(
+            &config_path,
+            r#"{"codexMcp":{"enabled":false},"projectCloneDir":"from-file"}"#,
+        )
+        .unwrap();
+
+        let mut args = cli(&access, &config_path);
+        args.project_clone_dir = Some(cli_dir.to_string_lossy().into_owned());
+        let config = load_config(args).unwrap();
+        assert_eq!(
+            config.project_clone_dir,
+            std::fs::canonicalize(cli_dir).unwrap()
+        );
+
+        let outside_path = root.path().join("outside.json");
+        std::fs::write(
+            &outside_path,
+            r#"{"codexMcp":{"enabled":false},"projectCloneDir":"../outside"}"#,
+        )
+        .unwrap();
+        let error = load_config(cli(&access, &outside_path)).unwrap_err();
+        assert!(error.contains("must resolve inside"), "{error}");
     }
 
     #[test]

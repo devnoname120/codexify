@@ -117,6 +117,86 @@ async fn catalogue_selector_can_bind_an_unbound_session() {
 }
 
 #[tokio::test]
+async fn github_url_reuses_a_matching_checkout_and_survives_restart() {
+    let root = TempDir::new().unwrap();
+    let access = root.path().join("projects");
+    let checkout = access.join("custom-widget-checkout");
+    fs::create_dir_all(&checkout).unwrap();
+    git(&checkout, &["init", "--quiet"]);
+    git(
+        &checkout,
+        &["remote", "add", "origin", "git@github.com:Acme/Widget.git"],
+    );
+
+    let mut config = multi_project_config(&access);
+    config.project_catalog.codex_config.enabled = false;
+    let state_dir = root.path().join("bindings");
+    let identity = conversation_identity("github-url-restart");
+
+    let selected = ProjectBindingStore::new(state_dir.clone())
+        .select_project_root(&config, &identity, "https://github.com/acme/widget/")
+        .await
+        .unwrap();
+    assert!(selected.newly_selected);
+    assert!(!selected.cloned);
+    assert_eq!(
+        selected.repository_url.as_deref(),
+        Some("https://github.com/acme/widget")
+    );
+    assert_eq!(
+        selected.source_project_root,
+        fs::canonicalize(&checkout).unwrap()
+    );
+    assert!(!access.join("widget").exists());
+
+    let restarted = ProjectBindingStore::new(state_dir);
+    let repeated = restarted
+        .select_project_root(&config, &identity, "git@github.com:ACME/WIDGET.git")
+        .await
+        .unwrap();
+    assert!(!repeated.newly_selected);
+    assert!(!repeated.cloned);
+    assert_eq!(
+        repeated.repository_url.as_deref(),
+        Some("https://github.com/acme/widget")
+    );
+    assert_eq!(
+        restarted
+            .effective_config(&config, &identity)
+            .unwrap()
+            .work_dir,
+        fs::canonicalize(checkout).unwrap()
+    );
+}
+
+#[tokio::test]
+async fn rejected_github_url_switch_does_not_clone() {
+    let root = TempDir::new().unwrap();
+    let access = root.path().join("projects");
+    let project = access.join("alpha");
+    let clone_dir = access.join("cloned");
+    fs::create_dir_all(&project).unwrap();
+    fs::create_dir_all(&clone_dir).unwrap();
+
+    let mut config = multi_project_config(&access);
+    config.project_clone_dir = clone_dir.clone();
+    let session = SessionState::new();
+    session.select_project_root(&config, "alpha").await.unwrap();
+
+    let rejected = SetProjectRoot
+        .call(
+            json!({ "path": "https://github.com/acme/not-cloned" }),
+            &config,
+            &session,
+        )
+        .await;
+    assert!(rejected.is_error);
+    assert!(rejected.joined_text().contains("cannot switch"));
+    assert!(!clone_dir.join("not-cloned").exists());
+    assert_eq!(fs::read_dir(clone_dir).unwrap().count(), 0);
+}
+
+#[tokio::test]
 async fn sessions_are_isolated_to_their_selected_roots() {
     let root = TempDir::new().unwrap();
     let access = root.path().join("projects");
@@ -754,4 +834,18 @@ fn multi_project_mode_can_be_enabled_by_config_or_cli() {
     ])
     .unwrap();
     assert!(load_config(from_cli).unwrap().multi_project);
+}
+
+fn git(cwd: &std::path::Path, args: &[&str]) {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .expect("git must be installed for tests");
+    assert!(
+        output.status.success(),
+        "git {:?} failed: {}",
+        args,
+        String::from_utf8_lossy(&output.stderr)
+    );
 }

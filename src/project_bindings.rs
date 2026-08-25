@@ -8,10 +8,14 @@ use rmcp::model::RequestMetaObject;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::project_clone::{
+    ProjectReference, normalize_repository_url, project_matches_repository, repository_url_matches,
+    resolve_github_project,
+};
 use crate::types::{AppConfig, WorktreeMode};
 use crate::util::home_dir;
 use crate::worktrees::{
-    ManagedWorktree, create_managed_worktree, load_metadata, metadata_path_for_worktree,
+    ManagedWorktree, create_managed_worktree_at, load_metadata, metadata_path_for_worktree,
     rollback_managed_worktree,
 };
 
@@ -89,6 +93,8 @@ pub struct ProjectRootSelection {
     pub access_root: PathBuf,
     pub source_project_root: PathBuf,
     pub project_root: PathBuf,
+    pub repository_url: Option<String>,
+    pub cloned: bool,
     pub managed_worktree: bool,
     pub worktree_git_root: Option<PathBuf>,
     pub worktrees_root: Option<PathBuf>,
@@ -112,6 +118,8 @@ struct StoredProjectBinding {
     #[serde(default)]
     source_project_root: Option<String>,
     #[serde(default)]
+    repository_url: Option<String>,
+    #[serde(default)]
     managed_worktree: bool,
     #[serde(default)]
     worktree_git_root: Option<String>,
@@ -123,9 +131,21 @@ struct StoredProjectBinding {
 struct ResolvedProjectBinding {
     source_project_root: PathBuf,
     project_root: PathBuf,
+    repository_url: Option<String>,
     managed_worktree: bool,
     worktree_git_root: Option<PathBuf>,
     worktrees_root: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PreparedProjectRoot {
+    pub access_root: PathBuf,
+    pub source_project_root: PathBuf,
+    pub repository_url: Option<String>,
+    pub checkout_commit: Option<String>,
+    pub source_matches_checkout: bool,
+    pub cloned: bool,
+    pub warnings: Vec<String>,
 }
 
 struct AssignmentScan {
@@ -168,7 +188,7 @@ impl ProjectBindingStore {
 
         let Some(binding) = self.selected_binding(config, identity)? else {
             return Err(format!(
-                "No project root is selected for this ChatGPT conversation. If the exact path is unknown, call `list_projects` first. Then call `set_project_root` with a directory relative to the access root `{}`, followed by `get_agent_brief` before using project tools. The selection is stored by ChatGPT conversation ID and will survive MCP reconnects and server restarts.",
+                "No project root is selected for this ChatGPT conversation. Call `set_project_root` with an existing directory beneath the access root `{}` or an exact GitHub repository, branch, or pull-request URL; GitHub URLs reuse a matching checkout or clone into the configured clone directory. If only a project name or purpose is known, call `list_projects` first. Then call `get_agent_brief` before using project tools. The selection is stored by ChatGPT conversation ID and will survive MCP reconnects and server restarts.",
                 config.work_dir.display()
             ));
         };
@@ -194,16 +214,36 @@ impl ProjectBindingStore {
         identity: &ConversationIdentity,
         input: &str,
     ) -> Result<ProjectRootSelection, String> {
-        let (access_root, source_project_root) = resolve_project_root(config, input)?;
+        if !config.multi_project {
+            return Err(
+                "Project-root selection is disabled. Start codexify with `--multi-project` or set `multiProject` to true."
+                    .to_string(),
+            );
+        }
+        let reference = ProjectReference::parse(input)?;
+        let access_root = canonical_access_root(config)?;
         let binding_path = self.binding_path(&access_root, identity);
         let binding_lock = acquire_lock(&binding_path).await?;
 
-        if let Some(current) = self.read_binding(&binding_path, &access_root)? {
-            if current.source_project_root == source_project_root {
+        if let Some(mut current) = self.read_binding(&binding_path, &access_root)? {
+            if project_reference_matches(
+                config,
+                &reference,
+                &current.source_project_root,
+                current.repository_url.as_deref(),
+            )
+            .await?
+            {
+                if current.repository_url.is_none()
+                    && let ProjectReference::GitHub(repository) = &reference
+                {
+                    current.repository_url = Some(repository.web_url().to_string());
+                }
                 return Ok(selection_from_binding(
                     access_root,
                     current,
                     config.worktrees.mode,
+                    false,
                     false,
                     ProjectBindingScope::ChatGptConversation,
                     Vec::new(),
@@ -213,34 +253,63 @@ impl ProjectBindingStore {
             return Err(format!(
                 "This ChatGPT conversation is already bound to source project `{}` and cannot switch to `{}`. Start a new chat for another project.",
                 current.source_project_root.display(),
-                source_project_root.display()
+                reference.display()
             ));
         }
+
+        let prepared = prepare_project_root(config, &reference).await?;
+        if prepared.access_root != access_root {
+            return Err(
+                "The configured project access root changed while resolving the project; retry the selection"
+                    .to_string(),
+            );
+        }
+        let source_project_root = prepared.source_project_root;
+        let checkout_commit = prepared.checkout_commit;
+        let requires_target_worktree =
+            checkout_commit.is_some() && !prepared.source_matches_checkout;
 
         let assignment_path = self.assignment_path(&access_root, &source_project_root);
         let assignment_lock = acquire_lock(&assignment_path).await?;
         let scan = self.scan_source_assignments(&access_root, &source_project_root);
         let create_worktree = match config.worktrees.mode {
-            WorktreeMode::Auto => scan.assigned,
+            WorktreeMode::Auto => scan.assigned || requires_target_worktree,
             WorktreeMode::Always => true,
+            WorktreeMode::Never if requires_target_worktree => {
+                return Err(format!(
+                    "The requested GitHub branch or pull request is not the current checkout in `{}` and worktree isolation is disabled. Enable worktrees with mode `auto` or `always`, or check out the requested target in that source repository before selecting it.",
+                    source_project_root.display()
+                ));
+            }
             WorktreeMode::Never => false,
         };
-        let mut warnings = scan.warnings;
+        let mut warnings = prepared.warnings;
+        warnings.extend(scan.warnings);
 
         let managed = if create_worktree {
-            let worktree = create_managed_worktree(config, &source_project_root).await?;
+            let worktree = create_managed_worktree_at(
+                config,
+                &source_project_root,
+                checkout_commit.as_deref(),
+            )
+            .await?;
             warnings.extend(worktree.warnings.iter().cloned());
             Some(worktree)
         } else {
             None
         };
 
-        let resolved = resolved_from_managed(&source_project_root, managed.as_ref());
+        let resolved = resolved_from_managed(
+            &source_project_root,
+            managed.as_ref(),
+            prepared.repository_url,
+        );
         let stored = StoredProjectBinding {
             version: BINDING_VERSION,
             access_root: access_root.to_string_lossy().into_owned(),
             source_project_root: Some(source_project_root.to_string_lossy().into_owned()),
             project_root: resolved.project_root.to_string_lossy().into_owned(),
+            repository_url: resolved.repository_url.clone(),
             managed_worktree: resolved.managed_worktree,
             worktree_git_root: resolved
                 .worktree_git_root
@@ -272,6 +341,7 @@ impl ProjectBindingStore {
             resolved,
             config.worktrees.mode,
             true,
+            prepared.cloned,
             ProjectBindingScope::ChatGptConversation,
             warnings,
         ))
@@ -433,6 +503,17 @@ impl ProjectBindingStore {
             path,
             "Start a new chat for another project.",
         )?;
+        let repository_url = binding
+            .repository_url
+            .as_deref()
+            .map(normalize_repository_url)
+            .transpose()
+            .map_err(|error| {
+                format!(
+                    "The GitHub repository URL in the ChatGPT conversation binding at {} is invalid: {error}. Start a new chat or remove that binding file.",
+                    path.display()
+                )
+            })?;
         if !binding.managed_worktree {
             if project_root != source_project_root {
                 return Err(format!(
@@ -443,6 +524,7 @@ impl ProjectBindingStore {
             return Ok(Some(ResolvedProjectBinding {
                 source_project_root,
                 project_root,
+                repository_url,
                 managed_worktree: false,
                 worktree_git_root: None,
                 worktrees_root: None,
@@ -529,6 +611,7 @@ impl ProjectBindingStore {
         Ok(Some(ResolvedProjectBinding {
             source_project_root,
             project_root,
+            repository_url,
             managed_worktree: true,
             worktree_git_root: Some(worktree_git_root),
             worktrees_root: Some(worktrees_root),
@@ -625,14 +708,78 @@ pub fn resolve_project_root(config: &AppConfig, input: &str) -> Result<(PathBuf,
     Ok((access_root, project_root))
 }
 
+pub async fn prepare_project_root(
+    config: &AppConfig,
+    reference: &ProjectReference,
+) -> Result<PreparedProjectRoot, String> {
+    match reference {
+        ProjectReference::Path(path) => {
+            let (access_root, source_project_root) = resolve_project_root(config, path)?;
+            Ok(PreparedProjectRoot {
+                access_root,
+                source_project_root,
+                repository_url: None,
+                checkout_commit: None,
+                source_matches_checkout: true,
+                cloned: false,
+                warnings: Vec::new(),
+            })
+        }
+        ProjectReference::GitHub(repository) => {
+            if !config.multi_project {
+                return Err(
+                    "Project-root selection is disabled. Start codexify with `--multi-project` or set `multiProject` to true."
+                        .to_string(),
+                );
+            }
+            let access_root = canonical_access_root(config)?;
+            let resolved = resolve_github_project(config, &access_root, repository).await?;
+            Ok(PreparedProjectRoot {
+                access_root,
+                source_project_root: resolved.source_project_root,
+                repository_url: Some(resolved.repository_url),
+                checkout_commit: resolved.checkout_commit,
+                source_matches_checkout: resolved.source_matches_checkout,
+                cloned: resolved.cloned,
+                warnings: resolved.warnings,
+            })
+        }
+    }
+}
+
+pub async fn project_reference_matches(
+    config: &AppConfig,
+    reference: &ProjectReference,
+    source_project_root: &Path,
+    repository_url: Option<&str>,
+) -> Result<bool, String> {
+    match reference {
+        ProjectReference::Path(path) => {
+            let (_, requested) = resolve_project_root(config, path)?;
+            Ok(requested == source_project_root)
+        }
+        ProjectReference::GitHub(repository) => {
+            if repository_url.is_some_and(|url| repository_url_matches(url, repository)) {
+                return Ok(true);
+            }
+            if repository.has_explicit_checkout() {
+                return Ok(false);
+            }
+            project_matches_repository(config, source_project_root, repository).await
+        }
+    }
+}
+
 fn resolved_from_managed(
     source_project_root: &Path,
     managed: Option<&ManagedWorktree>,
+    repository_url: Option<String>,
 ) -> ResolvedProjectBinding {
     match managed {
         Some(worktree) => ResolvedProjectBinding {
             source_project_root: source_project_root.to_path_buf(),
             project_root: worktree.project_root.clone(),
+            repository_url,
             managed_worktree: true,
             worktree_git_root: Some(worktree.worktree_git_root.clone()),
             worktrees_root: Some(worktree.worktrees_root.clone()),
@@ -640,6 +787,7 @@ fn resolved_from_managed(
         None => ResolvedProjectBinding {
             source_project_root: source_project_root.to_path_buf(),
             project_root: source_project_root.to_path_buf(),
+            repository_url,
             managed_worktree: false,
             worktree_git_root: None,
             worktrees_root: None,
@@ -652,6 +800,7 @@ fn selection_from_binding(
     binding: ResolvedProjectBinding,
     worktree_mode: WorktreeMode,
     newly_selected: bool,
+    cloned: bool,
     scope: ProjectBindingScope,
     warnings: Vec<String>,
 ) -> ProjectRootSelection {
@@ -659,6 +808,8 @@ fn selection_from_binding(
         access_root,
         source_project_root: binding.source_project_root,
         project_root: binding.project_root,
+        repository_url: binding.repository_url,
+        cloned,
         managed_worktree: binding.managed_worktree,
         worktree_git_root: binding.worktree_git_root,
         worktrees_root: binding.worktrees_root,

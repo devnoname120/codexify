@@ -24,6 +24,7 @@
     "maxSessions": 8,
     "idleTimeoutMs": 300000
   },
+  "projectCloneDir": ".",
   "projectCatalog": {
     "codexConfig": {
       "enabled": true,

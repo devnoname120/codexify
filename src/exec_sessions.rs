@@ -18,11 +18,13 @@ use tokio::sync::{Mutex as TokioMutex, Notify};
 
 use crate::process_env::scrub_untrusted_child_env;
 use crate::project_bindings::{
-    ConversationIdentity, ProjectBindingScope, ProjectRootSelection, resolve_project_root,
+    ConversationIdentity, ProjectBindingScope, ProjectRootSelection, prepare_project_root,
+    project_reference_matches,
 };
+use crate::project_clone::ProjectReference;
 use crate::review::TransportReviewState;
 use crate::types::{AppConfig, PlanState, WorktreeMode};
-use crate::worktrees::{create_managed_worktree, load_metadata, metadata_path_for_worktree};
+use crate::worktrees::{create_managed_worktree_at, load_metadata, metadata_path_for_worktree};
 
 // Codex constants (shell_spec.rs). Kept as code, not config, because they are
 // part of matching Codex's tool semantics rather than local policy.
@@ -587,6 +589,7 @@ pub struct SessionState {
 struct TransportProjectBinding {
     source_project_root: PathBuf,
     project_root: PathBuf,
+    repository_url: Option<String>,
     managed_worktree: bool,
     worktree_git_root: Option<PathBuf>,
     worktrees_root: Option<PathBuf>,
@@ -691,7 +694,7 @@ impl SessionState {
 
         let Some(binding) = self.project_binding.lock().unwrap().clone() else {
             return Err(format!(
-                "No project root is selected for this MCP transport session. If the exact path is unknown, call `list_projects` first. Then call `set_project_root` with a directory relative to the access root `{}`, followed by `get_agent_brief` before using project tools.",
+                "No project root is selected for this MCP transport session. Call `set_project_root` with an existing directory beneath the access root `{}` or an exact GitHub repository, branch, or pull-request URL; GitHub URLs reuse a matching checkout or clone into the configured clone directory. If only a project name or purpose is known, call `list_projects` first. Then call `get_agent_brief` before using project tools.",
                 config.work_dir.display()
             ));
         };
@@ -827,14 +830,34 @@ impl SessionState {
         }
 
         let _selection_guard = self.project_selection_lock.lock().await;
-        let (access_root, source_project_root) = resolve_project_root(config, input)?;
+        let reference = ProjectReference::parse(input)?;
 
-        if let Some(current) = self.project_binding.lock().unwrap().clone() {
-            if current.source_project_root == source_project_root {
+        let current_binding = { self.project_binding.lock().unwrap().clone() };
+        if let Some(mut current) = current_binding {
+            if project_reference_matches(
+                config,
+                &reference,
+                &current.source_project_root,
+                current.repository_url.as_deref(),
+            )
+            .await?
+            {
+                if current.repository_url.is_none()
+                    && let ProjectReference::GitHub(repository) = &reference
+                {
+                    current.repository_url = Some(repository.web_url().to_string());
+                }
                 return Ok(ProjectRootSelection {
-                    access_root,
+                    access_root: std::fs::canonicalize(&config.work_dir).map_err(|error| {
+                        format!(
+                            "Could not resolve project access root {}: {error}",
+                            config.work_dir.display()
+                        )
+                    })?,
                     source_project_root: current.source_project_root,
                     project_root: current.project_root,
+                    repository_url: current.repository_url,
+                    cloned: false,
                     managed_worktree: current.managed_worktree,
                     worktree_git_root: current.worktree_git_root,
                     worktrees_root: current.worktrees_root,
@@ -847,13 +870,33 @@ impl SessionState {
             return Err(format!(
                 "This MCP transport session is already bound to source project `{}` and cannot switch to `{}`. Open a new session for another project.",
                 current.source_project_root.display(),
-                source_project_root.display()
+                reference.display()
             ));
         }
 
+        let prepared = prepare_project_root(config, &reference).await?;
+        let access_root = prepared.access_root;
+        let source_project_root = prepared.source_project_root;
+        let checkout_commit = prepared.checkout_commit;
+        let requires_target_worktree =
+            checkout_commit.is_some() && !prepared.source_matches_checkout;
+
+        if config.worktrees.mode == WorktreeMode::Never && requires_target_worktree {
+            return Err(format!(
+                "The requested GitHub branch or pull request is not the current checkout in `{}` and worktree isolation is disabled. Enable worktrees with mode `auto` or `always`, or check out the requested target in that source repository before selecting it.",
+                source_project_root.display()
+            ));
+        }
         let create_worktree = config.worktrees.mode != WorktreeMode::Never;
         let managed = if create_worktree {
-            Some(create_managed_worktree(config, &source_project_root).await?)
+            Some(
+                create_managed_worktree_at(
+                    config,
+                    &source_project_root,
+                    checkout_commit.as_deref(),
+                )
+                .await?,
+            )
         } else {
             None
         };
@@ -861,6 +904,7 @@ impl SessionState {
             Some(worktree) => TransportProjectBinding {
                 source_project_root: source_project_root.clone(),
                 project_root: worktree.project_root.clone(),
+                repository_url: prepared.repository_url.clone(),
                 managed_worktree: true,
                 worktree_git_root: Some(worktree.worktree_git_root.clone()),
                 worktrees_root: Some(worktree.worktrees_root.clone()),
@@ -868,6 +912,7 @@ impl SessionState {
             None => TransportProjectBinding {
                 source_project_root: source_project_root.clone(),
                 project_root: source_project_root.clone(),
+                repository_url: prepared.repository_url.clone(),
                 managed_worktree: false,
                 worktree_git_root: None,
                 worktrees_root: None,
@@ -879,14 +924,19 @@ impl SessionState {
             access_root,
             source_project_root: binding.source_project_root,
             project_root: binding.project_root,
+            repository_url: binding.repository_url,
+            cloned: prepared.cloned,
             managed_worktree: binding.managed_worktree,
             worktree_git_root: binding.worktree_git_root,
             worktrees_root: binding.worktrees_root,
             worktree_mode: config.worktrees.mode,
-            warnings: managed
-                .as_ref()
-                .map(|worktree| worktree.warnings.clone())
-                .unwrap_or_default(),
+            warnings: {
+                let mut warnings = prepared.warnings;
+                if let Some(worktree) = managed.as_ref() {
+                    warnings.extend(worktree.warnings.iter().cloned());
+                }
+                warnings
+            },
             newly_selected: true,
             scope: ProjectBindingScope::McpTransportSession,
         })
@@ -1154,6 +1204,7 @@ mod tests {
         *state.project_binding.lock().unwrap() = Some(TransportProjectBinding {
             source_project_root: source,
             project_root: outside.path().to_path_buf(),
+            repository_url: None,
             managed_worktree: false,
             worktree_git_root: None,
             worktrees_root: None,
@@ -1176,6 +1227,7 @@ mod tests {
         *state.project_binding.lock().unwrap() = Some(TransportProjectBinding {
             source_project_root: source,
             project_root: outside.path().to_path_buf(),
+            repository_url: None,
             managed_worktree: true,
             worktree_git_root: Some(outside.path().to_path_buf()),
             worktrees_root: Some(worktrees.path().to_path_buf()),
@@ -1203,6 +1255,7 @@ mod tests {
         *state.project_binding.lock().unwrap() = Some(TransportProjectBinding {
             source_project_root: source,
             project_root: outside.path().to_path_buf(),
+            repository_url: None,
             managed_worktree: true,
             worktree_git_root: Some(worktree_git_root),
             worktrees_root: Some(worktrees.path().to_path_buf()),

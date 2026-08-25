@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use std::future::Future;
 
+use rmcp::model::ToolAnnotations;
 use serde_json::{Value, json};
 
 use crate::exec_sessions::SessionState;
@@ -28,7 +29,9 @@ where
         Err(error) => return ToolResult::error(error),
     };
 
-    let state = if selection.newly_selected {
+    let state = if selection.cloned {
+        "GitHub repository cloned and project root selected"
+    } else if selection.newly_selected {
         "Project root selected"
     } else {
         "Project root was already selected"
@@ -70,8 +73,13 @@ where
     } else {
         format!("\nWarnings:\n- {}", selection.warnings.join("\n- "))
     };
+    let repository_text = selection
+        .repository_url
+        .as_deref()
+        .map(|url| format!("\nGitHub repository: {url}"))
+        .unwrap_or_default();
     let content = format!(
-        "{state}\n{placement}\nAccess root: {}\n{persistence}{warning_text}\nCall `get_agent_brief` now so the environment, saved state, skills, and project instructions are loaded from the active root.",
+        "{state}\n{placement}\nAccess root: {}{repository_text}\n{persistence}{warning_text}\nCall `get_agent_brief` now so the environment, saved state, skills, and project instructions are loaded from the active root.",
         selection.access_root.display()
     );
 
@@ -79,6 +87,8 @@ where
         "access_root": selection.access_root.to_string_lossy(),
         "source_project_root": selection.source_project_root.to_string_lossy(),
         "project_root": selection.project_root.to_string_lossy(),
+        "repository_url": selection.repository_url,
+        "cloned": selection.cloned,
         "managed_worktree": selection.managed_worktree,
         "worktree_git_root": selection.worktree_git_root.as_ref().map(|path| path.to_string_lossy()),
         "worktrees_root": selection.worktrees_root.as_ref().map(|path| path.to_string_lossy()),
@@ -96,16 +106,31 @@ impl Tool for SetProjectRoot {
         Self::NAME
     }
 
+    fn title(&self) -> Option<String> {
+        Some("Set project root".to_string())
+    }
+
+    fn annotations(&self) -> Option<ToolAnnotations> {
+        Some(
+            ToolAnnotations::new()
+                .read_only(false)
+                .destructive(false)
+                .idempotent(true)
+                .open_world(true),
+        )
+    }
+
     fn description(&self) -> String {
-        "Bind the current ChatGPT conversation to one source project directory beneath the server's configured access root. Depending on the configured worktree mode and existing assignments, Codexify either uses that checkout directly or creates a detached managed worktree so concurrent conversations do not edit the same checkout. ChatGPT bindings survive MCP reconnects and server restarts and cannot be changed; start a new chat for another project. Clients without ChatGPT's stable conversation metadata fall back to binding the current MCP transport session. When the exact path is unknown, call list_projects first and pass one unambiguous result's selector as path. Do not guess among plausible projects. In multi-project mode, bind a new conversation before any filesystem, search, edit, command, git, project-instruction, skill, memory, or plan tool, then call get_agent_brief.".into()
+        "Bind the current ChatGPT conversation to one source project beneath the server's configured access root. The path may instead be an HTTPS or SSH GitHub repository-root URL, an HTTPS branch URL ending in /tree/<branch>, or an HTTPS pull-request URL ending in /pull/<number>. Codexify reuses an unambiguous matching local checkout, or runs non-interactive git clone in the configured project clone directory before binding. Branch and pull-request URLs fetch the exact requested ref; when an existing source checkout is on another commit, Codexify leaves it unchanged and selects a detached managed worktree at the requested commit. Worktree mode `never` therefore requires that the source checkout already be at the requested target. ChatGPT bindings survive MCP reconnects and server restarts and cannot be changed; start a new chat for another project. Clients without ChatGPT's stable conversation metadata fall back to binding the current MCP transport session. When only a project name or purpose is known, call list_projects first and pass one unambiguous result's selector as path. Do not guess among plausible projects. In multi-project mode, bind a new conversation before any filesystem, search, edit, command, git, project-instruction, skill, memory, or plan tool, then call get_agent_brief.".into()
     }
 
     fn describe(&self, config: &AppConfig) -> String {
         if config.multi_project {
             format!(
-                "{} The access root is `{}`. The path may be relative to that root or an absolute path inside it.",
+                "{} The access root is `{}` and GitHub clones are placed in `{}`. A filesystem path may be relative to the access root or absolute inside it.",
                 self.description(),
-                config.work_dir.display()
+                config.work_dir.display(),
+                config.project_clone_dir.display()
             )
         } else {
             "Project-root selection is disabled on this server. Start codexify with --multi-project or set multiProject to true to enable it.".into()
@@ -118,7 +143,7 @@ impl Tool for SetProjectRoot {
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "Existing project directory, relative to the configured access root or an absolute path inside it; a selector returned by list_projects is directly valid"
+                    "description": "Existing project directory (relative to the configured access root or absolute inside it), selector returned by list_projects, GitHub repository-root URL, HTTPS GitHub branch URL (/tree/<branch>), or HTTPS GitHub pull-request URL (/pull/<number>) to reuse or clone and select"
                 }
             },
             "required": ["path"],
@@ -133,6 +158,8 @@ impl Tool for SetProjectRoot {
                 "access_root": { "type": "string" },
                 "source_project_root": { "type": "string" },
                 "project_root": { "type": "string" },
+                "repository_url": { "type": ["string", "null"] },
+                "cloned": { "type": "boolean" },
                 "managed_worktree": { "type": "boolean" },
                 "worktree_git_root": { "type": ["string", "null"] },
                 "worktrees_root": { "type": ["string", "null"] },
@@ -142,7 +169,7 @@ impl Tool for SetProjectRoot {
                 "binding_scope": { "type": "string", "enum": ["chatgpt_conversation", "mcp_transport_session"] },
                 "content": { "type": "string" }
             },
-            "required": ["access_root", "source_project_root", "project_root", "managed_worktree", "worktree_git_root", "worktrees_root", "worktree_mode", "warnings", "newly_selected", "binding_scope", "content"]
+            "required": ["access_root", "source_project_root", "project_root", "repository_url", "cloned", "managed_worktree", "worktree_git_root", "worktrees_root", "worktree_mode", "warnings", "newly_selected", "binding_scope", "content"]
         }))
     }
 

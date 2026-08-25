@@ -179,7 +179,7 @@ To reuse one server across several independent projects, point it at their commo
 cargo run --release -- --work-dir /path/to/projects --multi-project
 ```
 
-Here `--work-dir` is an **access root**, not the active project. In ChatGPT, call `set_project_root` directly when the exact relative path is known; otherwise `list_projects` can search the read-only project catalogue by name, alias, description, or relative selector first. Codexify keys the resulting binding from ChatGPT's `_meta["openai/session"]` conversation identifier and persists it outside the repository, so later turns in the same chat recover the project after an MCP reconnect or codexify restart. A new chat gets a new binding and an existing chat cannot switch projects. Clients that do not provide `openai/session` fall back to a one-time MCP transport-session binding and must select again after reconnecting.
+Here `--work-dir` is an **access root**, not the active project. In ChatGPT, call `set_project_root` directly when the exact relative/absolute path or GitHub repository, branch, or pull-request URL is known. A GitHub URL reuses an unambiguous matching checkout already below the access root, or runs `git clone` in the configured project clone directory before binding. Branch and PR URLs select their exact refs without switching an unrelated source checkout. Otherwise `list_projects` can search the read-only project catalogue by name, alias, description, or relative selector first. Codexify keys the resulting binding from ChatGPT's `_meta["openai/session"]` conversation identifier and persists it outside the repository, so later turns in the same chat recover the project after an MCP reconnect or codexify restart. A new chat gets a new binding and an existing chat cannot switch projects. Clients that do not provide `openai/session` fall back to a one-time MCP transport-session binding and must select again after reconnecting.
 
 ### Optional per-conversation authorization
 
@@ -245,6 +245,7 @@ Each release ships a compiled binary per platform — `windows-x64`, `linux-x64`
 |------|----------|---------|-------------|
 | `--work-dir` | Yes | - | Project directory for server mode, or the project access root with `--multi-project` and `projects list` |
 | `--multi-project` | No | Disabled | Let each ChatGPT conversation bind once to a project beneath `--work-dir`; other clients fall back to transport-session binding |
+| `--project-clone-dir` | No | `--work-dir` | Existing directory beneath the multi-project access root where GitHub URLs are cloned; overrides `projectCloneDir` |
 | `--worktree-mode` | No | `auto` | Multi-project worktree policy: `auto`, `always`, or `never` |
 | `--worktree-root` | No | Codex worktree location | Directory for managed conversation worktrees |
 | `--port` | No | `3000` | Server port |
@@ -329,7 +330,7 @@ Multi-project mode adds two project-control tools:
 | Tool | Description |
 |------|-------------|
 | `list_projects` | Search the read-only project catalogue before binding. Returns relative selectors for existing canonical directories authorized beneath the access root, plus names, aliases, descriptions, trust metadata, sources, and sanitized warnings. It never selects a project |
-| `set_project_root` | Bind the current ChatGPT conversation to one existing directory beneath the configured access root; repeated selection of the same canonical directory is idempotent, but switching is rejected. Without ChatGPT conversation metadata, the binding lasts for the MCP transport session |
+| `set_project_root` | Bind the current ChatGPT conversation to an existing directory beneath the configured access root, an HTTPS/SSH GitHub repository-root URL, an HTTPS branch URL (`/tree/<branch>`), or an HTTPS pull-request URL (`/pull/<number>`). URL selection reuses a matching checkout or clones into `projectCloneDir`; targeted URLs fetch and select the exact ref without moving an unrelated source checkout. Repeating the same canonical directory or exact URL selection is idempotent, but switching is rejected. Without ChatGPT conversation metadata, the binding lasts for the MCP transport session |
 
 Codex needs the first three for none of these reasons: it puts its agent brief in the system prompt, the OS and shell in an `<environment_context>` message, and `AGENTS.md` straight into the prompt, all before the first turn. An MCP server has none of those channels — it can only expose tools — so the same facts are tool calls here as well as part of the server's `instructions`. It needs `remember` and `recall` for the opposite reason: its context is large and its session state lives in the CLI process, whereas the client here is a chat window that loses the conversation. See [Context and memory](#context-and-memory), [Acting as a Codex agent](#acting-as-a-codex-agent), [Shells and the host](#shells-and-the-host), [AGENTS.md](#agentsmd) and [Skills](#skills).
 
@@ -361,6 +362,7 @@ All project-scoped paths are resolved relative to the active project root: `--wo
 ```json
 {
   "multiProject": false,
+  "projectCloneDir": ".",
   "conversationAuthToken": null,
   "worktrees": {
     "mode": "auto",
@@ -528,6 +530,8 @@ The OpenAI runtime key authenticates the outbound control-plane connection. Code
 
 The top-level `multiProject` key is the config-file equivalent of `--multi-project`. In that mode the process still reads one static `codex.config.json`; project selection changes the effective work directory used by project-scoped tools, not the server configuration itself. The native Codex project table is the exception to the startup snapshot: `list_projects` rereads it on every call so newly trusted projects become discoverable without restarting Codexify. ChatGPT conversation bindings are independent of the `memory` block and remain enabled even when `memory.enabled` is `false`.
 
+`projectCloneDir` selects where `set_project_root` places a repository that is requested by GitHub URL but has no matching local checkout. It defaults to the multi-project access root (`--work-dir`); a relative value is resolved against that access root, while `--project-clone-dir` overrides the file setting. The directory must already exist, must be a directory, and must canonicalize to the access root or one of its descendants. The destination follows normal `git clone` naming (`<projectCloneDir>/<repository-name>`); an unrelated file or checkout at that path is never overwritten. Branch URLs clone the named branch when a repository must be created, while PR URLs clone the repository and then detach at `refs/pull/<number>/head`.
+
 The `worktrees` block controls isolation between conversations selecting the same Git project:
 
 | Key | Default | Description |
@@ -663,6 +667,8 @@ For example:
 
 Metadata overlays are merged by canonical path. Explicit entries are operator-authored providers in their own right, so they may include a path that native Codex marks untrusted or does not record; they still cannot widen the access-root boundary. Aliases are deduplicated case-insensitively, and aliases shared by different projects produce a warning because they make intent matching ambiguous. Catalogue construction never opens a candidate's README, source, `.codex/`, or `AGENTS.md`; project contents remain unread until the conversation has selected that project.
 
+GitHub URL selection is separate from catalogue listing. Before cloning, Codexify checks the normal destination, catalogue candidates, and immediate child directories of `projectCloneDir`, then compares normalized GitHub remotes at each Git top level. Exactly one match is reused; multiple matches are rejected as ambiguous so the caller can pass an explicit path. Accepted forms are repository-root URLs on `github.com` (`https://github.com/owner/repo`, `git@github.com:owner/repo.git`, and equivalent SSH forms), HTTPS branch URLs (`https://github.com/owner/repo/tree/<branch>`), and HTTPS pull-request URLs (`https://github.com/owner/repo/pull/<number>`). For branch URLs, everything after `/tree/` is interpreted as the branch ref, including `/` characters. Credential-bearing URLs, unsupported repository subpages, query strings, fragments, insecure transports, and non-GitHub hosts are rejected.
+
 The `openaiTunnel` block, `allowedHosts` array, and `mcpServers` map are covered under [Native OpenAI tunnel](#native-openai-tunnel-recommended), [Host allowlist](#host-allowlist), and [Bridging other MCP servers](#bridging-other-mcp-servers).
 
 ## Native host-file ingress
@@ -698,13 +704,15 @@ By default the server is pinned to one project: `--work-dir` *is* the project ro
 
 Enable it with `--multi-project` or `"multiProject": true` (see [CLI flags](#cli-flags) and [Config file](#config-file)). One static `codex.config.json` is still read once at startup; selection changes only the effective work directory the project tools use, never the server configuration itself.
 
-Each conversation binds a project exactly once, through the [`set_project_root`](#tools) tool. When the exact path is not already known, [`list_projects`](#tools) provides a project-independent enumeration step first:
+Each conversation binds a project exactly once, through the [`set_project_root`](#tools) tool. When neither an exact path nor an exact GitHub URL is known, [`list_projects`](#tools) provides a project-independent enumeration step first:
 
 - The path is relative to the access root or absolute, but its canonical target must be an existing directory inside that root. Traversal (`..`) and symlink escapes are rejected *after* canonicalisation, so a link pointing outside the root cannot smuggle a selection past the check.
+- A GitHub URL is normalized into case-insensitive owner/repository identity plus an optional case-sensitive branch or PR target. Codexify first reuses an unambiguous matching local Git top level. Otherwise it serializes concurrent requests for that repository, runs non-interactive `git clone` into a private temporary directory below `projectCloneDir`, verifies the resulting remote, and publishes it at `<projectCloneDir>/<repository-name>`. Name collisions fail rather than overwrite data.
+- Branch URLs fetch `refs/heads/<branch>`; PR URLs fetch GitHub's `refs/pull/<number>/head`. A fresh branch clone checks out the named branch and a fresh PR clone detaches at the PR head. For an existing checkout, target fetching does not switch, reset, or otherwise move its `HEAD`.
 - The binding belongs to the **ChatGPT conversation**, keyed from `_meta["openai/session"]` (the raw identifier is hashed, never stored), so simultaneous chats can hold different projects and a later turn recovers its own root after MCP reconnects or a server restart. A client that sends no ChatGPT conversation metadata falls back to a binding that lasts only the current MCP transport session.
-- With the default worktree mode, the first conversation selecting a Git project uses the source checkout directly. Once that logical project is already assigned, another conversation receives a detached managed worktree under the configured Codex worktree location, preventing concurrent chats from editing the same checkout. `always` and `never` make either behavior unconditional.
+- With the default worktree mode, the first conversation selecting a Git project uses the source checkout directly. Once that logical project is already assigned, another conversation receives a detached managed worktree under the configured Codex worktree location, preventing concurrent chats from editing the same checkout. A branch or PR URL also receives a detached worktree when the existing source checkout is on another commit. `always` isolates every selection; `never` uses the source directly and therefore rejects a targeted URL unless that source is already at the requested commit.
 - Worktree identity uses the repository's Git common directory plus the selected path relative to its Git root. Linked worktrees are therefore recognised as the same repository, while separate subprojects in a monorepo remain distinct.
-- A conversation cannot switch roots once bound — start another chat for a different project. Re-selecting the same canonical path is idempotent.
+- A conversation cannot switch roots once bound — start another chat for a different project. Re-selecting the same canonical path or exact normalized GitHub selection is idempotent. A different repository, branch, or PR URL is rejected before any clone or fetch begins.
 - Until a root is selected, project-scoped tools are unavailable and say why. `list_projects` and `set_project_root` are the two project-independent tools present for this workflow.
 
 ### Project catalogue semantics
@@ -809,6 +817,19 @@ Task: <what you want done>
 ```
 
 The path may be relative to the configured access root or absolute, but its canonical target must be an existing directory inside that root. The binding belongs to the ChatGPT conversation, not to the current HTTP/MCP transport, so simultaneous chats may select different projects and later turns recover their respective project roots after reconnects or server restarts. A conversation cannot switch roots after binding; start another chat for another project. Calling `set_project_root` again with the same canonical path is harmless.
+
+An exact GitHub repository, branch, or pull-request URL uses the same tool and clones only when no matching checkout exists:
+
+```
+Call set_project_root with path "https://github.com/owner/repository", then call get_agent_brief and follow it for the rest of this chat.
+
+Task: <what you want done>
+```
+
+To enter an exact branch or PR instead of the repository's default checkout, pass
+the corresponding GitHub page URL unchanged, for example
+`https://github.com/owner/repository/tree/split_db` or
+`https://github.com/owner/repository/pull/886`.
 
 When the task names a project by intent rather than an exact path, let the agent search first:
 
@@ -1062,7 +1083,7 @@ When `remote-exec` was imported from Codex, that overlay is sufficient; include 
 3. In ChatGPT's connector/plugin settings, create a developer-mode connector with **Connection type: Tunnel**.
 4. Select the same tunnel ID that Codexify reports as ready. Set **Authentication** to **None**.
 5. Set the connector's permissions to **Allow all actions** if you do not want per-call confirmations.
-6. Enable the connector in a new chat. Without conversation authorization, open with `Call get_agent_brief and follow it for the rest of this chat.` With `conversationAuthToken`, first supply the one-line `authenticate` instruction printed by quickstart; after it succeeds, follow its project-selection or `get_agent_brief` direction. See [Acting as a Codex agent](#acting-as-a-codex-agent). In multi-project mode (`--multi-project`), call `set_project_root` first when the path is known or `list_projects` first when it is not; later follow-ups in that same chat recover both authorization and the project binding from ChatGPT's conversation metadata.
+6. Enable the connector in a new chat. Without conversation authorization, open with `Call get_agent_brief and follow it for the rest of this chat.` With `conversationAuthToken`, first supply the one-line `authenticate` instruction printed by quickstart; after it succeeds, follow its project-selection or `get_agent_brief` direction. See [Acting as a Codex agent](#acting-as-a-codex-agent). In multi-project mode (`--multi-project`), call `set_project_root` first when an exact path or GitHub repository, branch, or pull-request URL is known, or `list_projects` first when only the local project identity is known; later follow-ups in that same chat recover both authorization and the project binding from ChatGPT's conversation metadata.
 
 There is no server URL to enter in this mode. OpenAI routes the selected tunnel to the supervised client, which supplies Codexify's generated per-process bearer on the local hop. The startup banner prints the runtime-only `/readyz` and `/metrics` URLs. It does not advertise an admin UI because `tunnel-client-runtime` deliberately omits that full-client surface.
 
@@ -1084,6 +1105,7 @@ Native tunnel mode ignores `allowedHosts` and forces the accepted authorities to
 ## Security
 
 - **Path traversal prevention**: every filesystem tool — including `apply_patch` and `view_image` — resolves paths through a guard that rejects anything outside the active project root. In multi-project mode, both catalogue discovery and `set_project_root` canonicalize the configured access root and candidate directory, so `..` and symlinks cannot expose or bind a project outside the access root.
+- **Bounded GitHub cloning and target fetching**: URL-based project selection accepts only normalized HTTPS/SSH repository roots plus HTTPS branch and PR URLs on `github.com`. It separates owner/repository identity from the exact checkout target, rejects embedded credentials, unsupported subpages, and non-GitHub/insecure transports, and disables interactive Git credential prompts. The configured clone directory is canonicalized inside the access root at startup and revalidated at use time. Resolution uses per-repository cross-process locks, bounded subprocess timeouts, private temporary clone destinations, remote verification, exact branch/PR refspecs, and collision refusal. Existing source checkouts are fetched without moving `HEAD`; a conversation already bound to another selection is rejected before the network/disk side effect.
 - **Host-authorized native-file ingress**: `import_host_file` accepts only ChatGPT's declared native-file object, rejects local source paths, constrains the download URL and every redirect hop to the configurable `artifactIngress.allowedHosts` allowlist (default `"*"`, which admits any public HTTPS host but never a loopback, private, link-local, unique-local, CGNAT, `localhost`, or metadata address), ignores ambient proxy credentials, and enforces whole-request, idle, size and concurrency limits. Its signed URL and file ID are never logged or returned: RMCP debug/trace payload logging is unconditionally suppressed even when `RUST_LOG` requests it. Destination publication uses a capability-confined directory handle, canonical-path and file-identity revalidation, a private partial file, SHA-256, and atomic no-overwrite linking so traversal, moved roots, symlink escapes, partial visibility and replacement races fail closed.
 - **One bounded exception in single-project mode**: [AGENTS.md](#agentsmd) discovery may read above `--work-dir`, up to the nearest `.git`. It is read-only, opens only `AGENTS.override.md`, `AGENTS.md` and any `projectDoc.fallbackFilenames`, and `get_project_doc` reports the absolute path of every file it used. Set `projectDoc.maxBytes` to `0` to switch it off, or `projectDoc.rootMarkers` to `[]` to keep the search inside the work directory. Multi-project mode does not perform this upward walk; its selected directory is the exact project root.
 - **Namespaced review state inside Git**: ChatGPT review checkpoints are exactly two refs per conversation/project pair under `refs/codexify/review/`. Synthetic snapshots contain only the selected project path, are built through a temporary index, and never modify the real index or working tree. Generic MCP-client checkpoints are in memory only. The namespace grows with the number of distinct persistent conversation/project pairs; the review section documents inspection and manual removal.
@@ -1104,7 +1126,7 @@ Native tunnel mode ignores `allowedHosts` and forces the accepted authorities to
 The allowlist is a **guardrail against accidents, not a sandbox**. It catches a model reaching for `curl` or `rm -rf`; it does not contain a determined one. The defaults already include `node`, `python` and `cargo`, each of which runs arbitrary code — `node -e "..."` can do anything the server process can. Shell redirection and explicit absolute or parent paths can also reach outside the active project root even though each command starts with that root as its cwd. Multi-project selection isolates Codexify's structured tools and logical per-conversation project state; it is not an operating-system sandbox. Treat everything below as reachable by whoever is authorized to use the configured connector or external endpoint:
 
 - everything in the active project root, read and write
-- in multi-project mode, any project beneath the configured access root can be selected by a new conversation or unbound transport session
+- in multi-project mode, any project beneath the configured access root can be selected by a new conversation or unbound transport session, and an exact GitHub repository, branch, or PR URL can add or target a checkout beneath `projectCloneDir`
 - anything else the user account running the server can touch, via an allowlisted interpreter
 - the network, from your machine
 - anything a bridged MCP server can do

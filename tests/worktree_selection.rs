@@ -203,6 +203,170 @@ async fn auto_mode_uses_the_source_checkout_once_then_creates_a_worktree() {
 }
 
 #[tokio::test]
+async fn targeted_github_urls_use_isolated_worktrees_without_moving_the_source() {
+    let root = TempDir::new().unwrap();
+    let upstream = root.path().join("upstream");
+    let access_root = root.path().join("projects");
+    let project_root = access_root.join("demo");
+    fs::create_dir_all(&upstream).unwrap();
+    fs::create_dir_all(&access_root).unwrap();
+
+    git(&upstream, &["init", "--quiet"]);
+    git(&upstream, &["config", "user.name", "Codexify Tests"]);
+    git(
+        &upstream,
+        &["config", "user.email", "codexify@example.invalid"],
+    );
+    git(&upstream, &["checkout", "--quiet", "-b", "main"]);
+    fs::write(upstream.join("base.txt"), "base\n").unwrap();
+    git(&upstream, &["add", "base.txt"]);
+    git(&upstream, &["commit", "--quiet", "-m", "base"]);
+    let base_commit = git(&upstream, &["rev-parse", "HEAD"]);
+
+    git(&upstream, &["checkout", "--quiet", "-b", "split_db"]);
+    fs::write(upstream.join("branch.txt"), "branch\n").unwrap();
+    git(&upstream, &["add", "branch.txt"]);
+    git(&upstream, &["commit", "--quiet", "-m", "branch"]);
+    let branch_commit = git(&upstream, &["rev-parse", "HEAD"]);
+    git(
+        &upstream,
+        &["update-ref", "refs/pull/886/head", &branch_commit],
+    );
+    git(&upstream, &["checkout", "--quiet", "main"]);
+
+    git(
+        &access_root,
+        &[
+            "clone",
+            "--quiet",
+            upstream.to_str().unwrap(),
+            project_root.to_str().unwrap(),
+        ],
+    );
+    git(
+        &project_root,
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            "https://github.com/acme/demo.git",
+        ],
+    );
+    let rewrite_key = format!("url.{}.insteadOf", upstream.display());
+    git(
+        &project_root,
+        &[
+            "config",
+            rewrite_key.as_str(),
+            "https://github.com/acme/demo.git",
+        ],
+    );
+    git(&project_root, &["config", "protocol.file.allow", "always"]);
+
+    let mut auto = config(&root, access_root.clone(), WorktreeMode::Auto);
+    auto.project_catalog.codex_config.enabled = false;
+    let state_dir = root.path().join("target-bindings");
+    let store = ProjectBindingStore::new(state_dir.clone());
+    let branch_identity = identity("target-branch");
+    let selection = store
+        .select_project_root(
+            &auto,
+            &branch_identity,
+            "https://github.com/acme/demo/tree/split_db",
+        )
+        .await
+        .unwrap();
+
+    assert!(selection.managed_worktree);
+    assert_eq!(
+        selection.repository_url.as_deref(),
+        Some("https://github.com/acme/demo/tree/split_db")
+    );
+    assert_eq!(git(&project_root, &["rev-parse", "HEAD"]), base_commit);
+    assert!(!project_root.join("branch.txt").exists());
+    assert_eq!(
+        git(&selection.project_root, &["rev-parse", "HEAD"]),
+        branch_commit
+    );
+    assert_eq!(
+        fs::read_to_string(selection.project_root.join("branch.txt")).unwrap(),
+        "branch\n"
+    );
+
+    let repeated = ProjectBindingStore::new(state_dir)
+        .select_project_root(
+            &auto,
+            &branch_identity,
+            "https://github.com/ACME/DEMO/tree/split_db",
+        )
+        .await
+        .unwrap();
+    assert!(!repeated.newly_selected);
+    assert_eq!(repeated.project_root, selection.project_root);
+
+    let fetched_refs_before_switch = git(
+        &project_root,
+        &[
+            "for-each-ref",
+            "--format=%(refname)",
+            "refs/codexify/project-selection",
+        ],
+    );
+    let switch_error = store
+        .select_project_root(
+            &auto,
+            &branch_identity,
+            "https://github.com/acme/demo/pull/886",
+        )
+        .await
+        .unwrap_err();
+    assert!(switch_error.contains("cannot switch"), "{switch_error}");
+    assert_eq!(
+        git(
+            &project_root,
+            &[
+                "for-each-ref",
+                "--format=%(refname)",
+                "refs/codexify/project-selection",
+            ],
+        ),
+        fetched_refs_before_switch
+    );
+
+    let pull_selection = store
+        .select_project_root(
+            &auto,
+            &identity("target-pull-request"),
+            "https://github.com/acme/demo/pull/886",
+        )
+        .await
+        .unwrap();
+    assert!(pull_selection.managed_worktree);
+    assert_eq!(
+        pull_selection.repository_url.as_deref(),
+        Some("https://github.com/acme/demo/pull/886")
+    );
+    assert_eq!(
+        git(&pull_selection.project_root, &["rev-parse", "HEAD"]),
+        branch_commit
+    );
+    assert_eq!(git(&project_root, &["rev-parse", "HEAD"]), base_commit);
+
+    let mut never = auto.clone();
+    never.worktrees.mode = WorktreeMode::Never;
+    let error = ProjectBindingStore::new(root.path().join("never-target-bindings"))
+        .select_project_root(
+            &never,
+            &identity("target-branch-never"),
+            "https://github.com/acme/demo/tree/split_db",
+        )
+        .await
+        .unwrap_err();
+    assert!(error.contains("worktree isolation is disabled"), "{error}");
+    assert_eq!(git(&project_root, &["rev-parse", "HEAD"]), base_commit);
+}
+
+#[tokio::test]
 async fn explicit_modes_override_auto_allocation() {
     let root = TempDir::new().unwrap();
     let (access_root, project_root) = repository(&root);

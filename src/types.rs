@@ -590,6 +590,7 @@ pub struct WorktreeConfig {
 pub struct AppConfig {
     pub work_dir: std::path::PathBuf,
     pub multi_project: bool,
+    pub project_clone_dir: std::path::PathBuf,
     pub project_catalog: ProjectCatalogConfig,
     pub worktrees: WorktreeConfig,
     pub api_key: Option<String>,
