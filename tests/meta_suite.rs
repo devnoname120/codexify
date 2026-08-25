@@ -189,6 +189,7 @@ fn mutating_tools_are_classified_for_checkpoint_fail_closed_behavior() {
             "apply_patch".to_string(),
             "exec_command".to_string(),
             "git_commit".to_string(),
+            "import_host_file".to_string(),
             "run_command".to_string(),
             "write_file".to_string(),
             "write_stdin".to_string(),

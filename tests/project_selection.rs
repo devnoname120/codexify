@@ -16,6 +16,7 @@ use codexify::tools::remember::Remember;
 use codexify::tools::run_command::RunCommand;
 use codexify::tools::set_project_root::SetProjectRoot;
 use codexify::types::WorktreeMode;
+use codexify::worktrees::metadata_path_for_worktree;
 use rmcp::model::RequestMetaObject;
 use serde_json::json;
 use tempfile::TempDir;
@@ -30,6 +31,37 @@ fn multi_project_config(access_root: &std::path::Path) -> codexify::types::AppCo
 
 fn conversation_identity(session: &str) -> ConversationIdentity {
     ConversationIdentity::from_openai_session(session).unwrap()
+}
+
+fn initialize_git_project(project: &std::path::Path) {
+    fs::create_dir_all(project).unwrap();
+    fs::write(project.join("tracked.txt"), "tracked\n").unwrap();
+    for args in [
+        vec!["init", "--quiet"],
+        vec!["add", "tracked.txt"],
+        vec![
+            "-c",
+            "user.email=codexify@example.invalid",
+            "-c",
+            "user.name=Codexify Tests",
+            "commit",
+            "--quiet",
+            "-m",
+            "initial",
+        ],
+    ] {
+        let output = std::process::Command::new("git")
+            .args(&args)
+            .current_dir(project)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }
 
 #[test]
@@ -177,6 +209,57 @@ async fn transport_project_binding_rejects_a_replacement_symlink_outside_the_acc
         error.contains("outside the configured access root"),
         "{error}"
     );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn transport_managed_worktree_rejects_a_replaced_active_root() {
+    let root = TempDir::new().unwrap();
+    let access = root.path().join("projects");
+    let project = access.join("demo");
+    initialize_git_project(&project);
+
+    let mut config = multi_project_config(&access);
+    config.worktrees.mode = WorktreeMode::Always;
+    config.worktrees.root = root.path().join("managed-worktrees");
+    config.worktrees.auto_cleanup_enabled = false;
+    let session = SessionState::new();
+    let selection = session.select_project_root(&config, "demo").await.unwrap();
+    assert!(selection.managed_worktree);
+
+    let outside = root.path().join("outside");
+    fs::create_dir(&outside).unwrap();
+    let active_root = selection.worktree_git_root.as_ref().unwrap();
+    fs::remove_dir_all(active_root).unwrap();
+    fs::create_dir_all(active_root.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&outside, active_root).unwrap();
+
+    let error = session.effective_config(&config).unwrap_err();
+    assert!(
+        error.contains("outside its recorded worktree root"),
+        "{error}"
+    );
+}
+
+#[tokio::test]
+async fn transport_managed_worktree_requires_matching_metadata() {
+    let root = TempDir::new().unwrap();
+    let access = root.path().join("projects");
+    let project = access.join("demo");
+    initialize_git_project(&project);
+
+    let mut config = multi_project_config(&access);
+    config.worktrees.mode = WorktreeMode::Always;
+    config.worktrees.root = root.path().join("managed-worktrees");
+    config.worktrees.auto_cleanup_enabled = false;
+    let session = SessionState::new();
+    let selection = session.select_project_root(&config, "demo").await.unwrap();
+    let metadata = metadata_path_for_worktree(selection.worktree_git_root.as_ref().unwrap())
+        .expect("managed worktree has a metadata path");
+    fs::remove_file(metadata).unwrap();
+
+    let error = session.effective_config(&config).unwrap_err();
+    assert!(error.contains("metadata"), "{error}");
 }
 
 #[tokio::test]

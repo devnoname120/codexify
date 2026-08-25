@@ -700,6 +700,34 @@ mod tests {
     }
 
     #[test]
+    fn native_file_audit_summary_never_contains_capability_values() {
+        let arguments = json!({
+            "file": {
+                "download_url": "https://files.oaiusercontent.com/object?signature=secret-capability",
+                "file_id": "file_sensitive_identifier",
+                "mime_type": "application/octet-stream",
+                "file_name": "input.bin"
+            },
+            "path": "fixtures/private-input.bin"
+        });
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "file": { "type": "object" },
+                "path": { "type": "string" }
+            }
+        });
+
+        let summary = summarize_arguments(&arguments, Some(&schema)).to_string();
+        assert!(!summary.contains("secret-capability"));
+        assert!(!summary.contains("file_sensitive_identifier"));
+        assert!(!summary.contains("private-input.bin"));
+        assert!(!summary.contains("input.bin"));
+        assert!(summary.contains("\"file\""));
+        assert!(summary.contains("\"path\""));
+    }
+
+    #[test]
     fn argument_summary_omits_unknown_and_sensitive_nested_field_names() {
         let arguments = json!({
             "known": true,
