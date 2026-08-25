@@ -38,6 +38,7 @@ flowchart LR
     HostFiles[("ChatGPT attachments\nand generated files")]
     State[("~/.codexify\nmemory (per project)")]
     Bindings[("~/.codexify\nconversation-projects")]
+    Worktree[("Managed Git worktree\nper-conversation checkout,\nswept on startup")]
     ExecSessions[("Conversation exec sessions\n(in memory, idle-reaped)")]
     ReviewRefs[("Git refs/codexify/review\nproject-open + last-review")]
     ReviewUI["MCP App review card\nui://codexify/review/mcp-app.html"]
@@ -79,6 +80,8 @@ flowchart LR
     Skills --> SkillDirs
     ListProjects -.->|"selector"| SetRoot
     SetRoot --> Bindings
+    SetRoot -.->|"worktree mode"| Worktree
+    Worktree -.->|"active checkout"| WorkDir
     Exec --> ExecSessions
     Git --> ReviewRefs
     Git -.-> ReviewUI
@@ -89,7 +92,7 @@ flowchart LR
     Bridge --> Upstream
 ```
 
-Dotted edges are conditional: `list_projects` and `set_project_root` appear only in [multi-project mode](#multi-project-mode). The first discovers selectable candidates from Codex's project trust table plus optional local metadata; the second binds this conversation's project root. Independently, the aggregator [auto-imports](#automatic-discovery-from-codex) compatible stdio and Streamable HTTP MCP servers directly from Codex's `config.toml`, then uses the Codex CLI when available to add plugin-provided servers before applying any `codex.config.json` overlays.
+Dotted edges are conditional: `list_projects` and `set_project_root` appear only in [multi-project mode](#multi-project-mode). The first discovers selectable candidates from Codex's project trust table plus optional local metadata; the second binds this conversation's project root, optionally provisioning a detached managed Git worktree (`worktrees.mode`) that becomes the active checkout so concurrent chats never share a working tree. Independently, the aggregator [auto-imports](#automatic-discovery-from-codex) compatible stdio and Streamable HTTP MCP servers directly from Codex's `config.toml`, then uses the Codex CLI when available to add plugin-provided servers before applying any `codex.config.json` overlays.
 
 ## Quick start
 
