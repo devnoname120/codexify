@@ -246,7 +246,8 @@ user-level Codex MCP definitions through `codex_mcp.rs`, opportunistically adds
 plugin-provided entries from the Codex CLI's effective catalogue, then applies
 explicit `mcpServers` entries as field overlays. Optional sub-configs (`projectDoc`,
 `projectCatalog`, `output`, `review`, `artifactIngress`, `worktrees`, `memory`, `skills`, `ignore`, `audit`) fall
-back to per-module defaults. In multi-project mode, dispatch clones this config per
+back to per-module defaults, as does `codexMcp` (Codex MCP import and CLI enrichment).
+In multi-project mode, dispatch clones this config per
 call and substitutes the conversation's selected root—or the transport fallback—for
 `work_dir`; the static server policy, catalogue overlay, and bridge configuration
 remain shared. Native Codex project entries are intentionally re-read when the
@@ -537,6 +538,14 @@ startup banner prints the exact file with `Config:`). All fields optional.
   "projectDoc": { "maxBytes": 32768, "fallbackFilenames": [], "rootMarkers": [".git"] },
   "memory": { "enabled": true, "dir": "…", "maxBytes": 16384 },
   "skills": { "enabled": true, "dirs": ["…"], "includePlugins": true },
+  "codexMcp": { "enabled": true,        // import MCP servers from Codex's config.toml
+                "useCli": true,          // also run `codex mcp list/get --json` for plugin-provided servers
+                "cliPath": "…" },        // default: CODEX_CLI_PATH, then `codex` on PATH
+  "projectCatalog": {                    // multi-project discovery; independent of codexMcp
+    "codexConfig": { "enabled": true, "trustedOnly": true },  // read native Codex [projects] table
+    "entries": [ { "path": "…", "name": "…",     // path is absolute or relative to the access root
+                   "aliases": ["…"], "description": "…" } ]
+  },
 
   "mcpServers": {
     "local-exec": {
