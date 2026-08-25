@@ -346,7 +346,7 @@ fn private_file_permissions(metadata: &std::fs::Metadata) -> bool {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        return metadata.permissions().mode() & 0o077 == 0;
+        metadata.permissions().mode() & 0o077 == 0
     }
     #[cfg(not(unix))]
     {
@@ -359,7 +359,7 @@ fn private_directory_permissions(metadata: &std::fs::Metadata) -> bool {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        return metadata.permissions().mode() & 0o077 == 0;
+        metadata.permissions().mode() & 0o077 == 0
     }
     #[cfg(not(unix))]
     {

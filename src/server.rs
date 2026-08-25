@@ -981,7 +981,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let mut config = crate::config::default_config(root.path().to_path_buf());
         config.conversation_auth_token =
-            Some("codexify_chat_0123456789abcdef0123456789abcdef".to_string());
+            Some("codexify_chat_0123456789abcdef0123456789abcdef".into());
         let tools = crate::registry::load_tools_for_config(&config);
         let authorizations = Arc::new(ConversationAuthorizationStore::new());
         let handler = CodexHandler {

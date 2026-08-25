@@ -175,7 +175,7 @@ mod tests {
         std::fs::write(root.path().join("AGENTS.md"), "private project instruction").unwrap();
         let mut config = crate::config::default_config(root.path().to_path_buf());
         config.conversation_auth_token =
-            Some("codexify_chat_0123456789abcdef0123456789abcdef".to_string());
+            Some("codexify_chat_0123456789abcdef0123456789abcdef".into());
 
         let initial = build_initial_instructions(&config);
 

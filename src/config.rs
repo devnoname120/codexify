@@ -21,9 +21,10 @@ use crate::openai_tunnel::validate_tunnel_id;
 use crate::project_catalog::{ProjectCatalog, discover_project_catalog_at};
 use crate::types::{
     AppConfig, ArtifactIngressConfig, AuditConfig, CodexProjectCatalogConfig, CommandConfig,
-    ExecConfig, ExecMode, IgnoreConfig, McpServerSpec, MemoryConfig, OpenAiTunnelConfig,
-    OutputConfig, ProjectCatalogConfig, ProjectCatalogEntryConfig, ProjectDocConfig, ReviewConfig,
-    SkillsConfig, TreeConfig, WorktreeConfig, WorktreeMode, WorktreeUpstreamRefreshMode,
+    ConversationAuthToken, ExecConfig, ExecMode, IgnoreConfig, McpServerSpec, MemoryConfig,
+    OpenAiTunnelConfig, OutputConfig, ProjectCatalogConfig, ProjectCatalogEntryConfig,
+    ProjectDocConfig, ReviewConfig, SkillsConfig, TreeConfig, WorktreeConfig, WorktreeMode,
+    WorktreeUpstreamRefreshMode,
 };
 use crate::util::home_dir;
 
@@ -972,6 +973,7 @@ pub fn load_config(cli: Cli) -> Result<AppConfig, String> {
     if let Some(token) = conversation_auth_token.as_deref() {
         validate_conversation_auth_token(token)?;
     }
+    let conversation_auth_token = conversation_auth_token.map(ConversationAuthToken::from);
 
     let mut tree = default_tree();
     if let Some(t) = file.tree.take() {
@@ -1158,6 +1160,9 @@ mod tests {
         let config = load_config(cli(root.path(), &config_path)).unwrap();
 
         assert_eq!(config.conversation_auth_token.as_deref(), Some(token));
+        let debug = format!("{config:?}");
+        assert!(debug.contains("conversation_auth_token: Some(<redacted>)"));
+        assert!(!debug.contains(token));
     }
 
     #[test]

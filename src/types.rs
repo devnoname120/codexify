@@ -4,8 +4,12 @@
 //! are kept camelCase on the wire (`allowedCommands`, `maxSessions`, …) via
 //! serde renames so an existing `codex.config.json` keeps parsing unchanged.
 
+use std::fmt;
+use std::ops::Deref;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use zeroize::Zeroize;
 
 // ─── Tool results ──────────────────────────────────────────────────────
 
@@ -140,6 +144,47 @@ pub struct PlanState {
 }
 
 // ─── Config ────────────────────────────────────────────────────────────
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct ConversationAuthToken(String);
+
+impl From<String> for ConversationAuthToken {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+
+impl From<&str> for ConversationAuthToken {
+    fn from(value: &str) -> Self {
+        Self(value.to_string())
+    }
+}
+
+impl Deref for ConversationAuthToken {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl AsRef<str> for ConversationAuthToken {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for ConversationAuthToken {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("<redacted>")
+    }
+}
+
+impl Drop for ConversationAuthToken {
+    fn drop(&mut self) {
+        self.0.zeroize();
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -548,7 +593,7 @@ pub struct AppConfig {
     pub project_catalog: ProjectCatalogConfig,
     pub worktrees: WorktreeConfig,
     pub api_key: Option<String>,
-    pub conversation_auth_token: Option<String>,
+    pub conversation_auth_token: Option<ConversationAuthToken>,
     pub port: u16,
     pub allowed_commands: Vec<String>,
     pub tree: TreeConfig,
