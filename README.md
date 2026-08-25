@@ -2,6 +2,8 @@
 
 *Codex-style local tooling for ChatGPT, implemented in Rust.*
 
+> 📖 **New here? Start with the [Wiki](https://github.com/devnoname120/codexify/wiki)** — an end-user guide covering [installation](https://github.com/devnoname120/codexify/wiki/Installation), [every CLI argument](https://github.com/devnoname120/codexify/wiki/CLI-Reference), [every config option](https://github.com/devnoname120/codexify/wiki/Configuration), and [how it all works end-to-end](https://github.com/devnoname120/codexify/wiki/How-It-Works). This README is the complete technical reference; the wiki is the friendlier path in.
+
 A local MCP bridge server that lets ChatGPT Web Pro call tools on your machine: read/write files, run shell commands, git operations, search. Codexify is the Rust continuation of the original Bun + TypeScript implementation, built on **tokio + axum** and the official [`rmcp`](https://crates.io/crates/rmcp) SDK over Streamable HTTP. It can expose that local MCP endpoint through OpenAI's native [Secure MCP Tunnel](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels), without opening an inbound port or publishing a general-purpose URL.
 
 In native-tunnel mode, Codexify listens only on `127.0.0.1`, protects the MCP endpoint with a random per-process bearer token, starts OpenAI's official runtime-only tunnel client, and supervises it for the lifetime of the server. The tunnel client makes outbound HTTPS requests to OpenAI and forwards tunnel traffic to the authenticated loopback MCP endpoint. A conventional externally managed tunnel remains available as an alternative.
@@ -1067,6 +1069,16 @@ cargo fmt                                    # format
 ```
 
 The design and module layout are documented in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+## Documentation
+
+- **[Wiki](https://github.com/devnoname120/codexify/wiki)** — the end-user guide, from arguments to operational flow. Good starting points:
+  - [Quick Start](https://github.com/devnoname120/codexify/wiki/Quick-Start) · [Installation](https://github.com/devnoname120/codexify/wiki/Installation) · [Connecting to ChatGPT](https://github.com/devnoname120/codexify/wiki/Connecting-to-ChatGPT)
+  - [CLI Reference](https://github.com/devnoname120/codexify/wiki/CLI-Reference) · [Configuration](https://github.com/devnoname120/codexify/wiki/Configuration) · [Tools Reference](https://github.com/devnoname120/codexify/wiki/Tools-Reference)
+  - [How It Works](https://github.com/devnoname120/codexify/wiki/How-It-Works) · [Security Model](https://github.com/devnoname120/codexify/wiki/Security-Model) · [Multi-Project Mode](https://github.com/devnoname120/codexify/wiki/Multi-Project-Mode) · [Bridging MCP Servers](https://github.com/devnoname120/codexify/wiki/Bridging-MCP-Servers)
+  - [Troubleshooting](https://github.com/devnoname120/codexify/wiki/Troubleshooting) · [FAQ](https://github.com/devnoname120/codexify/wiki/FAQ)
+- **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — internal design and module layout, for contributors.
+- **[CHANGELOG.md](CHANGELOG.md)** — release history.
 
 ## License
 
