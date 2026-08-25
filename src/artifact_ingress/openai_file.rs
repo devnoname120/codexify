@@ -12,8 +12,6 @@ use serde_json::Value;
 use super::error::{ArtifactIngressError, ArtifactIngressResult};
 use crate::types::ArtifactIngressConfig;
 
-const OPENAI_FILE_DOMAIN: &str = "oaiusercontent.com";
-const OPENAI_FILE_SUBDOMAIN_SUFFIX: &str = ".oaiusercontent.com";
 const MAX_FILE_ID_BYTES: usize = 512;
 const MAX_FILE_NAME_BYTES: usize = 1024;
 const MAX_MIME_TYPE_BYTES: usize = 255;
@@ -73,7 +71,7 @@ impl OpenAiFileParam {
                 "The host-provided file URL is invalid.",
             )
         })?;
-        validate_openai_file_url(&url)?;
+        validate_url_structure(&url)?;
         Ok(url)
     }
 }
@@ -93,34 +91,117 @@ fn validate_metadata_string(
     Ok(())
 }
 
-pub fn validate_openai_file_url(url: &Url) -> ArtifactIngressResult<()> {
-    let host = url.host_str().ok_or_else(|| {
-        ArtifactIngressError::new(
-            "untrusted_file_url",
-            "The host-provided file URL has no trusted hostname.",
-        )
-    })?;
-    let trusted_host = is_openai_content_host(host);
+fn untrusted_file_url() -> ArtifactIngressError {
+    ArtifactIngressError::new(
+        "untrusted_file_url",
+        "The host-provided file URL is outside the configured native-file allowlist.",
+    )
+}
+
+/// Transport-level checks that hold for every download URL regardless of the
+/// configured host allowlist: HTTPS only, no embedded credentials, no fragment.
+fn validate_url_structure(url: &Url) -> ArtifactIngressResult<()> {
     if url.scheme() != "https"
-        || !trusted_host
-        || url.port().is_some_and(|port| port != 443)
         || !url.username().is_empty()
         || url.password().is_some()
         || url.fragment().is_some()
+        || url.host_str().is_none()
     {
-        return Err(ArtifactIngressError::new(
-            "untrusted_file_url",
-            "The host-provided file URL is outside the trusted OpenAI file service.",
-        ));
+        return Err(untrusted_file_url());
     }
     Ok(())
 }
 
-fn is_openai_content_host(host: &str) -> bool {
-    host == OPENAI_FILE_DOMAIN
-        || host
-            .strip_suffix(OPENAI_FILE_SUBDOMAIN_SUFFIX)
-            .is_some_and(|prefix| !prefix.is_empty())
+/// Full policy check applied to the initial URL and re-applied to every redirect
+/// hop. Combines the transport checks with the configured host allowlist.
+pub fn validate_download_url(url: &Url, allowed_hosts: &[String]) -> ArtifactIngressResult<()> {
+    validate_url_structure(url)?;
+    let host = url.host_str().ok_or_else(untrusted_file_url)?;
+    match classify_host(host, allowed_hosts) {
+        HostMatch::None => Err(untrusted_file_url()),
+        // A host named explicitly in the allowlist is trusted as given, including
+        // any port and even an internal address the operator deliberately listed.
+        HostMatch::Explicit => Ok(()),
+        // The wildcard accepts arbitrary public hosts but never internal targets,
+        // and only over the standard HTTPS port, so a compromised or injected URL
+        // cannot reach cloud metadata, loopback, or private-network services.
+        HostMatch::Wildcard => {
+            if host_is_internal(host) || url.port().is_some_and(|port| port != 443) {
+                return Err(untrusted_file_url());
+            }
+            Ok(())
+        }
+    }
+}
+
+enum HostMatch {
+    Explicit,
+    Wildcard,
+    None,
+}
+
+fn classify_host(host: &str, allowed_hosts: &[String]) -> HostMatch {
+    let host = host.to_ascii_lowercase();
+    let mut wildcard = false;
+    for pattern in allowed_hosts {
+        let pattern = pattern.to_ascii_lowercase();
+        if pattern == "*" {
+            wildcard = true;
+        } else if let Some(bare) = pattern.strip_prefix('.') {
+            if host == bare || host.ends_with(pattern.as_str()) {
+                return HostMatch::Explicit;
+            }
+        } else if host == pattern {
+            return HostMatch::Explicit;
+        }
+    }
+    if wildcard {
+        HostMatch::Wildcard
+    } else {
+        HostMatch::None
+    }
+}
+
+/// Rejects hosts that address the local machine or a private/reserved network,
+/// the SSRF floor enforced whenever a URL is admitted only by the `"*"` wildcard.
+/// IP-literal hosts are classified directly; the loopback name families are
+/// blocked by name because they resolve to the local host by convention.
+fn host_is_internal(host: &str) -> bool {
+    let literal = host.trim_start_matches('[').trim_end_matches(']');
+    if let Ok(ip) = literal.parse::<std::net::IpAddr>() {
+        return ip_is_internal(ip);
+    }
+    let lower = host.to_ascii_lowercase();
+    lower == "localhost" || lower.ends_with(".localhost")
+}
+
+fn ip_is_internal(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+                || v4.is_documentation()
+                || {
+                    // Carrier-grade NAT / shared address space, 100.64.0.0/10.
+                    let octets = v4.octets();
+                    octets[0] == 100 && (64..=127).contains(&octets[1])
+                }
+        }
+        std::net::IpAddr::V6(v6) => {
+            if let Some(mapped) = v6.to_ipv4_mapped() {
+                return ip_is_internal(std::net::IpAddr::V4(mapped));
+            }
+            v6.is_loopback()
+                || v6.is_unspecified()
+                // Unique local addresses, fc00::/7.
+                || (v6.segments()[0] & 0xfe00) == 0xfc00
+                // Link-local unicast, fe80::/10.
+                || (v6.segments()[0] & 0xffc0) == 0xfe80
+        }
+    }
 }
 
 #[async_trait]
@@ -219,6 +300,7 @@ pub(crate) async fn open_openai_file(
     config: &ArtifactIngressConfig,
 ) -> ArtifactIngressResult<OpenedOpenAiFile> {
     let mut url = file.validated_url()?;
+    validate_download_url(&url, &config.allowed_hosts)?;
     let mut redirects = 0_u8;
 
     loop {
@@ -246,7 +328,7 @@ pub(crate) async fn open_openai_file(
                     "The native file download returned an invalid redirect.",
                 )
             })?;
-            validate_openai_file_url(&redirected)?;
+            validate_download_url(&redirected, &config.allowed_hosts)?;
             url = redirected;
             redirects += 1;
             continue;
@@ -404,36 +486,92 @@ mod tests {
         ArtifactIngressConfig::default()
     }
 
+    fn hosts(patterns: &[&str]) -> Vec<String> {
+        patterns.iter().map(|value| value.to_string()).collect()
+    }
+
     #[test]
-    fn accepts_only_the_known_openai_file_host_families() {
+    fn wildcard_allows_public_hosts_but_never_internal_ones() {
+        let allowed = hosts(&["*"]);
         for url in [
             "https://files.oaiusercontent.com/download?sig=secret",
-            "https://sdmntprwestus.oaiusercontent.com/download?sig=secret",
-            "https://nested.file-service.oaiusercontent.com/download?sig=secret",
-            "https://oaiusercontent.com/download?sig=secret",
+            "https://cdn.example.org/object",
+            "https://example.com/object",
             "https://files.oaiusercontent.com:443/download",
         ] {
             assert!(
-                validate_openai_file_url(&Url::parse(url).unwrap()).is_ok(),
+                validate_download_url(&Url::parse(url).unwrap(), &allowed).is_ok(),
                 "{url}"
             );
         }
 
         for url in [
-            "http://files.oaiusercontent.com/download",
-            "https://files.oaiusercontent.com:444/download",
-            "https://user@files.oaiusercontent.com/download",
-            "https://files.oaiusercontent.com/download#fragment",
+            // Transport rules hold under the wildcard too.
+            "http://example.com/download",
+            "https://user@example.com/download",
+            "https://example.com/download#fragment",
+            "https://example.com:8443/download",
+            // Internal / reserved targets are the SSRF floor the wildcard keeps.
+            "https://127.0.0.1/download",
+            "https://localhost/download",
+            "https://host.localhost/download",
+            "https://169.254.169.254/latest/meta-data/",
+            "https://10.0.0.5/download",
+            "https://192.168.1.10/download",
+            "https://172.16.9.9/download",
+            "https://100.64.1.1/download",
+            "https://[::1]/download",
+            "https://[fe80::1]/download",
+            "https://[fc00::1]/download",
+            "https://[::ffff:127.0.0.1]/download",
+        ] {
+            let error = validate_download_url(&Url::parse(url).unwrap(), &allowed).unwrap_err();
+            assert_eq!(error.code(), "untrusted_file_url", "{url}");
+        }
+    }
+
+    #[test]
+    fn explicit_allowlist_restricts_to_named_hosts() {
+        let allowed = hosts(&[".oaiusercontent.com", "files.example.com"]);
+        for url in [
+            "https://files.oaiusercontent.com/download",
+            "https://nested.file-service.oaiusercontent.com/download",
+            "https://oaiusercontent.com/download",
+            "https://files.example.com/object",
+            // An explicitly named host may use a non-standard port.
+            "https://files.example.com:8443/object",
+        ] {
+            assert!(
+                validate_download_url(&Url::parse(url).unwrap(), &allowed).is_ok(),
+                "{url}"
+            );
+        }
+
+        for url in [
+            "https://example.com/download",
             "https://files.oaiusercontent.com.evil.example/download",
             "https://notoaiusercontent.com/download",
-            "https://blob.core.windows.net/container/object",
-            "https://account.blob.core.windows.net/container/object",
-            "https://oaisdmntprwestus2.blob.core.windows.net/container/object?sig=secret",
-            "https://oaisdmntpr.blob.core.windows.net/container/object",
-            "https://127.0.0.1/download",
+            "https://other.example.com/object",
         ] {
-            let error = validate_openai_file_url(&Url::parse(url).unwrap()).unwrap_err();
+            let error = validate_download_url(&Url::parse(url).unwrap(), &allowed).unwrap_err();
             assert_eq!(error.code(), "untrusted_file_url", "{url}");
+        }
+    }
+
+    #[test]
+    fn an_explicitly_named_internal_host_is_trusted_as_given() {
+        // Naming an internal host opts into it deliberately; the wildcard floor
+        // does not apply to hosts the operator listed by name.
+        let allowed = hosts(&["10.0.0.5", "internal.corp"]);
+        for url in [
+            "https://10.0.0.5/object",
+            "https://10.0.0.5:8443/object",
+            "https://internal.corp/object",
+        ] {
+            assert!(
+                validate_download_url(&Url::parse(url).unwrap(), &allowed).is_ok(),
+                "{url}"
+            );
         }
     }
 
@@ -502,21 +640,41 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejects_redirects_outside_the_provider_boundary() {
+    async fn rejects_redirects_outside_a_restricted_allowlist() {
         let mut headers = HeaderMap::new();
         headers.insert(LOCATION, "https://example.com/stolen".parse().unwrap());
         let client = FakeClient::new(vec![response(StatusCode::FOUND, headers)]);
+        let mut config = config();
+        config.allowed_hosts = hosts(&[".oaiusercontent.com"]);
 
         let error = open_openai_file(
             &client,
             &file("https://files.oaiusercontent.com/start"),
-            &config(),
+            &config,
         )
         .await
         .err()
-        .expect("redirect outside the provider boundary must fail");
+        .expect("redirect outside the restricted allowlist must fail");
         assert_eq!(error.code(), "untrusted_file_url");
         assert!(!error.to_string().contains("stolen"));
+    }
+
+    #[tokio::test]
+    async fn wildcard_still_rejects_a_redirect_to_an_internal_address() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            LOCATION,
+            "https://169.254.169.254/latest/meta-data/".parse().unwrap(),
+        );
+        let client = FakeClient::new(vec![response(StatusCode::FOUND, headers)]);
+
+        // Default config is the "*" wildcard; the redirect revalidation must still
+        // enforce the internal-address floor on every hop.
+        let error = open_openai_file(&client, &file("https://cdn.example.org/start"), &config())
+            .await
+            .err()
+            .expect("redirect to an internal address must fail even under the wildcard");
+        assert_eq!(error.code(), "untrusted_file_url");
     }
 
     #[tokio::test]

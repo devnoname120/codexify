@@ -352,7 +352,8 @@ All project-scoped paths are resolved relative to the active project root: `--wo
     "requestTimeoutMs": 120000,
     "idleTimeoutMs": 30000,
     "maxRedirects": 3,
-    "maxConcurrentDownloads": 2
+    "maxConcurrentDownloads": 2,
+    "allowedHosts": ["*"]
   },
   "memory": {
     "enabled": true,
@@ -506,6 +507,7 @@ The `artifactIngress` block governs [native host-file ingress](#native-host-file
 | `idleTimeoutMs` | `30000` | Maximum wait between response-body chunks; must not exceed `requestTimeoutMs` |
 | `maxRedirects` | `3` | Maximum manually validated redirects, between `0` and `10` |
 | `maxConcurrentDownloads` | `2` | Process-wide concurrent import cap, between `1` and `16` |
+| `allowedHosts` | `["*"]` | Host patterns a download URL and every redirect hop must match. `"*"` accepts any public HTTPS host while rejecting internal/reserved addresses (loopback, private, link-local, unique-local, CGNAT, `localhost`, cloud metadata). A bare host (`files.example.com`) matches exactly; a leading dot (`.example.com`) matches that host and its subdomains; an explicitly named host is trusted as given, including an internal one |
 
 The `memory` block governs `remember`, `recall` and the plan `update_plan` saves:
 
@@ -592,7 +594,7 @@ The file argument follows ChatGPT's native file-parameter contract and is marked
 
 Source and destination authority are deliberately narrow:
 
-- only HTTPS URLs on OpenAI's `oaiusercontent.com` domain or its subdomains are accepted, and every redirect is revalidated; legacy Azure Blob endpoints are rejected because a storage-account name is not proof of provider ownership;
+- only HTTPS URLs are accepted, constrained by the configurable `artifactIngress.allowedHosts` allowlist and revalidated on every redirect hop; the default `"*"` wildcard admits any public host but always rejects internal and reserved targets (loopback, private, link-local, unique-local, CGNAT, `localhost`, the cloud metadata address), so an injected URL cannot reach internal services;
 - proxy environment variables, caller-supplied headers, cookies and ambient credentials are not used;
 - the temporary signed URL and file ID are never returned or persisted, and RMCP framework events are excluded from the tracing layer so `RUST_LOG` cannot expose native-file arguments before tool dispatch;
 - destination traversal and symlink escapes are confined through a capability-based directory handle rather than a lexical path check alone;
@@ -960,7 +962,7 @@ Native tunnel mode ignores `allowedHosts` and forces the accepted authorities to
 ## Security
 
 - **Path traversal prevention**: every filesystem tool — including `apply_patch` and `view_image` — resolves paths through a guard that rejects anything outside the active project root. In multi-project mode, both catalogue discovery and `set_project_root` canonicalize the configured access root and candidate directory, so `..` and symlinks cannot expose or bind a project outside the access root.
-- **Host-authorized native-file ingress**: `import_host_file` accepts only ChatGPT's declared native-file object, rejects arbitrary URLs and local source paths, accepts only OpenAI-owned `oaiusercontent.com` hosts, revalidates every HTTPS redirect, ignores ambient proxy credentials, and enforces whole-request, idle, size and concurrency limits. Its signed URL and file ID are never logged or returned: RMCP debug/trace payload logging is unconditionally suppressed even when `RUST_LOG` requests it. Destination publication uses a capability-confined directory handle, canonical-path and file-identity revalidation, a private partial file, SHA-256, and atomic no-overwrite linking so traversal, moved roots, symlink escapes, partial visibility and replacement races fail closed.
+- **Host-authorized native-file ingress**: `import_host_file` accepts only ChatGPT's declared native-file object, rejects local source paths, constrains the download URL and every redirect hop to the configurable `artifactIngress.allowedHosts` allowlist (default `"*"`, which admits any public HTTPS host but never a loopback, private, link-local, unique-local, CGNAT, `localhost`, or metadata address), ignores ambient proxy credentials, and enforces whole-request, idle, size and concurrency limits. Its signed URL and file ID are never logged or returned: RMCP debug/trace payload logging is unconditionally suppressed even when `RUST_LOG` requests it. Destination publication uses a capability-confined directory handle, canonical-path and file-identity revalidation, a private partial file, SHA-256, and atomic no-overwrite linking so traversal, moved roots, symlink escapes, partial visibility and replacement races fail closed.
 - **One bounded exception in single-project mode**: [AGENTS.md](#agentsmd) discovery may read above `--work-dir`, up to the nearest `.git`. It is read-only, opens only `AGENTS.override.md`, `AGENTS.md` and any `projectDoc.fallbackFilenames`, and `get_project_doc` reports the absolute path of every file it used. Set `projectDoc.maxBytes` to `0` to switch it off, or `projectDoc.rootMarkers` to `[]` to keep the search inside the work directory. Multi-project mode does not perform this upward walk; its selected directory is the exact project root.
 - **Namespaced review state inside Git**: ChatGPT review checkpoints are exactly two refs per conversation/project pair under `refs/codexify/review/`. Synthetic snapshots contain only the selected project path, are built through a temporary index, and never modify the real index or working tree. Generic MCP-client checkpoints are in memory only. The namespace grows with the number of distinct persistent conversation/project pairs; the review section documents inspection and manual removal.
 - **Bounded state writes outside the work directory**: `remember` and `update_plan` write `memory.json` under `~/.codexify/projects/`. Multi-project mode also writes one small project-binding record under `~/.codexify/conversation-projects/` for each ChatGPT conversation and access root. Both use atomic replacement and per-record locks. The binding filename is derived from a hash of `openai/session`; the raw identifier is not stored. Set `memory.enabled` to `false` to disable plans and notes; delete `~/.codexify/conversation-projects/` separately to forget conversation bindings. See [Context and memory](#context-and-memory).

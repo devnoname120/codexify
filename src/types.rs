@@ -227,6 +227,14 @@ pub struct ArtifactIngressConfig {
     pub idle_timeout_ms: u64,
     pub max_redirects: u8,
     pub max_concurrent_downloads: usize,
+    /// Host patterns the download URL (and every redirect hop) must match.
+    /// `"*"` is a wildcard that accepts any public host over HTTPS while still
+    /// rejecting internal targets (loopback, private, link-local, ULA,
+    /// `localhost`, and the cloud metadata address). A bare host (`files.example.com`)
+    /// matches that host exactly; a leading dot (`.example.com`) matches the host
+    /// and any subdomain. A host listed explicitly (not via `"*"`) is trusted as
+    /// given, so an internal host can be allowed only by naming it here.
+    pub allowed_hosts: Vec<String>,
 }
 
 impl Default for ArtifactIngressConfig {
@@ -238,6 +246,7 @@ impl Default for ArtifactIngressConfig {
             idle_timeout_ms: DEFAULT_ARTIFACT_IDLE_TIMEOUT_MS,
             max_redirects: DEFAULT_ARTIFACT_MAX_REDIRECTS,
             max_concurrent_downloads: DEFAULT_ARTIFACT_MAX_CONCURRENT_DOWNLOADS,
+            allowed_hosts: vec!["*".to_string()],
         }
     }
 }
@@ -263,6 +272,25 @@ impl ArtifactIngressConfig {
             return Err(
                 "artifactIngress.maxConcurrentDownloads must be between 1 and 16".to_string(),
             );
+        }
+        if self.allowed_hosts.is_empty() {
+            return Err(
+                "artifactIngress.allowedHosts must list at least one host pattern (use \"*\" to allow any public host)"
+                    .to_string(),
+            );
+        }
+        for pattern in &self.allowed_hosts {
+            let host = pattern.strip_prefix('.').unwrap_or(pattern);
+            if host.is_empty()
+                || (pattern != "*"
+                    && host
+                        .chars()
+                        .any(|character| character.is_whitespace() || character.is_control()))
+            {
+                return Err(format!(
+                    "artifactIngress.allowedHosts contains an invalid host pattern: {pattern:?}"
+                ));
+            }
         }
         Ok(())
     }

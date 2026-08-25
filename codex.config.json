@@ -45,6 +45,7 @@
     "requestTimeoutMs": 120000,
     "idleTimeoutMs": 30000,
     "maxRedirects": 3,
-    "maxConcurrentDownloads": 2
+    "maxConcurrentDownloads": 2,
+    "allowedHosts": ["*"]
   }
 }

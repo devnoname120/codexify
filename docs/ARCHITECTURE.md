@@ -326,7 +326,7 @@ the original order and rejects duplicate names.
 | Module | Responsibility |
 |--------|----------------|
 | `safe_path.rs` | Lexical path-traversal guard (no `canonicalize`; component-wise containment). The security boundary for every filesystem tool. |
-| `artifact_ingress/` | OpenAI native-file validation and streaming plus capability-confined, atomic no-overwrite workspace publication. It never accepts an arbitrary URL or local source path. |
+| `artifact_ingress/` | OpenAI native-file validation and streaming plus capability-confined, atomic no-overwrite workspace publication. It never accepts a local source path, and constrains the download URL and every redirect hop to the configurable `artifactIngress.allowedHosts` allowlist (default `"*"`, which still rejects loopback, private, link-local, unique-local, CGNAT, `localhost`, and metadata addresses). |
 | `logging.rs` | Tracing initialization plus a non-overridable filter that suppresses RMCP framework events, preventing native-file bearer URLs from appearing in logs before tool dispatch or malformed-session errors. |
 | `output_budget.rs` | Line/byte windowing and list caps, each cut announced with the continuation argument. |
 | `audit.rs` | Private append-only JSONL tool lifecycle records, stable hashed identities, redacted argument summaries, output accounting, and opt-in bounded command previews. |
@@ -473,7 +473,8 @@ startup banner prints the exact file with `Config:`). All fields optional.
              "commandPreviewMaxBytes": 512, "redactEnv": [] },
   "artifactIngress": { "enabled": true, "maxFileBytes": 104857600,
                        "requestTimeoutMs": 120000, "idleTimeoutMs": 30000,
-                       "maxRedirects": 3, "maxConcurrentDownloads": 2 },
+                       "maxRedirects": 3, "maxConcurrentDownloads": 2,
+                       "allowedHosts": ["*"] },
   "projectDoc": { "maxBytes": 32768, "fallbackFilenames": [], "rootMarkers": [".git"] },
   "memory": { "enabled": true, "dir": "…", "maxBytes": 16384 },
   "skills": { "enabled": true, "dirs": ["…"], "includePlugins": true },
