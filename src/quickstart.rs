@@ -9,6 +9,9 @@ use serde_json::{Map, Value};
 use tempfile::NamedTempFile;
 use zeroize::Zeroizing;
 
+use crate::conversation_auth::{
+    conversation_auth_prompt, generate_conversation_auth_token, validate_conversation_auth_token,
+};
 use crate::openai_tunnel::{validate_runtime_api_key, validate_tunnel_id};
 use crate::util::home_dir;
 
@@ -219,6 +222,26 @@ where
 
     let default_connector_name = connector_name_default(&work_dir, multi_project);
     let connector_name = prompt_connector_name(&mut wizard, &default_connector_name)?;
+    let existing_conversation_auth_token = configured_conversation_auth_token(&file_config)?;
+    let conversation_auth_enabled = wizard.confirm(
+        "Require each new ChatGPT conversation to authenticate with a token?",
+        existing_conversation_auth_token.is_some(),
+    )?;
+    let conversation_auth_token = if conversation_auth_enabled {
+        match existing_conversation_auth_token {
+            Some(token)
+                if !wizard.confirm(
+                    "Generate a new conversation token and invalidate the current one after restart?",
+                    false,
+                )? =>
+            {
+                Some(token)
+            }
+            _ => Some(generate_conversation_auth_token()?),
+        }
+    } else {
+        None
+    };
 
     if file_config
         .get("apiKey")
@@ -243,17 +266,36 @@ where
     print_api_key_step(&mut wizard, &key_path)?;
     configure_runtime_key(&mut wizard, &key_path)?;
 
-    merge_tunnel_config(&mut file_config, &tunnel_id, &key_path, multi_project)?;
-    write_config(&config_path, &file_config)?;
+    merge_tunnel_config(
+        &mut file_config,
+        &tunnel_id,
+        &key_path,
+        multi_project,
+        conversation_auth_token.as_deref(),
+    )?;
+    write_config(
+        &config_path,
+        &file_config,
+        conversation_auth_token.is_some(),
+    )?;
 
     writeln!(wizard.output, "\nLocal configuration complete.")?;
     writeln!(wizard.output, "  Config: {}", config_path.display())?;
     writeln!(wizard.output, "  Runtime key: {}", key_path.display())?;
     writeln!(wizard.output, "  Project directory: {}", work_dir.display())?;
+    if conversation_auth_token.is_some() {
+        writeln!(
+            wizard.output,
+            "  Conversation token: stored in the config file; do not commit or share that file"
+        )?;
+    }
     let command = launch_command(&environment.executable, &work_dir, &config_path);
     writeln!(wizard.output, "\nLaunch command:\n  {command}")?;
 
     print_connector_step(&mut wizard, &connector_name, &tunnel_id, multi_project)?;
+    if let Some(token) = conversation_auth_token.as_deref() {
+        print_conversation_auth_step(&mut wizard, token)?;
+    }
     let start_server = wizard.confirm(
         "Start Codexify now and keep this terminal open while ChatGPT scans the connector?",
         true,
@@ -544,6 +586,27 @@ where
     Ok(())
 }
 
+fn print_conversation_auth_step<R, W, F>(
+    wizard: &mut Wizard<'_, R, W, F>,
+    token: &str,
+) -> anyhow::Result<()>
+where
+    R: BufRead,
+    W: Write,
+    F: FnMut(&str, &mut W) -> io::Result<String>,
+{
+    writeln!(
+        wizard.output,
+        "\n4. Configure ChatGPT conversation authentication"
+    )?;
+    writeln!(
+        wizard.output,
+        "   Paste this instruction into a chat, or add it to the ChatGPT Project's Project instructions:"
+    )?;
+    writeln!(wizard.output, "   {}", conversation_auth_prompt(token))?;
+    Ok(())
+}
+
 fn connector_name_default(work_dir: &Path, multi_project: bool) -> String {
     let suffix = if multi_project {
         "Projects".to_string()
@@ -567,6 +630,22 @@ fn configured_tunnel_id(config: &Map<String, Value>) -> Option<String> {
         .map(str::to_string)
 }
 
+fn configured_conversation_auth_token(
+    config: &Map<String, Value>,
+) -> anyhow::Result<Option<String>> {
+    let Some(value) = config.get("conversationAuthToken") else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    let token = value
+        .as_str()
+        .context("conversationAuthToken in the existing config must be a string or null")?;
+    validate_conversation_auth_token(token).map_err(anyhow::Error::msg)?;
+    Ok(Some(token.to_string()))
+}
+
 fn credential_path(home_dir: &Path, tunnel_id: &str) -> PathBuf {
     home_dir
         .join(".codexify")
@@ -580,6 +659,7 @@ fn merge_tunnel_config(
     tunnel_id: &str,
     key_path: &Path,
     multi_project: bool,
+    conversation_auth_token: Option<&str>,
 ) -> anyhow::Result<()> {
     let tunnel = config
         .entry("openaiTunnel".to_string())
@@ -593,6 +673,17 @@ fn merge_tunnel_config(
         Value::String(format!("file:{}", key_path.display())),
     );
     config.insert("multiProject".to_string(), Value::Bool(multi_project));
+    match conversation_auth_token {
+        Some(token) => {
+            config.insert(
+                "conversationAuthToken".to_string(),
+                Value::String(token.to_string()),
+            );
+        }
+        None => {
+            config.remove("conversationAuthToken");
+        }
+    }
     Ok(())
 }
 
@@ -608,7 +699,11 @@ fn read_config(path: &Path) -> anyhow::Result<Map<String, Value>> {
     }
 }
 
-fn write_config(path: &Path, config: &Map<String, Value>) -> anyhow::Result<()> {
+fn write_config(
+    path: &Path,
+    config: &Map<String, Value>,
+    contains_conversation_token: bool,
+) -> anyhow::Result<()> {
     refuse_symlinked_config(path)?;
     let parent = path
         .parent()
@@ -622,7 +717,11 @@ fn write_config(path: &Path, config: &Map<String, Value>) -> anyhow::Result<()> 
     bytes.push(b'\n');
     temp.write_all(&bytes)?;
     temp.as_file().sync_all()?;
-    preserve_permissions(path, temp.path())?;
+    if contains_conversation_token {
+        make_private(temp.path())?;
+    } else {
+        preserve_permissions(path, temp.path())?;
+    }
     persist_replacing(temp, path)
         .with_context(|| format!("replace config file {}", path.display()))?;
     Ok(())
@@ -766,6 +865,7 @@ mod tests {
 
     const TUNNEL_ID: &str = "tunnel_0123456789abcdef0123456789abcdef";
     const RUNTIME_KEY: &str = "sk-runtime-test-key_123";
+    const CONVERSATION_TOKEN: &str = "codexify_chat_0123456789abcdef0123456789abcdef";
 
     struct GuardedPromptOutput {
         bytes: Vec<u8>,
@@ -907,7 +1007,7 @@ mod tests {
         let config_path = project.join("codex.config.json");
         let environment = environment(&root, &project);
         let home_dir = environment.home_dir.clone();
-        let input = format!("\n\n\n\n{TUNNEL_ID}\nn\n");
+        let input = format!("\n\n\n\n\n{TUNNEL_ID}\nn\n");
 
         let (result, output) = run_test_wizard(
             args(config_path.clone(), &project),
@@ -925,6 +1025,7 @@ mod tests {
         let config: Value =
             serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
         assert_eq!(config["multiProject"], json!(false));
+        assert!(config.get("conversationAuthToken").is_none());
         assert_eq!(config["openaiTunnel"]["tunnelId"], json!(TUNNEL_ID));
         assert_eq!(
             config["openaiTunnel"]["apiKeyRef"],
@@ -964,6 +1065,41 @@ mod tests {
     }
 
     #[test]
+    fn new_install_can_generate_a_conversation_token_and_project_instruction() {
+        let root = TempDir::new().unwrap();
+        let project = root.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+        let config_path = project.join("codex.config.json");
+        let environment = environment(&root, &project);
+        let input = format!("\n\n\ny\n\n{TUNNEL_ID}\nn\n");
+
+        let (result, output) = run_test_wizard(
+            args(config_path.clone(), &project),
+            environment,
+            &input,
+            &[RUNTIME_KEY],
+        );
+        result.unwrap();
+
+        let config: Value =
+            serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+        let token = config["conversationAuthToken"].as_str().unwrap();
+        validate_conversation_auth_token(token).unwrap();
+        assert!(output.contains(&conversation_auth_prompt(token)));
+        assert!(output.contains("ChatGPT Project's Project instructions"));
+        assert!(!output.contains(RUNTIME_KEY));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&config_path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+    }
+
+    #[test]
     fn rerun_preserves_unrelated_config_and_can_keep_the_stored_key() {
         let root = TempDir::new().unwrap();
         let project = root.path().join("projects");
@@ -974,6 +1110,7 @@ mod tests {
             serde_json::to_vec_pretty(&json!({
                 "apiKey": "legacy-local-token",
                 "multiProject": true,
+                "conversationAuthToken": CONVERSATION_TOKEN,
                 "allowedCommands": ["git"],
                 "openaiTunnel": {
                     "tunnelId": TUNNEL_ID,
@@ -991,7 +1128,7 @@ mod tests {
         let (result, output) = run_test_wizard(
             args(config_path.clone(), &project),
             environment,
-            "\n\n\n\n\n\nn\n",
+            "\n\n\n\n\n\n\n\nn\n",
             &[""],
         );
         let outcome = result.unwrap();
@@ -1003,6 +1140,8 @@ mod tests {
             serde_json::from_str(&fs::read_to_string(config_path).unwrap()).unwrap();
         assert!(config.get("apiKey").is_none());
         assert_eq!(config["multiProject"], json!(true));
+        assert_eq!(config["conversationAuthToken"], json!(CONVERSATION_TOKEN));
+        assert!(output.contains(&conversation_auth_prompt(CONVERSATION_TOKEN)));
         assert_eq!(config["allowedCommands"], json!(["git"]));
         assert_eq!(
             config["openaiTunnel"]["organizationId"],
@@ -1021,7 +1160,7 @@ mod tests {
         fs::create_dir_all(&project).unwrap();
         let config_path = project.join("codex.config.json");
         let environment = environment(&root, &project);
-        let input = format!("\nn\n\n\ninvalid-tunnel\n{TUNNEL_ID}\nn\n");
+        let input = format!("\nn\n\n\n\ninvalid-tunnel\n{TUNNEL_ID}\nn\n");
         let invalid_key = "not a valid key!";
 
         let (result, output) = run_test_wizard(
@@ -1035,6 +1174,35 @@ mod tests {
         assert!(output.contains("OpenAI tunnel API key is malformed"));
         assert!(!output.contains(invalid_key));
         assert!(!output.contains(RUNTIME_KEY));
+    }
+
+    #[test]
+    fn malformed_existing_conversation_token_fails_before_writing_credentials() {
+        let root = TempDir::new().unwrap();
+        let project = root.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+        let config_path = project.join("codex.config.json");
+        fs::write(
+            &config_path,
+            r#"{"conversationAuthToken":"not valid whitespace"}"#,
+        )
+        .unwrap();
+        let environment = environment(&root, &project);
+        let credentials = environment.home_dir.join(".codexify");
+
+        let (result, _) = run_test_wizard(
+            args(config_path.clone(), &project),
+            environment,
+            "\n\n\n",
+            &[],
+        );
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("conversationAuthToken"));
+        assert_eq!(
+            fs::read_to_string(config_path).unwrap(),
+            r#"{"conversationAuthToken":"not valid whitespace"}"#
+        );
+        assert!(!credentials.exists());
     }
 
     #[test]

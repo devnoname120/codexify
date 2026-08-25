@@ -548,6 +548,7 @@ pub struct AppConfig {
     pub project_catalog: ProjectCatalogConfig,
     pub worktrees: WorktreeConfig,
     pub api_key: Option<String>,
+    pub conversation_auth_token: Option<String>,
     pub port: u16,
     pub allowed_commands: Vec<String>,
     pub tree: TreeConfig,

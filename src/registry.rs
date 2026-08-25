@@ -10,12 +10,18 @@ use crate::tools;
 use crate::types::{AppConfig, DEFAULT_ARTIFACT_MAX_CONCURRENT_DOWNLOADS};
 
 pub fn load_tools() -> Vec<Box<dyn Tool>> {
-    load_tools_with_options(false, true, DEFAULT_ARTIFACT_MAX_CONCURRENT_DOWNLOADS)
+    load_tools_with_options(
+        false,
+        false,
+        true,
+        DEFAULT_ARTIFACT_MAX_CONCURRENT_DOWNLOADS,
+    )
 }
 
 pub fn load_tools_for_mode(multi_project: bool) -> Vec<Box<dyn Tool>> {
     load_tools_with_options(
         multi_project,
+        false,
         true,
         DEFAULT_ARTIFACT_MAX_CONCURRENT_DOWNLOADS,
     )
@@ -24,6 +30,7 @@ pub fn load_tools_for_mode(multi_project: bool) -> Vec<Box<dyn Tool>> {
 pub fn load_tools_for_config(config: &AppConfig) -> Vec<Box<dyn Tool>> {
     load_tools_with_options(
         config.multi_project,
+        config.conversation_auth_token.is_some(),
         config.artifact_ingress.enabled,
         config.artifact_ingress.max_concurrent_downloads,
     )
@@ -31,10 +38,14 @@ pub fn load_tools_for_config(config: &AppConfig) -> Vec<Box<dyn Tool>> {
 
 fn load_tools_with_options(
     multi_project: bool,
+    conversation_auth: bool,
     artifact_ingress_enabled: bool,
     max_concurrent_downloads: usize,
 ) -> Vec<Box<dyn Tool>> {
     let mut all: Vec<Box<dyn Tool>> = Vec::new();
+    if conversation_auth {
+        all.push(Box::new(tools::authenticate::Authenticate));
+    }
     if multi_project {
         all.push(Box::new(tools::list_projects::ListProjects));
         all.push(Box::new(tools::set_project_root::SetProjectRoot));

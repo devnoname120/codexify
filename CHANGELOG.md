@@ -6,6 +6,16 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Optional per-conversation connector authorization through
+  `conversationAuthToken`. Quickstart can generate and persist a high-entropy
+  token, protect the config on Unix, and print a one-line instruction for an
+  individual chat or ChatGPT Project instructions. The conditional `authenticate`
+  tool verifies the token once, then restores the grant from stable ChatGPT
+  conversation metadata across connector reconnects and server restarts; generic
+  MCP clients use transport-session authorization.
+
 ### Fixed
 
 - Codex CLI enrichment now imports plugin-provided Streamable HTTP MCP servers,
@@ -18,6 +28,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Security
 
+- Conversation authorization blocks every non-authentication tool and withholds
+  the project-aware initialization brief until verification. Durable markers store
+  only a hashed conversation identity and grant, in a namespace derived from the
+  canonical work directory and current token, so token rotation invalidates older
+  grants without copying the token into the cache. Audit command previews also
+  redact the configured conversation token. The token remains plaintext in
+  `codex.config.json` by design and must be kept private and out of version control.
 - Generic MCP transport-session project bindings now revalidate the complete
   direct-checkout or managed-worktree relationship on every project tool call.
   A moved, replaced, or internally inconsistent active root cannot escape its

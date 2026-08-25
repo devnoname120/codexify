@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
@@ -568,6 +568,7 @@ fn reap_conversation_states(
 /// backed by [`ConversationExecSessionStore`].
 pub struct SessionState {
     exec: Arc<ExecSessionState>,
+    connector_authorized: Arc<AtomicBool>,
     pub plan: Arc<StdMutex<Option<PlanState>>>,
     /// The transport-session project binding. Shared (behind `Arc`) with any
     /// conversation-scoped view derived through `with_exec_state`, and carries
@@ -618,6 +619,7 @@ impl Default for SessionState {
     fn default() -> Self {
         Self {
             exec: Arc::new(ExecSessionState::new()),
+            connector_authorized: Arc::new(AtomicBool::new(false)),
             plan: Arc::new(StdMutex::new(None)),
             project_binding: Arc::new(StdMutex::new(None)),
             project_selection_lock: Arc::new(TokioMutex::new(())),
@@ -635,6 +637,7 @@ impl SessionState {
     fn with_exec_state(&self, exec: Arc<ExecSessionState>) -> Self {
         Self {
             exec,
+            connector_authorized: self.connector_authorized.clone(),
             plan: self.plan.clone(),
             project_binding: self.project_binding.clone(),
             project_selection_lock: self.project_selection_lock.clone(),
@@ -646,6 +649,14 @@ impl SessionState {
     /// The stable per-transport identifier stamped into audit-log events.
     pub fn audit_id(&self) -> u64 {
         self.audit_id
+    }
+
+    pub fn connector_authorized(&self) -> bool {
+        self.connector_authorized.load(Ordering::Acquire)
+    }
+
+    pub fn authorize_connector(&self) {
+        self.connector_authorized.store(true, Ordering::Release);
     }
 
     /// Starts cleanup for generic-client, transport-owned resident commands.

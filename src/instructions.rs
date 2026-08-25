@@ -10,6 +10,8 @@ use crate::project_doc::{PROJECT_DOC_SEPARATOR, load_project_doc};
 use crate::skills::{discover_skills, render_skill_catalog};
 use crate::types::AppConfig;
 
+pub const CONVERSATION_AUTH_INSTRUCTIONS: &str = "This connector requires per-conversation authentication. Before calling any other tool, call `authenticate` once with the token supplied in the chat or ChatGPT Project instructions. After authentication, follow the tool response to load the project brief.";
+
 /// The behavioural half of what Codex tells its model, ported from
 /// `codex-rs/core/gpt-5.2-codex_prompt.md`.
 pub const AGENT_BRIEF: &str = concat!(
@@ -75,6 +77,9 @@ fn configured_agent_brief(config: &AppConfig) -> String {
 /// omits project state because ChatGPT's conversation ID arrives on tool calls,
 /// after the MCP initialize exchange.
 pub fn build_initial_instructions(config: &AppConfig) -> String {
+    if config.conversation_auth_token.is_some() {
+        return CONVERSATION_AUTH_INSTRUCTIONS.to_string();
+    }
     if !config.multi_project {
         return build_instructions(config);
     }
@@ -158,4 +163,25 @@ pub fn build_instructions(config: &AppConfig) -> String {
     }
 
     lines.join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn conversation_auth_initialization_withholds_project_context() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("AGENTS.md"), "private project instruction").unwrap();
+        let mut config = crate::config::default_config(root.path().to_path_buf());
+        config.conversation_auth_token =
+            Some("codexify_chat_0123456789abcdef0123456789abcdef".to_string());
+
+        let initial = build_initial_instructions(&config);
+
+        assert_eq!(initial, CONVERSATION_AUTH_INSTRUCTIONS);
+        assert!(!initial.contains("private project instruction"));
+        assert!(!initial.contains(&root.path().display().to_string()));
+        assert!(build_instructions(&config).contains("private project instruction"));
+    }
 }

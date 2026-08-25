@@ -11,6 +11,7 @@ use rmcp::model::{MetaObject, ToolAnnotations};
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
+use crate::conversation_auth::ConversationAuthorizationStore;
 use crate::exec_sessions::SessionState;
 use crate::project_bindings::ConversationIdentity;
 use crate::review::ReviewCheckpointManager;
@@ -19,6 +20,7 @@ use crate::types::{AppConfig, ToolResult};
 #[derive(Clone)]
 pub struct ToolRequestContext {
     pub conversation: Option<ConversationIdentity>,
+    pub conversation_authorizations: Arc<ConversationAuthorizationStore>,
     pub review_checkpoints: Arc<ReviewCheckpointManager>,
     /// Cancelled when the transport drops or a per-call deadline (e.g. the
     /// artifact-ingress idle timeout) fires, so long-running tools can abort.

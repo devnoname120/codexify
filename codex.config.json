@@ -1,5 +1,6 @@
 {
   "allowedCommands": ["bun", "npm", "npx", "node", "git", "python", "pip", "cargo", "make"],
+  "conversationAuthToken": null,
   "port": 3000,
   "tree": {
     "defaultDepth": 3,

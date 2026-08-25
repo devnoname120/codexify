@@ -12,6 +12,7 @@ pub mod bridge;
 pub mod codex_config;
 pub mod codex_mcp;
 pub mod config;
+pub mod conversation_auth;
 pub mod environment;
 pub mod exec_policy;
 pub mod exec_sessions;

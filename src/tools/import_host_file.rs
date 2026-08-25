@@ -281,6 +281,9 @@ mod tests {
         cancellation.cancel();
         let context = ToolRequestContext {
             conversation: None,
+            conversation_authorizations: Arc::new(
+                crate::conversation_auth::ConversationAuthorizationStore::new(),
+            ),
             review_checkpoints: Arc::new(crate::review::ReviewCheckpointManager::new()),
             cancellation,
         };
