@@ -182,6 +182,39 @@ hash, written atomically under a per-record lock, and validated again on every
 load so a deleted project or changed symlink fails closed. A new store instance
 can recover the same binding after a server restart.
 
+### Worktree isolation (`worktrees.rs`)
+In multi-project mode, `set_project_root` can bind a conversation to a **detached
+managed Git worktree** instead of the source checkout, so two chats editing the
+same repository never share a working tree. `worktrees.mode` selects the policy:
+`Never` binds the source root directly, `Always` requires a worktree, and `Auto`
+(the default) creates one when the selected root is a Git working tree and falls
+back to the source root otherwise. Managed worktrees are created with
+`git worktree add --detach` under `worktrees.root` (default: Codex's configured
+worktree location), one per conversation-and-repository.
+
+The binding therefore carries two roots: `source_project_root`, the operator-
+authorized directory beneath the access root, and `project_root`, the managed
+checkout that becomes the effective `work_dir`. The managed worktree lives
+*outside* the access root by design, so `effective_config` re-validates the pair
+on every dispatch — `source_project_root` must still canonicalize to a path under
+the access root (fails closed if a symlink or the directory moved), while
+`project_root` is only required to still exist as a directory. Attacker-controlled
+input never selects `project_root` independently: it is either the validated
+source root or a path deterministically derived from `worktrees.root` plus the
+repository's Git-relative workspace path.
+
+Stale managed worktrees from ended conversations are swept on startup when
+`worktrees.autoCleanupEnabled` is set, retaining the most recent `keepCount`
+(default 15) and skipping any root still referenced by a live binding. On Windows
+the extended-length `\\?\` prefix that `fs::canonicalize` returns is stripped
+before the root is handed to `git worktree add`, which otherwise cannot create the
+worktree's leading directories. Per-worktree Codex environment setup is a security
+boundary of its own: the environment file is neither copied into the worktree nor
+its setup script executed unless `worktrees.allowSetupScript` is explicitly `true`
+(default `false`), because both the file and its script path are selectable through
+the source repository's local Git config and the script runs outside the
+`allowedCommands`/exec policy.
+
 ### `ConversationExecSessionStore` and `SessionState` (`exec_sessions.rs`)
 `SessionState` is the per-MCP-transport view: it owns the optional fallback
 project root for generic clients, the current plan, a transport-owned exec
@@ -212,7 +245,7 @@ The fully-resolved config handed to every tool. `config.rs` parses
 user-level Codex MCP definitions through `codex_mcp.rs`, opportunistically adds
 plugin-provided entries from the Codex CLI's effective catalogue, then applies
 explicit `mcpServers` entries as field overlays. Optional sub-configs (`projectDoc`,
-`projectCatalog`, `output`, `review`, `artifactIngress`, `memory`, `skills`, `ignore`, `audit`) fall
+`projectCatalog`, `output`, `review`, `artifactIngress`, `worktrees`, `memory`, `skills`, `ignore`, `audit`) fall
 back to per-module defaults. In multi-project mode, dispatch clones this config per
 call and substitutes the conversation's selected root—or the transport fallback—for
 `work_dir`; the static server policy, catalogue overlay, and bridge configuration
@@ -327,13 +360,13 @@ the original order and rejects duplicate names.
 |--------|----------------|
 | `safe_path.rs` | Lexical path-traversal guard (no `canonicalize`; component-wise containment). The security boundary for every filesystem tool. |
 | `artifact_ingress/` | OpenAI native-file validation and streaming plus capability-confined, atomic no-overwrite workspace publication. It never accepts a local source path, and constrains the download URL and every redirect hop to the configurable `artifactIngress.allowedHosts` allowlist (default `"*"`, which still rejects loopback, private, link-local, unique-local, CGNAT, `localhost`, and metadata addresses). |
-| `logging.rs` | Tracing initialization plus a non-overridable filter that suppresses RMCP framework events, preventing native-file bearer URLs from appearing in logs before tool dispatch or malformed-session errors. |
+| `logging.rs` | Tracing initialization with default filters for normal, `-v`, and `-vv` operation (an explicit `RUST_LOG` remains authoritative), plus a non-overridable filter that suppresses RMCP framework events, preventing native-file bearer URLs from appearing in logs before tool dispatch or malformed-session errors. |
 | `output_budget.rs` | Line/byte windowing and list caps, each cut announced with the continuation argument. |
 | `audit.rs` | Private append-only JSONL tool lifecycle records, stable hashed identities, redacted argument summaries, output accounting, and opt-in bounded command previews. |
-| `logging.rs` | Default tracing filters for normal, `-v`, and `-vv` operation; an explicit `RUST_LOG` remains authoritative. |
 | `ignore_rules.rs` | One `.gitignore`-accurate matcher (the `ignore` crate) shared by glob/grep/tree/list_directory. |
 | `exec_policy.rs` | Shell-string allowlist guard for `exec_command` (a guardrail, not a sandbox). |
 | `project_bindings.rs` | Canonical project-root validation plus durable ChatGPT conversation bindings keyed by a hash of `openai/session`, namespaced by access root, locked per record, and atomically written. |
+| `worktrees.rs` | Per-conversation managed Git worktree lifecycle: create or reuse a detached checkout under `worktrees.root` via `git worktree add`, dual source/worktree root tracking, startup sweep bounded by `keepCount`, Windows `\\?\`-prefix handling, and the opt-in `allowSetupScript` gate for per-worktree environment setup. |
 | `project_catalog.rs` | Live, read-only project discovery from native Codex plus explicit metadata; canonical access-root filtering, deduplication, deterministic query ranking, sanitized MCP warnings, and local diagnostics. |
 | `exec_sessions.rs` | Generic-client transport fallback plus conversation-owned unified-exec sessions and transport-local review state: shell resolution, PowerShell exit-code wrapping, background stdout/stderr drain tasks, process-group kill, idle cleanup, and output truncation (UTF-16 units to match the TS). |
 | `review.rs` | Project-scoped Git snapshots, persistent conversation refs, transport-local fallbacks, incremental compare-and-swap checkpoints, diff parsing and result budgets. |
@@ -496,6 +529,11 @@ startup banner prints the exact file with `Config:`). All fields optional.
                        "requestTimeoutMs": 120000, "idleTimeoutMs": 30000,
                        "maxRedirects": 3, "maxConcurrentDownloads": 2,
                        "allowedHosts": ["*"] },
+  "worktrees": { "mode": "auto",        // auto | always | never; or --worktree-mode
+                 "root": "…",            // default: $CODEX_HOME/worktrees; or --worktree-root
+                 "upstreamRefreshMode": "never",   // never | best-effort
+                 "autoCleanupEnabled": true, "keepCount": 15,
+                 "allowSetupScript": false },      // opt-in; runs arbitrary setup outside exec policy
   "projectDoc": { "maxBytes": 32768, "fallbackFilenames": [], "rootMarkers": [".git"] },
   "memory": { "enabled": true, "dir": "…", "maxBytes": 16384 },
   "skills": { "enabled": true, "dirs": ["…"], "includePlugins": true },
