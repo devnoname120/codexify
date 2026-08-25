@@ -56,7 +56,8 @@ impl Tool for ViewImage {
         json!({
             "type": "object",
             "properties": {
-                "path": { "type": "string", "description": "Image file path relative to work-dir" }
+                "path": { "type": "string", "description": "Image file path relative to work-dir" },
+                "detail": { "type": "string", "description": "Optional detail hint (e.g. auto, low, high). Accepted for compatibility with Codex clients and currently ignored — the full image is always sent." }
             },
             "required": ["path"],
             "additionalProperties": false

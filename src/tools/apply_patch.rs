@@ -26,10 +26,10 @@ async fn plan_action(
     let abs_path = resolve_safe_path(action.path(), work_dir, false)?;
 
     match &action {
-        PatchAction::Add { path, lines } => {
-            if abs_path.exists() {
-                return Err(format!("Add File: '{path}' already exists"));
-            }
+        PatchAction::Add { lines, .. } => {
+            // Codex's engine does not existence-check an Add: a hunk that adds
+            // over an existing path overwrites it. Match that rather than
+            // rejecting, so a patch canonical Codex accepts applies here too.
             let contents = render_added_file(lines);
             Ok(PlannedWrite {
                 action,
@@ -129,9 +129,22 @@ impl Tool for ApplyPatch {
         };
 
         let mut planned: Vec<PlannedWrite> = Vec::new();
+        // Codex rejects a patch whose hunks resolve to the same file twice; guard
+        // the same way so two operations never silently race on one path.
+        let mut targets: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
         for action in actions {
             match plan_action(action, &config.work_dir).await {
-                Ok(w) => planned.push(w),
+                Ok(w) => {
+                    for target in std::iter::once(&w.abs_path).chain(w.dest_path.iter()) {
+                        if !targets.insert(target.clone()) {
+                            return ToolResult::error(format!(
+                                "Patch does not apply: multiple operations target {}",
+                                target.display()
+                            ));
+                        }
+                    }
+                    planned.push(w);
+                }
                 Err(e) => return ToolResult::error(format!("Patch does not apply: {e}")),
             }
         }

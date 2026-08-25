@@ -131,6 +131,11 @@ impl Tool for ExecCommand {
             EXEC_MIN_YIELD_MS,
             EXEC_MAX_YIELD_MS,
         );
+        // Codex floors the initial exec_command yield at 10s on Windows, where
+        // process startup and pipe buffering make a short first window routinely
+        // return before any output has surfaced.
+        #[cfg(windows)]
+        let yield_ms = yield_ms.max(EXEC_DEFAULT_YIELD_MS);
         let max_output_tokens = match arg_u64(&args, "max_output_tokens") {
             Some(n) if n > 0 => n,
             _ => DEFAULT_MAX_OUTPUT_TOKENS,
@@ -168,13 +173,13 @@ impl Tool for ExecCommand {
 
         let (output, exited, buffer_truncated) =
             exec_session.yield_output_with_metadata(yield_ms).await;
-        let (text, original_token_count) = truncate_output(&output, max_output_tokens);
+        let (text, original_token_count, truncated) = truncate_output(&output, max_output_tokens);
 
         let mut result = UnifiedExecOutput {
             chunk_id: Some(generate_chunk_id()),
             wall_time_seconds: started.elapsed().as_secs_f64(),
             output: text,
-            original_token_count,
+            original_token_count: Some(original_token_count),
             ..Default::default()
         };
 
@@ -196,8 +201,8 @@ impl Tool for ExecCommand {
             is_error,
             structured_content: Some(structured),
             audit: ToolAuditMetadata {
-                truncated: Some(buffer_truncated || original_token_count.is_some()),
-                original_output_tokens: original_token_count,
+                truncated: Some(buffer_truncated || truncated),
+                original_output_tokens: truncated.then_some(original_token_count),
                 exec_session_id: Some(exec_session.id),
                 process_id: exec_session.pid,
                 resident: Some(!exited),

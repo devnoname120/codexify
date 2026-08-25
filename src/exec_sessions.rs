@@ -62,22 +62,29 @@ pub struct UnifiedExecOutput {
 
 /// Trims `text` to the token budget, keeping the head and tail and marking the
 /// elided middle. Shell output is most informative at its start and end.
-pub fn truncate_output(text: &str, max_output_tokens: u64) -> (String, Option<u64>) {
+///
+/// Returns `(text, original_token_count, truncated)`. The token count is always
+/// reported — matching Codex's `unified_exec`, which populates
+/// `original_token_count` on every response, not only when it elides output — so
+/// the model always knows the true size. `truncated` is the separate signal
+/// callers use for audit.
+pub fn truncate_output(text: &str, max_output_tokens: u64) -> (String, u64, bool) {
     let budget_chars = (max_output_tokens.max(1) as usize) * 4;
     // Measured and sliced in UTF-16 code units, matching the TS `text.length`
     // and `text.slice(...)`.
     let units: Vec<u16> = text.encode_utf16().collect();
-    if units.len() <= budget_chars {
-        return (text.to_string(), None);
-    }
     let original = (units.len() as u64).div_ceil(4);
+    if units.len() <= budget_chars {
+        return (text.to_string(), original, false);
+    }
     let keep = budget_chars / 2;
     let head = String::from_utf16_lossy(&units[..keep]);
     let tail = String::from_utf16_lossy(&units[units.len() - keep..]);
     let omitted = units.len() - keep - keep;
     (
         format!("{head}\n\n[... {omitted} bytes omitted ...]\n\n{tail}"),
-        Some(original),
+        original,
+        true,
     )
 }
 
@@ -308,6 +315,35 @@ impl ExecSession {
     /// Take everything buffered so far, clearing the buffer.
     fn take_pending(&self) -> PendingOutput {
         self.pending.lock().unwrap().take()
+    }
+
+    /// Deliver an interrupt to the running process, the way Codex's unified exec
+    /// treats a lone `` (Ctrl-C) written to a non-tty session. Because this
+    /// bridge drives processes over plain pipes rather than a PTY, there is no
+    /// terminal to raise SIGINT: on Unix we signal the process group directly, and
+    /// on Windows (where a piped child has no console to receive a Ctrl-C event)
+    /// we fall back to terminating the tree. Returns `false` if the process has
+    /// already exited.
+    pub fn interrupt(&self) -> bool {
+        if self.exit_code().is_some() {
+            return false;
+        }
+        let Some(pid) = self.pid else { return false };
+        self.touch();
+        #[cfg(unix)]
+        {
+            // Negative pid targets the whole process group the shell leads.
+            unsafe {
+                libc::kill(-(pid as i32), libc::SIGINT);
+            }
+        }
+        #[cfg(windows)]
+        {
+            // No console is attached to a piped child, so a graceful Ctrl-C event
+            // cannot be generated; terminate the tree instead.
+            kill_pid(Some(pid));
+        }
+        true
     }
 
     /// Write `chars` to the process's stdin and flush.
@@ -1000,17 +1036,20 @@ mod tests {
     #[test]
     fn truncate_keeps_head_and_tail() {
         let text = "a".repeat(100);
-        let (out, orig) = truncate_output(&text, 4); // budget 16 chars
-        assert!(orig.is_some());
+        let (out, orig, truncated) = truncate_output(&text, 4); // budget 16 chars
+        assert!(truncated);
+        assert_eq!(orig, 25); // 100 UTF-16 units / 4
         assert!(out.contains("omitted"));
         assert!(out.starts_with("aaaaaaaa"));
     }
 
     #[test]
     fn no_truncation_under_budget() {
-        let (out, orig) = truncate_output("short", 100);
+        let (out, orig, truncated) = truncate_output("short", 100);
         assert_eq!(out, "short");
-        assert!(orig.is_none());
+        assert!(!truncated);
+        // The token count is reported even when nothing was elided.
+        assert_eq!(orig, 2); // 5 UTF-16 units / 4, rounded up
     }
 
     #[test]

@@ -137,10 +137,19 @@ fn parse_rejects_missing_end_marker() {
 }
 
 #[test]
-fn parse_rejects_update_hunk_without_marker() {
-    let e =
-        parse_patch("*** Begin Patch\n*** Update File: f.txt\n-old\n*** End Patch\n").unwrap_err();
-    assert!(e.0.contains("@@ context marker"), "{}", e.0);
+fn parse_accepts_update_hunk_without_marker() {
+    // Codex's parser is lenient: an update body before any `@@` header parses as
+    // one context-less chunk rather than being rejected.
+    let actions =
+        parse_patch("*** Begin Patch\n*** Update File: f.txt\n-old\n*** End Patch\n").unwrap();
+    match &actions[0] {
+        PatchAction::Update { chunks, .. } => {
+            assert_eq!(chunks.len(), 1);
+            assert!(chunks[0].change_context.is_none());
+            assert_eq!(chunks[0].old_lines, vec!["old".to_string()]);
+        }
+        _ => panic!("expected update"),
+    }
 }
 
 #[test]

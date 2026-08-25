@@ -163,9 +163,16 @@ pub fn parse_patch(patch: &str) -> Result<Vec<PatchAction>, PatchParseError> {
                 }
 
                 if !have_chunk {
-                    return Err(PatchParseError(format!(
-                        "Expected update hunk to start with a @@ context marker, got: '{body}'"
-                    )));
+                    // Codex's parser is lenient here: an update hunk whose body
+                    // begins before any `@@` header is treated as a single
+                    // context-less chunk. Synthesize one rather than rejecting.
+                    chunks.push(UpdateChunk {
+                        change_context: None,
+                        old_lines: Vec::new(),
+                        new_lines: Vec::new(),
+                        is_end_of_file: false,
+                    });
+                    have_chunk = true;
                 }
                 let chunk = chunks.last_mut().unwrap();
 
@@ -449,6 +456,22 @@ mod tests {
         let PatchAction::Update { chunks, .. } = &actions[0] else {
             panic!("expected update");
         };
+        let out = apply_update(original, chunks, "f").unwrap();
+        assert_eq!(out, "one\nTWO\nthree\n");
+    }
+
+    #[test]
+    fn update_hunk_without_leading_context_marker() {
+        // Codex accepts an update body that starts before any `@@` header; a
+        // single context-less chunk is synthesized.
+        let original = "one\ntwo\nthree\n";
+        let patch = "*** Begin Patch\n*** Update File: f\n one\n-two\n+TWO\n three\n*** End Patch";
+        let actions = parse_patch(patch).unwrap();
+        let PatchAction::Update { chunks, .. } = &actions[0] else {
+            panic!("expected update");
+        };
+        assert_eq!(chunks.len(), 1);
+        assert!(chunks[0].change_context.is_none());
         let out = apply_update(original, chunks, "f").unwrap();
         assert_eq!(out, "one\nTWO\nthree\n");
     }

@@ -6,6 +6,30 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-08-25
+
+### Fixed
+
+- Audited the ported tool-call handlers against upstream Codex (codex-rs) and
+  closed the genuine behavioral divergences:
+  - `write_stdin`: a lone `\u0003` (Ctrl-C) now interrupts the exec session
+    (SIGINT to the process group on unix, kill on windows) instead of writing
+    the raw `0x03` byte into the pipe, matching Codex unified exec.
+  - `apply_patch`: an `Add` hunk over an existing path now overwrites it rather
+    than being rejected, matching Codex's engine, which does not existence-check
+    Adds.
+  - `apply_patch`: a patch whose hunks resolve to the same target path twice is
+    now rejected, so two operations never silently race on one file.
+  - `apply_patch` parser: an `Update` hunk with no leading `@@` context marker is
+    now accepted as a single context-less chunk instead of being rejected.
+  - `exec_command` / `write_stdin`: `original_token_count` is now always reported
+    (not only when truncation occurs), matching upstream; truncation is tracked
+    separately for audit.
+  - `exec_command`: the initial yield is floored at the 10s default on windows to
+    match Codex's first-yield behavior.
+  - `view_image`: an optional `detail` hint is now accepted and ignored so a
+    Codex client sending it is not schema-rejected.
+
 ## [1.3.0] - 2026-08-25
 
 ### Added
@@ -254,7 +278,8 @@ filename sort uses byte/Unicode ordering rather than `localeCompare`;
 `write_file` reports UTF-8 byte counts; `exec_command` uses plain pipes, not a
 PTY. See the README's "Notes on the port" for the full list.
 
-[Unreleased]: https://github.com/devnoname120/codexify/compare/v1.3.0...HEAD
+[Unreleased]: https://github.com/devnoname120/codexify/compare/v1.4.0...HEAD
+[1.4.0]: https://github.com/devnoname120/codexify/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/devnoname120/codexify/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/devnoname120/codexify/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/devnoname120/codexify/releases/tag/v1.1.0
