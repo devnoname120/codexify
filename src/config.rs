@@ -251,6 +251,7 @@ struct PartialWorktrees {
     upstream_refresh_mode: Option<WorktreeUpstreamRefreshMode>,
     auto_cleanup_enabled: Option<bool>,
     keep_count: Option<usize>,
+    allow_setup_script: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -621,6 +622,7 @@ fn default_worktree_config() -> WorktreeConfig {
         upstream_refresh_mode: WorktreeUpstreamRefreshMode::Never,
         auto_cleanup_enabled: true,
         keep_count: 15,
+        allow_setup_script: false,
     }
 }
 
@@ -706,6 +708,9 @@ fn resolve_worktree_config(file: Option<PartialWorktrees>, cli: &Cli) -> Worktre
         .or(native.auto_cleanup_enabled)
         .unwrap_or(true);
     config.keep_count = file.keep_count.or(native.keep_count).unwrap_or(15).max(1);
+    // Setup-script execution is opt-in and has no native Codex-desktop
+    // equivalent, so it is only ever enabled through explicit file config.
+    config.allow_setup_script = file.allow_setup_script.unwrap_or(false);
     config
 }
 

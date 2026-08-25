@@ -309,7 +309,8 @@ All project-scoped paths are resolved relative to the active project root: `--wo
     "root": "/path/to/worktrees",
     "upstreamRefreshMode": "never",
     "autoCleanupEnabled": true,
-    "keepCount": 15
+    "keepCount": 15,
+    "allowSetupScript": false
   },
   "allowedCommands": ["bun", "npm", "npx", "node", "git", "python", "pip", "cargo", "make"],
   "port": 3000,
@@ -470,6 +471,7 @@ The `worktrees` block controls isolation between conversations selecting the sam
 | `upstreamRefreshMode` | Codex setting or `"never"` | `"best-effort"` refreshes a tracked upstream before worktree creation without making fetch failure fatal |
 | `autoCleanupEnabled` | Codex setting or `true` | On startup, remove old unreferenced worktrees only when their working trees are clean |
 | `keepCount` | Codex setting or `15` | Number of newest unreferenced managed worktrees retained before cleanup candidates are considered |
+| `allowSetupScript` | `false` | Whether a worktree's Codex environment setup script may run on creation. This executes an arbitrary command **outside** the `allowedCommands`/exec policy, and both the environment file and its script path are selectable through the source repository's local Git config, so an untrusted project could otherwise plant a script that runs on the next binding. Leave it off unless every project reachable by this server is trusted to run arbitrary setup commands |
 
 When these values are absent, Codexify reads Codex Desktop's `[desktop]` worktree settings from `$CODEX_HOME/config.toml`, including `git-worktree-root`, `worktree-upstream-refresh-mode`, `worktree-auto-cleanup-enabled`, and `worktree-keep-count`. The final location falls back to `$CODEX_HOME/worktrees` (normally `~/.codex/worktrees`).
 

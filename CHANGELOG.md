@@ -61,6 +61,10 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   connector reconnect. Generic MCP clients retain transport-owned process
   cleanup; conversation-owned processes remain bounded by the configured idle
   timeout and are killed when the server stops.
+- Managed worktrees now work on Windows: the extended-length `\\?\` prefix that
+  `fs::canonicalize` returns is stripped from the worktree root before it is
+  handed to `git worktree add`, which otherwise fails to create the worktree's
+  leading directories.
 
 ### Security
 
@@ -84,6 +88,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   synchronization, and SHA-256 processing complete. Traversal, moved or replaced
   project roots, parent symlink escapes, existing destinations, partial visibility,
   and concurrent replacement races fail closed.
+- Per-worktree Codex environment setup scripts are now opt-in through
+  `worktrees.allowSetupScript` (default `false`). The script runs an arbitrary
+  command outside the `allowedCommands`/exec policy, and both the environment
+  file and its script path are selectable through the source repository's local
+  Git config, so an untrusted project could otherwise plant a script that runs
+  on the next conversation binding. When the flag is off, the environment is
+  neither copied into the worktree nor executed.
 
 ## [1.2.0] - 2026-08-24
 

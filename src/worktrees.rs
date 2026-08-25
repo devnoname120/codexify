@@ -150,9 +150,17 @@ pub async fn create_managed_worktree(
             )
         })?;
 
-        if let Some(environment_path) =
-            prepare_local_environment(config, &source_git_root, &worktree_git_root, &shard_root)
-                .await?
+        // The setup script runs an arbitrary command outside the
+        // `allowedCommands`/exec policy, and both the environment file and its
+        // script path are selectable through the source repository's local git
+        // config — so an untrusted repo could plant a script that executes on
+        // the next binding. Gate the whole prepare-and-run path behind an
+        // explicit opt-in that defaults off; when disabled we neither copy the
+        // environment into the worktree nor run anything.
+        if config.worktrees.allow_setup_script
+            && let Some(environment_path) =
+                prepare_local_environment(config, &source_git_root, &worktree_git_root, &shard_root)
+                    .await?
         {
             run_setup_script(
                 config,
@@ -392,12 +400,38 @@ fn prepare_worktrees_root(configured: &Path) -> Result<PathBuf, String> {
             configured.display()
         )
     })?;
-    fs::canonicalize(configured).map_err(|error| {
+    let canonical = fs::canonicalize(configured).map_err(|error| {
         format!(
             "Could not resolve managed-worktree root {}: {error}",
             configured.display()
         )
-    })
+    })?;
+    Ok(strip_verbatim_prefix(canonical))
+}
+
+/// On Windows, `fs::canonicalize` returns an extended-length `\\?\C:\…` path.
+/// `git worktree add` cannot create leading directories for such a path and
+/// fails with "Invalid argument", so strip the verbatim disk prefix back to a
+/// plain `C:\…` before any of these paths reach git. Only the drive-letter
+/// form is unwrapped; UNC and other prefixes, and every non-Windows path, are
+/// returned unchanged.
+fn strip_verbatim_prefix(path: PathBuf) -> PathBuf {
+    #[cfg(windows)]
+    {
+        use std::path::{Component, Prefix};
+        let mut components = path.components();
+        if let Some(Component::Prefix(prefix)) = components.next()
+            && let Prefix::VerbatimDisk(drive) = prefix.kind()
+        {
+            // The remaining components still include the root directory, which
+            // renders with a leading separator, so append it to a bare `C:` to
+            // land on `C:\…` rather than `C:\\…`.
+            let mut rebuilt = std::ffi::OsString::from(format!("{}:", drive as char));
+            rebuilt.push(components.as_path().as_os_str());
+            return PathBuf::from(rebuilt);
+        }
+    }
+    path
 }
 
 fn allocate_worktree_path(
