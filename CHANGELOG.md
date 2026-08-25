@@ -6,6 +6,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-08-25
+
 ### Added
 
 - Optional per-conversation connector authorization through
@@ -25,6 +27,10 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `import_host_file` now participates in the same fail-closed, serialized review
   checkpoint protocol as every other project-writing tool, so imports cannot race
   review capture or proceed after a checkpoint-capture failure.
+- The conversation authorization check no longer holds its in-memory lock while
+  probing the durable marker on disk, so a cache miss for one conversation cannot
+  serialize every other conversation's authorization behind blocking filesystem
+  reads.
 
 ### Security
 
@@ -312,7 +318,8 @@ filename sort uses byte/Unicode ordering rather than `localeCompare`;
 `write_file` reports UTF-8 byte counts; `exec_command` uses plain pipes, not a
 PTY. See the README's "Notes on the port" for the full list.
 
-[Unreleased]: https://github.com/devnoname120/codexify/compare/v1.4.0...HEAD
+[Unreleased]: https://github.com/devnoname120/codexify/compare/v1.5.0...HEAD
+[1.5.0]: https://github.com/devnoname120/codexify/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/devnoname120/codexify/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/devnoname120/codexify/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/devnoname120/codexify/compare/v1.1.0...v1.2.0

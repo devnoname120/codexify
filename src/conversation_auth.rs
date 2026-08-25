@@ -77,12 +77,17 @@ impl ConversationAuthorizationStore {
     ) -> bool {
         match conversation {
             Some(identity) => {
-                let mut authorized = self.authorized.lock().unwrap();
-                if authorized.contains(identity) {
+                // Fast path: an already-cached grant only needs the in-memory set.
+                if self.authorized.lock().unwrap().contains(identity) {
                     return true;
                 }
+                // Probe the disk WITHOUT holding the lock. A cache miss must not
+                // serialize every other conversation's authorization check behind
+                // our blocking filesystem reads. The benign race where two callers
+                // both probe and both insert is harmless: the grant is identical
+                // and the insert is idempotent.
                 if self.persisted_authorization_exists(identity) {
-                    authorized.insert(identity.clone());
+                    self.authorized.lock().unwrap().insert(identity.clone());
                     return true;
                 }
                 false
