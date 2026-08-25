@@ -5,7 +5,8 @@ use serde::Serialize;
 
 use anyhow::Context;
 use codexify::config::{
-    Cli, CliCommand, ProjectsCommand, ProjectsListArgs, load_config, load_project_catalog_for_cli,
+    Cli, CliCommand, ProjectsCommand, ProjectsListArgs, config_path_for_quickstart, load_config,
+    load_project_catalog_for_cli,
 };
 use codexify::logging;
 use codexify::project_catalog::{
@@ -139,12 +140,10 @@ async fn run() -> anyhow::Result<()> {
     if let Some(command) = cli.command.take() {
         match command {
             CliCommand::Quickstart => {
+                let config = config_path_for_quickstart(&cli).map_err(anyhow::Error::msg)?;
                 let args = quickstart::QuickstartArgs {
-                    config: cli
-                        .config
-                        .clone()
-                        .map(PathBuf::from)
-                        .unwrap_or_else(|| PathBuf::from("codex.config.json")),
+                    config: config.path,
+                    config_explicit: config.explicit,
                     work_dir: cli.work_dir.clone().map(PathBuf::from),
                 };
                 let outcome = quickstart::run(args)?;
@@ -152,7 +151,6 @@ async fn run() -> anyhow::Result<()> {
                     return Ok(());
                 }
                 cli.work_dir = Some(outcome.work_dir.to_string_lossy().into_owned());
-                cli.config = Some(outcome.config_path.to_string_lossy().into_owned());
             }
             CliCommand::Projects { .. } => {
                 // Project catalogue subcommands are dispatched in `main` before

@@ -6,6 +6,19 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- User-level config discovery through `~/.codexify/codex.config.json` and the
+  `CODEXIFY_CONFIG` environment variable. Explicit `--config` remains highest
+  priority; the old working-directory `codex.config.json` is retained as a warned
+  compatibility fallback only when no user config exists.
+
+### Changed
+
+- `quickstart` now writes the user-level config by default and omits `--config`
+  from its generated launch command for that canonical path. Explicit CLI or
+  environment-selected paths continue to be preserved.
+
 ## [1.6.0] - 2026-08-25
 
 ### Added

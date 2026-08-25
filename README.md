@@ -123,10 +123,10 @@ are printed together with the exact connection values to use.
 The runtime key is entered without terminal echo and stored in a dedicated
 per-tunnel file under `~/.codexify/openai-tunnel/credentials/`. On Unix, the
 wizard restricts the credential directory and file to the current user.
-`codex.config.json` receives only a `file:` reference, and unrelated existing JSON
-settings are preserved. At the end, the wizard can start Codexify immediately
-so ChatGPT can scan the live connector. Keep that process running while using the
-connector.
+The wizard writes `~/.codexify/codex.config.json` by default; that file receives
+only a `file:` reference, and unrelated existing JSON settings are preserved. At
+the end, the wizard can start Codexify immediately so ChatGPT can scan the live
+connector. Keep that process running while using the connector.
 
 When an existing config already contains `conversationAuthToken`, quickstart
 preserves it, restricts the config file to the current user on Unix, and prints the
@@ -134,15 +134,16 @@ one-line instruction required to authorize a chat. It does not offer to enable o
 rotate this advanced feature. Keep a token-bearing config out of version control
 and do not share it.
 
-Use `codexify quickstart --config /path/to/codex.config.json` to update a
-different config file, or `--work-dir /path/to/project` to change the directory
-initially shown by the wizard.
+Set `CODEXIFY_CONFIG=/path/to/codex.config.json` or use
+`codexify quickstart --config /path/to/codex.config.json` to update a different
+config file. `--work-dir /path/to/project` changes the directory initially shown
+by the wizard.
 
 ### Manual native OpenAI tunnel setup
 
 1. Create or obtain a tunnel ID in [OpenAI Platform tunnel settings](https://platform.openai.com/settings/organization/tunnels).
 2. Create a restricted [runtime API key](https://platform.openai.com/settings/organization/api-keys) whose principal has Tunnels **Read** + **Use** for that tunnel. Keep tunnel-management/admin credentials separate.
-3. Add the tunnel to `codex.config.json`:
+3. Add the tunnel to `~/.codexify/codex.config.json`:
 
    ```json
    {
@@ -240,7 +241,8 @@ Each release ships a compiled binary per platform — `windows-x64`, `linux-x64`
 |---------|-------------|
 | `quickstart` | Interactively configure the project scope, native OpenAI tunnel credentials, JSON config, and ChatGPT developer-mode connector; optionally start the server when setup is complete |
 
-`quickstart` accepts `--config <PATH>` (default `./codex.config.json`) and
+`quickstart` writes `~/.codexify/codex.config.json` by default. It accepts
+`--config <PATH>` (or `CODEXIFY_CONFIG`) to select another file and
 `--work-dir <DIR>` as the initial project-directory prompt value.
 
 ### Server flags
@@ -254,7 +256,7 @@ Each release ships a compiled binary per platform — `windows-x64`, `linux-x64`
 | `--worktree-root` | No | Codex worktree location | Directory for managed conversation worktrees |
 | `--port` | No | `3000` | Server port |
 | `--api-key` | No | - | Bearer token for auth |
-| `--config` | No | `./codex.config.json` | Config file path (tolerated if missing) |
+| `--config` | No | `CODEXIFY_CONFIG`, user config, then legacy `./codex.config.json` | Explicit config file path. The user config is `~/.codexify/codex.config.json`; relative explicit paths resolve from the startup directory, and a missing file is tolerated |
 | `--codex-cli` | No | Auto when available | Require successful Codex CLI-backed MCP discovery. When omitted, failure produces a warning and direct `config.toml` parsing remains the fallback |
 | `-v`, `--verbose` | No | Info logs | Enable Codexify debug diagnostics; repeat (`-vv`) for trace diagnostics (`--log-tool-calls` is an alias) |
 | `--audit <FILE>` | No | Disabled | Append privacy-preserving tool activity events to a JSONL file (`--audit-log` is an alias) |
@@ -361,7 +363,27 @@ All project-scoped paths are resolved relative to the active project root: `--wo
 
 ## Config file
 
-`codex.config.json` in the project root, or pass a custom path with `--config`. Every field is optional and uses the same camelCase names as the original TypeScript project, so an existing config keeps working. A missing config file is tolerated — the built-in defaults are used and the startup banner says so.
+Codexify resolves one server-level JSON config in this order:
+
+1. `--config <PATH>`;
+2. the non-empty `CODEXIFY_CONFIG` environment variable;
+3. an existing `~/.codexify/codex.config.json`;
+4. an existing `./codex.config.json` as a legacy compatibility fallback;
+5. built-in defaults.
+
+Relative paths supplied through `--config` or `CODEXIFY_CONFIG` resolve against
+the process's startup directory. Explicit CLI and environment paths are
+authoritative even when missing; a missing file is tolerated and built-in defaults
+are used. The startup banner prints the selected path and its source. Selecting the
+legacy working-directory file also prints a migration warning because process
+authority should not normally depend on which repository happened to be the launch
+directory. Move that file to `~/.codexify/codex.config.json`, or make its location
+explicit with `--config` or `CODEXIFY_CONFIG`.
+
+`quickstart` always chooses the user-level path when neither explicit source is
+set; it does not update the legacy working-directory fallback. Every field is
+optional and uses the same camelCase names as the original TypeScript project, so
+an existing config keeps working.
 
 ```json
 {
@@ -464,10 +486,11 @@ CLI flags override values from the config file.
 cryptographically secure random source. `quickstart` does not enable or rotate the
 feature; if the selected config already contains a valid token, it preserves the
 value and prints the copyable ChatGPT instruction shown above. Because the token
-is intentionally stored in this file, use a config path outside the repository or
-add it to the repository's ignore rules. On Unix, quickstart changes the config
-mode to `0600` when it preserves a token-bearing config; manually created configs
-should be protected equivalently.
+is intentionally stored in this file, keep the config outside the repository; the
+default `~/.codexify/codex.config.json` location does so. When using a custom
+repository-local path, add it to the repository's ignore rules. On Unix,
+quickstart changes the config mode to `0600` when it preserves a token-bearing
+config; manually created configs should be protected equivalently.
 
 ## Diagnostics and audit logging
 
@@ -1111,6 +1134,7 @@ Native tunnel mode ignores `allowedHosts` and forces the accepted authorities to
 ## Security
 
 - **Path traversal prevention**: every filesystem tool — including `apply_patch` and `view_image` — resolves paths through a guard that rejects anything outside the active project root. In multi-project mode, both catalogue discovery and `set_project_root` canonicalize the configured access root and candidate directory, so `..` and symlinks cannot expose or bind a project outside the access root.
+- **Stable server-config authority**: the implicit config is user-scoped at `~/.codexify/codex.config.json`, so changing the launch directory does not normally change command, MCP-server, network, tunnel, or worktree policy. `--config` and `CODEXIFY_CONFIG` remain explicit overrides. The old `./codex.config.json` behavior is retained only as a warned compatibility fallback when no user config exists.
 - **Bounded GitHub cloning and target fetching**: URL-based project selection accepts only normalized HTTPS/SSH repository roots plus HTTPS branch and PR URLs on `github.com`. It separates owner/repository identity from the exact checkout target, rejects embedded credentials, unsupported subpages, and non-GitHub/insecure transports, and disables interactive Git credential prompts. The configured clone directory is canonicalized inside the access root at startup and revalidated at use time. Resolution uses per-repository cross-process locks, bounded subprocess timeouts, private temporary clone destinations, remote verification, exact branch/PR refspecs, and collision refusal. Existing source checkouts are fetched without moving `HEAD`; a conversation already bound to another selection is rejected before the network/disk side effect.
 - **Host-authorized native-file ingress**: `import_host_file` accepts only ChatGPT's declared native-file object, rejects local source paths, constrains the download URL and every redirect hop to the configurable `artifactIngress.allowedHosts` allowlist (default `"*"`, which admits any public HTTPS host but never a loopback, private, link-local, unique-local, CGNAT, `localhost`, or metadata address), ignores ambient proxy credentials, and enforces whole-request, idle, size and concurrency limits. Its signed URL and file ID are never logged or returned: RMCP debug/trace payload logging is unconditionally suppressed even when `RUST_LOG` requests it. Destination publication uses a capability-confined directory handle, canonical-path and file-identity revalidation, a private partial file, SHA-256, and atomic no-overwrite linking so traversal, moved roots, symlink escapes, partial visibility and replacement races fail closed.
 - **One bounded exception in single-project mode**: [AGENTS.md](#agentsmd) discovery may read above `--work-dir`, up to the nearest `.git`. It is read-only, opens only `AGENTS.override.md`, `AGENTS.md` and any `projectDoc.fallbackFilenames`, and `get_project_doc` reports the absolute path of every file it used. Set `projectDoc.maxBytes` to `0` to switch it off, or `projectDoc.rootMarkers` to `[]` to keep the search inside the work directory. Multi-project mode does not perform this upward walk; its selected directory is the exact project root.

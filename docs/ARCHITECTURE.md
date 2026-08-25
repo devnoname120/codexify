@@ -306,18 +306,20 @@ compare-and-swap. The same per-owner/project lock spans mutating tool calls thro
 completion so reviews cannot capture an in-process write halfway through.
 
 ### `AppConfig` (`types.rs`)
-The fully-resolved config handed to every tool. `config.rs` parses
-`codex.config.json` with camelCase field names for backward compatibility, imports
+The fully-resolved config handed to every tool. `config.rs` selects one JSON file
+from explicit `--config`, `CODEXIFY_CONFIG`, the user-level
+`~/.codexify/codex.config.json`, or the warned legacy working-directory fallback,
+in that order. It parses camelCase fields for backward compatibility, imports
 user-level Codex MCP definitions through `codex_mcp.rs`, opportunistically adds
 plugin-provided entries from the Codex CLI's effective catalogue, then applies
 explicit `mcpServers` entries as field overlays. Optional sub-configs (`projectDoc`,
-`projectCatalog`, `output`, `review`, `artifactIngress`, `worktrees`, `memory`, `skills`, `ignore`, `audit`) fall
-back to per-module defaults, as does `codexMcp` (Codex MCP import and CLI enrichment).
-In multi-project mode, dispatch clones this config per
-call and substitutes the conversation's selected root—or the transport fallback—for
-`work_dir`; the static server policy, catalogue overlay, and bridge configuration
-remain shared. Native Codex project entries are intentionally re-read when the
-catalogue tool is called rather than copied into `AppConfig` at startup.
+`projectCatalog`, `output`, `review`, `artifactIngress`, `worktrees`, `memory`,
+`skills`, `ignore`, `audit`) fall back to per-module defaults, as does `codexMcp`
+(Codex MCP import and CLI enrichment). In multi-project mode, dispatch clones this
+config per call and substitutes the conversation's selected root—or the transport
+fallback—for `work_dir`; the static server policy, catalogue overlay, and bridge
+configuration remain shared. Native Codex project entries are intentionally re-read
+when the catalogue tool is called rather than copied into `AppConfig` at startup.
 `conversationAuthToken` is a top-level optional secret with no CLI override; its
 presence also controls registry inclusion of the `authenticate` tool and the
 authentication-only initialization instructions.
@@ -325,13 +327,17 @@ authentication-only initialization instructions.
 ### `quickstart` CLI (`quickstart.rs`)
 The `quickstart` subcommand runs before server configuration is loaded. It uses a
 testable line-oriented wizard for ordinary prompts and terminal-hidden input for
-the runtime API key. The wizard canonicalizes the project directory, validates
-the tunnel credentials with the same helpers as normal startup, merges only the
-managed fields into the existing JSON object, and stores the key outside the
-project behind an absolute `file:` reference. Config and credential replacement
-use temporary files in the destination directory. Once setup is complete, the
-same process can pass the generated paths back through `load_config` and enter the
-ordinary supervised server lifecycle; there is no separate quickstart runtime.
+the runtime API key. Without an explicit CLI or environment override, it writes
+`~/.codexify/codex.config.json` and its generated launch command relies on normal
+user-config discovery rather than adding `--config`. The wizard canonicalizes the
+project directory, validates the tunnel credentials with the same helpers as normal
+startup, merges only the managed fields into the existing JSON object, and stores
+the key outside the project behind an absolute `file:` reference. Config and
+credential replacement use temporary files in the destination directory. Once
+setup is complete, the same process can pass the selected work directory through
+`load_config`; normal config discovery reselects the file the wizard just wrote
+before entering the ordinary supervised server lifecycle. There is no separate
+quickstart runtime.
 The wizard does not expose the advanced `conversationAuthToken` policy as an
 onboarding choice. If an existing config already contains a valid token, it
 preserves the value, protects the config as a private file on Unix, and prints the
@@ -578,8 +584,13 @@ read through `skills_read`. Scope `plugin`.
 
 ## 9. Configuration reference
 
-`codex.config.json` (loaded from the current directory, or `--config`; the
-startup banner prints the exact file with `Config:`). All fields optional.
+The server selects one `codex.config.json`: `--config`, then
+`CODEXIFY_CONFIG`, then an existing `~/.codexify/codex.config.json`, then an
+existing `./codex.config.json` compatibility fallback. If none exists, built-in
+defaults are used. Relative explicit paths resolve from the startup directory; the
+startup banner prints the exact source, and selecting the legacy fallback emits a
+migration warning. `quickstart` writes the user-level path by default rather than
+the legacy fallback. All fields are optional.
 
 ```jsonc
 {
@@ -655,7 +666,7 @@ startup banner prints the exact file with `Config:`). All fields optional.
 The banner is designed so failures are never silent:
 
 ```
-Config: D:\codex-bridge\codex.config.json          ← which file actually loaded
+Config: C:\Users\alice\.codexify\codex.config.json (user config)
 Tools loaded (29): 28 native + 1 bridged from upstream MCP servers
 Upstream MCP servers:
   remote-exec -> gateway (84 functions via `remote_exec`)
@@ -665,8 +676,10 @@ Audit log: /private/path/tools.jsonl
 Audit command previews: disabled
 ```
 
-- `Config:` reveals the common mistake of editing a different file than the one
-  loaded (config is resolved relative to the launch directory unless `--config`).
+- `Config:` names both the selected file and its source. Explicit relative paths
+  resolve from the launch directory; implicit discovery normally selects the
+  stable user-level file instead. The legacy working-directory fallback also
+  emits a migration warning on stderr.
 - The `Upstream MCP servers:` block reports each server's outcome.
 - In native tunnel mode, the banner also reports loopback-only exposure, the
   internal-auth boundary, managed runtime version or operator-supplied client,
@@ -739,7 +752,7 @@ Run: `cargo test`. Build a standalone binary: `cargo build --release`.
 | Symptom | Cause / fix |
 |---------|-------------|
 | Bridged tools don't appear; banner shows `-> FAILED` | For stdio, verify that `command` is runnable on the machine where Codexify runs. For Streamable HTTP, verify the URL, TLS trust, bearer/header environment variables, and upstream authentication. |
-| Banner shows a server you didn't configure (e.g. `idasql -> disabled`) | codexify loaded a *different* `codex.config.json` than you edited. Check the `Config:` line and edit that file, or pass `--config`. |
+| Banner shows a server you didn't configure (e.g. `idasql -> disabled`) | Codexify loaded a *different* `codex.config.json` than you edited. Check the `Config:` line and edit that file, set `CODEXIFY_CONFIG`, or pass `--config`. |
 | codexify exposes a newer tool set but the client still shows the old one | The client caches the tool manifest — **remove and re-add the connector** so it re-fetches `tools/list`. |
 | A client won't surface a large bridged set at all | Use `"mode": "gateway"` to collapse the server into one tool + a skill, or `"tools": [...]` to expose a curated few. |
 | Upstream uses `type: "sse"` or `"websocket"` | Current Codex transport parity is stdio plus Streamable HTTP. Point the entry at a Streamable HTTP endpoint and use `url` (or an HTTP type alias). |

@@ -19,12 +19,15 @@ pub const DEVELOPER_MODE_GUIDE_URL: &str =
     "https://developers.openai.com/api/docs/guides/developer-mode";
 pub const CHATGPT_PLUGINS_URL: &str = "https://chatgpt.com/plugins";
 
-/// Inputs for the quickstart wizard, resolved from the global `--config` and
-/// `--work-dir` options before dispatch.
+/// Inputs for the quickstart wizard, resolved from `--config`,
+/// `CODEXIFY_CONFIG`, and the global `--work-dir` option before dispatch.
 #[derive(Debug, Clone)]
 pub struct QuickstartArgs {
     /// Config file to create or update.
     pub config: PathBuf,
+
+    /// Preserve an explicit CLI or environment selection in the launch command.
+    pub config_explicit: bool,
 
     /// Initial directory shown by the project-directory prompt.
     pub work_dir: Option<PathBuf>,
@@ -268,7 +271,12 @@ where
             "  Conversation token: stored in the config file; do not commit or share that file"
         )?;
     }
-    let command = launch_command(&environment.executable, &work_dir, &config_path);
+    let command = launch_command(
+        &environment.executable,
+        &work_dir,
+        &config_path,
+        args.config_explicit,
+    );
     writeln!(wizard.output, "\nLaunch command:\n  {command}")?;
 
     print_connector_step(&mut wizard, &connector_name, &tunnel_id, multi_project)?;
@@ -809,13 +817,22 @@ fn resolve_user_path(raw: &str, current_dir: &Path, home_dir: &Path) -> PathBuf 
     absolute_path(current_dir, Path::new(raw))
 }
 
-fn launch_command(executable: &Path, work_dir: &Path, config_path: &Path) -> String {
-    format!(
-        "{} --work-dir {} --config {}",
+fn launch_command(
+    executable: &Path,
+    work_dir: &Path,
+    config_path: &Path,
+    config_explicit: bool,
+) -> String {
+    let mut command = format!(
+        "{} --work-dir {}",
         quote_shell_arg(&executable.to_string_lossy()),
-        quote_shell_arg(&work_dir.to_string_lossy()),
-        quote_shell_arg(&config_path.to_string_lossy())
-    )
+        quote_shell_arg(&work_dir.to_string_lossy())
+    );
+    if config_explicit {
+        command.push_str(" --config ");
+        command.push_str(&quote_shell_arg(&config_path.to_string_lossy()));
+    }
+    command
 }
 
 #[cfg(not(windows))]
@@ -880,6 +897,7 @@ mod tests {
     fn args(config: PathBuf, work_dir: &Path) -> QuickstartArgs {
         QuickstartArgs {
             config,
+            config_explicit: true,
             work_dir: Some(work_dir.to_path_buf()),
         }
     }
@@ -976,6 +994,21 @@ mod tests {
             error.contains("--work-dir"),
             "expected a missing work-dir error, got: {error}"
         );
+    }
+
+    #[test]
+    fn launch_command_omits_only_the_implicit_user_config() {
+        let root = TempDir::new().unwrap();
+        let executable = root.path().join("bin").join("codexify");
+        let work_dir = root.path().join("project");
+        let config = root.path().join("home/.codexify/codex.config.json");
+
+        let default_command = launch_command(&executable, &work_dir, &config, false);
+        assert!(!default_command.contains("--config"));
+
+        let explicit_default_command = launch_command(&executable, &work_dir, &config, true);
+        assert!(explicit_default_command.contains("--config"));
+        assert!(explicit_default_command.contains("codex.config.json"));
     }
 
     #[test]

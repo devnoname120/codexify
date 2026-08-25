@@ -32,6 +32,107 @@ fn write_native_config(codex_home: &Path, project: &Path, trust: &str) -> PathBu
     path
 }
 
+fn write_catalog_config(path: &Path, project: &Path, name: &str) {
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(
+        path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "codexMcp": { "enabled": false },
+            "projectCatalog": {
+                "codexConfig": { "enabled": false },
+                "entries": [{ "path": project, "name": name }]
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+}
+
+fn run_discovered_config(
+    access: &Path,
+    current_dir: &Path,
+    home: &Path,
+    codex_home: &Path,
+    env_config: Option<&Path>,
+) -> (Value, String) {
+    let mut command = Command::new(binary());
+    command
+        .args([
+            "projects",
+            "list",
+            "--work-dir",
+            access.to_str().unwrap(),
+            "--json",
+        ])
+        .current_dir(current_dir)
+        .env("HOME", home)
+        .env("USERPROFILE", home)
+        .env("CODEX_HOME", codex_home);
+    match env_config {
+        Some(path) => {
+            command.env("CODEXIFY_CONFIG", path);
+        }
+        None => {
+            command.env_remove("CODEXIFY_CONFIG");
+        }
+    }
+    let output = command.output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    (
+        serde_json::from_slice(&output.stdout).unwrap(),
+        String::from_utf8(output.stderr).unwrap(),
+    )
+}
+
+#[test]
+fn config_discovery_prefers_env_then_user_then_legacy() {
+    let root = TempDir::new().unwrap();
+    let access = root.path().join("projects");
+    let current_dir = root.path().join("cwd");
+    let home = root.path().join("home");
+    let codex_home = root.path().join("codex-home");
+    let env_project = access.join("env-project");
+    let user_project = access.join("user-project");
+    let legacy_project = access.join("legacy-project");
+    for directory in [
+        &access,
+        &current_dir,
+        &home,
+        &codex_home,
+        &env_project,
+        &user_project,
+        &legacy_project,
+    ] {
+        fs::create_dir_all(directory).unwrap();
+    }
+
+    let env_config = root.path().join("env.json");
+    let user_config = home.join(".codexify").join("codex.config.json");
+    let legacy_config = current_dir.join("codex.config.json");
+    write_catalog_config(&env_config, &env_project, "Environment");
+    write_catalog_config(&user_config, &user_project, "User");
+    write_catalog_config(&legacy_config, &legacy_project, "Legacy");
+
+    let (value, stderr) =
+        run_discovered_config(&access, &current_dir, &home, &codex_home, Some(&env_config));
+    assert_eq!(value["projects"][0]["name"], "Environment");
+    assert!(!stderr.contains("legacy working-directory config"));
+
+    let (value, stderr) = run_discovered_config(&access, &current_dir, &home, &codex_home, None);
+    assert_eq!(value["projects"][0]["name"], "User");
+    assert!(!stderr.contains("legacy working-directory config"));
+
+    fs::remove_file(user_config).unwrap();
+    let (value, stderr) = run_discovered_config(&access, &current_dir, &home, &codex_home, None);
+    assert_eq!(value["projects"][0]["name"], "Legacy");
+    assert!(stderr.contains("legacy working-directory config"));
+    assert!(stderr.contains(".codexify"));
+}
+
 #[test]
 fn json_command_lists_native_projects_with_explicit_metadata() {
     let root = TempDir::new().unwrap();

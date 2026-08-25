@@ -2,9 +2,12 @@
 //!
 //! An existing `codex.config.json` keeps working: every field is read with its
 //! original camelCase name, absent sections fall back to the same defaults the
-//! TypeScript used, and a missing config file is tolerated.
+//! TypeScript used, and a missing config file is tolerated. Server-level config
+//! defaults to `~/.codexify/codex.config.json`; the old working-directory file
+//! remains a warned compatibility fallback.
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
+use std::io;
 use std::path::{Path, PathBuf};
 
 use clap::{ArgAction, Args, Parser, Subcommand};
@@ -27,6 +30,10 @@ use crate::types::{
     WorktreeUpstreamRefreshMode,
 };
 use crate::util::home_dir;
+
+pub const CODEXIFY_CONFIG_ENV: &str = "CODEXIFY_CONFIG";
+const CONFIG_FILE_NAME: &str = "codex.config.json";
+const CONFIG_HOME_DIR: &str = ".codexify";
 
 #[derive(Parser, Debug)]
 #[command(
@@ -79,7 +86,8 @@ pub struct Cli {
     #[arg(long = "api-key")]
     pub api_key: Option<String>,
 
-    /// Config file path. Default: ./codex.config.json (tolerated if missing).
+    /// Config file path. Default: CODEXIFY_CONFIG, then ~/.codexify/codex.config.json.
+    /// A working-directory codex.config.json remains a warned legacy fallback.
     #[arg(long, global = true)]
     pub config: Option<String>,
 
@@ -131,7 +139,7 @@ pub enum CliCommand {
     },
     /// Interactively configure a native OpenAI tunnel and ChatGPT connector.
     ///
-    /// The wizard reads the global `--config` and `--work-dir` options.
+    /// The wizard reads `--config`, CODEXIFY_CONFIG, and the global `--work-dir` option.
     Quickstart,
 }
 
@@ -852,39 +860,248 @@ fn resolve_project_clone_dir(
     Ok(clone_dir)
 }
 
-fn config_file_path(cli: &Cli) -> PathBuf {
-    cli.config
-        .as_deref()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("codex.config.json"))
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConfigPathSource {
+    CommandLine,
+    Environment,
+    User,
+    LegacyWorkingDirectory,
+    Defaults,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ConfigPathSelection {
+    path: Option<PathBuf>,
+    source: ConfigPathSource,
+    user_path: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuickstartConfigSelection {
+    pub path: PathBuf,
+    pub explicit: bool,
+}
+
+pub fn user_config_path(home: &Path) -> PathBuf {
+    home.join(CONFIG_HOME_DIR).join(CONFIG_FILE_NAME)
+}
+
+fn absolute_config_path(current_dir: &Path, path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        current_dir.join(path)
+    }
+}
+
+fn explicit_config_path(
+    cli_config: Option<&str>,
+    env_config: Option<&OsStr>,
+    current_dir: &Path,
+) -> Option<(PathBuf, ConfigPathSource)> {
+    if let Some(path) = cli_config {
+        return Some((
+            absolute_config_path(current_dir, Path::new(path)),
+            ConfigPathSource::CommandLine,
+        ));
+    }
+    env_config.filter(|value| !value.is_empty()).map(|path| {
+        (
+            absolute_config_path(current_dir, Path::new(path)),
+            ConfigPathSource::Environment,
+        )
+    })
+}
+
+fn config_path_is_present(path: &Path) -> bool {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => true,
+        Err(error) => error.kind() != io::ErrorKind::NotFound,
+    }
+}
+
+fn select_config_path_with(
+    cli_config: Option<&str>,
+    env_config: Option<&OsStr>,
+    current_dir: &Path,
+    home: Option<&Path>,
+) -> ConfigPathSelection {
+    let user_path = home
+        .filter(|path| !path.as_os_str().is_empty())
+        .map(user_config_path)
+        .map(|path| absolute_config_path(current_dir, &path));
+    if let Some((path, source)) = explicit_config_path(cli_config, env_config, current_dir) {
+        return ConfigPathSelection {
+            path: Some(path),
+            source,
+            user_path,
+        };
+    }
+    if let Some(path) = user_path
+        .as_ref()
+        .filter(|path| config_path_is_present(path))
+    {
+        return ConfigPathSelection {
+            path: Some(path.clone()),
+            source: ConfigPathSource::User,
+            user_path,
+        };
+    }
+
+    let legacy_path = current_dir.join(CONFIG_FILE_NAME);
+    if config_path_is_present(&legacy_path) {
+        return ConfigPathSelection {
+            path: Some(legacy_path),
+            source: ConfigPathSource::LegacyWorkingDirectory,
+            user_path,
+        };
+    }
+
+    match user_path {
+        Some(path) => ConfigPathSelection {
+            path: Some(path.clone()),
+            source: ConfigPathSource::User,
+            user_path: Some(path),
+        },
+        None => ConfigPathSelection {
+            path: None,
+            source: ConfigPathSource::Defaults,
+            user_path: None,
+        },
+    }
+}
+
+fn select_config_path(cli: &Cli) -> Result<ConfigPathSelection, String> {
+    let current_dir = std::env::current_dir()
+        .map_err(|error| format!("could not determine the current directory: {error}"))?;
+    let env_config = std::env::var_os(CODEXIFY_CONFIG_ENV);
+    let home = home_dir();
+    Ok(select_config_path_with(
+        cli.config.as_deref(),
+        env_config.as_deref(),
+        &current_dir,
+        home.as_deref(),
+    ))
+}
+
+fn config_path_for_quickstart_with(
+    cli_config: Option<&str>,
+    env_config: Option<&OsStr>,
+    current_dir: &Path,
+    home: Option<&Path>,
+) -> Result<QuickstartConfigSelection, String> {
+    if let Some((path, _)) = explicit_config_path(cli_config, env_config, current_dir) {
+        return Ok(QuickstartConfigSelection {
+            path,
+            explicit: true,
+        });
+    }
+    home.filter(|path| !path.as_os_str().is_empty())
+        .map(user_config_path)
+        .map(|path| absolute_config_path(current_dir, &path))
+        .map(|path| QuickstartConfigSelection {
+            path,
+            explicit: false,
+        })
+        .ok_or_else(|| {
+            format!(
+                "quickstart cannot locate the user's home directory; pass --config or set {CODEXIFY_CONFIG_ENV}"
+            )
+        })
+}
+
+pub fn config_path_for_quickstart(cli: &Cli) -> Result<QuickstartConfigSelection, String> {
+    let current_dir = std::env::current_dir()
+        .map_err(|error| format!("could not determine the current directory: {error}"))?;
+    let env_config = std::env::var_os(CODEXIFY_CONFIG_ENV);
+    let home = home_dir();
+    config_path_for_quickstart_with(
+        cli.config.as_deref(),
+        env_config.as_deref(),
+        &current_dir,
+        home.as_deref(),
+    )
+}
+
+fn warn_legacy_config(selection: &ConfigPathSelection, path: &Path) {
+    if selection.source != ConfigPathSource::LegacyWorkingDirectory {
+        return;
+    }
+    match &selection.user_path {
+        Some(user_path) => eprintln!(
+            "Warning: using legacy working-directory config at {}. Move it to {} or select it explicitly with --config or {CODEXIFY_CONFIG_ENV}.",
+            path.display(),
+            user_path.display()
+        ),
+        None => eprintln!(
+            "Warning: using legacy working-directory config at {}. Select it explicitly with --config or {CODEXIFY_CONFIG_ENV}.",
+            path.display()
+        ),
+    }
+}
+
+fn announce_loaded_config(selection: &ConfigPathSelection, path: &Path) {
+    match selection.source {
+        ConfigPathSource::CommandLine => println!("Config: {} (from --config)", path.display()),
+        ConfigPathSource::Environment => {
+            println!("Config: {} (from {CODEXIFY_CONFIG_ENV})", path.display())
+        }
+        ConfigPathSource::LegacyWorkingDirectory => println!(
+            "Config: {} (legacy working-directory fallback)",
+            path.display()
+        ),
+        ConfigPathSource::User => println!("Config: {} (user config)", path.display()),
+        ConfigPathSource::Defaults => {}
+    }
+}
+
+fn announce_missing_config(selection: &ConfigPathSelection) {
+    match (&selection.path, selection.source) {
+        (Some(path), ConfigPathSource::CommandLine) => println!(
+            "Config: no file at {} selected by --config — using built-in defaults",
+            path.display()
+        ),
+        (Some(path), ConfigPathSource::Environment) => println!(
+            "Config: no file at {} selected by {CODEXIFY_CONFIG_ENV} — using built-in defaults",
+            path.display()
+        ),
+        (Some(path), _) => println!(
+            "Config: no file at {} — using built-in defaults (override with --config or {CODEXIFY_CONFIG_ENV})",
+            path.display()
+        ),
+        (None, _) => println!(
+            "Config: no user home or legacy working-directory config available — using built-in defaults (set --config or {CODEXIFY_CONFIG_ENV})"
+        ),
+    }
 }
 
 fn load_file_config(cli: &Cli, announce: bool) -> Result<FileConfig, String> {
-    let config_path = config_file_path(cli);
-    let display_path = if config_path.is_absolute() {
-        config_path.clone()
-    } else {
-        std::env::current_dir()
-            .unwrap_or_default()
-            .join(&config_path)
+    let selection = select_config_path(cli)?;
+    let Some(config_path) = selection.path.as_deref() else {
+        if announce {
+            announce_missing_config(&selection);
+        }
+        return Ok(FileConfig::default());
     };
-    match std::fs::read_to_string(&config_path) {
+    match std::fs::read_to_string(config_path) {
         Ok(text) => {
+            warn_legacy_config(&selection, config_path);
             if announce {
-                println!("Config: {}", display_path.display());
+                announce_loaded_config(&selection, config_path);
             }
             serde_json::from_str(&text)
                 .map_err(|error| format!("invalid config file {}: {error}", config_path.display()))
         }
-        Err(_) => {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
             if announce {
-                println!(
-                    "Config: no file at {} — using built-in defaults (pass --config to point elsewhere)",
-                    display_path.display()
-                );
+                announce_missing_config(&selection);
             }
             Ok(FileConfig::default())
         }
+        Err(error) => Err(format!(
+            "could not read config file {}: {error}",
+            config_path.display()
+        )),
     }
 }
 
@@ -1177,6 +1394,126 @@ mod tests {
             openai_tunnel_client: None,
             openai_tunnel_organization_id: None,
         }
+    }
+
+    #[test]
+    fn config_path_precedence_is_cli_env_user_legacy_then_defaults() {
+        let root = tempfile::tempdir().unwrap();
+        let current_dir = root.path().join("cwd");
+        let home = root.path().join("home");
+        std::fs::create_dir_all(&current_dir).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+
+        let user_path = user_config_path(&home);
+        std::fs::create_dir_all(user_path.parent().unwrap()).unwrap();
+        std::fs::write(&user_path, "{}").unwrap();
+        let legacy_path = current_dir.join(CONFIG_FILE_NAME);
+        std::fs::write(&legacy_path, "{}").unwrap();
+
+        let selected = select_config_path_with(
+            Some("cli.json"),
+            Some(OsStr::new("env.json")),
+            &current_dir,
+            Some(&home),
+        );
+        assert_eq!(selected.source, ConfigPathSource::CommandLine);
+        assert_eq!(
+            selected.path.as_deref(),
+            Some(current_dir.join("cli.json").as_path())
+        );
+
+        let selected = select_config_path_with(
+            None,
+            Some(OsStr::new("env.json")),
+            &current_dir,
+            Some(&home),
+        );
+        assert_eq!(selected.source, ConfigPathSource::Environment);
+        assert_eq!(
+            selected.path.as_deref(),
+            Some(current_dir.join("env.json").as_path())
+        );
+
+        let selected =
+            select_config_path_with(None, Some(OsStr::new("")), &current_dir, Some(&home));
+        assert_eq!(selected.source, ConfigPathSource::User);
+        assert_eq!(selected.path.as_deref(), Some(user_path.as_path()));
+
+        let selected = select_config_path_with(None, None, &current_dir, Some(&home));
+        assert_eq!(selected.source, ConfigPathSource::User);
+        assert_eq!(selected.path.as_deref(), Some(user_path.as_path()));
+
+        std::fs::remove_file(&user_path).unwrap();
+        let selected = select_config_path_with(None, None, &current_dir, Some(&home));
+        assert_eq!(selected.source, ConfigPathSource::LegacyWorkingDirectory);
+        assert_eq!(selected.path.as_deref(), Some(legacy_path.as_path()));
+        assert_eq!(selected.user_path.as_deref(), Some(user_path.as_path()));
+
+        std::fs::remove_file(&legacy_path).unwrap();
+        let selected = select_config_path_with(None, None, &current_dir, Some(&home));
+        assert_eq!(selected.source, ConfigPathSource::User);
+        assert_eq!(selected.path.as_deref(), Some(user_path.as_path()));
+
+        let selected = select_config_path_with(None, None, &current_dir, None);
+        assert_eq!(selected.source, ConfigPathSource::Defaults);
+        assert!(selected.path.is_none());
+
+        let selected = select_config_path_with(None, None, &current_dir, Some(Path::new("")));
+        assert_eq!(selected.source, ConfigPathSource::Defaults);
+        assert!(selected.path.is_none());
+    }
+
+    #[test]
+    fn quickstart_defaults_to_user_config_but_honors_explicit_sources() {
+        let root = tempfile::tempdir().unwrap();
+        let current_dir = root.path().join("cwd");
+        let home = root.path().join("home");
+
+        let selected =
+            config_path_for_quickstart_with(None, None, &current_dir, Some(&home)).unwrap();
+        assert_eq!(selected.path, user_config_path(&home));
+        assert!(!selected.explicit);
+
+        let selected = config_path_for_quickstart_with(
+            None,
+            Some(OsStr::new("env.json")),
+            &current_dir,
+            Some(&home),
+        )
+        .unwrap();
+        assert_eq!(selected.path, current_dir.join("env.json"));
+        assert!(selected.explicit);
+
+        let selected = config_path_for_quickstart_with(
+            Some("cli.json"),
+            Some(OsStr::new("env.json")),
+            &current_dir,
+            Some(&home),
+        )
+        .unwrap();
+        assert_eq!(selected.path, current_dir.join("cli.json"));
+        assert!(selected.explicit);
+
+        let selected = config_path_for_quickstart_with(
+            Some(user_config_path(&home).to_str().unwrap()),
+            None,
+            &current_dir,
+            Some(&home),
+        )
+        .unwrap();
+        assert_eq!(selected.path, user_config_path(&home));
+        assert!(selected.explicit);
+
+        assert!(
+            config_path_for_quickstart_with(None, None, &current_dir, None)
+                .unwrap_err()
+                .contains(CODEXIFY_CONFIG_ENV)
+        );
+        assert!(
+            config_path_for_quickstart_with(None, None, &current_dir, Some(Path::new("")))
+                .unwrap_err()
+                .contains(CODEXIFY_CONFIG_ENV)
+        );
     }
 
     #[test]
