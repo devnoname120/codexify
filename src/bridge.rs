@@ -709,9 +709,21 @@ fn configures_authorization_header(spec: &crate::types::McpServerSpec) -> bool {
         .any(|name| name.eq_ignore_ascii_case(AUTHORIZATION.as_str()))
 }
 
-fn ensure_rustls_crypto_provider() {
-    // RMCP avoids bundling AWS-LC; install the ring provider already used by Codexify.
-    let _ = rustls::crypto::ring::default_provider().install_default();
+/// Build the reqwest client used for upstream Streamable HTTP servers.
+///
+/// The redirect policy is set to `none` in our own code rather than relying on
+/// RMCP's default client: a redirect would otherwise let the upstream replay our
+/// caller-supplied `Authorization` and custom headers to an arbitrary location,
+/// so we own that guarantee here where it cannot regress under a dependency
+/// bump. Idle connection pooling is disabled for the same reason RMCP's default
+/// client disables it — to avoid TCP Delayed-ACK stalls when a response body is
+/// not fully drained before the pooled connection is reused.
+fn build_upstream_client() -> Result<reqwest::Client, String> {
+    crate::tls::client_builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .pool_max_idle_per_host(0)
+        .build()
+        .map_err(|error| format!("could not build the upstream HTTP client: {error}"))
 }
 
 async fn connect_one_with_env(
@@ -771,7 +783,6 @@ async fn connect_one_with_env(
                         .to_string(),
                 );
             }
-            ensure_rustls_crypto_provider();
             let headers = build_http_headers(spec, env_lookup);
 
             let mut transport_config = StreamableHttpClientTransportConfig::with_uri(url);
@@ -779,7 +790,10 @@ async fn connect_one_with_env(
                 transport_config = transport_config.auth_header(token);
             }
             transport_config = transport_config.custom_headers(headers);
-            let transport = StreamableHttpClientTransport::from_config(transport_config);
+            let transport = StreamableHttpClientTransport::with_client(
+                build_upstream_client()?,
+                transport_config,
+            );
             let connect = async {
                 let service = ().serve(transport).await.map_err(|error| error.to_string())?;
                 let tools = service
@@ -1252,5 +1266,46 @@ mod tests {
         assert!(tool_is_enabled(&spec, "read"));
         assert!(!tool_is_enabled(&spec, "write"));
         assert!(!tool_is_enabled(&spec, "other"));
+    }
+
+    #[tokio::test]
+    async fn upstream_client_does_not_follow_redirects() {
+        use axum::http::{StatusCode, header::LOCATION};
+        use axum::routing::get;
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new()
+            .route(
+                "/redirect",
+                get(|| async { (StatusCode::FOUND, [(LOCATION, "/target")]) }),
+            )
+            .route("/target", get(|| async { "arrived" }));
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let client = build_upstream_client().unwrap();
+        let response = client
+            .get(format!("http://{address}/redirect"))
+            .send()
+            .await
+            .unwrap();
+
+        // The client must surface the 3xx itself rather than transparently
+        // following it — otherwise a redirecting upstream could have our
+        // caller-supplied Authorization and custom headers replayed to an
+        // arbitrary target.
+        assert_eq!(response.status().as_u16(), 302);
+        assert_eq!(
+            response
+                .headers()
+                .get("location")
+                .and_then(|value| value.to_str().ok()),
+            Some("/target")
+        );
+        task.abort();
     }
 }

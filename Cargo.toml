@@ -1,6 +1,6 @@
 [package]
 name = "codexify"
-version = "1.2.0"
+version = "1.3.0"
 edition = "2024"
 description = "Codexify MCP bridge, ported to Rust: a local Streamable-HTTP MCP server exposing Codex-style agent tools over a chosen work directory."
 license = "MIT"
@@ -33,7 +33,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 async-trait = "0.1.92"
 toml = "1.1.4"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"] }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 tempfile = "3"
 zip = { version = "4", default-features = false, features = ["deflate"] }

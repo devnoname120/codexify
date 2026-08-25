@@ -81,7 +81,7 @@ pub enum TunnelHealth {
 /// Builds the loopback-only HTTP client used to probe the tunnel-client's health
 /// endpoints. Shared by startup readiness and the running-tunnel health monitor.
 pub fn build_health_client() -> anyhow::Result<Client> {
-    Client::builder()
+    crate::tls::client_builder()
         .no_proxy()
         .timeout(Duration::from_secs(3))
         .build()
@@ -482,7 +482,7 @@ async fn install_managed_client(
 }
 
 async fn fetch_bytes(url: &str) -> anyhow::Result<Vec<u8>> {
-    let client = Client::builder()
+    let client = crate::tls::client_builder()
         .redirect(Policy::limited(5))
         .timeout(Duration::from_secs(120))
         .build()
@@ -948,7 +948,7 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let base_url = Url::parse(&format!("http://{address}/")).unwrap();
-        let client = Client::builder().no_proxy().build().unwrap();
+        let client = crate::tls::client_builder().no_proxy().build().unwrap();
 
         assert_eq!(
             client

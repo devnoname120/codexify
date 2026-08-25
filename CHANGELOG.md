@@ -6,6 +6,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-08-25
+
 ### Added
 
 - Optional Git worktree isolation for concurrent conversations. In multi-project
@@ -106,6 +108,19 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   in-flight request. Legacy SSE/WebSocket transports, literal Codex
   `bearer_token` values, mixed stdio/HTTP settings, and ambiguous duplicate
   Authorization configuration are rejected explicitly.
+- The upstream Streamable HTTP client's redirect policy is now set to `none` in
+  Codexify's own code (`build_upstream_client`) rather than inherited from
+  RMCP's default client, so the guarantee that caller-supplied
+  `Authorization`/custom headers are never replayed to a redirect target cannot
+  silently regress under a dependency bump; a regression test asserts it.
+
+### Changed
+
+- Consolidated on a single `reqwest` 0.13 (the version RMCP's Streamable HTTP
+  client transport uses), removing the second `reqwest` 0.12 that was compiled
+  in alongside it. The whole process now shares one TLS stack — rustls with the
+  ring crypto provider — installed once before any HTTP client is built, so
+  there is a single set of trust roots and no aws-lc-rs backend.
 
 ## [1.2.0] - 2026-08-24
 
@@ -239,7 +254,8 @@ filename sort uses byte/Unicode ordering rather than `localeCompare`;
 `write_file` reports UTF-8 byte counts; `exec_command` uses plain pipes, not a
 PTY. See the README's "Notes on the port" for the full list.
 
-[Unreleased]: https://github.com/devnoname120/codexify/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/devnoname120/codexify/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/devnoname120/codexify/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/devnoname120/codexify/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/devnoname120/codexify/releases/tag/v1.1.0
 [1.0.1]: https://github.com/devnoname120/codexify/releases/tag/v1.0.1

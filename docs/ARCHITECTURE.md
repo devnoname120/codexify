@@ -376,7 +376,10 @@ For each resulting server entry (sorted, non-disabled), `connect_one`:
 1. Selects stdio from `command`, or Streamable HTTP from `url`.
 2. For stdio, launches the child through `TokioChildProcess`; for HTTP, resolves
    the bearer-token environment variable and environment-backed headers, then
-   builds `StreamableHttpClientTransport` with RMCP's redirect-disabled reqwest client.
+   builds `StreamableHttpClientTransport` with an in-tree reqwest client whose
+   redirect policy is set to `none` (`build_upstream_client`), so a redirecting
+   upstream cannot have the caller-supplied `Authorization`/custom headers
+   replayed to another target.
 3. Runs the MCP handshake (`().serve(transport)`), then `list_all_tools()`, under
    `startupTimeoutSec` (20 s by default).
 4. Applies the optional `tools` allow-list, then `disabledTools` deny-list.

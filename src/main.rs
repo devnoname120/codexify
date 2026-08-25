@@ -108,6 +108,12 @@ fn run_projects_list(cli: &Cli, args: &ProjectsListArgs) -> Result<(), String> {
 
 #[tokio::main]
 async fn main() {
+    // We build reqwest with `rustls-no-provider`, so a rustls crypto provider
+    // must be installed process-wide before any HTTP client is built. Every
+    // client factory installs it too, but do it once up front so any client
+    // constructed by a dependency also finds a provider.
+    codexify::tls::ensure_crypto_provider();
+
     let cli = Cli::parse();
     if let Some(CliCommand::Projects {
         command: ProjectsCommand::List(args),
