@@ -53,10 +53,19 @@ fn artifact_ingress_can_be_omitted_by_configuration() {
 #[test]
 fn conversation_auth_mode_adds_authenticate_before_protected_tools() {
     let mut config = default_config(PathBuf::from("/tmp"));
-    config.conversation_auth_token = Some("codexify_chat_0123456789abcdef0123456789abcdef".into());
+    config.conversation_auth_token =
+        Some("codexify_chat_0123456789abcdef0123456789abcdef".into());
     let tools = load_tools_for_config(&config);
     assert_eq!(tools.len(), 28);
     assert_eq!(tools[0].name(), "authenticate");
+    let schema = tools[0].input_schema();
+    assert!(schema["properties"].get("checksum").is_some());
+    assert!(schema["properties"].get("token").is_none());
+    assert_eq!(schema["required"], serde_json::json!(["checksum"]));
+    let description = tools[0].description().to_ascii_lowercase();
+    assert!(description.contains("checksum"));
+    assert!(!description.contains("token"));
+    assert!(!description.contains("api key"));
 
     config.multi_project = true;
     let tools = load_tools_for_config(&config);

@@ -127,7 +127,7 @@ impl CodexHandler {
             "This MCP transport session"
         };
         Some(ToolResult::error(format!(
-            "{scope} is not authorized to use the connector. Call the `authenticate` tool once with the configured conversation token, then retry."
+            "{scope} is not authorized to use the connector. Call the `authenticate` tool once with the configured authentication checksum, then retry."
         )))
     }
 }

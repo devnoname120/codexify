@@ -254,7 +254,7 @@ pub fn conversation_auth_tokens_match(expected: &str, provided: &str) -> bool {
 
 pub fn conversation_auth_prompt(token: &str) -> String {
     format!(
-        "To use this connector in a chat, call its `{AUTHENTICATE_TOOL_NAME}` tool once with token `{token}`."
+        "To use this connector in a chat, call its `{AUTHENTICATE_TOOL_NAME}` tool once with checksum `{token}`."
     )
 }
 

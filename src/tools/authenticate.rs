@@ -18,23 +18,23 @@ impl Tool for Authenticate {
     }
 
     fn description(&self) -> String {
-        "Authorize this ChatGPT conversation to use the connector. Call once with the token supplied by the user or in ChatGPT Project instructions. After verification, only the authorization decision is cached; the submitted token is not retained.".into()
+        "Call this function when using the codexify connector for the first time in a conversation, and only once; there is no need to call it again afterwards. Provide the checksum supplied by the user or system prompt for codexify authentication. After verification, only the authorization decision is cached; the submitted checksum is not retained.".into()
     }
 
     fn input_schema(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
-                "token": {
+                "checksum": {
                     "type": "string",
-                    "description": "The connector conversation-authentication token.",
+                    "description": "The checksum supplied for codexify authentication.",
                     "minLength": MIN_CONVERSATION_AUTH_TOKEN_BYTES,
                     "maxLength": MAX_CONVERSATION_AUTH_TOKEN_BYTES,
                     "pattern": "^[A-Za-z0-9_-]+$",
                     "writeOnly": true
                 }
             },
-            "required": ["token"],
+            "required": ["checksum"],
             "additionalProperties": false
         })
     }
@@ -68,7 +68,7 @@ impl Tool for Authenticate {
         let Some(expected) = config.conversation_auth_token.as_deref() else {
             return ToolResult::error("Conversation authentication is not enabled.");
         };
-        let Some(provided) = arg_str(&args, "token") else {
+        let Some(provided) = arg_str(&args, "checksum") else {
             return ToolResult::error("Authentication failed.");
         };
         if validate_conversation_auth_token(provided).is_err()
@@ -120,7 +120,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn valid_token_authorizes_only_the_current_conversation() {
+    async fn valid_checksum_authorizes_only_the_current_conversation() {
         let root = tempfile::tempdir().unwrap();
         let mut config = default_config(root.path().to_path_buf());
         let token = "codexify_chat_0123456789abcdef0123456789abcdef";
@@ -133,7 +133,7 @@ mod tests {
 
         let result = Authenticate
             .call_with_context(
-                json!({ "token": token }),
+                json!({ "checksum": token }),
                 &config,
                 &session,
                 &request_context,
@@ -146,7 +146,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn invalid_token_does_not_authorize_or_echo_the_value() {
+    async fn invalid_checksum_does_not_authorize_or_echo_the_value() {
         let root = tempfile::tempdir().unwrap();
         let mut config = default_config(root.path().to_path_buf());
         config.conversation_auth_token =
@@ -159,7 +159,7 @@ mod tests {
 
         let result = Authenticate
             .call_with_context(
-                json!({ "token": invalid }),
+                json!({ "checksum": invalid }),
                 &config,
                 &session,
                 &request_context,
@@ -184,7 +184,7 @@ mod tests {
 
         Authenticate
             .call_with_context(
-                json!({ "token": token }),
+                json!({ "checksum": token }),
                 &config,
                 &first_session,
                 &request_context,

@@ -326,7 +326,9 @@ configuration remain shared. Native Codex project entries are intentionally re-r
 when the catalogue tool is called rather than copied into `AppConfig` at startup.
 `conversationAuthToken` is a top-level optional secret with no CLI override; its
 presence also controls registry inclusion of the `authenticate` tool and the
-authentication-only initialization instructions.
+authentication-only initialization instructions. The model-facing `authenticate`
+schema deliberately exposes this configured value only as a `checksum` parameter;
+the underlying comparison and persistence semantics are otherwise unchanged.
 
 ### `quickstart` CLI (`quickstart.rs`)
 The `quickstart` subcommand runs before server configuration is loaded. It uses a

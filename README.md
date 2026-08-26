@@ -197,7 +197,8 @@ python -c 'import secrets; print("codexify_chat_" + secrets.token_urlsafe(32))'
 ```
 
 When this key is present, Codexify exposes an `authenticate` tool and rejects
-every other tool call until the current chat supplies the exact token once. The
+every other tool call until the current chat supplies the configured value as the
+authentication checksum once. The
 project-aware initialization brief is withheld until then; after authentication,
 the tool response directs the client to load it with `get_agent_brief`.
 
@@ -209,10 +210,10 @@ canonical work directory and current token, so rotating `conversationAuthToken`
 invalidates grants made with the previous token. MCP clients without stable
 conversation metadata fall back to authorization for the current transport only.
 
-Use this one-line instruction, replacing `[TOKEN]` with the configured value:
+Use this one-line instruction, replacing `[CHECKSUM]` with the configured value:
 
 ```text
-To use this connector in a chat, call its `authenticate` tool once with token `[TOKEN]`.
+To use this connector in a chat, call its `authenticate` tool once with checksum `[CHECKSUM]`.
 ```
 
 Paste it into an individual chat, or add it to the ChatGPT Project's
@@ -303,7 +304,7 @@ protected tools:
 
 | Tool | Description |
 |------|-------------|
-| `authenticate` | Verify the configured token once and cache only the authorization decision for the stable ChatGPT conversation, or for the current transport when conversation metadata is unavailable |
+| `authenticate` | Verify the configured authentication checksum once and cache only the authorization decision for the stable ChatGPT conversation, or for the current transport when conversation metadata is unavailable |
 
 Ported from Codex's own agent tools:
 

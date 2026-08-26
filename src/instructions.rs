@@ -10,7 +10,7 @@ use crate::project_doc::{PROJECT_DOC_SEPARATOR, load_project_doc};
 use crate::skills::{discover_skills, render_skill_catalog};
 use crate::types::AppConfig;
 
-pub const CONVERSATION_AUTH_INSTRUCTIONS: &str = "This connector requires per-conversation authentication. Before calling any other tool, call `authenticate` once with the token supplied in the chat or ChatGPT Project instructions. After authentication, follow the tool response to load the project brief.";
+pub const CONVERSATION_AUTH_INSTRUCTIONS: &str = "This connector requires per-conversation authentication. Before calling any other tool, call `authenticate` once with the checksum supplied in the chat or ChatGPT Project instructions. After authentication, follow the tool response to load the project brief.";
 
 /// The behavioural half of what Codex tells its model, ported from
 /// `codex-rs/core/gpt-5.2-codex_prompt.md`.
