@@ -6,6 +6,14 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- The `show_changes` MCP app now uses a compact, single-line file list with
+  initially collapsed per-file diffs, a short reveal control for larger change
+  sets, and smaller explicitly sized monospace patch text across web and native
+  mobile/desktop hosts. Patch panes remain horizontally scrollable without
+  expanding the host card, and generated Git diffs use the histogram algorithm.
+
 ## [1.7.0] - 2026-08-26
 
 ### Added

@@ -21,6 +21,7 @@ const REVIEW_REF_ROOT: &str = "refs/codexify/review";
 const SYNTHETIC_IDENTITY_NAME: &str = "Codexify Review";
 const SYNTHETIC_IDENTITY_EMAIL: &str = "review@codexify.local";
 const MAX_GIT_ERROR_BYTES: usize = 64 * 1024;
+const REVIEW_DIFF_ALGORITHM: &str = "--diff-algorithm=histogram";
 
 static TRANSPORT_REVIEW_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -824,6 +825,7 @@ fn diff_args(kind: &str, baseline: &str, current: &str, pathspec: &Path) -> Vec<
         OsString::from("diff"),
         OsString::from("--no-ext-diff"),
         OsString::from("--no-textconv"),
+        OsString::from(REVIEW_DIFF_ALGORITHM),
         OsString::from("--find-renames"),
         OsString::from(kind),
         OsString::from("-z"),
@@ -1065,19 +1067,13 @@ impl PatchResult {
     }
 }
 
-async fn git_patch_bounded(
-    config: &AppConfig,
-    workspace: &ReviewWorkspace,
-    baseline: &str,
-    current: &str,
-    max_bytes: usize,
-    object_environment: &[(OsString, OsString)],
-) -> Result<PatchResult, String> {
+fn patch_args(workspace: &ReviewWorkspace, baseline: &str, current: &str) -> Vec<OsString> {
     let mut args = vec![
         OsString::from("--literal-pathspecs"),
         OsString::from("diff"),
         OsString::from("--no-ext-diff"),
         OsString::from("--no-textconv"),
+        OsString::from(REVIEW_DIFF_ALGORITHM),
         OsString::from("--find-renames"),
         OsString::from("--binary"),
         OsString::from("--full-index"),
@@ -1092,6 +1088,18 @@ async fn git_patch_bounded(
         OsString::from("--"),
         workspace.pathspec.as_os_str().to_os_string(),
     ]);
+    args
+}
+
+async fn git_patch_bounded(
+    config: &AppConfig,
+    workspace: &ReviewWorkspace,
+    baseline: &str,
+    current: &str,
+    max_bytes: usize,
+    object_environment: &[(OsString, OsString)],
+) -> Result<PatchResult, String> {
+    let args = patch_args(workspace, baseline, current);
     let mut command = git_command(config, &workspace.git_root, &args, object_environment);
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = command
@@ -1336,5 +1344,38 @@ fn git_failure(command: &str, stderr: &[u8], code: Option<i32>) -> String {
         format!("{command} failed with exit code {}", code.unwrap_or(-1))
     } else {
         format!("{command} failed: {detail}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rendered_args(args: Vec<OsString>) -> Vec<String> {
+        args.into_iter()
+            .map(|value| value.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn every_review_diff_uses_histogram_and_rename_detection() {
+        let summary_args = rendered_args(diff_args(
+            "--name-status",
+            "baseline",
+            "current",
+            Path::new("."),
+        ));
+        let workspace = ReviewWorkspace {
+            git_root: PathBuf::from("."),
+            pathspec: PathBuf::from("."),
+            scope: ".".to_string(),
+            key: "test".to_string(),
+        };
+        let patch_args = rendered_args(patch_args(&workspace, "baseline", "current"));
+
+        for args in [&summary_args, &patch_args] {
+            assert!(args.iter().any(|arg| arg == REVIEW_DIFF_ALGORITHM));
+            assert!(args.iter().any(|arg| arg == "--find-renames"));
+        }
     }
 }

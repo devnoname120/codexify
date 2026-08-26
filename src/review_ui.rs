@@ -46,6 +46,7 @@ pub const REVIEW_UI_HTML: &str = r##"<!doctype html>
   color-scheme: light dark;
   --bg: var(--color-background-primary, light-dark(#ffffff, #171717));
   --panel: var(--color-background-secondary, light-dark(#f6f7f8, #222222));
+  --panel-hover: light-dark(#eef0f2, #292929);
   --text: var(--color-text-primary, light-dark(#171717, #f4f4f4));
   --muted: var(--color-text-secondary, light-dark(#62666d, #a7a7a7));
   --border: var(--color-border-primary, light-dark(#d9dce1, #3a3a3a));
@@ -54,46 +55,63 @@ pub const REVIEW_UI_HTML: &str = r##"<!doctype html>
   --deleted-bg: light-dark(#fceaea, #421d1d);
   --deleted-text: light-dark(#8a1f1f, #f2a0a0);
   --accent: light-dark(#2457c5, #8db4ff);
+  --file-row-height: 28px;
+  --diff-font-size: 9.5px;
   font-family: var(--font-sans, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
 }
 * { box-sizing: border-box; }
+html, body { width: 100%; max-width: 100%; overflow-x: hidden; -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
 body { margin: 0; background: var(--bg); color: var(--text); }
-main { display: grid; gap: 12px; padding: 14px; }
-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
-h1 { margin: 0; font-size: 16px; line-height: 1.35; }
-.subhead { margin-top: 3px; color: var(--muted); font-size: 12px; }
-.badge { border: 1px solid var(--border); border-radius: 999px; padding: 4px 8px; color: var(--muted); font-size: 11px; white-space: nowrap; }
-.summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
-.metric { border: 1px solid var(--border); border-radius: 10px; padding: 9px 10px; background: var(--panel); }
-.metric strong { display: block; font-size: 16px; font-variant-numeric: tabular-nums; }
-.metric span { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .055em; }
-section { border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
-.section-title { display: flex; justify-content: space-between; gap: 12px; padding: 9px 11px; background: var(--panel); border-bottom: 1px solid var(--border); font-size: 12px; font-weight: 650; }
-.files { display: grid; }
-.file { display: grid; grid-template-columns: 94px minmax(0, 1fr) auto; align-items: center; gap: 10px; padding: 8px 11px; border-top: 1px solid var(--border); font-size: 12px; }
-.file:first-child { border-top: 0; }
-.status { color: var(--muted); text-transform: capitalize; }
-.path { min-width: 0; overflow-wrap: anywhere; font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace); }
-.stats { font-variant-numeric: tabular-nums; white-space: nowrap; }
+button, summary { color: inherit; font: inherit; }
+main { display: grid; width: 100%; min-width: 0; gap: 8px; padding: 10px; }
+header { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 6px 12px; }
+h1 { margin: 0; font-size: 14px; line-height: 1.25; }
+.subhead { margin-top: 2px; color: var(--muted); font-size: 10px; line-height: 1.35; overflow-wrap: anywhere; }
+.badge { border: 1px solid var(--border); border-radius: 999px; padding: 3px 7px; color: var(--muted); font-size: 9px; line-height: 1.25; white-space: nowrap; }
+.review { width: 100%; min-width: 0; max-width: 100%; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+.review-summary, .file-summary { cursor: pointer; list-style: none; -webkit-tap-highlight-color: transparent; }
+.review-summary::-webkit-details-marker, .file-summary::-webkit-details-marker { display: none; }
+.review-summary { display: grid; grid-template-columns: minmax(0, 1fr) auto 9px; align-items: center; gap: 8px; min-height: 32px; padding: 6px 9px; background: var(--panel); font-size: 11px; font-weight: 650; }
+.review-summary::after, .file-summary::after { content: ""; width: 7px; height: 7px; border-right: 1.5px solid var(--muted); border-bottom: 1.5px solid var(--muted); transform: rotate(-45deg); transition: transform 120ms ease; }
+.review[open] > .review-summary::after, .file-entry[open] > .file-summary::after { transform: rotate(45deg); }
+.review-summary:focus-visible, .file-summary:focus-visible, .show-more:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.summary-stats { display: flex; align-items: baseline; gap: 6px; font-size: 10px; font-weight: 500; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.binary-count { color: var(--muted); }
+.files { display: grid; width: 100%; min-width: 0; max-width: 100%; }
+.file-entry { width: 100%; min-width: 0; max-width: 100%; overflow: hidden; border-top: 1px solid var(--border); }
+.file-summary, .file-row { display: grid; width: 100%; min-width: 0; max-width: 100%; grid-template-columns: 12px minmax(0, 1fr) auto 8px; align-items: center; gap: 6px; min-height: var(--file-row-height); padding: 3px 9px; font-size: 10.5px; line-height: 1.25; }
+.file-row { grid-template-columns: 12px minmax(0, 1fr) auto; border-top: 1px solid var(--border); }
+.file-entry[open] > .file-summary, .file-summary:hover, .show-more:hover { background: var(--panel-hover); }
+.status { width: 12px; color: var(--muted); font-family: var(--font-sans, ui-sans-serif, system-ui, sans-serif); font-size: 8.5px; font-weight: 650; line-height: 1; text-align: center; }
+.path { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace); }
+.stats { font-size: 9.5px; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .add { color: var(--added-text); }
-.del { color: var(--deleted-text); margin-left: 7px; }
-.empty, .notice { padding: 18px 12px; color: var(--muted); font-size: 12px; text-align: center; }
-.warning { border: 1px solid var(--border); border-radius: 10px; padding: 9px 11px; color: var(--muted); font-size: 12px; }
-.diff-files { display: grid; }
-.diff-file { border-top: 1px solid var(--border); }
-.diff-file:first-child { border-top: 0; }
-.diff-heading { padding: 8px 11px; background: var(--panel); color: var(--muted); font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace); font-size: 11px; overflow-wrap: anywhere; }
-pre { margin: 0; overflow: auto; font: 11px/1.55 var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace); tab-size: 4; }
-.line { display: block; min-width: max-content; padding: 0 11px; white-space: pre; }
+.del { color: var(--deleted-text); margin-left: 5px; }
+.show-more { width: 100%; min-height: var(--file-row-height); padding: 4px 9px; border: 0; border-top: 1px solid var(--border); background: transparent; color: var(--muted); font-size: 10px; line-height: 1.25; text-align: left; cursor: pointer; }
+.empty, .notice { padding: 12px 9px; color: var(--muted); font-size: 10px; text-align: center; }
+.omitted { border-top: 1px solid var(--border); }
+.warning { border: 1px solid var(--border); border-radius: 9px; padding: 7px 9px; color: var(--muted); font-size: 10px; line-height: 1.35; }
+.diff-body { width: 100%; min-width: 0; max-width: 100%; overflow: hidden; border-top: 1px solid var(--border); }
+pre { width: 100%; min-width: 0; max-width: 100%; margin: 0; overflow-x: auto; overflow-y: hidden; overscroll-behavior-x: contain; -webkit-overflow-scrolling: touch; font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace); font-size: var(--diff-font-size); font-variant-ligatures: none; line-height: 1.4; tab-size: 4; }
+.line { display: block; width: max-content; min-width: 100%; padding: 0 8px; white-space: pre; }
 .line.added { background: var(--added-bg); color: var(--added-text); }
 .line.deleted { background: var(--deleted-bg); color: var(--deleted-text); }
 .line.hunk { color: var(--accent); background: var(--panel); }
 .line.meta { color: var(--muted); }
 @media (max-width: 520px) {
-  main { padding: 10px; }
-  .summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .file { grid-template-columns: 72px minmax(0, 1fr); }
-  .stats { grid-column: 2; }
+  :root { --file-row-height: 26px; --diff-font-size: 9px; }
+  main { gap: 6px; padding: 6px; }
+  header { gap: 4px 8px; }
+  h1 { font-size: 13px; }
+  .subhead { font-size: 9.5px; }
+  .badge { padding: 2px 6px; font-size: 8.5px; }
+  .review-summary { min-height: 30px; padding: 5px 7px; }
+  .file-summary, .file-row { padding: 2px 7px; font-size: 10px; }
+  .show-more { padding: 3px 7px; }
+  .line { padding: 0 6px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .review-summary::after, .file-summary::after { transition: none; }
 }
 </style>
 </head>
@@ -105,6 +123,7 @@ pre { margin: 0; overflow: auto; font: 11px/1.55 var(--font-mono, ui-monospace, 
 (() => {
   "use strict";
   const root = document.getElementById("root");
+  const INITIAL_VISIBLE_FILES = 3;
   let nextId = 1;
   const pending = new Map();
   let resizeObserver;
@@ -130,12 +149,6 @@ pre { margin: 0; overflow: auto; font: 11px/1.55 var(--font-mono, ui-monospace, 
     return node;
   }
 
-  function metric(value, label) {
-    const node = el("div", "metric");
-    node.append(el("strong", "", value), el("span", "", label));
-    return node;
-  }
-
   function splitPatch(patch) {
     const chunks = [];
     let current = null;
@@ -154,21 +167,140 @@ pre { margin: 0; overflow: auto; font: 11px/1.55 var(--font-mono, ui-monospace, 
     return chunks;
   }
 
-  function renderPatch(patch, container) {
-    for (const chunk of splitPatch(patch)) {
-      const article = el("article", "diff-file");
-      article.append(el("div", "diff-heading", chunk.heading));
-      const pre = el("pre");
-      for (const text of chunk.lines) {
-        let className = "line";
-        if (text.startsWith("+") && !text.startsWith("+++")) className += " added";
-        else if (text.startsWith("-") && !text.startsWith("---")) className += " deleted";
-        else if (text.startsWith("@@")) className += " hunk";
-        else if (/^(diff --git|index |--- |\+\+\+ |new file|deleted file|similarity|rename )/.test(text)) className += " meta";
-        pre.append(el("span", className, text + "\n"));
+  function displayPath(file, chunk) {
+    if (file && file.path) return file.previousPath ? `${file.previousPath} → ${file.path}` : file.path;
+    return chunk && chunk.heading ? chunk.heading : "Patch";
+  }
+
+  function pathNode(file, chunk) {
+    const text = displayPath(file, chunk);
+    const node = el("span", "path", text);
+    node.title = text;
+    return node;
+  }
+
+  function statusCode(status) {
+    return ({
+      added: "A",
+      modified: "M",
+      deleted: "D",
+      renamed: "R",
+      copied: "C",
+      type_changed: "T",
+      unmerged: "U"
+    })[status] || "M";
+  }
+
+  function statusNode(file) {
+    const status = file && file.status ? file.status : "changed";
+    const node = el("span", "status", statusCode(status));
+    node.title = status.replaceAll("_", " ");
+    return node;
+  }
+
+  function fileStats(file) {
+    const stats = el("span", "stats");
+    if (!file) return stats;
+    if (file.binary) stats.append(el("span", "binary-count", "bin"));
+    else stats.append(
+      el("span", "add", `+${file.additions || 0}`),
+      el("span", "del", `-${file.deletions || 0}`)
+    );
+    return stats;
+  }
+
+  function renderDiffLines(lines, container) {
+    const pre = el("pre");
+    for (const text of lines) {
+      let className = "line";
+      if (text.startsWith("+") && !text.startsWith("+++")) className += " added";
+      else if (text.startsWith("-") && !text.startsWith("---")) className += " deleted";
+      else if (text.startsWith("@@")) className += " hunk";
+      else if (/^(diff --git|index |--- |\+\+\+ |new file|deleted file|similarity|rename )/.test(text)) className += " meta";
+      pre.append(el("span", className, text + "\n"));
+    }
+    container.append(pre);
+  }
+
+  function scheduleSizeReport() {
+    if (typeof window.requestAnimationFrame === "function") window.requestAnimationFrame(reportSize);
+    else reportSize();
+  }
+
+  function diffDetails(file, chunk, unavailableReason) {
+    const details = el("details", "file-entry");
+    details.open = false;
+    const summary = el("summary", "file-summary");
+    summary.append(statusNode(file), pathNode(file, chunk), fileStats(file));
+    details.append(summary);
+
+    let rendered = false;
+    details.addEventListener("toggle", () => {
+      if (details.open && !rendered) {
+        rendered = true;
+        const body = el("div", "diff-body");
+        if (chunk) renderDiffLines(chunk.lines, body);
+        else body.append(el("div", "empty", unavailableReason || "No textual diff is available for this file."));
+        details.append(body);
       }
-      article.append(pre);
-      container.append(article);
+      scheduleSizeReport();
+    });
+    return details;
+  }
+
+  function fileRow(file) {
+    const row = el("div", "file-row");
+    row.append(statusNode(file), pathNode(file), fileStats(file));
+    return row;
+  }
+
+  function appendEntries(entries, container) {
+    for (const entry of entries) container.append(entry);
+    if (entries.length <= INITIAL_VISIBLE_FILES) return;
+
+    let expanded = false;
+    const button = el("button", "show-more");
+    button.type = "button";
+    const sync = () => {
+      entries.forEach((entry, index) => {
+        entry.hidden = !expanded && index >= INITIAL_VISIBLE_FILES;
+      });
+      button.textContent = expanded
+        ? "Show fewer files"
+        : `View ${entries.length - INITIAL_VISIBLE_FILES} more file${entries.length - INITIAL_VISIBLE_FILES === 1 ? "" : "s"}`;
+      button.setAttribute("aria-expanded", String(expanded));
+      scheduleSizeReport();
+    };
+    button.addEventListener("click", () => {
+      expanded = !expanded;
+      sync();
+    });
+    container.append(button);
+    sync();
+  }
+
+  function renderFiles(data, container) {
+    const files = Array.isArray(data.files) ? data.files : [];
+    const patchAvailable = Boolean(data.patchIncluded && typeof data.patch === "string" && data.patch);
+    const chunks = patchAvailable ? splitPatch(data.patch) : [];
+    const count = patchAvailable ? Math.max(files.length, chunks.length) : files.length;
+    const entries = [];
+
+    for (let index = 0; index < count; index += 1) {
+      entries.push(patchAvailable
+        ? diffDetails(files[index], chunks[index], data.patchOmittedReason)
+        : fileRow(files[index]));
+    }
+    appendEntries(entries, container);
+
+    if (!entries.length) {
+      const hasChanges = data.summary && data.summary.files;
+      container.append(el("div", "empty", hasChanges
+        ? "File metadata was omitted from this result."
+        : "The scoped working tree matches the selected checkpoint."));
+    }
+    if (data.filesOmitted) {
+      container.append(el("div", "empty omitted", `${data.filesOmitted} additional file${data.filesOmitted === 1 ? "" : "s"} omitted from structured metadata.`));
     }
   }
 
@@ -179,7 +311,7 @@ pre { margin: 0; overflow: auto; font: 11px/1.55 var(--font-mono, ui-monospace, 
     const header = el("header");
     const heading = el("div");
     heading.append(
-      el("h1", "", summary.files ? `Changed ${summary.files} file${summary.files === 1 ? "" : "s"}` : "No changes"),
+      el("h1", "", "Code review"),
       el("div", "subhead", `Since ${String(data.since || "last_review").replaceAll("_", " ")} · scope ${data.scope || "."}`)
     );
     const badgeText = data.advanceRequested
@@ -188,48 +320,34 @@ pre { margin: 0; overflow: auto; font: 11px/1.55 var(--font-mono, ui-monospace, 
     header.append(heading, el("div", "badge", badgeText));
     root.append(header);
 
-    const metrics = el("div", "summary");
-    metrics.append(
-      metric(summary.files || 0, "Files"),
-      metric(`+${summary.additions || 0}`, "Additions"),
-      metric(`-${summary.deletions || 0}`, "Deletions"),
-      metric(summary.binaryFiles || 0, "Binary")
+    const review = el("details", "review");
+    review.open = true;
+    review.addEventListener("toggle", scheduleSizeReport);
+    const reviewSummary = el("summary", "review-summary");
+    const count = summary.files || 0;
+    const summaryStats = el("span", "summary-stats");
+    summaryStats.append(
+      el("span", "add", `+${summary.additions || 0}`),
+      el("span", "del", `-${summary.deletions || 0}`)
     );
-    root.append(metrics);
-
-    const filesSection = el("section");
-    const filesTitle = el("div", "section-title");
-    filesTitle.append(el("span", "", "Files"));
-    if (data.filesOmitted) filesTitle.append(el("span", "", `${data.filesOmitted} omitted`));
-    filesSection.append(filesTitle);
-    const files = el("div", "files");
-    for (const file of data.files || []) {
-      const row = el("div", "file");
-      row.append(el("span", "status", file.status || "changed"));
-      const path = file.previousPath ? `${file.previousPath} → ${file.path}` : file.path;
-      row.append(el("span", "path", path));
-      const stats = el("span", "stats");
-      if (file.binary) stats.append(el("span", "", "binary"));
-      else stats.append(
-        el("span", "add", `+${file.additions || 0}`),
-        el("span", "del", `-${file.deletions || 0}`)
-      );
-      row.append(stats);
-      files.append(row);
+    if (summary.binaryFiles) {
+      summaryStats.append(el("span", "binary-count", `${summary.binaryFiles} binary`));
     }
-    if (!(data.files || []).length) files.append(el("div", "empty", "The scoped working tree matches the selected checkpoint."));
-    filesSection.append(files);
-    root.append(filesSection);
+    reviewSummary.append(
+      el("span", "", count ? `${count} file${count === 1 ? "" : "s"} changed` : "No files changed"),
+      summaryStats
+    );
+    review.append(reviewSummary);
+    const files = el("div", "files");
+    renderFiles(data, files);
+    review.append(files);
+    root.append(review);
 
+    const patchAvailable = Boolean(data.patchIncluded && typeof data.patch === "string" && data.patch);
+    if (!patchAvailable && summary.files) {
+      root.append(el("div", "warning", `Patch not shown: ${data.patchOmittedReason || "no textual patch was returned"}`));
+    }
     for (const warning of data.warnings || []) root.append(el("div", "warning", warning));
-
-    const diffSection = el("section");
-    diffSection.append(el("div", "section-title", "Patch"));
-    const diffFiles = el("div", "diff-files");
-    if (data.patchIncluded && data.patch) renderPatch(data.patch, diffFiles);
-    else diffFiles.append(el("div", "empty", data.patchOmittedReason || "No textual patch."));
-    diffSection.append(diffFiles);
-    root.append(diffSection);
     reportSize();
   }
 
@@ -265,7 +383,7 @@ pre { margin: 0; overflow: auto; font: 11px/1.55 var(--font-mono, ui-monospace, 
 
   function reportSize() {
     notify("ui/notifications/size-changed", {
-      width: Math.ceil(document.documentElement.scrollWidth),
+      width: Math.ceil(document.documentElement.clientWidth || root.getBoundingClientRect().width),
       height: Math.ceil(document.documentElement.scrollHeight)
     });
   }
@@ -348,5 +466,20 @@ mod tests {
             .unwrap();
         let size_reporting = REVIEW_UI_HTML.find("startSizeReporting();").unwrap();
         assert!(initialized < size_reporting);
+    }
+
+    #[test]
+    fn embedded_view_is_compact_and_collapses_file_diffs_lazily() {
+        assert!(REVIEW_UI_HTML.contains("--file-row-height: 28px"));
+        assert!(REVIEW_UI_HTML.contains("--diff-font-size: 9.5px"));
+        assert!(REVIEW_UI_HTML.contains("text-size-adjust: 100%"));
+        assert!(REVIEW_UI_HTML.contains("const INITIAL_VISIBLE_FILES = 3"));
+        assert!(REVIEW_UI_HTML.contains("el(\"details\", \"file-entry\")"));
+        assert!(REVIEW_UI_HTML.contains("details.open = false"));
+        assert!(REVIEW_UI_HTML.contains("details.addEventListener(\"toggle\""));
+        assert!(REVIEW_UI_HTML.contains("renderDiffLines(chunk.lines, body)"));
+        assert!(REVIEW_UI_HTML.contains("document.documentElement.clientWidth"));
+        assert!(!REVIEW_UI_HTML.contains("document.documentElement.scrollWidth"));
+        assert!(!REVIEW_UI_HTML.contains("font: 11px/1.55"));
     }
 }
