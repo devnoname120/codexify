@@ -10,7 +10,7 @@ use crate::project_doc::{PROJECT_DOC_SEPARATOR, load_project_doc};
 use crate::skills::{discover_skills, render_skill_catalog};
 use crate::types::AppConfig;
 
-pub const CONVERSATION_AUTH_INSTRUCTIONS: &str = "This connector requires per-conversation authentication. Before calling any other tool, call `authenticate` once with the checksum supplied in the chat or ChatGPT Project instructions. After authentication, follow the tool response to load the project brief.";
+pub const CONVERSATION_SETUP_INSTRUCTIONS: &str = "This connector requires one-time setup for this conversation. Before calling any other tool, call `setup` once with the `ref` supplied in the chat or ChatGPT Project instructions. After setup completes, follow the tool response to load the project brief.";
 
 /// The behavioural half of what Codex tells its model, ported from
 /// `codex-rs/core/gpt-5.2-codex_prompt.md`.
@@ -78,7 +78,7 @@ fn configured_agent_brief(config: &AppConfig) -> String {
 /// after the MCP initialize exchange.
 pub fn build_initial_instructions(config: &AppConfig) -> String {
     if config.conversation_auth_token.is_some() {
-        return CONVERSATION_AUTH_INSTRUCTIONS.to_string();
+        return CONVERSATION_SETUP_INSTRUCTIONS.to_string();
     }
     if !config.multi_project {
         return build_instructions(config);
@@ -171,16 +171,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn conversation_auth_initialization_withholds_project_context() {
+    fn conversation_setup_initialization_withholds_project_context() {
         let root = tempfile::tempdir().unwrap();
         std::fs::write(root.path().join("AGENTS.md"), "private project instruction").unwrap();
         let mut config = crate::config::default_config(root.path().to_path_buf());
         config.conversation_auth_token =
-            Some("codexify_chat_0123456789abcdef0123456789abcdef".into());
+            Some("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into());
 
         let initial = build_initial_instructions(&config);
 
-        assert_eq!(initial, CONVERSATION_AUTH_INSTRUCTIONS);
+        assert_eq!(initial, CONVERSATION_SETUP_INSTRUCTIONS);
+        assert!(!initial.to_ascii_lowercase().contains("auth"));
+        assert!(!initial.to_ascii_lowercase().contains("checksum"));
+        assert!(!initial.to_ascii_lowercase().contains("token"));
         assert!(!initial.contains("private project instruction"));
         assert!(!initial.contains(&root.path().display().to_string()));
         assert!(build_instructions(&config).contains("private project instruction"));

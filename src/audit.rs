@@ -760,15 +760,15 @@ mod tests {
         config.audit.include_command_preview = true;
         config.api_key = Some("literal-known-secret".to_string());
         config.conversation_auth_token =
-            Some("codexify_chat_0123456789abcdef0123456789abcdef".into());
+            Some("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into());
         let logger = AuditLogger::open(&config).unwrap().unwrap();
         let redacted = logger.redact_command(
-            "tool --github-token prefixed-token OPENAI_API_KEY=assigned-key literal-known-secret codexify_chat_0123456789abcdef0123456789abcdef \"api_key\": \"json-secret\" Authorization: Basic basic-token Bearer abc.def",
+            "tool --github-token prefixed-token OPENAI_API_KEY=assigned-key literal-known-secret 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \"api_key\": \"json-secret\" Authorization: Basic basic-token Bearer abc.def",
         );
         assert!(!redacted.contains("prefixed-token"));
         assert!(!redacted.contains("assigned-key"));
         assert!(!redacted.contains("literal-known-secret"));
-        assert!(!redacted.contains("codexify_chat_0123456789abcdef"));
+        assert!(!redacted.contains("0123456789abcdef0123456789abcdef"));
         assert!(!redacted.contains("json-secret"), "{redacted}");
         assert!(!redacted.contains("basic-token"));
         assert!(!redacted.contains("abc.def"));

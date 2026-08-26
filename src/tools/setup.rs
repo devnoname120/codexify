@@ -2,39 +2,39 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use crate::conversation_auth::{
-    AUTHENTICATE_TOOL_NAME, MAX_CONVERSATION_AUTH_TOKEN_BYTES, MIN_CONVERSATION_AUTH_TOKEN_BYTES,
-    conversation_auth_tokens_match, validate_conversation_auth_token,
+    SETUP_REF_HEX_LENGTH, SETUP_TOOL_NAME, conversation_setup_refs_match,
+    validate_conversation_setup_ref,
 };
 use crate::exec_sessions::SessionState;
 use crate::tool::{Tool, ToolRequestContext, arg_str};
 use crate::types::{AppConfig, ToolResult};
 
-pub struct Authenticate;
+pub struct Setup;
 
 #[async_trait]
-impl Tool for Authenticate {
+impl Tool for Setup {
     fn name(&self) -> &'static str {
-        AUTHENTICATE_TOOL_NAME
+        SETUP_TOOL_NAME
     }
 
     fn description(&self) -> String {
-        "Call this function when using the codexify connector for the first time in a conversation, and only once; there is no need to call it again afterwards. Provide the checksum supplied by the user or system prompt for codexify authentication. After verification, only the authorization decision is cached; the submitted checksum is not retained.".into()
+        "Call this function once when using the codexify connector for the first time in a conversation. Provide the SHA-256-shaped `ref` supplied by the user or system prompt. After setup completes, continue as directed. The submitted value is not retained.".into()
     }
 
     fn input_schema(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
-                "checksum": {
+                "ref": {
                     "type": "string",
-                    "description": "The checksum supplied for codexify authentication.",
-                    "minLength": MIN_CONVERSATION_AUTH_TOKEN_BYTES,
-                    "maxLength": MAX_CONVERSATION_AUTH_TOKEN_BYTES,
-                    "pattern": "^[A-Za-z0-9_-]+$",
+                    "description": "The 64-character lowercase hexadecimal reference supplied for codexify setup.",
+                    "minLength": SETUP_REF_HEX_LENGTH,
+                    "maxLength": SETUP_REF_HEX_LENGTH,
+                    "pattern": "^[0-9a-f]{64}$",
                     "writeOnly": true
                 }
             },
-            "required": ["checksum"],
+            "required": ["ref"],
             "additionalProperties": false
         })
     }
@@ -55,7 +55,7 @@ impl Tool for Authenticate {
     }
 
     async fn call(&self, _args: Value, _config: &AppConfig, _session: &SessionState) -> ToolResult {
-        ToolResult::error("Authentication requires request metadata.")
+        ToolResult::error("Setup requires request metadata.")
     }
 
     async fn call_with_context(
@@ -66,15 +66,15 @@ impl Tool for Authenticate {
         context: &ToolRequestContext,
     ) -> ToolResult {
         let Some(expected) = config.conversation_auth_token.as_deref() else {
-            return ToolResult::error("Conversation authentication is not enabled.");
+            return ToolResult::error("Conversation setup is not enabled.");
         };
-        let Some(provided) = arg_str(&args, "checksum") else {
-            return ToolResult::error("Authentication failed.");
+        let Some(provided) = arg_str(&args, "ref") else {
+            return ToolResult::error("Setup failed.");
         };
-        if validate_conversation_auth_token(provided).is_err()
-            || !conversation_auth_tokens_match(expected, provided)
+        if validate_conversation_setup_ref(provided).is_err()
+            || !conversation_setup_refs_match(expected, provided)
         {
-            return ToolResult::error("Authentication failed.");
+            return ToolResult::error("Setup failed.");
         }
 
         let scope = context
@@ -91,7 +91,7 @@ impl Tool for Authenticate {
             "Call `get_agent_brief` before using project tools."
         };
         ToolResult::text(format!(
-            "Authentication succeeded for {}. {next_step}",
+            "Setup completed for {}. {next_step}",
             scope.description()
         ))
     }
@@ -107,6 +107,24 @@ mod tests {
     use crate::project_bindings::ConversationIdentity;
     use crate::review::ReviewCheckpointManager;
 
+    fn assert_setup_vocabulary(text: &str) {
+        let text = text.to_ascii_lowercase();
+        for forbidden in [
+            "authenticat",
+            "authoriz",
+            "checksum",
+            "credential",
+            "secret",
+            "token",
+            "verify",
+        ] {
+            assert!(
+                !text.contains(forbidden),
+                "unexpected `{forbidden}` in `{text}`"
+            );
+        }
+    }
+
     fn context(
         identity: Option<ConversationIdentity>,
         authorizations: Arc<ConversationAuthorizationStore>,
@@ -120,20 +138,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn valid_checksum_authorizes_only_the_current_conversation() {
+    async fn valid_ref_applies_only_to_the_current_conversation() {
         let root = tempfile::tempdir().unwrap();
         let mut config = default_config(root.path().to_path_buf());
-        let token = "codexify_chat_0123456789abcdef0123456789abcdef";
-        config.conversation_auth_token = Some(token.into());
+        let reference = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        config.conversation_auth_token = Some(reference.into());
         let store = Arc::new(ConversationAuthorizationStore::new());
         let session = SessionState::new();
         let first = ConversationIdentity::from_openai_session("first").unwrap();
         let second = ConversationIdentity::from_openai_session("second").unwrap();
         let request_context = context(Some(first.clone()), store.clone());
 
-        let result = Authenticate
+        let result = Setup
             .call_with_context(
-                json!({ "checksum": token }),
+                json!({ "ref": reference }),
                 &config,
                 &session,
                 &request_context,
@@ -141,25 +159,26 @@ mod tests {
             .await;
 
         assert!(!result.is_error);
+        assert_setup_vocabulary(&result.joined_text());
         assert!(store.is_authorized(Some(&first), &session));
         assert!(!store.is_authorized(Some(&second), &session));
     }
 
     #[tokio::test]
-    async fn invalid_checksum_does_not_authorize_or_echo_the_value() {
+    async fn invalid_ref_does_not_apply_or_echo_the_value() {
         let root = tempfile::tempdir().unwrap();
         let mut config = default_config(root.path().to_path_buf());
         config.conversation_auth_token =
-            Some("codexify_chat_0123456789abcdef0123456789abcdef".into());
+            Some("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into());
         let store = Arc::new(ConversationAuthorizationStore::new());
         let session = SessionState::new();
         let identity = ConversationIdentity::from_openai_session("first").unwrap();
         let request_context = context(Some(identity.clone()), store.clone());
-        let invalid = "codexify_chat_invalid-invalid-invalid-invalid";
+        let invalid = "abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd";
 
-        let result = Authenticate
+        let result = Setup
             .call_with_context(
-                json!({ "checksum": invalid }),
+                json!({ "ref": invalid }),
                 &config,
                 &session,
                 &request_context,
@@ -167,6 +186,7 @@ mod tests {
             .await;
 
         assert!(result.is_error);
+        assert_setup_vocabulary(&result.joined_text());
         assert!(!result.joined_text().contains(invalid));
         assert!(!store.is_authorized(Some(&identity), &session));
     }
@@ -175,16 +195,16 @@ mod tests {
     async fn clients_without_conversation_metadata_use_transport_scope() {
         let root = tempfile::tempdir().unwrap();
         let mut config = default_config(root.path().to_path_buf());
-        let token = "codexify_chat_0123456789abcdef0123456789abcdef";
-        config.conversation_auth_token = Some(token.into());
+        let reference = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        config.conversation_auth_token = Some(reference.into());
         let store = Arc::new(ConversationAuthorizationStore::new());
         let first_session = SessionState::new();
         let second_session = SessionState::new();
         let request_context = context(None, store.clone());
 
-        Authenticate
+        Setup
             .call_with_context(
-                json!({ "checksum": token }),
+                json!({ "ref": reference }),
                 &config,
                 &first_session,
                 &request_context,

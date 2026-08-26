@@ -35,7 +35,7 @@ use crate::audit::{
     AuditLogger, AuditScope, argument_field_names, summarize_arguments, summarize_output,
 };
 use crate::auth::{generate_internal_bearer_token, require_auth};
-use crate::conversation_auth::{AUTHENTICATE_TOOL_NAME, ConversationAuthorizationStore};
+use crate::conversation_auth::{ConversationAuthorizationStore, SETUP_TOOL_NAME};
 use crate::exec_sessions::{ConversationExecSessionStore, SessionState};
 use crate::instructions::build_initial_instructions;
 use crate::openai_tunnel::TunnelHealth;
@@ -107,13 +107,13 @@ impl CodexHandler {
         )
     }
 
-    fn conversation_auth_error(
+    fn conversation_setup_error(
         &self,
         tool_name: &str,
         conversation: Option<&ConversationIdentity>,
     ) -> Option<ToolResult> {
         if self.config.conversation_auth_token.is_none()
-            || tool_name == AUTHENTICATE_TOOL_NAME
+            || tool_name == SETUP_TOOL_NAME
             || self
                 .conversation_authorizations
                 .is_authorized(conversation, &self.session)
@@ -127,7 +127,7 @@ impl CodexHandler {
             "This MCP transport session"
         };
         Some(ToolResult::error(format!(
-            "{scope} is not authorized to use the connector. Call the `authenticate` tool once with the configured authentication checksum, then retry."
+            "{scope} has not completed connector setup. Call the `setup` tool once with the configured `ref`, then retry."
         )))
     }
 }
@@ -293,7 +293,7 @@ impl ServerHandler for CodexHandler {
 
         let started = Instant::now();
         let mut result = if let Some(error) =
-            self.conversation_auth_error(&name, conversation.as_ref())
+            self.conversation_setup_error(&name, conversation.as_ref())
         {
             error
         } else {
@@ -629,9 +629,9 @@ pub async fn start_http_server(mut config: AppConfig) -> anyhow::Result<()> {
         println!("Auth: disabled (no --api-key)");
     }
     if config.conversation_auth_token.is_some() {
-        println!("Conversation auth: enabled (one token verification per chat)");
+        println!("Conversation setup: enabled (once per chat)");
     } else {
-        println!("Conversation auth: disabled");
+        println!("Conversation setup: disabled");
     }
     if let Some(audit) = audit.as_ref() {
         println!("Audit log: {}", audit.path().display());
@@ -981,11 +981,11 @@ mod tests {
     }
 
     #[test]
-    fn conversation_auth_gate_is_scoped_to_the_stable_chat_identity() {
+    fn conversation_setup_gate_is_scoped_to_the_stable_chat_identity() {
         let root = tempfile::tempdir().unwrap();
         let mut config = crate::config::default_config(root.path().to_path_buf());
         config.conversation_auth_token =
-            Some("codexify_chat_0123456789abcdef0123456789abcdef".into());
+            Some("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into());
         let tools = crate::registry::load_tools_for_config(&config);
         let authorizations = Arc::new(ConversationAuthorizationStore::new());
         let handler = CodexHandler {
@@ -1002,13 +1002,24 @@ mod tests {
         let second = ConversationIdentity::from_openai_session("second-chat").unwrap();
 
         let blocked = handler
-            .conversation_auth_error("read_file", Some(&first))
+            .conversation_setup_error("read_file", Some(&first))
             .unwrap();
         assert!(blocked.is_error);
-        assert!(blocked.joined_text().contains("not authorized"));
+        assert!(
+            blocked
+                .joined_text()
+                .contains("has not completed connector setup")
+        );
+        assert!(!blocked.joined_text().to_ascii_lowercase().contains("auth"));
+        assert!(
+            !blocked
+                .joined_text()
+                .to_ascii_lowercase()
+                .contains("checksum")
+        );
         assert!(
             handler
-                .conversation_auth_error(AUTHENTICATE_TOOL_NAME, Some(&first))
+                .conversation_setup_error(SETUP_TOOL_NAME, Some(&first))
                 .is_none()
         );
 
@@ -1017,12 +1028,12 @@ mod tests {
             .unwrap();
         assert!(
             handler
-                .conversation_auth_error("read_file", Some(&first))
+                .conversation_setup_error("read_file", Some(&first))
                 .is_none()
         );
         assert!(
             handler
-                .conversation_auth_error("read_file", Some(&second))
+                .conversation_setup_error("read_file", Some(&second))
                 .is_some()
         );
     }

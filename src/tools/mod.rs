@@ -1,7 +1,6 @@
 //! Tool implementations. Each file is one Codex-style MCP tool.
 
 pub mod apply_patch;
-pub mod authenticate;
 pub mod clock_curr_time;
 pub mod clock_sleep;
 pub mod exec_command;
@@ -22,6 +21,7 @@ pub mod recall;
 pub mod remember;
 pub mod run_command;
 pub mod set_project_root;
+pub mod setup;
 pub mod show_changes;
 pub mod skills_list;
 pub mod skills_read;

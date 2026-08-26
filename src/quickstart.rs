@@ -9,7 +9,7 @@ use serde_json::{Map, Value};
 use tempfile::NamedTempFile;
 use zeroize::Zeroizing;
 
-use crate::conversation_auth::{conversation_auth_prompt, validate_conversation_auth_token};
+use crate::conversation_auth::{conversation_setup_prompt, validate_conversation_setup_ref};
 use crate::openai_tunnel::{validate_runtime_api_key, validate_tunnel_id};
 use crate::util::home_dir;
 
@@ -268,7 +268,7 @@ where
     if conversation_auth_token.is_some() {
         writeln!(
             wizard.output,
-            "  Conversation token: stored in the config file; do not commit or share that file"
+            "  Conversation setup: configured; do not commit or share that config file"
         )?;
     }
     let command = launch_command(
@@ -281,7 +281,7 @@ where
 
     print_connector_step(&mut wizard, &connector_name, &tunnel_id, multi_project)?;
     if let Some(token) = conversation_auth_token.as_deref() {
-        print_conversation_auth_step(&mut wizard, token)?;
+        print_conversation_setup_step(&mut wizard, token)?;
     }
     let start_server = wizard.confirm(
         "Start Codexify now and keep this terminal open while ChatGPT scans the connector?",
@@ -573,24 +573,21 @@ where
     Ok(())
 }
 
-fn print_conversation_auth_step<R, W, F>(
+fn print_conversation_setup_step<R, W, F>(
     wizard: &mut Wizard<'_, R, W, F>,
-    token: &str,
+    reference: &str,
 ) -> anyhow::Result<()>
 where
     R: BufRead,
     W: Write,
     F: FnMut(&str, &mut W) -> io::Result<String>,
 {
-    writeln!(
-        wizard.output,
-        "\n4. Configure ChatGPT conversation authentication"
-    )?;
+    writeln!(wizard.output, "\n4. Configure ChatGPT conversation setup")?;
     writeln!(
         wizard.output,
         "   Paste this instruction into a chat, or add it to the ChatGPT Project's Project instructions:"
     )?;
-    writeln!(wizard.output, "   {}", conversation_auth_prompt(token))?;
+    writeln!(wizard.output, "   {}", conversation_setup_prompt(reference))?;
     Ok(())
 }
 
@@ -629,7 +626,7 @@ fn configured_conversation_auth_token(
     let token = value
         .as_str()
         .context("conversationAuthToken in the existing config must be a string or null")?;
-    validate_conversation_auth_token(token).map_err(anyhow::Error::msg)?;
+    validate_conversation_setup_ref(token).map_err(anyhow::Error::msg)?;
     Ok(Some(token.to_string()))
 }
 
@@ -861,7 +858,8 @@ mod tests {
 
     const TUNNEL_ID: &str = "tunnel_0123456789abcdef0123456789abcdef";
     const RUNTIME_KEY: &str = "sk-runtime-test-key_123";
-    const CONVERSATION_TOKEN: &str = "codexify_chat_0123456789abcdef0123456789abcdef";
+    const CONVERSATION_TOKEN: &str =
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
     struct GuardedPromptOutput {
         bytes: Vec<u8>,
@@ -1057,7 +1055,7 @@ mod tests {
         assert!(output.contains("Authentication: No Authentication"));
         assert!(output.contains(TUNNEL_ID));
         assert!(!output.contains("Require each new ChatGPT conversation"));
-        assert!(!output.contains("Configure ChatGPT conversation authentication"));
+        assert!(!output.contains("Configure ChatGPT conversation setup"));
         assert!(!output.contains(RUNTIME_KEY));
 
         #[cfg(unix)]
@@ -1079,7 +1077,7 @@ mod tests {
     }
 
     #[test]
-    fn rerun_preserves_advanced_conversation_auth_and_unrelated_config() {
+    fn rerun_preserves_advanced_conversation_setup_and_unrelated_config() {
         let root = TempDir::new().unwrap();
         let project = root.path().join("projects");
         fs::create_dir_all(&project).unwrap();
@@ -1120,7 +1118,7 @@ mod tests {
         assert!(config.get("apiKey").is_none());
         assert_eq!(config["multiProject"], json!(true));
         assert_eq!(config["conversationAuthToken"], json!(CONVERSATION_TOKEN));
-        assert!(output.contains(&conversation_auth_prompt(CONVERSATION_TOKEN)));
+        assert!(output.contains(&conversation_setup_prompt(CONVERSATION_TOKEN)));
         assert!(!output.contains("Require each new ChatGPT conversation"));
         assert!(!output.contains("Generate a new conversation token"));
         assert_eq!(config["allowedCommands"], json!(["git"]));
@@ -1167,7 +1165,7 @@ mod tests {
     }
 
     #[test]
-    fn malformed_existing_conversation_token_fails_before_writing_credentials() {
+    fn malformed_existing_conversation_setup_value_fails_before_writing_credentials() {
         let root = TempDir::new().unwrap();
         let project = root.path().join("project");
         fs::create_dir_all(&project).unwrap();

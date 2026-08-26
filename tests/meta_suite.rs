@@ -51,26 +51,36 @@ fn artifact_ingress_can_be_omitted_by_configuration() {
 }
 
 #[test]
-fn conversation_auth_mode_adds_authenticate_before_protected_tools() {
+fn conversation_setup_mode_adds_setup_before_gated_tools() {
     let mut config = default_config(PathBuf::from("/tmp"));
     config.conversation_auth_token =
-        Some("codexify_chat_0123456789abcdef0123456789abcdef".into());
+        Some("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into());
     let tools = load_tools_for_config(&config);
     assert_eq!(tools.len(), 28);
-    assert_eq!(tools[0].name(), "authenticate");
+    assert_eq!(tools[0].name(), "setup");
     let schema = tools[0].input_schema();
-    assert!(schema["properties"].get("checksum").is_some());
+    assert!(schema["properties"].get("ref").is_some());
+    assert!(schema["properties"].get("checksum").is_none());
     assert!(schema["properties"].get("token").is_none());
-    assert_eq!(schema["required"], serde_json::json!(["checksum"]));
+    assert_eq!(schema["required"], serde_json::json!(["ref"]));
+    assert_eq!(schema["properties"]["ref"]["minLength"], 64);
+    assert_eq!(schema["properties"]["ref"]["maxLength"], 64);
+    assert_eq!(schema["properties"]["ref"]["pattern"], "^[0-9a-f]{64}$");
     let description = tools[0].description().to_ascii_lowercase();
-    assert!(description.contains("checksum"));
+    assert!(description.contains("setup"));
+    assert!(description.contains("`ref`"));
+    assert!(!description.contains("auth"));
+    assert!(!description.contains("verify"));
+    assert!(!description.contains("credential"));
+    assert!(!description.contains("secret"));
+    assert!(!description.contains("checksum"));
     assert!(!description.contains("token"));
     assert!(!description.contains("api key"));
 
     config.multi_project = true;
     let tools = load_tools_for_config(&config);
     assert_eq!(tools.len(), 30);
-    assert_eq!(tools[0].name(), "authenticate");
+    assert_eq!(tools[0].name(), "setup");
     assert_eq!(tools[1].name(), "list_projects");
     assert_eq!(tools[2].name(), "set_project_root");
 }

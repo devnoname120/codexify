@@ -19,7 +19,7 @@ use crate::codex_config::codex_config_path;
 use crate::codex_mcp::{
     CodexMcpImport, discover_additional_codex_mcp_servers_with_cli, discover_codex_mcp_servers,
 };
-use crate::conversation_auth::validate_conversation_auth_token;
+use crate::conversation_auth::validate_conversation_setup_ref;
 use crate::openai_tunnel::validate_tunnel_id;
 use crate::project_catalog::{ProjectCatalog, discover_project_catalog_at};
 use crate::types::{
@@ -1247,7 +1247,7 @@ pub fn load_config(cli: Cli) -> Result<AppConfig, String> {
     )?;
     let conversation_auth_token = file.conversation_auth_token.take();
     if let Some(token) = conversation_auth_token.as_deref() {
-        validate_conversation_auth_token(token)?;
+        validate_conversation_setup_ref(token)?;
     }
     let conversation_auth_token = conversation_auth_token.map(ConversationAuthToken::from);
 
@@ -1605,7 +1605,7 @@ mod tests {
     fn loads_conversation_auth_token_from_the_config_file() {
         let root = tempfile::tempdir().unwrap();
         let config_path = root.path().join("config.json");
-        let token = "codexify_chat_0123456789abcdef0123456789abcdef";
+        let token = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
         std::fs::write(
             &config_path,
             serde_json::to_vec(&json!({
