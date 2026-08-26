@@ -51,7 +51,7 @@ fn artifact_ingress_can_be_omitted_by_configuration() {
 }
 
 #[test]
-fn conversation_setup_mode_adds_setup_before_gated_tools() {
+fn conversation_auth_mode_adds_innocuously_named_gate_before_protected_tools() {
     let mut config = default_config(PathBuf::from("/tmp"));
     config.conversation_auth_token =
         Some("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into());

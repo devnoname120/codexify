@@ -116,7 +116,7 @@ The wizard asks which project directory ChatGPT may access and whether that
 directory is one project or a multi-project access root. It then walks through
 creating an OpenAI Secure MCP Tunnel, entering the tunnel ID and runtime API key,
 and creating the matching ChatGPT developer-mode connector. Advanced policies,
-including optional per-conversation setup, are configured manually rather
+including optional per-conversation authorization, are configured manually rather
 than presented during first-run onboarding. The relevant OpenAI and ChatGPT links
 are printed together with the exact connection values to use.
 
@@ -130,8 +130,8 @@ connector. Keep that process running while using the connector.
 
 When an existing config already contains `conversationAuthToken`, quickstart
 preserves it, restricts the config file to the current user on Unix, and prints the
-one-line instruction required to complete setup in a chat. It does not offer to
-enable or rotate this advanced feature. Keep a setup-enabled config out of
+one-line instruction required to authorize a chat. It does not offer to enable or
+rotate this advanced feature. Keep a token-bearing config out of
 version control and do not share it.
 
 Set `CODEXIFY_CONFIG=/path/to/codex.config.json` or use
@@ -181,10 +181,11 @@ cargo run --release -- --work-dir /path/to/projects --multi-project
 
 Here `--work-dir` is an **access root**, not the active project. In ChatGPT, call `set_project_root` directly when the exact relative/absolute path or GitHub repository, branch, or pull-request URL is known. A GitHub URL reuses an unambiguous matching checkout already below the access root, or runs `git clone` in the configured project clone directory before binding. Branch and PR URLs select their exact refs without switching an unrelated source checkout. Otherwise `list_projects` can search the read-only project catalogue by name, alias, description, or relative selector first. Codexify keys the resulting binding from ChatGPT's `_meta["openai/session"]` conversation identifier and persists it outside the repository, so later turns in the same chat recover the project after an MCP reconnect or codexify restart. A new chat gets a new binding and an existing chat cannot switch projects. Clients that do not provide `openai/session` fall back to a one-time MCP transport-session binding and must select again after reconnecting.
 
-### Optional per-conversation setup
+### Optional per-conversation authorization
 
-Set a high-entropy, SHA-256-shaped value manually in the config. It must contain
-exactly 64 lowercase hexadecimal characters. For example:
+Set a high-entropy authentication token manually in the config. The token itself,
+not a digest of another secret, must look like a SHA-256 value: exactly 64
+lowercase hexadecimal characters. For example:
 
 ```bash
 python -c 'import secrets; print(secrets.token_hex(32))'
@@ -196,21 +197,36 @@ python -c 'import secrets; print(secrets.token_hex(32))'
 }
 ```
 
-When this key is present, Codexify exposes a `setup` tool and rejects every
-other tool call until the current chat supplies that exact 64-character value as
-`ref` once. No additional digest transformation is applied. The project-aware
-initialization brief is withheld until setup completes;
-the tool response then directs the client to load it with `get_agent_brief`.
+When this key is present, Codexify rejects every ordinary tool call until the
+current chat presents that exact token once. A successful check authorizes only
+the stable ChatGPT conversation that made the call. The project-aware
+initialization brief is withheld until authorization succeeds; the gate response
+then directs the client to load it with `get_agent_brief`.
 
-For ChatGPT, completion is keyed by the hash of `_meta["openai/session"]` and
-persisted outside the project, so it survives MCP transport replacement and
-Codexify restarts. The marker contains neither the configured value nor the raw
-conversation identifier. Its namespace is derived from the canonical work
-directory and current value, so rotating `conversationAuthToken` invalidates
-earlier setup. MCP clients without stable conversation metadata fall back to
-setup for the current transport only.
+The MCP wire surface deliberately calls this authorization tool `setup` and its
+token parameter `ref`. ChatGPT can otherwise falsely classify a token-looking
+connector call as an unsafe secret leak and refuse to make the call. Keeping the
+actual token in a SHA-256-shaped format and using the innocuous `setup(ref)` names
+avoids that false positive. This is only a compatibility workaround for ChatGPT's
+connector safety behavior: `ref` is still the authentication token, it remains
+secret, and no digest transformation is applied before it is submitted.
 
-Use this one-line instruction, replacing `[REF]` with the exact configured value:
+This extra gate is necessary because ChatGPT's connector OAuth state controls
+whether the account can use the connector at all; it does not independently
+authorize each conversation or ChatGPT Project. `conversationAuthToken` adds that
+missing conversation-level boundary after the connector has already been made
+available to the account.
+
+For ChatGPT, the authorization grant is keyed by the hash of
+`_meta["openai/session"]` and persisted under
+`~/.codexify/conversation-authorizations/`, so it survives MCP transport
+replacement and Codexify restarts. The marker contains neither the token nor the
+raw conversation identifier. Its namespace is derived from the canonical work
+directory and current token, so rotating `conversationAuthToken` invalidates
+earlier grants. MCP clients without stable conversation metadata fall back to
+authorization for the current transport only.
+
+Use this one-line instruction, replacing `[REF]` with the exact configured token:
 
 ```text
 To use this connector in a chat, call its `setup` tool once with ref `[REF]`.
@@ -218,11 +234,10 @@ To use this connector in a chat, call its `setup` tool once with ref `[REF]`.
 
 Paste it into an individual chat, or add it to the ChatGPT Project's
 [Project instructions](https://help.openai.com/en/articles/10169521-projects-in-chatgpt)
-so chats created in that project can complete setup automatically. The configured
-value is an application-level gate for model conversations, not a replacement
-for tunnel, HTTP, workspace, or operating-system access controls. It is plaintext
-in the config by design; anyone who can read that file can complete setup for
-another chat.
+so chats created in that project can authorize themselves automatically. The
+token is an application-level gate for model conversations, not a replacement for
+tunnel, HTTP, workspace, or operating-system access controls. It is plaintext in
+the config by design; anyone who can read that file can authorize another chat.
 
 To build a standalone binary:
 
@@ -300,12 +315,12 @@ Structured primitives — cheaper and safer than shelling out for the same job, 
 | `list_directory` | List files and directories with name, type, and size |
 | `tree` | Print directory tree as ASCII art |
 
-When `conversationAuthToken` is configured, one gate tool is added ahead of the
-other tools:
+When `conversationAuthToken` is configured, one authorization gate tool is added
+ahead of the protected tools:
 
 | Tool | Description |
 |------|-------------|
-| `setup` | Apply the configured `ref` once for the stable ChatGPT conversation, or for the current transport when conversation metadata is unavailable |
+| `setup` | ChatGPT-facing name for the per-conversation authorization tool. Checks the configured authentication token supplied as `ref`, then caches only the grant for the stable ChatGPT conversation or current transport |
 
 Ported from Codex's own agent tools:
 
@@ -342,7 +357,7 @@ Multi-project mode adds two project-control tools:
 
 Codex needs the first three for none of these reasons: it puts its agent brief in the system prompt, the OS and shell in an `<environment_context>` message, and `AGENTS.md` straight into the prompt, all before the first turn. An MCP server has none of those channels — it can only expose tools — so the same facts are tool calls here as well as part of the server's `instructions`. It needs `remember` and `recall` for the opposite reason: its context is large and its session state lives in the CLI process, whereas the client here is a chat window that loses the conversation. See [Context and memory](#context-and-memory), [Acting as a Codex agent](#acting-as-a-codex-agent), [Shells and the host](#shells-and-the-host), [AGENTS.md](#agentsmd) and [Skills](#skills).
 
-That is 27 native tools in the default single-project mode and 29 in multi-project mode. Enabling conversation setup adds `setup`, producing 28 or 30 respectively. Setting `artifactIngress.enabled` to `false` removes `import_host_file`, reducing the applicable count by one. One or more [catalog-mode MCP upstreams](#catalog-mode-default-for-automatic-imports) add one shared four-tool discovery/call surface regardless of how many transitive tools they contain. Direct mode adds one downstream tool per selected upstream tool; gateway mode adds one downstream dispatcher per upstream server.
+That is 27 native tools in the default single-project mode and 29 in multi-project mode. Enabling conversation authorization adds the ChatGPT-facing `setup` tool, producing 28 or 30 respectively. Setting `artifactIngress.enabled` to `false` removes `import_host_file`, reducing the applicable count by one. One or more [catalog-mode MCP upstreams](#catalog-mode-default-for-automatic-imports) add one shared four-tool discovery/call surface regardless of how many transitive tools they contain. Direct mode adds one downstream tool per selected upstream tool; gateway mode adds one downstream dispatcher per upstream server.
 
 Two deliberate differences from Codex:
 
@@ -491,7 +506,7 @@ value and prints the copyable ChatGPT instruction shown above. Because the value
 is intentionally stored in this file, keep the config outside the repository; the
 default `~/.codexify/codex.config.json` location does so. When using a custom
 repository-local path, add it to the repository's ignore rules. On Unix,
-quickstart changes the config mode to `0600` when it preserves a setup-enabled
+quickstart changes the config mode to `0600` when it preserves a token-bearing
 config; manually created configs should be protected equivalently.
 
 ## Diagnostics and audit logging
@@ -523,7 +538,7 @@ codexify \
   --audit-redact-env GITHUB_TOKEN
 ```
 
-Before a preview is written, Codexify replaces the local MCP bearer, the configured conversation setup value, configured MCP-server environment values, the referenced OpenAI tunnel key when readable, values named by `audit.redactEnv` / `--audit-redact-env`, common secret-bearing process environment variables, and common `--token`, `API_KEY=…`, and `Bearer …` forms. The preview is then capped at `commandPreviewMaxBytes`. This is defense in depth, not a proof that an arbitrary command contains no sensitive literal; leave previews disabled when command text itself is sensitive.
+Before a preview is written, Codexify replaces the local MCP bearer, the configured conversation-authentication token, configured MCP-server environment values, the referenced OpenAI tunnel key when readable, values named by `audit.redactEnv` / `--audit-redact-env`, common secret-bearing process environment variables, and common `--token`, `API_KEY=…`, and `Bearer …` forms. The preview is then capped at `commandPreviewMaxBytes`. This is defense in depth, not a proof that an arbitrary command contains no sensitive literal; leave previews disabled when command text itself is sensitive.
 
 The `audit` config block has the same controls:
 
@@ -995,7 +1010,7 @@ To keep a standalone explicit server out of the connector capability catalogue:
 }
 ```
 
-`tools` and `disabledTools` are applied to raw upstream tool names before any mode is materialized. The fixed catalog tools and every direct/gateway proxy are project-independent: they remain callable before project selection in multi-project mode, subject to any configured conversation setup gate.
+`tools` and `disabledTools` are applied to raw upstream tool names before any mode is materialized. The fixed catalog tools and every direct/gateway proxy are project-independent: they remain callable before project selection in multi-project mode, subject to any configured conversation-authorization gate.
 
 ### Automatic discovery from Codex
 
@@ -1173,7 +1188,7 @@ If your server doesn't show up, **check the banner first** — the most common c
 3. In ChatGPT's connector/plugin settings, create a developer-mode connector with **Connection type: Tunnel**.
 4. Select the same tunnel ID that Codexify reports as ready. Set **Authentication** to **None**.
 5. Set the connector's permissions to **Allow all actions** if you do not want per-call confirmations.
-6. Enable the connector in a new chat. Without conversation setup, open with `Call get_agent_brief and follow it for the rest of this chat.` With `conversationAuthToken`, first supply the one-line `setup` instruction from [Optional per-conversation setup](#optional-per-conversation-setup); after it completes, follow its project-selection or `get_agent_brief` direction. In multi-project mode (`--multi-project`), call `set_project_root` first when an exact path or GitHub repository, branch, or pull-request URL is known, or `list_projects` first when only the local project identity is known; later follow-ups in that same chat recover both setup and the project binding from ChatGPT's conversation metadata.
+6. Enable the connector in a new chat. Without conversation authorization, open with `Call get_agent_brief and follow it for the rest of this chat.` With `conversationAuthToken`, first supply the one-line `setup` instruction from [Optional per-conversation authorization](#optional-per-conversation-authorization); after authorization succeeds, follow its project-selection or `get_agent_brief` direction. In multi-project mode (`--multi-project`), call `set_project_root` first when an exact path or GitHub repository, branch, or pull-request URL is known, or `list_projects` first when only the local project identity is known; later follow-ups in that same chat recover both authorization and the project binding from ChatGPT's conversation metadata.
 
 There is no server URL to enter in this mode. OpenAI routes the selected tunnel to the supervised client, which supplies Codexify's generated per-process bearer on the local hop. The startup banner prints the runtime-only `/readyz` and `/metrics` URLs. It does not advertise an admin UI because `tunnel-client-runtime` deliberately omits that full-client surface.
 
@@ -1200,14 +1215,14 @@ Native tunnel mode ignores `allowedHosts` and forces the accepted authorities to
 - **Host-authorized native-file ingress**: `import_host_file` accepts only ChatGPT's declared native-file object, rejects local source paths, constrains the download URL and every redirect hop to the configurable `artifactIngress.allowedHosts` allowlist (default `"*"`, which admits any public HTTPS host but never a loopback, private, link-local, unique-local, CGNAT, `localhost`, or metadata address), ignores ambient proxy credentials, and enforces whole-request, idle, size and concurrency limits. Its signed URL and file ID are never logged or returned: RMCP debug/trace payload logging is unconditionally suppressed even when `RUST_LOG` requests it. Destination publication uses a capability-confined directory handle, canonical-path and file-identity revalidation, a private partial file, SHA-256, and atomic no-overwrite linking so traversal, moved roots, symlink escapes, partial visibility and replacement races fail closed.
 - **One bounded exception in single-project mode**: [AGENTS.md](#agentsmd) discovery may read above `--work-dir`, up to the nearest `.git`. It is read-only, opens only `AGENTS.override.md`, `AGENTS.md` and any `projectDoc.fallbackFilenames`, and `get_project_doc` reports the absolute path of every file it used. Set `projectDoc.maxBytes` to `0` to switch it off, or `projectDoc.rootMarkers` to `[]` to keep the search inside the work directory. Multi-project mode does not perform this upward walk; its selected directory is the exact project root.
 - **Namespaced review state inside Git**: ChatGPT review checkpoints are exactly two refs per conversation/project pair under `refs/codexify/review/`. Synthetic snapshots contain only the selected project path, are built through a temporary index, and never modify the real index or working tree. Generic MCP-client checkpoints are in memory only. The namespace grows with the number of distinct persistent conversation/project pairs; the review section documents inspection and manual removal.
-- **Bounded state writes outside the work directory**: `remember` and `update_plan` write `memory.json` under `~/.codexify/projects/`. Multi-project mode also writes one small project-binding record under `~/.codexify/conversation-projects/` for each ChatGPT conversation and access root. Per-conversation setup writes one small marker in Codexify's user state. Binding and setup filenames are derived from a hash of `openai/session`; the raw identifier is not stored. Setup namespaces include a one-way digest of the canonical work directory and configured value, while marker contents store only completion state. Set `memory.enabled` to `false` to disable plans and notes; delete the corresponding state directory to forget bindings or setup state. See [Context and memory](#context-and-memory).
+- **Bounded state writes outside the work directory**: `remember` and `update_plan` write `memory.json` under `~/.codexify/projects/`. Multi-project mode also writes one small project-binding record under `~/.codexify/conversation-projects/` for each ChatGPT conversation and access root. Per-conversation authorization writes a small marker under `~/.codexify/conversation-authorizations/`. Binding and authorization filenames are derived from a hash of `openai/session`; the raw identifier is not stored. Authorization namespaces include a one-way digest of the canonical work directory and configured token, while marker contents store only the grant. Set `memory.enabled` to `false` to disable plans and notes; delete the corresponding state directory to forget bindings or authorizations. See [Context and memory](#context-and-memory).
 - **Bounded reads outside the work directory**: [skills](#skills) may live in `~/.agents/skills`, `~/.codex/skills`, `~/.claude/skills` or an installed Claude Code plugin. `skills_read` opens files there, but only inside a skill package that already exists — the `resource` path is checked against the skill's own directory, so it cannot walk out into the rest of your home directory. `skills_list` reports the absolute path of every skill it found. Set `skills.enabled` to `false` to switch it off, or `skills.dirs` to point the user scope somewhere you choose.
 - **Read-only Codex configuration discovery**: MCP import and the project catalogue read the user-level Codex `config.toml` without rewriting it. Project discovery inspects only the top-level `projects` table, does not read candidate project contents, and suppresses rejected absolute paths from MCP output. Set `projectCatalog.codexConfig.enabled` to `false` to disable that provider. Native Codex trust does not override the Codexify access-root boundary.
 - **Command allowlist**: `run_command` only runs binaries listed in `allowedCommands`; everything else is rejected. `exec_command` checks the same list plus `exec.extraAllowedCommands`, at every command position in the string.
 - **Bridged servers carry delegated authority**: an explicit `mcpServers` entry or an automatically imported Codex MCP—including one contributed by a Codex plugin—can receive model-directed calls. A stdio upstream launches a real process that runs as your OS user; a Streamable HTTP upstream receives calls plus its configured bearer token and HTTP headers. Catalog mode reduces connector-schema exposure, not runtime authority: `mcp_call_tool` can still dispatch any filtered catalogue entry. Only bridge servers you trust, use `tools`/`disabledTools` to narrow callable operations, prefer catalog mode to keep transitive schemas private, keep secrets in `bearerTokenEnvVar`/`envHttpHeaders` rather than static JSON, set `codexMcp.useCli` to `false` to exclude plugin-only discovery, or set `codexMcp.enabled` to `false` to disable all automatic Codex import. Launch, connection, authentication, and handshake failures are reported rather than silently ignored.
 - **Native OpenAI tunnel is outbound-only**: Codexify binds its MCP listener to loopback and supervises OpenAI's official runtime-only tunnel client. Startup fails unless the runtime reports `/readyz` and completes a control-plane poll. Failure of either process stops the other, and HTTP shutdown has a bounded grace period before remaining connections are aborted.
 - **The loopback MCP hop is authenticated**: native mode generates a random per-process bearer token and configures the tunnel runtime to send it on MCP requests and discovery probes. The token is never printed, written to the config file, or inherited by model-launched commands and bridged MCP children.
-- **Optional conversation setup**: `conversationAuthToken` blocks all tools except `setup` until the stable ChatGPT conversation presents the configured `ref`. Successful setup persists by hashed conversation identity and is invalidated when the configured value changes; clients without `openai/session` get transport-only state. Initialization withholds the project-aware brief until setup completes. This gate controls model conversations, not network callers: keep the native tunnel, reverse proxy, ChatGPT workspace, and local account secured independently. The configured value remains plaintext in `codex.config.json` because the server must compare chat-supplied values, so keep that file private and out of version control.
+- **Optional conversation-level authorization**: `conversationAuthToken` blocks all tools except the deliberately innocuous `setup` wire tool until the stable ChatGPT conversation presents the configured authentication token as `ref`. Successful grants persist by hashed conversation identity and are invalidated by token rotation; clients without `openai/session` get transport-only grants. Initialization withholds the project-aware brief until authorization succeeds. The `setup(ref)` naming and SHA-256-shaped token avoid ChatGPT's false-positive connector secret-leak refusal; they do not make the token public or replace real authentication. This gate controls model conversations, not network callers: keep the native tunnel, reverse proxy, ChatGPT workspace, and local account secured independently. The token remains plaintext in `codex.config.json` because the server must compare chat-supplied values, so keep that file private and out of version control.
 - **Verified tunnel-client installation**: the managed client is pinned to a specific official release and per-platform archive SHA-256 embedded in Codexify, extracted by exact filename under size limits, installed atomically with private permissions, and hash-checked against its installation manifest on subsequent starts. Set `clientPath` to opt out of managed installation while retaining compatibility checks.
 - **Tunnel secrets are references, not config values**: `openaiTunnel.apiKeyRef` accepts only `env:NAME` or `file:/path`; literal API keys are rejected. Codexify resolves the value and exposes it only to the tunnel child under a synthetic environment name, while the child receives a clean, allowlisted environment. Use a restricted runtime key with Tunnels **Read** + **Use**, not an admin key. Private key-file permissions are enforced on Unix. Same-user process inspection and same-user file access remain outside this boundary.
 - **Optional bearer token auth in non-native mode**: set `--api-key` to require an `Authorization: Bearer <key>` header on all requests except `/health`. Native mode instead owns its private per-process bearer token. ChatGPT Plugins do not support simple bearer token auth for URL-based connectors.

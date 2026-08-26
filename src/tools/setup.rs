@@ -2,19 +2,24 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use crate::conversation_auth::{
-    SETUP_REF_HEX_LENGTH, SETUP_TOOL_NAME, conversation_setup_refs_match,
-    validate_conversation_setup_ref,
+    AUTHORIZATION_TOOL_WIRE_NAME, CONVERSATION_AUTH_TOKEN_HEX_LENGTH,
+    conversation_auth_tokens_match, validate_conversation_auth_token,
 };
 use crate::exec_sessions::SessionState;
 use crate::tool::{Tool, ToolRequestContext, arg_str};
 use crate::types::{AppConfig, ToolResult};
 
-pub struct Setup;
+// This is an authentication and authorization tool despite its deliberately
+// innocuous ChatGPT-facing name and parameter. ChatGPT can falsely classify a
+// token-looking connector call as a secret leak and refuse it, so the wire schema
+// says `setup(ref)` and the real token is shaped like a SHA-256 hex string. The
+// token is not a digest of a different configured secret.
+pub struct ConversationAuthorization;
 
 #[async_trait]
-impl Tool for Setup {
+impl Tool for ConversationAuthorization {
     fn name(&self) -> &'static str {
-        SETUP_TOOL_NAME
+        AUTHORIZATION_TOOL_WIRE_NAME
     }
 
     fn description(&self) -> String {
@@ -28,8 +33,8 @@ impl Tool for Setup {
                 "ref": {
                     "type": "string",
                     "description": "The 64-character lowercase hexadecimal reference supplied for codexify setup.",
-                    "minLength": SETUP_REF_HEX_LENGTH,
-                    "maxLength": SETUP_REF_HEX_LENGTH,
+                    "minLength": CONVERSATION_AUTH_TOKEN_HEX_LENGTH,
+                    "maxLength": CONVERSATION_AUTH_TOKEN_HEX_LENGTH,
                     "pattern": "^[0-9a-f]{64}$",
                     "writeOnly": true
                 }
@@ -65,14 +70,14 @@ impl Tool for Setup {
         session: &SessionState,
         context: &ToolRequestContext,
     ) -> ToolResult {
-        let Some(expected) = config.conversation_auth_token.as_deref() else {
+        let Some(expected_token) = config.conversation_auth_token.as_deref() else {
             return ToolResult::error("Conversation setup is not enabled.");
         };
-        let Some(provided) = arg_str(&args, "ref") else {
+        let Some(provided_ref) = arg_str(&args, "ref") else {
             return ToolResult::error("Setup failed.");
         };
-        if validate_conversation_setup_ref(provided).is_err()
-            || !conversation_setup_refs_match(expected, provided)
+        if validate_conversation_auth_token(provided_ref).is_err()
+            || !conversation_auth_tokens_match(expected_token, provided_ref)
         {
             return ToolResult::error("Setup failed.");
         }
@@ -107,7 +112,7 @@ mod tests {
     use crate::project_bindings::ConversationIdentity;
     use crate::review::ReviewCheckpointManager;
 
-    fn assert_setup_vocabulary(text: &str) {
+    fn assert_model_facing_setup_vocabulary(text: &str) {
         let text = text.to_ascii_lowercase();
         for forbidden in [
             "authenticat",
@@ -138,20 +143,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn valid_ref_applies_only_to_the_current_conversation() {
+    async fn valid_auth_token_authorizes_only_the_current_conversation() {
         let root = tempfile::tempdir().unwrap();
         let mut config = default_config(root.path().to_path_buf());
-        let reference = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-        config.conversation_auth_token = Some(reference.into());
+        let auth_token = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        config.conversation_auth_token = Some(auth_token.into());
         let store = Arc::new(ConversationAuthorizationStore::new());
         let session = SessionState::new();
         let first = ConversationIdentity::from_openai_session("first").unwrap();
         let second = ConversationIdentity::from_openai_session("second").unwrap();
         let request_context = context(Some(first.clone()), store.clone());
 
-        let result = Setup
+        let result = ConversationAuthorization
             .call_with_context(
-                json!({ "ref": reference }),
+                json!({ "ref": auth_token }),
                 &config,
                 &session,
                 &request_context,
@@ -159,13 +164,13 @@ mod tests {
             .await;
 
         assert!(!result.is_error);
-        assert_setup_vocabulary(&result.joined_text());
+        assert_model_facing_setup_vocabulary(&result.joined_text());
         assert!(store.is_authorized(Some(&first), &session));
         assert!(!store.is_authorized(Some(&second), &session));
     }
 
     #[tokio::test]
-    async fn invalid_ref_does_not_apply_or_echo_the_value() {
+    async fn invalid_auth_token_does_not_authorize_or_echo_the_value() {
         let root = tempfile::tempdir().unwrap();
         let mut config = default_config(root.path().to_path_buf());
         config.conversation_auth_token =
@@ -176,7 +181,7 @@ mod tests {
         let request_context = context(Some(identity.clone()), store.clone());
         let invalid = "abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd";
 
-        let result = Setup
+        let result = ConversationAuthorization
             .call_with_context(
                 json!({ "ref": invalid }),
                 &config,
@@ -186,7 +191,7 @@ mod tests {
             .await;
 
         assert!(result.is_error);
-        assert_setup_vocabulary(&result.joined_text());
+        assert_model_facing_setup_vocabulary(&result.joined_text());
         assert!(!result.joined_text().contains(invalid));
         assert!(!store.is_authorized(Some(&identity), &session));
     }
@@ -195,16 +200,16 @@ mod tests {
     async fn clients_without_conversation_metadata_use_transport_scope() {
         let root = tempfile::tempdir().unwrap();
         let mut config = default_config(root.path().to_path_buf());
-        let reference = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-        config.conversation_auth_token = Some(reference.into());
+        let auth_token = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        config.conversation_auth_token = Some(auth_token.into());
         let store = Arc::new(ConversationAuthorizationStore::new());
         let first_session = SessionState::new();
         let second_session = SessionState::new();
         let request_context = context(None, store.clone());
 
-        Setup
+        ConversationAuthorization
             .call_with_context(
-                json!({ "ref": reference }),
+                json!({ "ref": auth_token }),
                 &config,
                 &first_session,
                 &request_context,

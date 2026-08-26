@@ -44,7 +44,7 @@ fn load_tools_with_options(
 ) -> Vec<Box<dyn Tool>> {
     let mut all: Vec<Box<dyn Tool>> = Vec::new();
     if conversation_auth {
-        all.push(Box::new(tools::setup::Setup));
+        all.push(Box::new(tools::setup::ConversationAuthorization));
     }
     if multi_project {
         all.push(Box::new(tools::list_projects::ListProjects));
