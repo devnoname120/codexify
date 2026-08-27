@@ -5,6 +5,7 @@
 //! original TypeScript.
 
 pub mod apply_patch;
+pub mod artifact_egress;
 pub mod artifact_ingress;
 mod audit;
 pub mod auth;

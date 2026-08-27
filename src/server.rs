@@ -31,6 +31,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tower_http::cors::{Any, CorsLayer};
 
+use crate::artifact_egress::{ARTIFACT_RESOURCE_URI_PREFIX, ArtifactEgressStore};
 use crate::audit::{
     AuditLogger, AuditScope, argument_field_names, summarize_arguments, summarize_output,
 };
@@ -75,6 +76,7 @@ pub struct CodexHandler {
     conversation_authorizations: Arc<ConversationAuthorizationStore>,
     conversation_exec_sessions: Arc<ConversationExecSessionStore>,
     review_checkpoints: Arc<ReviewCheckpointManager>,
+    artifact_egress: Arc<ArtifactEgressStore>,
     audit: Option<Arc<AuditLogger>>,
     session: SessionState,
 }
@@ -142,6 +144,7 @@ fn to_call_tool_result(result: ToolResult) -> CallToolResult {
         .map(|c| match c {
             ToolContent::Text(t) => ContentBlock::text(t),
             ToolContent::Image { data, mime_type } => ContentBlock::image(data, mime_type),
+            ToolContent::ResourceLink(resource) => ContentBlock::resource_link(resource),
         })
         .collect();
 
@@ -194,7 +197,7 @@ impl ServerHandler for CodexHandler {
         );
         capabilities.extensions = Some(extensions);
         InitializeResult::new(capabilities)
-            .with_server_info(Implementation::new("codexify", "1.7.0"))
+            .with_server_info(Implementation::new("codexify", "1.8.0"))
             .with_instructions(build_initial_instructions(&self.config))
     }
 
@@ -224,8 +227,27 @@ impl ServerHandler for CodexHandler {
     async fn read_resource(
         &self,
         request: ReadResourceRequestParams,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<ReadResourceResponse, McpError> {
+        match self
+            .artifact_egress
+            .read_resource(&request.uri, &context.ct)
+            .await
+        {
+            Ok(Some(contents)) => {
+                return Ok(ReadResourceResult::new(vec![contents]).into());
+            }
+            Ok(None) => {}
+            Err(error) => {
+                return Err(McpError::internal_error(error.to_string(), None));
+            }
+        }
+        if request.uri.starts_with(ARTIFACT_RESOURCE_URI_PREFIX) {
+            return Err(McpError::resource_not_found(
+                "Unknown or expired exported-file resource".to_string(),
+                None,
+            ));
+        }
         let Some(contents) = review_ui::contents_for_uri(&request.uri) else {
             return Err(McpError::resource_not_found(
                 format!("Unknown resource: {}", request.uri),
@@ -252,6 +274,7 @@ impl ServerHandler for CodexHandler {
             conversation: conversation.clone(),
             conversation_authorizations: self.conversation_authorizations.clone(),
             review_checkpoints: self.review_checkpoints.clone(),
+            artifact_egress: self.artifact_egress.clone(),
             cancellation: context.ct.clone(),
         };
 
@@ -479,6 +502,7 @@ pub async fn start_http_server(mut config: AppConfig) -> anyhow::Result<()> {
     conversation_exec_sessions
         .spawn_idle_reaper(Duration::from_millis(config.exec.idle_timeout_ms));
     let review_checkpoints = Arc::new(ReviewCheckpointManager::new());
+    let artifact_egress = Arc::new(ArtifactEgressStore::new(config.artifact_egress.clone()));
     let conversation_authorizations =
         Arc::new(ConversationAuthorizationStore::for_current_user(&config));
 
@@ -547,6 +571,7 @@ pub async fn start_http_server(mut config: AppConfig) -> anyhow::Result<()> {
     let factory_conversation_authorizations = conversation_authorizations.clone();
     let factory_conversation_exec_sessions = conversation_exec_sessions.clone();
     let factory_review_checkpoints = review_checkpoints.clone();
+    let factory_artifact_egress = artifact_egress.clone();
     let factory_audit = audit.clone();
     let service = StreamableHttpService::new(
         move || {
@@ -559,6 +584,7 @@ pub async fn start_http_server(mut config: AppConfig) -> anyhow::Result<()> {
                 conversation_authorizations: factory_conversation_authorizations.clone(),
                 conversation_exec_sessions: factory_conversation_exec_sessions.clone(),
                 review_checkpoints: factory_review_checkpoints.clone(),
+                artifact_egress: factory_artifact_egress.clone(),
                 audit: factory_audit.clone(),
                 session,
             })
@@ -966,6 +992,9 @@ mod tests {
             conversation_authorizations: Arc::new(ConversationAuthorizationStore::new()),
             conversation_exec_sessions: Arc::new(ConversationExecSessionStore::new()),
             review_checkpoints: Arc::new(ReviewCheckpointManager::new()),
+            artifact_egress: Arc::new(ArtifactEgressStore::new(
+                crate::types::ArtifactEgressConfig::default(),
+            )),
             audit: None,
             session: SessionState::new(),
         };
@@ -997,6 +1026,9 @@ mod tests {
             conversation_authorizations: authorizations.clone(),
             conversation_exec_sessions: Arc::new(ConversationExecSessionStore::new()),
             review_checkpoints: Arc::new(ReviewCheckpointManager::new()),
+            artifact_egress: Arc::new(ArtifactEgressStore::new(
+                crate::types::ArtifactEgressConfig::default(),
+            )),
             audit: None,
             session: SessionState::new(),
         };
@@ -1082,6 +1114,29 @@ mod tests {
                 .and_then(|metadata| metadata.0.get("trace")),
             Some(&json!("upstream"))
         );
+    }
+
+    #[test]
+    fn call_result_serializes_exported_files_as_resource_links() {
+        let resource = rmcp::model::Resource::new(
+            "codexify://artifact/abcdefghijklmnopqrstuvwxyz0123456789_-ABCDE",
+            "report.bin",
+        )
+        .with_mime_type("application/octet-stream")
+        .with_size(42);
+        let converted = to_call_tool_result(ToolResult {
+            content: vec![ToolContent::ResourceLink(resource)],
+            is_error: false,
+            structured_content: None,
+            meta: None,
+            audit: Default::default(),
+        });
+        let value = serde_json::to_value(converted).unwrap();
+
+        assert_eq!(value["content"][0]["type"], "resource_link");
+        assert_eq!(value["content"][0]["name"], "report.bin");
+        assert_eq!(value["content"][0]["mimeType"], "application/octet-stream");
+        assert_eq!(value["content"][0]["size"], 42);
     }
 
     #[tokio::test]

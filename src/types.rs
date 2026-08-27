@@ -7,7 +7,7 @@
 use std::fmt;
 use std::ops::Deref;
 
-use rmcp::model::MetaObject;
+use rmcp::model::{MetaObject, Resource};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use zeroize::Zeroize;
@@ -20,6 +20,7 @@ use zeroize::Zeroize;
 pub enum ToolContent {
     Text(String),
     Image { data: String, mime_type: String },
+    ResourceLink(Resource),
 }
 
 /// Metadata retained for operational accounting without retaining tool output.
@@ -268,6 +269,11 @@ pub const DEFAULT_ARTIFACT_IDLE_TIMEOUT_MS: u64 = 30_000;
 pub const DEFAULT_ARTIFACT_MAX_REDIRECTS: u8 = 3;
 pub const DEFAULT_ARTIFACT_MAX_CONCURRENT_DOWNLOADS: usize = 2;
 
+pub const DEFAULT_ARTIFACT_EGRESS_MAX_FILE_BYTES: u64 = 100 * 1024 * 1024;
+pub const DEFAULT_ARTIFACT_EGRESS_MAX_CACHED_BYTES: u64 = 256 * 1024 * 1024;
+pub const DEFAULT_ARTIFACT_EGRESS_MAX_REFERENCES: usize = 64;
+pub const DEFAULT_ARTIFACT_EGRESS_REFERENCE_TTL_MS: u64 = 5 * 60 * 1000;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct ArtifactIngressConfig {
@@ -341,6 +347,46 @@ impl ArtifactIngressConfig {
                     "artifactIngress.allowedHosts contains an invalid host pattern: {pattern:?}"
                 ));
             }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ArtifactEgressConfig {
+    pub enabled: bool,
+    pub max_file_bytes: u64,
+    pub max_cached_bytes: u64,
+    pub max_references: usize,
+    pub reference_ttl_ms: u64,
+}
+
+impl Default for ArtifactEgressConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_file_bytes: DEFAULT_ARTIFACT_EGRESS_MAX_FILE_BYTES,
+            max_cached_bytes: DEFAULT_ARTIFACT_EGRESS_MAX_CACHED_BYTES,
+            max_references: DEFAULT_ARTIFACT_EGRESS_MAX_REFERENCES,
+            reference_ttl_ms: DEFAULT_ARTIFACT_EGRESS_REFERENCE_TTL_MS,
+        }
+    }
+}
+
+impl ArtifactEgressConfig {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.max_file_bytes == 0 {
+            return Err("artifactEgress.maxFileBytes must be positive".to_string());
+        }
+        if self.max_cached_bytes < self.max_file_bytes {
+            return Err("artifactEgress.maxCachedBytes must be at least maxFileBytes".to_string());
+        }
+        if !(1..=1024).contains(&self.max_references) {
+            return Err("artifactEgress.maxReferences must be between 1 and 1024".to_string());
+        }
+        if self.reference_ttl_ms == 0 {
+            return Err("artifactEgress.referenceTtlMs must be positive".to_string());
         }
         Ok(())
     }
@@ -647,7 +693,7 @@ pub struct WorktreeConfig {
 /// The fully-resolved server configuration handed to every tool.
 ///
 /// `work_dir` and `port` are always concrete. `project_catalog`, `projectDoc`,
-/// `output`, `review`, `artifactIngress`, `memory`, `skills`, `ignore` and
+/// `output`, `review`, `artifactIngress`, `artifactEgress`, `memory`, `skills`, `ignore` and
 /// `audit` carry their resolved/defaultable module settings.
 #[derive(Debug, Clone)]
 pub struct AppConfig {
@@ -667,6 +713,7 @@ pub struct AppConfig {
     pub output: OutputConfig,
     pub review: ReviewConfig,
     pub artifact_ingress: ArtifactIngressConfig,
+    pub artifact_egress: ArtifactEgressConfig,
     pub memory: MemoryConfig,
     pub skills: SkillsConfig,
     pub ignore: IgnoreConfig,

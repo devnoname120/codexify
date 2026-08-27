@@ -4,6 +4,7 @@ pub mod apply_patch;
 pub mod clock_curr_time;
 pub mod clock_sleep;
 pub mod exec_command;
+pub mod export_host_file;
 pub mod get_agent_brief;
 pub mod get_environment;
 pub mod get_project_doc;

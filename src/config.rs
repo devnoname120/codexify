@@ -23,9 +23,9 @@ use crate::conversation_auth::validate_conversation_auth_token;
 use crate::openai_tunnel::validate_tunnel_id;
 use crate::project_catalog::{ProjectCatalog, discover_project_catalog_at};
 use crate::types::{
-    AppConfig, ArtifactIngressConfig, AuditConfig, CodexProjectCatalogConfig, CommandConfig,
-    ConversationAuthToken, ExecConfig, ExecMode, IgnoreConfig, McpServerSpec, McpToolExposure,
-    MemoryConfig, OpenAiTunnelConfig, OutputConfig, ProjectCatalogConfig,
+    AppConfig, ArtifactEgressConfig, ArtifactIngressConfig, AuditConfig, CodexProjectCatalogConfig,
+    CommandConfig, ConversationAuthToken, ExecConfig, ExecMode, IgnoreConfig, McpServerSpec,
+    McpToolExposure, MemoryConfig, OpenAiTunnelConfig, OutputConfig, ProjectCatalogConfig,
     ProjectCatalogEntryConfig, ProjectDocConfig, ReviewConfig, SkillsConfig, TreeConfig,
     WorktreeConfig, WorktreeMode, WorktreeUpstreamRefreshMode,
 };
@@ -459,6 +459,7 @@ struct FileConfig {
     output: Option<OutputConfig>,
     review: Option<ReviewConfig>,
     artifact_ingress: Option<ArtifactIngressConfig>,
+    artifact_egress: Option<ArtifactEgressConfig>,
     memory: Option<MemoryConfig>,
     skills: Option<SkillsConfig>,
     ignore: Option<IgnoreConfig>,
@@ -656,6 +657,7 @@ pub fn default_config(work_dir: std::path::PathBuf) -> AppConfig {
         output: OutputConfig::default(),
         review: ReviewConfig::default(),
         artifact_ingress: ArtifactIngressConfig::default(),
+        artifact_egress: ArtifactEgressConfig::default(),
         memory: MemoryConfig::default(),
         skills: SkillsConfig::default(),
         ignore: IgnoreConfig::default(),
@@ -1305,6 +1307,8 @@ pub fn load_config(cli: Cli) -> Result<AppConfig, String> {
 
     let artifact_ingress = file.artifact_ingress.unwrap_or_default();
     artifact_ingress.validate()?;
+    let artifact_egress = file.artifact_egress.unwrap_or_default();
+    artifact_egress.validate()?;
 
     Ok(AppConfig {
         work_dir,
@@ -1325,6 +1329,7 @@ pub fn load_config(cli: Cli) -> Result<AppConfig, String> {
         output: file.output.unwrap_or_default(),
         review: file.review.unwrap_or_default(),
         artifact_ingress,
+        artifact_egress,
         memory: file.memory.unwrap_or_default(),
         skills: file.skills.unwrap_or_default(),
         ignore: file.ignore.unwrap_or_default(),
@@ -2177,6 +2182,76 @@ mod tests {
             (
                 r#"{"artifactIngress":{"maxConcurrentDownloads":0}}"#,
                 "maxConcurrentDownloads",
+            ),
+        ] {
+            std::fs::write(&config_path, json).unwrap();
+            let error = load_config(cli(root.path(), &config_path)).unwrap_err();
+            assert!(error.contains(expected), "{error}");
+        }
+    }
+
+    #[test]
+    fn artifact_egress_config_accepts_defaults_and_camel_case_overrides() {
+        let empty: FileConfig = serde_json::from_str(r#"{"artifactEgress":{}}"#).unwrap();
+        let empty = empty.artifact_egress.unwrap();
+        assert!(empty.enabled);
+        assert_eq!(
+            empty.max_file_bytes,
+            crate::types::DEFAULT_ARTIFACT_EGRESS_MAX_FILE_BYTES
+        );
+        assert_eq!(
+            empty.max_cached_bytes,
+            crate::types::DEFAULT_ARTIFACT_EGRESS_MAX_CACHED_BYTES
+        );
+        assert_eq!(
+            empty.max_references,
+            crate::types::DEFAULT_ARTIFACT_EGRESS_MAX_REFERENCES
+        );
+        assert_eq!(
+            empty.reference_ttl_ms,
+            crate::types::DEFAULT_ARTIFACT_EGRESS_REFERENCE_TTL_MS
+        );
+
+        let configured: FileConfig = serde_json::from_str(
+            r#"{
+                "artifactEgress": {
+                    "enabled": false,
+                    "maxFileBytes": 4096,
+                    "maxCachedBytes": 8192,
+                    "maxReferences": 4,
+                    "referenceTtlMs": 5000
+                }
+            }"#,
+        )
+        .unwrap();
+        let configured = configured.artifact_egress.unwrap();
+        assert!(!configured.enabled);
+        assert_eq!(configured.max_file_bytes, 4096);
+        assert_eq!(configured.max_cached_bytes, 8192);
+        assert_eq!(configured.max_references, 4);
+        assert_eq!(configured.reference_ttl_ms, 5000);
+    }
+
+    #[test]
+    fn artifact_egress_config_rejects_unsafe_limits() {
+        let root = tempfile::tempdir().unwrap();
+        let config_path = root.path().join("config.json");
+        for (json, expected) in [
+            (
+                r#"{"artifactEgress":{"maxFileBytes":0}}"#,
+                "maxFileBytes must be positive",
+            ),
+            (
+                r#"{"artifactEgress":{"maxFileBytes":4096,"maxCachedBytes":4095}}"#,
+                "maxCachedBytes must be at least maxFileBytes",
+            ),
+            (
+                r#"{"artifactEgress":{"maxReferences":0}}"#,
+                "maxReferences must be between 1 and 1024",
+            ),
+            (
+                r#"{"artifactEgress":{"referenceTtlMs":0}}"#,
+                "referenceTtlMs must be positive",
             ),
         ] {
             std::fs::write(&config_path, json).unwrap();

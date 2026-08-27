@@ -285,6 +285,9 @@ mod tests {
                 crate::conversation_auth::ConversationAuthorizationStore::new(),
             ),
             review_checkpoints: Arc::new(crate::review::ReviewCheckpointManager::new()),
+            artifact_egress: Arc::new(crate::artifact_egress::ArtifactEgressStore::new(
+                config.artifact_egress.clone(),
+            )),
             cancellation,
         };
 

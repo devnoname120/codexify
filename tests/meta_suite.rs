@@ -25,15 +25,15 @@ use codexify::types::{AppConfig, ToolContent, ToolResult};
 // ─── registry.test.ts ──────────────────────────────────────────────────
 
 #[test]
-fn loads_all_27_tools() {
+fn loads_all_28_tools() {
     let tools = load_tools();
-    assert_eq!(tools.len(), 27);
+    assert_eq!(tools.len(), 28);
 }
 
 #[test]
 fn multi_project_mode_adds_catalogue_and_session_selector() {
     let tools = load_tools_for_mode(true);
-    assert_eq!(tools.len(), 29);
+    assert_eq!(tools.len(), 30);
     assert_eq!(tools[0].name(), "list_projects");
     assert_eq!(tools[1].name(), "set_project_root");
 }
@@ -46,8 +46,20 @@ fn artifact_ingress_can_be_omitted_by_configuration() {
         .into_iter()
         .map(|tool| tool.name())
         .collect::<Vec<_>>();
-    assert_eq!(names.len(), 26);
+    assert_eq!(names.len(), 27);
     assert!(!names.contains(&"import_host_file"));
+}
+
+#[test]
+fn artifact_egress_can_be_omitted_by_configuration() {
+    let mut config = default_config(PathBuf::from("/tmp"));
+    config.artifact_egress.enabled = false;
+    let names = load_tools_for_config(&config)
+        .into_iter()
+        .map(|tool| tool.name())
+        .collect::<Vec<_>>();
+    assert_eq!(names.len(), 27);
+    assert!(!names.contains(&"export_host_file"));
 }
 
 #[test]
@@ -56,7 +68,7 @@ fn conversation_auth_mode_adds_innocuously_named_gate_before_protected_tools() {
     config.conversation_auth_token =
         Some("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into());
     let tools = load_tools_for_config(&config);
-    assert_eq!(tools.len(), 28);
+    assert_eq!(tools.len(), 29);
     assert_eq!(tools[0].name(), "setup");
     let schema = tools[0].input_schema();
     assert!(schema["properties"].get("ref").is_some());
@@ -79,7 +91,7 @@ fn conversation_auth_mode_adds_innocuously_named_gate_before_protected_tools() {
 
     config.multi_project = true;
     let tools = load_tools_for_config(&config);
-    assert_eq!(tools.len(), 30);
+    assert_eq!(tools.len(), 31);
     assert_eq!(tools[0].name(), "setup");
     assert_eq!(tools[1].name(), "list_projects");
     assert_eq!(tools[2].name(), "set_project_root");
@@ -121,6 +133,7 @@ fn includes_expected_tool_names() {
         "read_file",
         "write_file",
         "import_host_file",
+        "export_host_file",
         "run_command",
         "git_status",
         "show_changes",
@@ -423,6 +436,7 @@ fn tools_that_need_their_own_structured_content() {
         vec![
             "clock_curr_time".to_string(),
             "exec_command".to_string(),
+            "export_host_file".to_string(),
             "get_environment".to_string(),
             "get_project_doc".to_string(),
             "import_host_file".to_string(),

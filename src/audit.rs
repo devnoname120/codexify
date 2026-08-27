@@ -273,6 +273,7 @@ pub(crate) fn summarize_output(result: &ToolResult) -> Value {
     let mut text_tokens = 0u64;
     let mut image_base64_bytes = 0u64;
     let mut image_count = 0u64;
+    let mut resource_link_count = 0u64;
     for content in &result.content {
         match content {
             ToolContent::Text(text) => {
@@ -282,6 +283,9 @@ pub(crate) fn summarize_output(result: &ToolResult) -> Value {
             ToolContent::Image { data, .. } => {
                 image_count = image_count.saturating_add(1);
                 image_base64_bytes = image_base64_bytes.saturating_add(data.len() as u64);
+            }
+            ToolContent::ResourceLink(_) => {
+                resource_link_count = resource_link_count.saturating_add(1);
             }
         }
     }
@@ -296,6 +300,7 @@ pub(crate) fn summarize_output(result: &ToolResult) -> Value {
         "approx_text_tokens": text_tokens,
         "image_count": image_count,
         "image_base64_bytes": image_base64_bytes,
+        "resource_link_count": resource_link_count,
         "structured_bytes": structured_bytes,
         "meta_bytes": meta_bytes,
         "truncated": result.audit.truncated,
@@ -732,6 +737,28 @@ mod tests {
         assert!(!summary.contains("input.bin"));
         assert!(summary.contains("\"file\""));
         assert!(summary.contains("\"path\""));
+    }
+
+    #[test]
+    fn exported_file_output_summary_counts_but_never_names_the_capability() {
+        let resource = rmcp::model::Resource::new(
+            "codexify://artifact/abcdefghijklmnopqrstuvwxyz0123456789_-ABCDE",
+            "private-report.bin",
+        )
+        .with_mime_type("application/octet-stream")
+        .with_size(42);
+        let result = ToolResult {
+            content: vec![ToolContent::ResourceLink(resource)],
+            is_error: false,
+            structured_content: None,
+            meta: None,
+            audit: Default::default(),
+        };
+
+        let summary = summarize_output(&result).to_string();
+        assert!(summary.contains("\"resource_link_count\":1"));
+        assert!(!summary.contains("codexify://artifact/"));
+        assert!(!summary.contains("private-report.bin"));
     }
 
     #[test]

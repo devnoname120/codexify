@@ -14,6 +14,7 @@ pub fn load_tools() -> Vec<Box<dyn Tool>> {
         false,
         false,
         true,
+        true,
         DEFAULT_ARTIFACT_MAX_CONCURRENT_DOWNLOADS,
     )
 }
@@ -22,6 +23,7 @@ pub fn load_tools_for_mode(multi_project: bool) -> Vec<Box<dyn Tool>> {
     load_tools_with_options(
         multi_project,
         false,
+        true,
         true,
         DEFAULT_ARTIFACT_MAX_CONCURRENT_DOWNLOADS,
     )
@@ -32,6 +34,7 @@ pub fn load_tools_for_config(config: &AppConfig) -> Vec<Box<dyn Tool>> {
         config.multi_project,
         config.conversation_auth_token.is_some(),
         config.artifact_ingress.enabled,
+        config.artifact_egress.enabled,
         config.artifact_ingress.max_concurrent_downloads,
     )
 }
@@ -40,6 +43,7 @@ fn load_tools_with_options(
     multi_project: bool,
     conversation_auth: bool,
     artifact_ingress_enabled: bool,
+    artifact_egress_enabled: bool,
     max_concurrent_downloads: usize,
 ) -> Vec<Box<dyn Tool>> {
     let mut all: Vec<Box<dyn Tool>> = Vec::new();
@@ -56,6 +60,9 @@ fn load_tools_with_options(
         all.push(Box::new(tools::import_host_file::ImportHostFile::new(
             max_concurrent_downloads,
         )));
+    }
+    if artifact_egress_enabled {
+        all.push(Box::new(tools::export_host_file::ExportHostFile));
     }
     all.extend([
         Box::new(tools::run_command::RunCommand),

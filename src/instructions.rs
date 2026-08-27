@@ -66,12 +66,20 @@ pub const AGENT_BRIEF: &str = concat!(
 );
 
 fn configured_agent_brief(config: &AppConfig) -> String {
-    if !config.artifact_ingress.enabled {
+    let mut host_file_guidance = Vec::new();
+    if config.artifact_ingress.enabled {
+        host_file_guidance.push("- Use import_host_file when the user attaches a file or asks you to place a ChatGPT-generated file into the project. Do not reconstruct binary files through write_file or substitute an arbitrary URL.");
+    }
+    if config.artifact_egress.enabled {
+        host_file_guidance.push("- Use export_host_file when the user asks to receive, download, or open a file that exists in the active project. Return the resource from that tool instead of pasting base64 data or merely reporting a local path.");
+    }
+    if host_file_guidance.is_empty() {
         return AGENT_BRIEF.to_string();
     }
 
     format!(
-        "{AGENT_BRIEF}\n\n## Host files\n\n- Use import_host_file when the user attaches a file or asks you to place a ChatGPT-generated file into the project. Do not reconstruct binary files through write_file or substitute an arbitrary URL."
+        "{AGENT_BRIEF}\n\n## Host files\n\n{}",
+        host_file_guidance.join("\n")
     )
 }
 

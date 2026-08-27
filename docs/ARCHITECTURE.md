@@ -4,8 +4,9 @@ A Rust port of the `codexify` MCP bridge. codexify is a local [Model Context
 Protocol](https://modelcontextprotocol.io) server that exposes Codex-style agent
 tools over **Streamable HTTP**, scoped either to one configured working directory
 or to a project root selected independently by each ChatGPT conversation, and can
-additionally **aggregate local or remote MCP servers**, **surface local skills**, and
-materialize ChatGPT-native files inside the active project.
+additionally **aggregate local or remote MCP servers**, **surface local skills**,
+materialize ChatGPT-native files inside the active project, and return project files
+to ChatGPT as downloadable MCP resources.
 Clients without ChatGPT conversation metadata use an MCP-transport-session fallback.
 
 This document explains how it is put together and why. For usage, see
@@ -35,7 +36,7 @@ ChatGPT / MCP client
 │        │                                      │
 │        ▼                                      │
 │  registry: Vec<Box<dyn Tool>>                 │
-│    • 27 native tools                          │
+│    • 28 native tools                          │
 │    • + setup authorization wire tool          │
 │    • + list_projects + set_project_root       │
 │      in multi-project mode                    │
@@ -58,6 +59,10 @@ ChatGPT / MCP client
 │  shared ReviewCheckpointManager               │
 │    • project-open + last-review snapshots     │
 │    • scoped Git refs + MCP Apps resource      │
+│                                               │
+│  shared ArtifactEgressStore                   │
+│    • opaque short-lived resource capabilities │
+│    • bounded immutable in-memory snapshots    │
 │                                               │
 │  optional shared AuditLogger                  │
 │    • redacted JSONL tool lifecycle records    │
@@ -83,9 +88,12 @@ Five integration surfaces are exposed to the client:
 - **Conversation authorization** — an optional authentication-token gate whose
   durable grant is keyed by ChatGPT's stable conversation metadata rather than
   by the replaceable MCP transport.
-- **MCP App** — the self-contained review resource linked from `show_changes`;
-  its complete diff arrives through component-only result metadata, while
-  unsupported clients retain only the concise ordinary text result.
+- **Resources / MCP App** — the self-contained review resource linked from
+  `show_changes`, whose complete diff arrives through component-only result
+  metadata, plus opaque exported-file resources linked from `export_host_file`
+  and resolved through `resources/read`. Unsupported clients ignore review UI
+  metadata and keep the concise ordinary text result; a client must support
+  resource links to retrieve exported file bytes.
 
 ---
 
@@ -106,8 +114,10 @@ Five integration surfaces are exposed to the client:
    rmcp `Tool` definitions, including optional titles, behavioral annotations,
    icons, input/output schemas, OpenAI file-parameter metadata, and MCP Apps
    resource metadata. Transitive definitions held by the private MCP catalog are
-   deliberately absent from this registry.
-   `resources/list` / `resources/read` expose the embedded review HTML.
+   deliberately absent from this registry. `resources/list` exposes only the
+   embedded review HTML. `resources/read` serves that static resource and also
+   resolves opaque exported-file capabilities returned by `export_host_file`;
+   those dynamic references are intentionally not enumerable.
 4. `tools/call` → `CodexHandler::call_tool` reads `openai/session` from rmcp's
    `RequestContext::meta`. rmcp moves wire-level request `_meta` into that context
    before dispatch, so the typed tool parameters are not the authoritative source.
@@ -318,8 +328,8 @@ in that order. It parses camelCase fields for backward compatibility, imports
 user-level Codex MCP definitions through `codex_mcp.rs`, opportunistically adds
 plugin-provided entries from the Codex CLI's effective catalogue, then applies
 explicit `mcpServers` entries as field overlays. Optional sub-configs (`projectDoc`,
-`projectCatalog`, `output`, `review`, `artifactIngress`, `worktrees`, `memory`,
-`skills`, `ignore`, `audit`) fall back to per-module defaults, as does `codexMcp`
+`projectCatalog`, `output`, `review`, `artifactIngress`, `artifactEgress`, `worktrees`,
+`memory`, `skills`, `ignore`, `audit`) fall back to per-module defaults, as does `codexMcp`
 (Codex MCP import and CLI enrichment). In multi-project mode, dispatch clones this
 config per call and substitutes the conversation's selected root—or the transport
 fallback—for `work_dir`; the static server policy, catalogue overlay, and bridge
@@ -374,15 +384,18 @@ one-line instruction needed by an individual chat or ChatGPT Project.
   `ProjectBindingStore` resolves its project, the persistent
   `ConversationAuthorizationStore` resolves the optional token grant, and the in-memory
   `ConversationExecSessionStore` resolves resident commands across replacement
-  transports. Upstream MCP connections, all three stores, and the tool registry are
-  shared (`Arc`) across transports.
+  transports, and `ArtifactEgressStore` preserves short-lived exported-file
+  snapshots across the same replacement. Upstream MCP connections, all four stores,
+  and the tool registry are shared (`Arc`) across transports.
 - **`get_info`** advertises server name `codexify` (wire-compatible identity),
   version, tools/resources capabilities, the `io.modelcontextprotocol/ui` extension,
   and the `instructions`. The review resource is embedded in the binary and has no
   external network or asset dependency.
-- **Tool descriptors** preserve generic titles, MCP annotations and `_meta`
-  extensions. `import_host_file` uses this path for
-  `_meta["openai/fileParams"]`; the server has no tool-name special case.
+- **Tool descriptors and results** preserve generic titles, MCP annotations and
+  `_meta` extensions. `import_host_file` uses the descriptor path for
+  `_meta["openai/fileParams"]`; `export_host_file` returns a standard
+  `resource_link`, and `resources/read` resolves only locally issued opaque
+  artifact capabilities. The conversion layer has no tool-name special case.
 - **Errors**: a tool that fails returns `Ok(CallToolResult::error(...))`
   (`isError: true`) so the caller sees the message; only an unknown tool name is
   an error *result* as well. Protocol errors are avoided.
@@ -423,11 +436,11 @@ a private per-run temporary directory and are removed after shutdown.
 
 ---
 
-## 5. Native tools (27 default, 29 multi-project)
+## 5. Native tools (28 default, 30 multi-project)
 
 | Group | Tools |
 |-------|-------|
-| File / code | `read_file`, `write_file`, `import_host_file`, `apply_patch`, `glob`, `grep`, `list_directory`, `tree`, `view_image` |
+| File / code | `read_file`, `write_file`, `import_host_file`, `export_host_file`, `apply_patch`, `glob`, `grep`, `list_directory`, `tree`, `view_image` |
 | Commands | `run_command` (allowlisted argv), `exec_command` / `write_stdin` (resident shell sessions) |
 | Git / review | `git_status`, `show_changes`, `git_push`, `git_commit`, `git_log` |
 | Environment / project | `get_environment`, `get_project_doc`, `get_agent_brief` |
@@ -438,10 +451,11 @@ a private per-run temporary directory and are removed after shutdown.
 
 Conversation authorization prepends the ChatGPT-facing `setup` wire tool; multi-project mode then
 prepends `list_projects` and `set_project_root`. The optional tools are omitted
-from the ordinary single-project registry, preserving the 27-tool default surface
+from the ordinary single-project registry, preserving the 28-tool default surface
 and behaviour. Enabling the gate raises the applicable count by one.
-`artifactIngress.enabled = false` independently removes
-`import_host_file`, reducing either count by one. Project-catalogue discovery and
+`artifactIngress.enabled = false` independently removes `import_host_file`, while
+`artifactEgress.enabled = false` independently removes `export_host_file`; each
+reduces the applicable count by one. Project-catalogue discovery and
 selection, clocks, the four transitive-MCP catalog tools, and direct/gateway
 compatibility tools are project-independent; every other native tool is blocked
 until a conversation binding or transport fallback is available.
@@ -455,8 +469,9 @@ the original order and rejects duplicate names.
 
 | Module | Responsibility |
 |--------|----------------|
-| `safe_path.rs` | Lexical path-traversal guard (no `canonicalize`; component-wise containment). The security boundary for every filesystem tool. |
+| `safe_path.rs` | Lexical path-traversal guard (no `canonicalize`; component-wise containment) used by the ordinary filesystem tools. Native file ingress and egress use their own capability-confined boundaries below. |
 | `artifact_ingress/` | OpenAI native-file validation and streaming plus capability-confined, atomic no-overwrite workspace publication. It never accepts a local source path, and constrains the download URL and every redirect hop to the configurable `artifactIngress.allowedHosts` allowlist (default `"*"`, which still rejects loopback, private, link-local, unique-local, CGNAT, `localhost`, and metadata addresses). |
+| `artifact_egress.rs` | Capability-confined regular-file snapshotting plus a process-wide bounded store of immutable bytes. It returns random opaque `codexify://artifact/...` resource capabilities, enforces per-file/total-byte/reference/TTL limits, and serves blobs only through `resources/read`; absolute paths, traversal, symlink escapes, and delayed path rereads are excluded. |
 | `logging.rs` | Tracing initialization with default filters for normal, `-v`, and `-vv` operation (an explicit `RUST_LOG` remains authoritative), plus a non-overridable filter that suppresses RMCP framework events, preventing native-file bearer URLs from appearing in logs before tool dispatch or malformed-session errors. |
 | `output_budget.rs` | Line/byte windowing and list caps, each cut announced with the continuation argument. |
 | `audit.rs` | Private append-only JSONL tool lifecycle records, stable hashed identities, redacted argument summaries, output accounting, and opt-in bounded command previews. |
@@ -706,6 +721,9 @@ the legacy fallback. All fields are optional.
                        "requestTimeoutMs": 120000, "idleTimeoutMs": 30000,
                        "maxRedirects": 3, "maxConcurrentDownloads": 2,
                        "allowedHosts": ["*"] },
+  "artifactEgress": { "enabled": true, "maxFileBytes": 104857600,
+                      "maxCachedBytes": 268435456, "maxReferences": 64,
+                      "referenceTtlMs": 300000 },
   "worktrees": { "mode": "auto",        // auto | always | never; or --worktree-mode
                  "root": "…",            // default: $CODEX_HOME/worktrees; or --worktree-root
                  "upstreamRefreshMode": "never",   // never | best-effort
@@ -752,7 +770,7 @@ The banner is designed so failures are never silent:
 
 ```
 Config: C:\Users\alice\.codexify\codex.config.json (user config)
-Tools loaded (34): 30 native + 4 upstream-facing MCP tools
+Tools loaded (35): 31 native + 4 upstream-facing MCP tools
 Upstream MCP servers:
   idalib      -> catalog (66 private tool(s))
   remote-exec -> catalog (84 private tool(s))
@@ -773,7 +791,7 @@ Audit command previews: disabled
   internal bearer are never printed.
 - Multi-project startup also prints `Project access root:`, `Project mode:
   persistent ChatGPT conversation binding`, and the conversation-binding state
-  directory; its native count is 29 because the selectors are present.
+  directory; its native count is 30 because the selectors are present.
 - Conversation authorization adds one native tool and prints only whether the
   gate is enabled; neither the token nor its derived namespace is printed.
 - `-v` and `-vv` increase Codexify diagnostics without dumping raw tool payloads;
@@ -818,6 +836,10 @@ units to match the TS `text.length` / `text.slice`.
   temporary directories to cover provider-host validation, redirects, declared
   and streamed size limits, idle and caller cancellation, exact hashes, partial
   cleanup, symlink escapes, no-overwrite publication, and concurrent writers.
+- `artifact_egress` unit tests cover opaque resource generation, exact immutable
+  byte snapshots after source replacement, MIME and SHA-256 receipts, traversal,
+  symlink escape and oversize rejection, caller cancellation boundaries, cache-byte
+  and reference eviction, and reference expiry.
 - `tests/review_fixes.rs` locks the behavioral-fidelity fixes found by the
   adversarial review of the port. The bridge/gateway/skills code was reviewed the
   same way; the confirmed low-severity findings (name-collision dedup, YAML-safe
@@ -848,3 +870,5 @@ Run: `cargo test`. Build a standalone binary: `cargo build --release`.
 | Native tunnel key is rejected before startup | `apiKeyRef` must be `env:NAME` or `file:/path`. The referenced value must exist; on Unix, key files must not grant group/other access. |
 | `import_host_file` is missing | `artifactIngress.enabled` is false, or the connector cached an older manifest. Enable it and remove/re-add the connector so ChatGPT refreshes `tools/list`. |
 | Native file import reports an untrusted URL | The supplied value was not a ChatGPT-native file parameter or its temporary provider URL no longer matches the supported OpenAI file-service boundary. Reattach or regenerate the file instead of passing a URL manually. |
+| `export_host_file` is missing | `artifactEgress.enabled` is false, or the connector cached an older manifest. Enable it and remove/re-add the connector so ChatGPT refreshes `tools/list`. |
+| An exported-file resource is unknown or expired | Its opaque capability exceeded `artifactEgress.referenceTtlMs`, was evicted by the byte/reference bounds, or Codexify restarted. Call `export_host_file` again to create a fresh immutable snapshot. |

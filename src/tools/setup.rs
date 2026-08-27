@@ -138,6 +138,9 @@ mod tests {
             conversation: identity,
             conversation_authorizations: authorizations,
             review_checkpoints: Arc::new(ReviewCheckpointManager::new()),
+            artifact_egress: Arc::new(crate::artifact_egress::ArtifactEgressStore::new(
+                crate::types::ArtifactEgressConfig::default(),
+            )),
             cancellation: tokio_util::sync::CancellationToken::new(),
         }
     }

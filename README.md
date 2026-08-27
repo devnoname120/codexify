@@ -8,7 +8,7 @@ A local MCP bridge server that lets ChatGPT Web Pro call tools on your machine: 
 
 In native-tunnel mode, Codexify listens only on `127.0.0.1`, protects the MCP endpoint with a random per-process bearer token, starts OpenAI's official runtime-only tunnel client, and supervises it for the lifetime of the server. The tunnel client makes outbound HTTPS requests to OpenAI and forwards tunnel traffic to the authenticated loopback MCP endpoint. A conventional externally managed tunnel remains available as an alternative.
 
-The tool set covers the ones [Codex](https://github.com/openai/codex) gives its own agent — `apply_patch`, `exec_command`/`write_stdin`, `view_image`, `update_plan`, `clock_curr_time`/`clock_sleep` — so ChatGPT Web can work the way Codex does: patch files in place instead of rewriting them, drive interactive and long-running processes, and keep a plan across a task. It also bridges ChatGPT-native attachments and generated files into the active local project without base64 reconstruction. It carries the project's `AGENTS.md` and Codex's own agent brief, so the client is told how to behave and not just what it can call. It bounds what a tool call can return, keeps a plan and notes on disk across conversations, and records project-scoped review checkpoints so ChatGPT can inspect either the full task diff or only changes since the last review. And it loads Codex's skills: a `SKILL.md` in the repo or your home directory teaches the client how *you* do a recurring task, and only the ones that apply are ever read. Schemas and prompt are ported from the Codex source, not reimplemented from guesswork.
+The tool set covers the ones [Codex](https://github.com/openai/codex) gives its own agent — `apply_patch`, `exec_command`/`write_stdin`, `view_image`, `update_plan`, `clock_curr_time`/`clock_sleep` — so ChatGPT Web can work the way Codex does: patch files in place instead of rewriting them, drive interactive and long-running processes, and keep a plan across a task. It also bridges ChatGPT-native attachments and generated files into the active local project, and returns project files to ChatGPT as downloadable MCP resources, without reconstructing binary data in model-visible text or pretending a machine-local path is usable by the host. It carries the project's `AGENTS.md` and Codex's own agent brief, so the client is told how to behave and not just what it can call. It bounds what a tool call can return, keeps a plan and notes on disk across conversations, and records project-scoped review checkpoints so ChatGPT can inspect either the full task diff or only changes since the last review. And it loads Codex's skills: a `SKILL.md` in the repo or your home directory teaches the client how *you* do a recurring task, and only the ones that apply are ever read. Schemas and prompt are ported from the Codex source, not reimplemented from guesswork.
 
 Beyond the port, Codexify can **aggregate other MCP servers**. It connects to local stdio servers or remote Streamable HTTP endpoints, keeps automatically imported Codex/plugin tool catalogues private by default, and gives the ChatGPT-side agent a fixed ranked discovery/schema/call surface. Explicit direct flattening and the older one-tool gateway remain available as compatibility modes.
 
@@ -24,6 +24,7 @@ flowchart LR
 
     FS["read_file\nwrite_file\nlist_directory\ntree"]
     Ingress["import_host_file"]
+    Egress["export_host_file"]
     Search["glob\ngrep"]
     Shell["run_command"]
     Git["git_status\nshow_changes\ngit_push\ngit_commit\ngit_log"]
@@ -38,6 +39,7 @@ flowchart LR
     Bridge["MCP aggregator\n(bridge.rs)"]
     WorkDir[("Project root\nper-conversation in\nmulti-project mode")]
     HostFiles[("ChatGPT attachments\nand generated files")]
+    ArtifactCache[("Bounded immutable\nfile snapshots")]
     State[("~/.codexify\nmemory (per project)")]
     Bindings[("~/.codexify\nconversation-projects")]
     Worktree[("Managed Git worktree\nper-conversation checkout,\nswept on startup")]
@@ -56,6 +58,7 @@ flowchart LR
 
     Tools --> FS
     Tools --> Ingress
+    Tools --> Egress
     Tools --> Search
     Tools --> Shell
     Tools --> Git
@@ -72,6 +75,9 @@ flowchart LR
     FS --> WorkDir
     HostFiles --> Ingress
     Ingress --> WorkDir
+    WorkDir --> Egress
+    Egress --> ArtifactCache
+    Server <-->|"resource_link / resources/read"| ArtifactCache
     Search --> WorkDir
     Shell --> WorkDir
     Edit --> WorkDir
@@ -304,6 +310,7 @@ Structured primitives — cheaper and safer than shelling out for the same job, 
 | `read_file` | Read a file's contents, a bounded window at a time, with optional line offset/limit |
 | `write_file` | Write content to a file, creating parent directories if needed |
 | `import_host_file` | Stream one ChatGPT attachment or generated file into a new project-relative path, with bounded size, SHA-256 verification and atomic no-overwrite publication |
+| `export_host_file` | Snapshot one project-relative file and return a short-lived, opaque MCP resource that ChatGPT can download without receiving a local path or base64 text |
 | `run_command` | Execute a command in the work directory (allowlist-restricted) |
 | `git_status` | Show git status, parsed into changed files with status codes |
 | `show_changes` | Compare the scoped working tree with the project-open or last-review checkpoint, optionally advancing the incremental baseline; compatible hosts receive the bounded diff in an interactive component-only review card |
@@ -357,7 +364,7 @@ Multi-project mode adds two project-control tools:
 
 Codex needs the first three for none of these reasons: it puts its agent brief in the system prompt, the OS and shell in an `<environment_context>` message, and `AGENTS.md` straight into the prompt, all before the first turn. An MCP server has none of those channels — it can only expose tools — so the same facts are tool calls here as well as part of the server's `instructions`. It needs `remember` and `recall` for the opposite reason: its context is large and its session state lives in the CLI process, whereas the client here is a chat window that loses the conversation. See [Context and memory](#context-and-memory), [Acting as a Codex agent](#acting-as-a-codex-agent), [Shells and the host](#shells-and-the-host), [AGENTS.md](#agentsmd) and [Skills](#skills).
 
-That is 27 native tools in the default single-project mode and 29 in multi-project mode. Enabling conversation authorization adds the ChatGPT-facing `setup` tool, producing 28 or 30 respectively. Setting `artifactIngress.enabled` to `false` removes `import_host_file`, reducing the applicable count by one. One or more [catalog-mode MCP upstreams](#catalog-mode-default-for-automatic-imports) add one shared four-tool discovery/call surface regardless of how many transitive tools they contain. Direct mode adds one downstream tool per selected upstream tool; gateway mode adds one downstream dispatcher per upstream server.
+That is 28 native tools in the default single-project mode and 30 in multi-project mode. Enabling conversation authorization adds the ChatGPT-facing `setup` tool, producing 29 or 31 respectively. Setting `artifactIngress.enabled` to `false` removes `import_host_file`; setting `artifactEgress.enabled` to `false` independently removes `export_host_file`. Each disabled direction reduces the applicable count by one. One or more [catalog-mode MCP upstreams](#catalog-mode-default-for-automatic-imports) add one shared four-tool discovery/call surface regardless of how many transitive tools they contain. Direct mode adds one downstream tool per selected upstream tool; gateway mode adds one downstream dispatcher per upstream server.
 
 Two deliberate differences from Codex:
 
@@ -374,7 +381,7 @@ sessions.
 
 `clock_sleep` also caps at 5 minutes rather than Codex's 12 hours — a longer wait would outlive the HTTP request through the tunnel.
 
-Every tool that advertises an `outputSchema` also returns `structuredContent` matching it, as the MCP spec asks. `exec_command` and `write_stdin` return Codex's unified-exec object, `import_host_file` returns its destination, byte count and SHA-256 receipt, `clock_curr_time` returns `{ current_time }`, `get_environment` returns the environment object, `get_project_doc` returns `{ files, content }` and `skills_list` returns `{ skills, content }`; the rest return `{ content: <text> }`, which the server derives from the text blocks so handlers don't repeat it. `show_changes` deliberately advertises no output schema: its model-visible result is concise text, while its complete review payload is attached as component-only result `_meta` for the MCP App.
+Every tool that advertises an `outputSchema` also returns `structuredContent` matching it, as the MCP spec asks. `exec_command` and `write_stdin` return Codex's unified-exec object, `import_host_file` returns its destination, byte count and SHA-256 receipt, `export_host_file` returns its immutable-snapshot receipt and a standard MCP `resource_link`, `clock_curr_time` returns `{ current_time }`, `get_environment` returns the environment object, `get_project_doc` returns `{ files, content }` and `skills_list` returns `{ skills, content }`; the rest return `{ content: <text> }`, which the server derives from the text blocks so handlers don't repeat it. `show_changes` deliberately advertises no output schema: its model-visible result is concise text, while its complete review payload is attached as component-only result `_meta` for the MCP App.
 
 All project-scoped paths are resolved relative to the active project root: `--work-dir` in single-project mode, or the root selected for the current ChatGPT conversation in multi-project mode. Non-ChatGPT clients use the root selected for their current MCP transport session.
 
@@ -467,6 +474,13 @@ an existing config keeps working.
     "maxRedirects": 3,
     "maxConcurrentDownloads": 2,
     "allowedHosts": ["*"]
+  },
+  "artifactEgress": {
+    "enabled": true,
+    "maxFileBytes": 104857600,
+    "maxCachedBytes": 268435456,
+    "maxReferences": 64,
+    "referenceTtlMs": 300000
   },
   "memory": {
     "enabled": true,
@@ -648,6 +662,16 @@ The `artifactIngress` block governs [native host-file ingress](#native-host-file
 | `maxConcurrentDownloads` | `2` | Process-wide concurrent import cap, between `1` and `16` |
 | `allowedHosts` | `["*"]` | Host patterns a download URL and every redirect hop must match. `"*"` accepts any public HTTPS host while rejecting internal/reserved addresses (loopback, private, link-local, unique-local, CGNAT, `localhost`, cloud metadata). A bare host (`files.example.com`) matches exactly; a leading dot (`.example.com`) matches that host and its subdomains; an explicitly named host is trusted as given, including an internal one |
 
+The `artifactEgress` block governs [native host-file egress](#native-host-file-egress):
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `enabled` | `true` | Expose `export_host_file`; `false` removes the tool from `tools/list` |
+| `maxFileBytes` | `104857600` | Maximum bytes in one exported snapshot (100 MiB, approximately 104.9 MB), checked before and during the read |
+| `maxCachedBytes` | `268435456` | Process-wide payload-byte ceiling for live immutable snapshots (256 MiB, approximately 268.4 MB); the oldest references are evicted when necessary |
+| `maxReferences` | `64` | Maximum number of live exported-file references, between `1` and `1024`; the oldest are evicted when the bound is reached |
+| `referenceTtlMs` | `300000` | Lifetime of an opaque resource capability after the tool call (5 minutes). Expired references return `resource_not_found`; call `export_host_file` again to create a fresh one |
+
 The `memory` block governs `remember`, `recall` and the plan `update_plan` saves:
 
 | Key | Default | Description |
@@ -743,6 +767,28 @@ Source and destination authority are deliberately narrow:
 - archive extraction, execution, arbitrary URL fetching and arbitrary local-source paths are outside this tool's contract.
 
 After publication, the result is an ordinary project file. Git, `glob`, `tree`, review tools and normal deletion provide its catalogue and lifecycle; Codexify does not maintain a second artifact database or TTL.
+
+## Native host-file egress
+
+Machine-local paths are not downloadable by ChatGPT, and returning a large binary file as base64 text would put the encoded payload into the tool result and model context. `export_host_file` instead uses MCP's resource flow:
+
+```text
+the agent creates or selects a project file
+        ↓
+the agent calls export_host_file(path)
+        ↓
+Codexify opens the file through the active-project capability and snapshots its exact bytes
+        ↓
+the tool returns a standard MCP resource_link with an opaque codexify://artifact/... URI
+        ↓
+the connector host resolves that URI through resources/read and receives a base64 blob resource
+```
+
+The returned resource describes the original filename, MIME type and byte count. The structured receipt includes the project-relative source path, SHA-256 digest and remaining lifetime, but deliberately does not duplicate the bearer-capability URI into ordinary structured data. It never exposes an absolute filesystem path or asks the model to copy the file contents through text.
+
+The resource is an immutable snapshot, not a delayed path read. Replacing, truncating, deleting or retargeting the source after `export_host_file` returns cannot change the bytes served for that reference. Source access is capability-confined to an existing regular file inside the active project; traversal, absolute paths and symlink escapes fail closed. The read is bounded before allocation and again while streaming so a growing file cannot cross `artifactEgress.maxFileBytes` unnoticed.
+
+Each URI contains a 256-bit random bearer capability. Issued resources are not added to `resources/list`, are shared only through the tool result, and remain in a process-wide in-memory cache so ChatGPT can replace the MCP transport between the tool call and `resources/read`. The cache is bounded by both total bytes and reference count; oldest entries are evicted as needed, every reference expires after `artifactEgress.referenceTtlMs`, and all references disappear when Codexify restarts. Calling `export_host_file` again creates a fresh snapshot and capability.
 
 ## Multi-project mode
 
@@ -1112,7 +1158,7 @@ Codex CLI MCP discovery: codex
   idalib -> imported from Codex CLI (not present in config.toml)
 Codex MCP overrides:
   remote-exec -> imported fields overlaid by codex.config.json
-Tools loaded (31): 27 native + 4 upstream-facing MCP tools
+Tools loaded (32): 28 native + 4 upstream-facing MCP tools
 Upstream MCP servers:
   idalib      -> catalog (66 private tool(s))
   idasql      -> catalog (12 private tool(s))
@@ -1175,7 +1221,7 @@ When `remote-exec` was imported from Codex, that overlay is sufficient; include 
 - `type` is inferred: `command` means `"stdio"`, while `url` means Streamable HTTP. Explicit HTTP aliases `"http"`, `"streamable-http"`, and `"streamable_http"` are accepted.
 - Legacy SSE and WebSocket transports are rejected explicitly because current Codex supports stdio and Streamable HTTP, not those legacy protocols.
 
-OAuth authorization-code login and credential persistence are not implemented by this bridge. An OAuth-protected upstream must therefore be supplied a usable bearer token through `bearerTokenEnvVar` or an environment-backed `Authorization` header. MCP resources, resource templates, and prompts remain separate capability work. Catalog mode reports upstream initialization instructions as source metadata, but does not inject them into Codexify's own initialization instructions.
+OAuth authorization-code login and credential persistence are not implemented by this bridge. An OAuth-protected upstream must therefore be supplied a usable bearer token through `bearerTokenEnvVar` or an environment-backed `Authorization` header. Upstream MCP resources, resource templates, and prompts remain separate capability work: Codexify's native exported-file resources are resolved locally, but resource links returned by a bridged server are not proxied through that server. Catalog mode reports upstream initialization instructions as source metadata, but does not inject them into Codexify's own initialization instructions.
 
 If your server doesn't show up, **check the banner first** — the most common cause is a wrong `command` path.
 
@@ -1213,6 +1259,7 @@ Native tunnel mode ignores `allowedHosts` and forces the accepted authorities to
 - **Stable server-config authority**: the implicit config is user-scoped at `~/.codexify/codex.config.json`, so changing the launch directory does not normally change command, MCP-server, network, tunnel, or worktree policy. `--config` and `CODEXIFY_CONFIG` remain explicit overrides. The old `./codex.config.json` behavior is retained only as a warned compatibility fallback when no user config exists.
 - **Bounded GitHub cloning and target fetching**: URL-based project selection accepts only normalized HTTPS/SSH repository roots plus HTTPS branch and PR URLs on `github.com`. It separates owner/repository identity from the exact checkout target, rejects embedded credentials, unsupported subpages, and non-GitHub/insecure transports, and disables interactive Git credential prompts. The configured clone directory is canonicalized inside the access root at startup and revalidated at use time. Resolution uses per-repository cross-process locks, bounded subprocess timeouts, private temporary clone destinations, remote verification, exact branch/PR refspecs, and collision refusal. Existing source checkouts are fetched without moving `HEAD`; a conversation already bound to another selection is rejected before the network/disk side effect.
 - **Host-authorized native-file ingress**: `import_host_file` accepts only ChatGPT's declared native-file object, rejects local source paths, constrains the download URL and every redirect hop to the configurable `artifactIngress.allowedHosts` allowlist (default `"*"`, which admits any public HTTPS host but never a loopback, private, link-local, unique-local, CGNAT, `localhost`, or metadata address), ignores ambient proxy credentials, and enforces whole-request, idle, size and concurrency limits. Its signed URL and file ID are never logged or returned: RMCP debug/trace payload logging is unconditionally suppressed even when `RUST_LOG` requests it. Destination publication uses a capability-confined directory handle, canonical-path and file-identity revalidation, a private partial file, SHA-256, and atomic no-overwrite linking so traversal, moved roots, symlink escapes, partial visibility and replacement races fail closed.
+- **Bounded native-file egress**: `export_host_file` accepts only a relative regular-file path inside the active project, opens it through a capability-confined directory handle, rejects traversal and symlink escapes, enforces `artifactEgress.maxFileBytes` before and during the read, and returns a SHA-256 receipt plus a standard MCP resource link. The link carries a random 256-bit opaque capability rather than a local path. Its immutable bytes live only in a process-wide memory cache bounded by `maxCachedBytes`, `maxReferences` and `referenceTtlMs`; expired and evicted references fail closed, and audit output records only the number of resource links, never their URIs or filenames.
 - **One bounded exception in single-project mode**: [AGENTS.md](#agentsmd) discovery may read above `--work-dir`, up to the nearest `.git`. It is read-only, opens only `AGENTS.override.md`, `AGENTS.md` and any `projectDoc.fallbackFilenames`, and `get_project_doc` reports the absolute path of every file it used. Set `projectDoc.maxBytes` to `0` to switch it off, or `projectDoc.rootMarkers` to `[]` to keep the search inside the work directory. Multi-project mode does not perform this upward walk; its selected directory is the exact project root.
 - **Namespaced review state inside Git**: ChatGPT review checkpoints are exactly two refs per conversation/project pair under `refs/codexify/review/`. Synthetic snapshots contain only the selected project path, are built through a temporary index, and never modify the real index or working tree. Generic MCP-client checkpoints are in memory only. The namespace grows with the number of distinct persistent conversation/project pairs; the review section documents inspection and manual removal.
 - **Bounded state writes outside the work directory**: `remember` and `update_plan` write `memory.json` under `~/.codexify/projects/`. Multi-project mode also writes one small project-binding record under `~/.codexify/conversation-projects/` for each ChatGPT conversation and access root. Per-conversation authorization writes a small marker under `~/.codexify/conversation-authorizations/`. Binding and authorization filenames are derived from a hash of `openai/session`; the raw identifier is not stored. Authorization namespaces include a one-way digest of the canonical work directory and configured token, while marker contents store only the grant. Set `memory.enabled` to `false` to disable plans and notes; delete the corresponding state directory to forget bindings or authorizations. See [Context and memory](#context-and-memory).
