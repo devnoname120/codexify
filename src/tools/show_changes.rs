@@ -3,7 +3,9 @@ use rmcp::model::MetaObject;
 use serde_json::{Value, json};
 
 use crate::exec_sessions::SessionState;
-use crate::review::{ReviewBaseline, ReviewCheckpointManager, ReviewOwner, ReviewRequest};
+use crate::review::{
+    ReviewBaseline, ReviewCheckpointManager, ReviewOwner, ReviewRequest, ReviewResult,
+};
 use crate::review_ui;
 use crate::tool::{Tool, ToolRequestContext};
 use crate::types::{AppConfig, ToolResult};
@@ -20,6 +22,12 @@ fn bool_argument(args: &Value, key: &str, default: bool) -> Result<bool, String>
 
 impl ShowChanges {
     pub const NAME: &'static str = "show_changes";
+
+    fn tool_result(result: ReviewResult) -> ToolResult {
+        let mut output = ToolResult::text(result.render_text());
+        output.meta = Some(review_ui::result_meta(&result));
+        output
+    }
 
     fn request(args: &Value) -> Result<ReviewRequest, String> {
         let since = match args.get("since") {
@@ -50,10 +58,7 @@ impl ShowChanges {
             None => ReviewOwner::transport(session.review_state()),
         };
         match manager.show_changes(config, owner, request).await {
-            Ok(result) => {
-                let structured = serde_json::to_value(&result).unwrap_or(Value::Null);
-                ToolResult::text(result.render_text()).with_structured(structured)
-            }
+            Ok(result) => Self::tool_result(result),
             Err(error) => ToolResult::error(error),
         }
     }
@@ -74,7 +79,7 @@ impl Tool for ShowChanges {
     }
 
     fn description(&self) -> String {
-        "Review project-scoped working-tree changes against the immutable project-open checkpoint or the incremental last-review checkpoint. The snapshot includes tracked, untracked, deleted, renamed, executable, symlink, and binary changes without modifying the real Git index. By default the returned review advances the last-review checkpoint, so call once after a related batch of edits rather than after every file. Set advance=false for a read-only comparison."
+        "Present project-scoped working-tree changes against the immutable project-open checkpoint or the incremental last-review checkpoint. The interactive widget receives tracked, untracked, deleted, renamed, executable, symlink, and binary changes through component-only result metadata without adding the patch to model-visible structured content. By default the returned review advances the last-review checkpoint, so call once after a related batch of edits rather than after every file. Set advance=false for a read-only comparison."
             .to_string()
     }
 
@@ -93,62 +98,11 @@ impl Tool for ShowChanges {
                 },
                 "include_patch": {
                     "type": "boolean",
-                    "description": "Include the unified binary-capable patch when it fits review.maxPatchBytes. Default: true."
+                    "description": "Attach the unified binary-capable patch to component-only widget metadata when it fits review.maxPatchBytes. Default: true."
                 }
             },
             "additionalProperties": false
         })
-    }
-
-    fn output_schema(&self) -> Option<Value> {
-        Some(json!({
-            "type": "object",
-            "properties": {
-                "since": { "type": "string", "enum": ["last_review", "project_open"] },
-                "advanceRequested": { "type": "boolean" },
-                "checkpointAdvanced": { "type": "boolean" },
-                "scope": { "type": "string" },
-                "summary": {
-                    "type": "object",
-                    "properties": {
-                        "files": { "type": "integer" },
-                        "additions": { "type": "integer" },
-                        "deletions": { "type": "integer" },
-                        "binaryFiles": { "type": "integer" }
-                    },
-                    "required": ["files", "additions", "deletions", "binaryFiles"]
-                },
-                "files": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "path": { "type": "string" },
-                            "previousPath": { "type": "string" },
-                            "status": { "type": "string" },
-                            "additions": { "type": "integer" },
-                            "deletions": { "type": "integer" },
-                            "binary": { "type": "boolean" }
-                        },
-                        "required": ["path", "status", "binary"]
-                    }
-                },
-                "filesOmitted": { "type": "integer" },
-                "patch": { "type": "string" },
-                "patchIncluded": { "type": "boolean" },
-                "patchBytes": { "type": "integer" },
-                "patchOmittedReason": { "type": "string" },
-                "warnings": { "type": "array", "items": { "type": "string" } }
-            },
-            "required": [
-                "since", "advanceRequested", "checkpointAdvanced", "scope", "summary",
-                "files", "filesOmitted", "patch", "patchIncluded", "warnings"
-            ]
-        }))
-    }
-
-    fn fills_structured_content(&self) -> bool {
-        false
     }
 
     async fn call(&self, args: Value, config: &AppConfig, session: &SessionState) -> ToolResult {
@@ -177,6 +131,7 @@ impl Tool for ShowChanges {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::review::ReviewSummary;
 
     #[test]
     fn request_defaults_to_incremental_advancing_patch_review() {
@@ -191,5 +146,41 @@ mod tests {
         assert!(ShowChanges::request(&json!({ "since": 1 })).is_err());
         assert!(ShowChanges::request(&json!({ "advance": "yes" })).is_err());
         assert!(ShowChanges::request(&json!({ "include_patch": 1 })).is_err());
+    }
+
+    #[test]
+    fn result_keeps_the_patch_out_of_model_visible_structured_content() {
+        let result = ReviewResult {
+            since: ReviewBaseline::LastReview,
+            advance_requested: true,
+            checkpoint_advanced: true,
+            scope: ".".to_string(),
+            summary: ReviewSummary {
+                files: 1,
+                additions: 1,
+                deletions: 0,
+                binary_files: 0,
+            },
+            files: Vec::new(),
+            files_omitted: 0,
+            patch: "diff --git a/file b/file\n+secret patch line\n".to_string(),
+            patch_included: true,
+            patch_bytes: Some(48),
+            patch_omitted_reason: None,
+            warnings: Vec::new(),
+        };
+
+        let output = ShowChanges::tool_result(result);
+        assert!(output.structured_content.is_none());
+        assert!(!output.joined_text().contains("secret patch line"));
+        assert_eq!(
+            output
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.get(review_ui::REVIEW_RESULT_META_KEY))
+                .and_then(|payload| payload.get("patch"))
+                .and_then(Value::as_str),
+            Some("diff --git a/file b/file\n+secret patch line\n")
+        );
     }
 }

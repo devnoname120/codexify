@@ -118,25 +118,9 @@ impl ReviewResult {
         }
         lines.push(format!("Repository scope: {}", self.scope));
 
-        for file in &self.files {
-            let path = match &file.previous_path {
-                Some(previous) => format!("{previous} -> {}", file.path),
-                None => file.path.clone(),
-            };
-            let stats = if file.binary {
-                "binary".to_string()
-            } else {
-                format!(
-                    "+{} -{}",
-                    file.additions.unwrap_or(0),
-                    file.deletions.unwrap_or(0)
-                )
-            };
-            lines.push(format!("- {} {path} ({stats})", file.status));
-        }
         if self.files_omitted > 0 {
             lines.push(format!(
-                "... {} additional file{} omitted from the result.",
+                "{} file record{} omitted from the widget payload.",
                 self.files_omitted,
                 if self.files_omitted == 1 { "" } else { "s" }
             ));
@@ -157,7 +141,7 @@ impl ReviewResult {
 
         if self.patch_included && !self.patch.is_empty() {
             lines.push(format!(
-                "Patch included in structuredContent ({} bytes).",
+                "Complete patch attached to component-only widget metadata ({} bytes).",
                 self.patch_bytes.unwrap_or(self.patch.len())
             ));
         } else if let Some(reason) = &self.patch_omitted_reason {

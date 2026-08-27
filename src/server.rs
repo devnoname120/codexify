@@ -226,13 +226,13 @@ impl ServerHandler for CodexHandler {
         request: ReadResourceRequestParams,
         _context: RequestContext<RoleServer>,
     ) -> Result<ReadResourceResponse, McpError> {
-        if request.uri != review_ui::REVIEW_UI_URI {
+        let Some(contents) = review_ui::contents_for_uri(&request.uri) else {
             return Err(McpError::resource_not_found(
                 format!("Unknown resource: {}", request.uri),
                 None,
             ));
-        }
-        Ok(ReadResourceResult::new(vec![review_ui::contents()]).into())
+        };
+        Ok(ReadResourceResult::new(vec![contents]).into())
     }
 
     async fn call_tool(

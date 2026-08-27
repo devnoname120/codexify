@@ -8,6 +8,15 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- `show_changes` now keeps its review metadata and bounded patch in
+  component-only result `_meta` instead of model-visible `structuredContent`.
+  Its concise text result still reports aggregate counts and automatic checkpoint
+  advancement, while the MCP App remains independently interactive. The default
+  patch budget is now 4 MiB and is regression-tested with 10,000 changed code
+  lines. Review-card expansion, per-file disclosure, and the larger-file-list
+  control persist across ChatGPT widget remounts through private widget state.
+  The UI resource moved to a versioned URI to avoid stale host caches, while the
+  prior URI remains readable for historical cards.
 - The `show_changes` MCP app now uses a compact, single-line file list with
   initially collapsed per-file diffs, a short reveal control for larger change
   sets, and smaller explicitly sized monospace patch text across web and native

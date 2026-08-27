@@ -208,6 +208,7 @@ fn show_changes_links_the_review_mcp_app() {
             .and_then(Value::as_str),
         Some(codexify::review_ui::REVIEW_UI_URI)
     );
+    assert!(tool.output_schema().is_none());
 }
 
 #[test]
@@ -425,7 +426,6 @@ fn tools_that_need_their_own_structured_content() {
             "get_environment".to_string(),
             "get_project_doc".to_string(),
             "import_host_file".to_string(),
-            "show_changes".to_string(),
             "skills_list".to_string(),
             "write_stdin".to_string(),
         ]

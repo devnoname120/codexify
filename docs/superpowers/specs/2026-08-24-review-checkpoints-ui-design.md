@@ -2,7 +2,7 @@
 
 ## Goal
 
-Add an explicit review workflow to Codexify without coupling correctness to a particular MCP host UI. The server must be able to report changes since project opening or since the last acknowledged review, advance the incremental baseline atomically, and optionally render the same structured result as an MCP App.
+Add an explicit review workflow to Codexify without coupling checkpoint correctness to a particular MCP host UI. The server must be able to report changes since project opening or since the last emitted review, advance the incremental baseline atomically, and optionally render the complete review as an MCP App without placing the diff in model-visible context.
 
 ## Non-goals
 
@@ -19,7 +19,8 @@ Add an explicit review workflow to Codexify without coupling correctness to a pa
 4. The last-review checkpoint advances with compare-and-swap semantics so concurrent reviews cannot silently overwrite one another.
 5. ChatGPT conversation checkpoints survive MCP transport replacement and server restart. Generic MCP-client checkpoints remain transport-local.
 6. Raw ChatGPT conversation identifiers are never stored; the existing hashed conversation identity is used in ref names.
-7. Plain MCP clients receive the complete ordinary MCP tool result, including structured review data. UI support is optional presentation metadata over that same result.
+7. The ordinary MCP content is concise and model-visible. Complete review data is carried only in namespaced result `_meta`, which MCP Apps receive but the model does not.
+8. Checkpoint advancement is completed before `show_changes` returns and never waits for the user to expand, collapse, or otherwise interact with the widget.
 
 ## Ownership model
 
@@ -66,11 +67,11 @@ Checkpoint initialisation is best-effort for unrelated tools: a non-Git project 
 - `advance: boolean`, default `true`;
 - `include_patch: boolean`, default `true`.
 
-It creates one current snapshot, compares it with the requested baseline, and optionally advances `last-review` to that snapshot. Persistent advancement uses `git update-ref <ref> <new> <expected-old>`. A compare-and-swap conflict preserves the returned diff but reports that the baseline was not advanced.
+It creates one current snapshot, compares it with the requested baseline, and optionally advances `last-review` to that snapshot before returning. Persistent advancement uses `git update-ref <ref> <new> <expected-old>`. A compare-and-swap conflict preserves the returned diff but reports that the baseline was not advanced. Advancement records that the diff was emitted, not that the model or user inspected every hunk.
 
 ## Result contract
 
-The text result is concise and usable by the model. `structuredContent` is the authoritative UI payload:
+The tool deliberately advertises no `outputSchema` and returns no `structuredContent`. Its text result is concise and usable by the model. Namespaced result `_meta` is the authoritative component-only UI payload:
 
 - requested and effective baseline;
 - whether the last-review checkpoint advanced;
@@ -81,20 +82,20 @@ The text result is concise and usable by the model. `structuredContent` is the a
 - explicit omission metadata when the patch or file list is bounded;
 - warnings such as compare-and-swap conflicts.
 
-A patch larger than `review.maxPatchBytes` is omitted rather than cut mid-hunk. File metadata and aggregate statistics remain available. `0` disables patch bodies.
+A patch larger than `review.maxPatchBytes` is omitted rather than cut mid-hunk. File metadata and aggregate statistics remain available. The default is 4 MiB, regression-tested with 10,000 changed code lines whose source lines are roughly 300 bytes long. Byte bounding remains necessary because line length and binary-patch expansion are unbounded. `0` disables patch bodies.
 
 ## MCP Apps integration
 
 The server advertises the standard `io.modelcontextprotocol/ui` extension and a single resource:
 
 ```text
-ui://codexify/review/mcp-app.html
+ui://codexify/review/v2/mcp-app.html
 text/html;profile=mcp-app
 ```
 
-The `show_changes` tool descriptor links that resource through both the current nested `_meta.ui.resourceUri` shape and the compatibility `_meta["ui/resourceUri"]` key. Unsupported clients ignore the metadata and continue to receive the normal result.
+The `show_changes` tool descriptor links that resource through both the current nested `_meta.ui.resourceUri` shape and the compatibility `_meta["ui/resourceUri"]` key. The tool result stores the complete `ReviewResult` under `_meta["io.github.devnoname120/codexify/review"]`. Unsupported clients ignore the component metadata and continue to receive the concise text result. The prior unversioned resource URI remains readable with the v2 HTML, which falls back to historical structured review results only when component metadata is absent; current tool results never produce that model-visible payload.
 
-The resource is a self-contained HTML/CSS/JavaScript document embedded in the Rust binary. It has no external script, font, style, network, or storage dependency. It performs the MCP Apps handshake, validates `postMessage` source identity, consumes `ui/notifications/tool-result`, renders only with DOM `textContent`, and reports size changes. The view never performs checkpoint mutations itself.
+The resource is a self-contained HTML/CSS/JavaScript document embedded in the Rust binary. It has no external script, font, style, network, or direct browser-storage dependency. It performs the MCP Apps handshake, validates `postMessage` source identity, consumes component-only result metadata from `ui/notifications/tool-result` and ChatGPT's canonical `toolResponseMetadata` envelope, renders only with DOM `textContent`, and reports size changes. The view never performs checkpoint mutations itself. Its overall disclosure state, per-file expansions, and larger-file-list disclosure are saved through `window.openai.setWidgetState` under `privateContent` and restored from `window.openai.widgetState` after iframe remounts; none of that state is exposed to the model. Hosts without the ChatGPT state API retain normal interaction for the current iframe lifetime.
 
 ## Concurrency and failure handling
 

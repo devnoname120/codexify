@@ -33,7 +33,7 @@
     "entries": []
   },
   "review": {
-    "maxPatchBytes": 524288
+    "maxPatchBytes": 4194304
   },
   "audit": {
     "logFile": null,

@@ -72,7 +72,7 @@ ChatGPT / MCP client
    active project root     upstream MCP servers (idasql, remote-docs, …)
 ```
 
-Five surfaces reach the model:
+Five integration surfaces are exposed to the client:
 
 - **Tools** — `tools/list` + `tools/call` (native, fixed catalog discovery/call,
   direct compatibility proxies, and gateway compatibility dispatchers).
@@ -84,7 +84,8 @@ Five surfaces reach the model:
   durable grant is keyed by ChatGPT's stable conversation metadata rather than
   by the replaceable MCP transport.
 - **MCP App** — the self-contained review resource linked from `show_changes`;
-  unsupported clients ignore the UI metadata and keep the ordinary tool result.
+  its complete diff arrives through component-only result metadata, while
+  unsupported clients retain only the concise ordinary text result.
 
 ---
 
@@ -467,8 +468,8 @@ the original order and rejects duplicate names.
 | `worktrees.rs` | Per-conversation managed Git worktree lifecycle: create a detached checkout under `worktrees.root` via `git worktree add`, optionally at an exact fetched commit, dual source/worktree root tracking, startup sweep bounded by `keepCount`, Windows `\\?\`-prefix handling, and the opt-in `allowSetupScript` gate for per-worktree environment setup. |
 | `project_catalog.rs` | Live, read-only project discovery from native Codex plus explicit metadata; canonical access-root filtering, deduplication, deterministic query ranking, sanitized MCP warnings, and local diagnostics. |
 | `exec_sessions.rs` | Generic-client transport fallback plus conversation-owned unified-exec sessions and transport-local review state: shell resolution, PowerShell exit-code wrapping, background stdout/stderr drain tasks, process-group kill, idle cleanup, and output truncation (UTF-16 units to match the TS). |
-| `review.rs` | Project-scoped Git snapshots, persistent conversation refs, transport-local fallbacks, incremental compare-and-swap checkpoints, diff parsing and result budgets. |
-| `review_ui.rs` | Embedded MCP Apps resource and compatibility metadata for the interactive `show_changes` review card. |
+| `review.rs` | Project-scoped Git snapshots, persistent conversation refs, transport-local fallbacks, incremental compare-and-swap checkpoints, diff parsing and component-payload budgets. |
+| `review_ui.rs` | Embedded MCP Apps resource, component-only review-result metadata, and persisted private interaction state for the interactive `show_changes` card. |
 | `apply_patch.rs` | The Codex patch format: parse then apply, atomically, with fuzzy context matching and CRLF preservation. |
 | `memory.rs` | Working memory outside the repo, keyed by a hash of the normalized active root, with `O_EXCL` locking and atomic writes. In multi-project mode, a configured `memory.dir` is a base containing one hashed child per project. |
 | `quickstart.rs` | Interactive first-install wizard for project scope, native tunnel credentials, JSON config merging, preservation of preconfigured advanced conversation authorization, and the ChatGPT developer-mode connector handoff. |
@@ -698,7 +699,7 @@ the legacy fallback. All fields are optional.
               "defaultShell": "…" },
   "ignore": { "useGitignore": true, "useDefaultPatterns": true, "customPatterns": [] },
   "output": { "maxFileLines": 1000, "maxFileBytes": 131072, "maxEntries": 500, "maxTreeNodes": 1000 },
-  "review": { "maxPatchBytes": 524288 },
+  "review": { "maxPatchBytes": 4194304 },
   "audit": { "logFile": null, "includeCommandPreview": false,
              "commandPreviewMaxBytes": 512, "redactEnv": [] },
   "artifactIngress": { "enabled": true, "maxFileBytes": 104857600,

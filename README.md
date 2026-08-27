@@ -43,7 +43,7 @@ flowchart LR
     Worktree[("Managed Git worktree\nper-conversation checkout,\nswept on startup")]
     ExecSessions[("Conversation exec sessions\n(in memory, idle-reaped)")]
     ReviewRefs[("Git refs/codexify/review\nproject-open + last-review")]
-    ReviewUI["MCP App review card\nui://codexify/review/mcp-app.html"]
+    ReviewUI["MCP App review card\nui://codexify/review/v2/mcp-app.html"]
     SkillDirs[(".agents/skills\n.codex/skills\n.claude/skills")]
     CodexCfg[("$CODEX_HOME\nconfig.toml")]
     CodexCli["optional Codex CLI\nmcp list/get --json"]
@@ -306,7 +306,7 @@ Structured primitives — cheaper and safer than shelling out for the same job, 
 | `import_host_file` | Stream one ChatGPT attachment or generated file into a new project-relative path, with bounded size, SHA-256 verification and atomic no-overwrite publication |
 | `run_command` | Execute a command in the work directory (allowlist-restricted) |
 | `git_status` | Show git status, parsed into changed files with status codes |
-| `show_changes` | Compare the scoped working tree with the project-open or last-review checkpoint, optionally advancing the incremental baseline; compatible hosts render an interactive review card |
+| `show_changes` | Compare the scoped working tree with the project-open or last-review checkpoint, optionally advancing the incremental baseline; compatible hosts receive the bounded diff in an interactive component-only review card |
 | `git_push` | Push commits to a remote |
 | `git_commit` | Create a commit, optionally staging all tracked changes |
 | `git_log` | Show recent commit history |
@@ -374,7 +374,7 @@ sessions.
 
 `clock_sleep` also caps at 5 minutes rather than Codex's 12 hours — a longer wait would outlive the HTTP request through the tunnel.
 
-Every tool that advertises an `outputSchema` also returns `structuredContent` matching it, as the MCP spec asks. `exec_command` and `write_stdin` return Codex's unified-exec object, `show_changes` returns its review summary, file records, warnings and bounded patch, `import_host_file` returns its destination, byte count and SHA-256 receipt, `clock_curr_time` returns `{ current_time }`, `get_environment` returns the environment object, `get_project_doc` returns `{ files, content }` and `skills_list` returns `{ skills, content }`; the rest return `{ content: <text> }`, which the server derives from the text blocks so handlers don't repeat it.
+Every tool that advertises an `outputSchema` also returns `structuredContent` matching it, as the MCP spec asks. `exec_command` and `write_stdin` return Codex's unified-exec object, `import_host_file` returns its destination, byte count and SHA-256 receipt, `clock_curr_time` returns `{ current_time }`, `get_environment` returns the environment object, `get_project_doc` returns `{ files, content }` and `skills_list` returns `{ skills, content }`; the rest return `{ content: <text> }`, which the server derives from the text blocks so handlers don't repeat it. `show_changes` deliberately advertises no output schema: its model-visible result is concise text, while its complete review payload is attached as component-only result `_meta` for the MCP App.
 
 All project-scoped paths are resolved relative to the active project root: `--work-dir` in single-project mode, or the root selected for the current ChatGPT conversation in multi-project mode. Non-ChatGPT clients use the root selected for their current MCP transport session.
 
@@ -451,7 +451,7 @@ an existing config keeps working.
     "maxTreeNodes": 1000
   },
   "review": {
-    "maxPatchBytes": 524288
+    "maxPatchBytes": 4194304
   },
   "audit": {
     "logFile": null,
@@ -634,7 +634,7 @@ The `review` block bounds presentation without changing checkpoint semantics:
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `maxPatchBytes` | `524288` | Largest complete binary-capable patch returned by `show_changes`; a larger patch is omitted rather than cut mid-hunk, while file metadata and aggregate statistics remain available. `0` disables patch bodies |
+| `maxPatchBytes` | `4194304` | Largest complete binary-capable patch attached to the review widget's component-only result metadata. The 4 MiB default is regression-tested with 10,000 changed code lines of roughly 300 bytes each; unusually long lines and large binary patches can still exceed it. A larger patch is omitted rather than cut mid-hunk, while file metadata and aggregate statistics remain available. `0` disables patch bodies |
 
 The `artifactIngress` block governs [native host-file ingress](#native-host-file-ingress):
 
@@ -789,9 +789,9 @@ Review state is initialized immediately before the first project-scoped tool cal
 - **project open** is immutable and shows the complete task diff;
 - **last review** advances only when `show_changes` is called with `advance=true` (the default), so the next review is incremental.
 
-`show_changes` accepts `since: "last_review" | "project_open"`, `advance`, and `include_patch`. Use `advance=false` for a read-only inspection. The result contains a concise text summary plus structured aggregate counts, bounded file records, rename sources, binary markers, warnings, and a complete unified binary patch when it fits `review.maxPatchBytes`. Oversized patches are omitted explicitly rather than returned as invalid partial hunks.
+`show_changes` accepts `since: "last_review" | "project_open"`, `advance`, and `include_patch`. Use `advance=false` for a read-only inspection. The ordinary model-visible result is a concise aggregate summary with checkpoint status and warnings; it deliberately has no `structuredContent`. Compatible MCP Apps receive bounded file records, rename sources, binary markers, warnings, and the complete unified binary patch through namespaced result `_meta`, which ChatGPT forwards to the component without adding it to model context. Oversized patches are omitted explicitly rather than returned as invalid partial hunks.
 
-Snapshots use Git objects, but they do **not** touch the real index or working tree. Codexify builds a private temporary index containing only the logical project root, then carries the same literal pathspec through every comparison. If the selected project is `packages/app` inside a monorepo, sibling changes under `packages/other` cannot enter its checkpoint or diff. Paths returned to the model and UI are relative to the selected project, not the repository root.
+Snapshots use Git objects, but they do **not** touch the real index or working tree. Codexify builds a private temporary index containing only the logical project root, then carries the same literal pathspec through every comparison. If the selected project is `packages/app` inside a monorepo, sibling changes under `packages/other` cannot enter its checkpoint or diff. Paths in the component-only review payload are relative to the selected project, not the repository root.
 
 With ChatGPT's stable `_meta["openai/session"]`, each conversation/project scope stores exactly two namespaced refs under:
 
@@ -802,7 +802,7 @@ refs/codexify/review/<project-hash>/<conversation-hash>/last-review
 
 The raw conversation identifier is never written. The refs survive MCP reconnects and Codexify restarts. Generic MCP clients receive transport-local in-memory checkpoints instead. Each conversation/project pair retains only its current two referenced snapshots; superseded synthetic commits are ordinary Git-GC candidates. To inspect or remove old conversation refs manually, use `git for-each-ref refs/codexify/review/` and `git update-ref -d <ref>`. Removing both refs resets that owner to the current scoped state on its next project call.
 
-Codexify also advertises the standard MCP Apps extension and serves a self-contained resource at `ui://codexify/review/mcp-app.html`. Compatible ChatGPT developer connectors render `show_changes` as a file, statistic and patch card. No separate web service or public app publication is needed; clients that ignore MCP Apps metadata still receive the same ordinary MCP result. The card updates at the `show_changes` tool-call boundary—it is not a continuous filesystem watcher.
+Codexify also advertises the standard MCP Apps extension and serves a self-contained resource at `ui://codexify/review/v2/mcp-app.html`. Compatible ChatGPT developer connectors render `show_changes` as a file, statistic and patch card from component-only result metadata. No separate web service or public app publication is needed; clients that ignore MCP Apps metadata receive only the concise ordinary text result. Checkpoint advancement completes before that result is returned and does not wait for user interaction. The card remains independently interactive while the model continues, and its overall disclosure, expanded file diffs, and larger-file-list state are persisted as private ChatGPT widget state so an iframe remount restores them. The prior unversioned resource URI remains readable, and the v2 widget has a structured-content fallback solely so historical cards created before this change can still remount; current `show_changes` results never populate that model-visible field. The card updates at the `show_changes` tool-call boundary—it is not a continuous filesystem watcher.
 
 ## Context and memory
 

@@ -440,6 +440,40 @@ async fn omits_instead_of_truncating_an_oversized_patch() {
 }
 
 #[tokio::test]
+async fn default_widget_budget_includes_ten_thousand_changed_code_lines() {
+    fn source(prefix: char) -> String {
+        let padding = "x".repeat(270);
+        (0..5_000)
+            .map(|index| format!("const VALUE_{index:04}: &str = \"{prefix}{padding}\";\n"))
+            .collect()
+    }
+
+    let repo = init_repo();
+    let file = repo.path().join("large.rs");
+    std::fs::write(&file, source('a')).unwrap();
+    commit_all(repo.path(), "seed");
+    let config = default_config(repo.path().to_path_buf());
+    assert_eq!(config.review.max_patch_bytes, 4 * 1024 * 1024);
+    let manager = ReviewCheckpointManager::new();
+    let owner = conversation("ten-thousand-lines");
+    manager
+        .ensure_initialized(&config, owner.clone())
+        .await
+        .unwrap();
+
+    std::fs::write(&file, source('b')).unwrap();
+    let result = manager
+        .show_changes(&config, owner, request(ReviewBaseline::ProjectOpen, false))
+        .await
+        .unwrap();
+
+    assert_eq!(result.summary.additions + result.summary.deletions, 10_000);
+    assert!(result.patch_included);
+    assert!(result.patch_bytes.unwrap() < config.review.max_patch_bytes);
+    assert!(result.patch.contains("const VALUE_4999"));
+}
+
+#[tokio::test]
 async fn non_git_project_reports_a_clear_error() {
     let root = TempDir::new().unwrap();
     let config = default_config(PathBuf::from(root.path()));

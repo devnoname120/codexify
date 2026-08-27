@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use anyhow::{Context, bail};
 use chrono::{SecondsFormat, Utc};
 use regex::Regex;
+use serde::Serialize;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
@@ -288,6 +289,7 @@ pub(crate) fn summarize_output(result: &ToolResult) -> Value {
         .structured_content
         .as_ref()
         .map_or(0, serialized_json_bytes);
+    let meta_bytes = result.meta.as_ref().map_or(0, serialized_json_bytes);
     json!({
         "content_bytes": text_bytes.saturating_add(image_base64_bytes),
         "text_bytes": text_bytes,
@@ -295,6 +297,7 @@ pub(crate) fn summarize_output(result: &ToolResult) -> Value {
         "image_count": image_count,
         "image_base64_bytes": image_base64_bytes,
         "structured_bytes": structured_bytes,
+        "meta_bytes": meta_bytes,
         "truncated": result.audit.truncated,
         "original_output_tokens": result.audit.original_output_tokens,
         "exec_session_id": result.audit.exec_session_id,
@@ -317,7 +320,7 @@ impl Write for CountingWriter {
     }
 }
 
-fn serialized_json_bytes(value: &Value) -> u64 {
+fn serialized_json_bytes<T: Serialize>(value: &T) -> u64 {
     let mut writer = CountingWriter::default();
     if serde_json::to_writer(&mut writer, value).is_ok() {
         writer.0
@@ -668,6 +671,7 @@ fn open_private_append(path: &Path) -> anyhow::Result<File> {
 mod tests {
     use super::*;
     use crate::config::default_config;
+    use rmcp::model::MetaObject;
 
     #[test]
     fn argument_summary_exposes_shape_but_not_values() {
@@ -844,6 +848,22 @@ mod tests {
         assert_eq!(events[2]["duration_ms"], 17);
         assert_eq!(events[2]["output"]["truncated"], true);
         assert_eq!(events[2]["output"]["text_bytes"], 25);
+    }
+
+    #[test]
+    fn output_summary_counts_component_metadata_without_retaining_it() {
+        let mut result = ToolResult::text("ok");
+        let mut meta = MetaObject::new();
+        meta.0.insert(
+            "io.github.example/review".to_string(),
+            json!({ "patch": "sensitive patch" }),
+        );
+        result.meta = Some(meta);
+
+        let summary = summarize_output(&result);
+        assert_eq!(summary["structured_bytes"], 0);
+        assert!(summary["meta_bytes"].as_u64().unwrap() > 0);
+        assert!(!summary.to_string().contains("sensitive patch"));
     }
 
     #[test]

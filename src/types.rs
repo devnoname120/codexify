@@ -240,9 +240,9 @@ pub struct MemoryConfig {
     pub max_bytes: Option<usize>,
 }
 
-pub const DEFAULT_REVIEW_MAX_PATCH_BYTES: usize = 512 * 1024;
+pub const DEFAULT_REVIEW_MAX_PATCH_BYTES: usize = 4 * 1024 * 1024;
 
-/// Bounds review results without changing checkpoint semantics.
+/// Bounds the component-only patch payload without changing checkpoint semantics.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReviewConfig {
