@@ -44,6 +44,7 @@
   },
   "toolLogging": {
     "mode": "off",
+    "level": "info",
     "maxRequestBytes": 2048,
     "maxResponseBytes": 4096,
     "redactEnv": []

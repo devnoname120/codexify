@@ -1,24 +1,66 @@
+use std::cell::Cell;
 use std::path::Path;
 
 use regex::Regex;
+use serde::ser::{SerializeMap, SerializeSeq};
+use serde::{Serialize, Serializer};
 use serde_json::{Map, Value};
 use zeroize::Zeroizing;
 
 use crate::types::AppConfig;
 
 const MAX_REFERENCED_SECRET_BYTES: u64 = 64 * 1024;
+const MAX_SECRET_MATCH_BYTES: usize = 64 * 1024;
+const REDACTION_LOOKAHEAD_BYTES: usize = 256;
+const MAX_SCHEMA_COMPOSITION_BRANCHES: usize = 32;
+const MAX_SCHEMA_COMPOSITION_DEPTH: usize = 16;
 const REDACTED: &str = "[REDACTED]";
+const VALUE_TRUNCATED: &str = "...[value truncated]...";
 
 pub(crate) struct SecretRedactor {
     secrets: Zeroizing<Vec<String>>,
     secret_patterns: Vec<(Regex, &'static str)>,
+    max_secret_bytes: usize,
+}
+
+pub(crate) struct RedactedJson<'a> {
+    redactor: &'a SecretRedactor,
+    value: &'a Value,
+    schema: Option<&'a Value>,
+    max_text_bytes: usize,
+    traversal_truncated: &'a Cell<bool>,
+}
+
+pub(crate) struct RedactedJsonMap<'a> {
+    redactor: &'a SecretRedactor,
+    values: &'a Map<String, Value>,
+    max_text_bytes: usize,
+    traversal_truncated: &'a Cell<bool>,
+}
+
+pub(crate) struct RedactedText<'a> {
+    redactor: &'a SecretRedactor,
+    text: &'a str,
+    max_text_bytes: usize,
+    traversal_truncated: &'a Cell<bool>,
 }
 
 impl SecretRedactor {
-    pub(crate) fn from_config(config: &AppConfig, redact_env: &[String]) -> Self {
+    pub(crate) fn for_audit(config: &AppConfig) -> Self {
+        Self::from_config(config, &config.audit.redact_env, true)
+    }
+
+    pub(crate) fn for_tool_logging(config: &AppConfig) -> Self {
+        Self::from_config(config, &config.tool_logging.redact_env, false)
+    }
+
+    fn from_config(config: &AppConfig, redact_env: &[String], redact_all_mcp_values: bool) -> Self {
+        let secrets = collect_secret_values(config, redact_env, redact_all_mcp_values);
+        let max_secret_bytes = secrets.iter().map(String::len).max().unwrap_or(0);
         Self {
-            secrets: collect_secret_values(config, redact_env),
+            secrets,
             secret_patterns: secret_patterns(),
+            max_secret_bytes,
         }
     }
 
@@ -47,12 +89,77 @@ impl SecretRedactor {
             .collect()
     }
 
-    pub(crate) fn redact_json(&self, value: &Value) -> Value {
-        self.redact_json_value(value, None)
+    pub(crate) fn redact_json_with_schema(&self, value: &Value, schema: Option<&Value>) -> Value {
+        self.redact_json_value(value, None, schema)
     }
 
-    fn redact_json_value(&self, value: &Value, key: Option<&str>) -> Value {
-        if key.is_some_and(sensitive_json_key) {
+    pub(crate) fn redacted_json<'a>(
+        &'a self,
+        value: &'a Value,
+        schema: Option<&'a Value>,
+        max_payload_bytes: usize,
+        traversal_truncated: &'a Cell<bool>,
+    ) -> RedactedJson<'a> {
+        RedactedJson {
+            redactor: self,
+            value,
+            schema,
+            max_text_bytes: self.max_text_bytes(max_payload_bytes),
+            traversal_truncated,
+        }
+    }
+
+    pub(crate) fn redacted_json_map<'a>(
+        &'a self,
+        values: &'a Map<String, Value>,
+        max_payload_bytes: usize,
+        traversal_truncated: &'a Cell<bool>,
+    ) -> RedactedJsonMap<'a> {
+        RedactedJsonMap {
+            redactor: self,
+            values,
+            max_text_bytes: self.max_text_bytes(max_payload_bytes),
+            traversal_truncated,
+        }
+    }
+
+    pub(crate) fn redacted_text<'a>(
+        &'a self,
+        text: &'a str,
+        max_payload_bytes: usize,
+        traversal_truncated: &'a Cell<bool>,
+    ) -> RedactedText<'a> {
+        RedactedText {
+            redactor: self,
+            text,
+            max_text_bytes: self.max_text_bytes(max_payload_bytes),
+            traversal_truncated,
+        }
+    }
+
+    fn max_text_bytes(&self, max_payload_bytes: usize) -> usize {
+        max_payload_bytes
+            .saturating_add(self.max_secret_bytes)
+            .saturating_add(REDACTION_LOOKAHEAD_BYTES)
+    }
+
+    fn redact_text_bounded(
+        &self,
+        text: &str,
+        max_text_bytes: usize,
+        traversal_truncated: &Cell<bool>,
+    ) -> String {
+        let (prefix, prefix_truncated) = utf8_prefix(text, max_text_bytes);
+        let mut redacted = self.redact_text(prefix);
+        if prefix_truncated {
+            traversal_truncated.set(true);
+            redacted.push_str(VALUE_TRUNCATED);
+        }
+        redacted
+    }
+
+    fn redact_json_value(&self, value: &Value, key: Option<&str>, schema: Option<&Value>) -> Value {
+        if key.is_some_and(sensitive_json_key) || schema.is_some_and(schema_marks_sensitive) {
             return Value::String(REDACTED.to_string());
         }
         match value {
@@ -61,15 +168,23 @@ impl SecretRedactor {
             Value::Array(values) => Value::Array(
                 values
                     .iter()
-                    .map(|value| self.redact_json_value(value, None))
+                    .map(|value| self.redact_json_value(value, None, schema.and_then(schema_items)))
                     .collect(),
             ),
             Value::Object(values) => {
                 let mut redacted = Map::with_capacity(values.len());
                 for (name, value) in values {
+                    if schema.is_some_and(|schema| schema_property_is_sensitive(schema, name)) {
+                        redacted.insert(name.clone(), Value::String(REDACTED.to_string()));
+                        continue;
+                    }
                     redacted.insert(
                         name.clone(),
-                        self.redact_json_value(value, Some(name.as_str())),
+                        self.redact_json_value(
+                            value,
+                            Some(name.as_str()),
+                            schema.and_then(|schema| schema_property(schema, name)),
+                        ),
                     );
                 }
                 Value::Object(redacted)
@@ -78,7 +193,114 @@ impl SecretRedactor {
     }
 }
 
-fn collect_secret_values(config: &AppConfig, redact_env: &[String]) -> Zeroizing<Vec<String>> {
+impl Serialize for RedactedJson<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        if self.schema.is_some_and(schema_marks_sensitive) {
+            return serializer.serialize_str(REDACTED);
+        }
+        match self.value {
+            Value::Null => serializer.serialize_none(),
+            Value::Bool(value) => serializer.serialize_bool(*value),
+            Value::Number(value) => value.serialize(serializer),
+            Value::String(text) => serializer.serialize_str(&self.redactor.redact_text_bounded(
+                text,
+                self.max_text_bytes,
+                self.traversal_truncated,
+            )),
+            Value::Array(values) => {
+                let mut sequence = serializer.serialize_seq(Some(values.len()))?;
+                let item_schema = self.schema.and_then(schema_items);
+                for value in values {
+                    sequence.serialize_element(&RedactedJson {
+                        redactor: self.redactor,
+                        value,
+                        schema: item_schema,
+                        max_text_bytes: self.max_text_bytes,
+                        traversal_truncated: self.traversal_truncated,
+                    })?;
+                }
+                sequence.end()
+            }
+            Value::Object(values) => serialize_redacted_map(
+                serializer,
+                self.redactor,
+                values,
+                self.schema,
+                self.max_text_bytes,
+                self.traversal_truncated,
+            ),
+        }
+    }
+}
+
+impl Serialize for RedactedJsonMap<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serialize_redacted_map(
+            serializer,
+            self.redactor,
+            self.values,
+            None,
+            self.max_text_bytes,
+            self.traversal_truncated,
+        )
+    }
+}
+
+impl Serialize for RedactedText<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.redactor.redact_text_bounded(
+            self.text,
+            self.max_text_bytes,
+            self.traversal_truncated,
+        ))
+    }
+}
+
+fn serialize_redacted_map<S>(
+    serializer: S,
+    redactor: &SecretRedactor,
+    values: &Map<String, Value>,
+    schema: Option<&Value>,
+    max_text_bytes: usize,
+    traversal_truncated: &Cell<bool>,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    let mut map = serializer.serialize_map(Some(values.len()))?;
+    for (name, value) in values {
+        map.serialize_key(name)?;
+        if sensitive_json_key(name)
+            || schema.is_some_and(|schema| schema_property_is_sensitive(schema, name))
+        {
+            map.serialize_value(REDACTED)?;
+        } else {
+            map.serialize_value(&RedactedJson {
+                redactor,
+                value,
+                schema: schema.and_then(|schema| schema_property(schema, name)),
+                max_text_bytes,
+                traversal_truncated,
+            })?;
+        }
+    }
+    map.end()
+}
+
+fn collect_secret_values(
+    config: &AppConfig,
+    redact_env: &[String],
+    redact_all_mcp_values: bool,
+) -> Zeroizing<Vec<String>> {
     let mut values = Vec::new();
     if let Some(api_key) = config.api_key.as_deref() {
         push_secret(&mut values, api_key, false);
@@ -88,10 +310,18 @@ fn collect_secret_values(config: &AppConfig, redact_env: &[String]) -> Zeroizing
     }
     for server in config.mcp_servers.values() {
         for (name, value) in &server.env {
-            push_secret(&mut values, value, !secret_env_name(name));
+            push_secret(
+                &mut values,
+                value,
+                !redact_all_mcp_values && !secret_env_name(name),
+            );
         }
         for (name, value) in &server.http_headers {
-            push_secret(&mut values, value, !secret_env_name(name));
+            push_secret(
+                &mut values,
+                value,
+                !redact_all_mcp_values && !secret_env_name(name),
+            );
         }
         if let Some(name) = server.bearer_token_env_var.as_deref()
             && let Ok(value) = std::env::var(name)
@@ -103,7 +333,7 @@ fn collect_secret_values(config: &AppConfig, redact_env: &[String]) -> Zeroizing
                 push_secret(
                     &mut values,
                     &value,
-                    !secret_env_name(header) && !secret_env_name(name),
+                    !redact_all_mcp_values && !secret_env_name(header) && !secret_env_name(name),
                 );
             }
         }
@@ -140,10 +370,89 @@ fn collect_secret_values(config: &AppConfig, redact_env: &[String]) -> Zeroizing
     Zeroizing::new(values)
 }
 
+fn schema_marks_sensitive(schema: &Value) -> bool {
+    schema_marks_sensitive_at(schema, 0)
+}
+
+fn schema_marks_sensitive_at(schema: &Value, depth: usize) -> bool {
+    if depth >= MAX_SCHEMA_COMPOSITION_DEPTH
+        || schema_composition_count(schema) > MAX_SCHEMA_COMPOSITION_BRANCHES
+    {
+        return true;
+    }
+    schema.get("writeOnly").and_then(Value::as_bool) == Some(true)
+        || schema
+            .get("format")
+            .and_then(Value::as_str)
+            .is_some_and(|format| format.eq_ignore_ascii_case("password"))
+        || schema_compositions(schema).any(|schema| schema_marks_sensitive_at(schema, depth + 1))
+}
+
+fn schema_property_is_sensitive(schema: &Value, property: &str) -> bool {
+    schema_property_is_sensitive_at(schema, property, 0)
+}
+
+fn schema_property_is_sensitive_at(schema: &Value, property: &str, depth: usize) -> bool {
+    if depth >= MAX_SCHEMA_COMPOSITION_DEPTH
+        || schema_composition_count(schema) > MAX_SCHEMA_COMPOSITION_BRANCHES
+    {
+        return true;
+    }
+    schema
+        .get("properties")
+        .and_then(Value::as_object)
+        .and_then(|properties| properties.get(property))
+        .is_some_and(schema_marks_sensitive)
+        || schema_compositions(schema)
+            .any(|schema| schema_property_is_sensitive_at(schema, property, depth + 1))
+}
+
+fn schema_property<'a>(schema: &'a Value, property: &str) -> Option<&'a Value> {
+    schema
+        .get("properties")
+        .and_then(Value::as_object)
+        .and_then(|properties| properties.get(property))
+        .or_else(|| {
+            schema_compositions(schema).find_map(|schema| schema_property(schema, property))
+        })
+}
+
+fn schema_items(schema: &Value) -> Option<&Value> {
+    schema
+        .get("items")
+        .or_else(|| schema_compositions(schema).find_map(|schema| schema_items(schema)))
+}
+
+fn schema_composition_count(schema: &Value) -> usize {
+    ["allOf", "anyOf", "oneOf"]
+        .into_iter()
+        .filter_map(|keyword| schema.get(keyword).and_then(Value::as_array))
+        .map(Vec::len)
+        .sum()
+}
+
+fn schema_compositions(schema: &Value) -> impl Iterator<Item = &Value> {
+    ["allOf", "anyOf", "oneOf"]
+        .into_iter()
+        .filter_map(|keyword| schema.get(keyword).and_then(Value::as_array))
+        .flatten()
+}
+
 fn push_secret(values: &mut Vec<String>, value: &str, automatic: bool) {
     if !value.is_empty() && (!automatic || value.len() >= 8) {
-        values.push(value.to_string());
+        values.push(utf8_prefix(value, MAX_SECRET_MATCH_BYTES).0.to_string());
     }
+}
+
+fn utf8_prefix(value: &str, max_bytes: usize) -> (&str, bool) {
+    if value.len() <= max_bytes {
+        return (value, false);
+    }
+    let mut end = max_bytes;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    (&value[..end], true)
 }
 
 fn sensitive_json_key(key: &str) -> bool {
@@ -170,6 +479,13 @@ fn sensitive_json_key(key: &str) -> bool {
             | "headers"
             | "httpheaders"
             | "envhttpheaders"
+            | "checksum"
+            | "digest"
+            | "md5"
+            | "sha1"
+            | "sha256"
+            | "sha384"
+            | "sha512"
     ) || normalized.ends_with("token")
         || normalized.contains("secret")
         || normalized.ends_with("cookie")
@@ -179,6 +495,8 @@ fn sensitive_json_key(key: &str) -> bool {
         || normalized.contains("authorization")
         || normalized.contains("privatekey")
         || normalized.contains("apikey")
+        || normalized.ends_with("checksum")
+        || normalized.ends_with("digest")
 }
 
 fn secret_env_name(name: &str) -> bool {
@@ -229,6 +547,10 @@ fn secret_patterns() -> Vec<(Regex, &'static str)> {
             r#"(?i)([\"']?[A-Za-z0-9_-]*(?:api[-_]?key|token|secret|password|passphrase|credential)[A-Za-z0-9_-]*[\"']?\s*:\s*)(?:\"[^\"]*\"|'[^']*'|[^\s,;}]+)"#,
             "$1[REDACTED]",
         ),
+        (
+            r#"(?i)([?&](?:x-amz-signature|signature|sig|token|access_token|api[-_]?key)=)[^&\s'\"]+"#,
+            "$1[REDACTED]",
+        ),
     ]
     .into_iter()
     .map(|(pattern, replacement)| {
@@ -254,7 +576,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let mut config = default_config(root.path().to_path_buf());
         config.api_key = Some("known-api-secret".to_string());
-        let redactor = SecretRedactor::from_config(&config, &[]);
+        let redactor = SecretRedactor::for_tool_logging(&config);
         let value = json!({
             "path": "src/main.rs",
             "cmd": "echo known-api-secret",
@@ -267,14 +589,14 @@ mod tests {
             "nested": { "accessToken": "nested-secret", "message": "visible" }
         });
 
-        let redacted = redactor.redact_json(&value);
+        let redacted = redactor.redact_json_with_schema(&value, None);
         let rendered = redacted.to_string();
         assert!(rendered.contains("src/main.rs"));
         assert!(rendered.contains("original_token_count"));
         assert!(rendered.contains("42"));
         assert!(rendered.contains("visible"));
         assert!(!rendered.contains("known-api-secret"));
-        assert!(rendered.contains("0123456789abcdef"));
+        assert!(!rendered.contains("0123456789abcdef"));
         assert!(!rendered.contains("capability"));
         assert!(!rendered.contains("file_sensitive_identifier"));
         assert!(!rendered.contains("github-token-value"));
@@ -285,7 +607,7 @@ mod tests {
     fn argv_redaction_covers_separate_secret_values() {
         let root = tempfile::tempdir().unwrap();
         let config = default_config(root.path().to_path_buf());
-        let redactor = SecretRedactor::from_config(&config, &[]);
+        let redactor = SecretRedactor::for_tool_logging(&config);
         let redacted = redactor.redact_argv(&[
             "tool".into(),
             "--github-token".into(),
@@ -316,11 +638,61 @@ mod tests {
                 ..Default::default()
             },
         );
-        let redactor = SecretRedactor::from_config(&config, &[]);
+        let redactor = SecretRedactor::for_tool_logging(&config);
 
         let redacted = redactor.redact_text("1 dev abc xyz");
         assert!(redacted.contains("1 dev"));
         assert!(!redacted.contains("abc"));
         assert!(!redacted.contains("xyz"));
+    }
+
+    #[test]
+    fn audit_policy_preserves_redaction_of_short_mcp_environment_values() {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = default_config(root.path().to_path_buf());
+        config.mcp_servers.insert(
+            "fixture".to_string(),
+            crate::types::McpServerSpec {
+                env: HashMap::from([("UNCLASSIFIED_VALUE".to_string(), "abc".to_string())]),
+                ..Default::default()
+            },
+        );
+        let redactor = SecretRedactor::for_audit(&config);
+
+        assert_eq!(redactor.redact_text("echo abc"), "echo [REDACTED]");
+    }
+
+    #[test]
+    fn json_schema_write_only_and_password_fields_are_redacted() {
+        let root = tempfile::tempdir().unwrap();
+        let config = default_config(root.path().to_path_buf());
+        let redactor = SecretRedactor::for_tool_logging(&config);
+        let value = json!({
+            "ref": "stale-auth-reference",
+            "nested": {
+                "password": "schema-password",
+                "visible": "keep-me"
+            }
+        });
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "ref": { "type": "string", "writeOnly": true },
+                "nested": {
+                    "type": "object",
+                    "properties": {
+                        "password": { "type": "string", "format": "password" },
+                        "visible": { "type": "string" }
+                    }
+                }
+            }
+        });
+
+        let rendered = redactor
+            .redact_json_with_schema(&value, Some(&schema))
+            .to_string();
+        assert!(!rendered.contains("stale-auth-reference"));
+        assert!(!rendered.contains("schema-password"));
+        assert!(rendered.contains("keep-me"));
     }
 }

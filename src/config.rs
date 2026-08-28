@@ -26,8 +26,9 @@ use crate::types::{
     AppConfig, ArtifactEgressConfig, ArtifactIngressConfig, AuditConfig, CodexProjectCatalogConfig,
     CommandConfig, ConversationAuthToken, ExecConfig, ExecMode, IgnoreConfig, McpServerSpec,
     McpToolExposure, MemoryConfig, OpenAiTunnelConfig, OutputConfig, ProjectCatalogConfig,
-    ProjectCatalogEntryConfig, ProjectDocConfig, ReviewConfig, SkillsConfig, ToolLogMode,
-    ToolLoggingConfig, TreeConfig, WorktreeConfig, WorktreeMode, WorktreeUpstreamRefreshMode,
+    ProjectCatalogEntryConfig, ProjectDocConfig, ReviewConfig, SkillsConfig, ToolLogLevel,
+    ToolLogMode, ToolLoggingConfig, TreeConfig, WorktreeConfig, WorktreeMode,
+    WorktreeUpstreamRefreshMode,
 };
 use crate::util::home_dir;
 
@@ -63,6 +64,15 @@ pub struct Cli {
         global = true
     )]
     pub log_tool_payloads: Option<ToolLogMode>,
+
+    /// Severity used for tool invocation lifecycle and payload events.
+    #[arg(
+        long = "tool-log-level",
+        value_enum,
+        value_name = "LEVEL",
+        global = true
+    )]
+    pub tool_log_level: Option<ToolLogLevel>,
 
     /// Maximum UTF-8 bytes retained from each logged tool request.
     #[arg(
@@ -293,6 +303,7 @@ struct PartialAudit {
 #[serde(rename_all = "camelCase")]
 struct PartialToolLogging {
     mode: Option<ToolLogMode>,
+    level: Option<ToolLogLevel>,
     max_request_bytes: Option<usize>,
     max_response_bytes: Option<usize>,
     redact_env: Option<Vec<String>>,
@@ -1240,11 +1251,13 @@ fn resolve_tool_logging(
     file: Option<PartialToolLogging>,
     cli: &Cli,
 ) -> Result<ToolLoggingConfig, String> {
+    const MIN_PAYLOAD_BYTES: usize = 64;
     const MAX_PAYLOAD_BYTES: usize = 64 * 1024;
 
     let file = file.unwrap_or_default();
     let defaults = ToolLoggingConfig::default();
     let mode = cli.log_tool_payloads.or(file.mode).unwrap_or(defaults.mode);
+    let level = cli.tool_log_level.or(file.level).unwrap_or(defaults.level);
     let max_request_bytes = cli
         .tool_log_max_request_bytes
         .or(file.max_request_bytes)
@@ -1257,8 +1270,10 @@ fn resolve_tool_logging(
         ("toolLogging.maxRequestBytes", max_request_bytes),
         ("toolLogging.maxResponseBytes", max_response_bytes),
     ] {
-        if !(1..=MAX_PAYLOAD_BYTES).contains(&value) {
-            return Err(format!("{name} must be between 1 and {MAX_PAYLOAD_BYTES}"));
+        if !(MIN_PAYLOAD_BYTES..=MAX_PAYLOAD_BYTES).contains(&value) {
+            return Err(format!(
+                "{name} must be between {MIN_PAYLOAD_BYTES} and {MAX_PAYLOAD_BYTES}"
+            ));
         }
     }
 
@@ -1276,6 +1291,7 @@ fn resolve_tool_logging(
 
     Ok(ToolLoggingConfig {
         mode,
+        level,
         max_request_bytes,
         max_response_bytes,
         redact_env,
@@ -1475,6 +1491,7 @@ mod tests {
         Cli {
             verbose: 0,
             log_tool_payloads: None,
+            tool_log_level: None,
             tool_log_max_request_bytes: None,
             tool_log_max_response_bytes: None,
             tool_log_redact_env: Vec::new(),
@@ -1624,6 +1641,8 @@ mod tests {
             "codexify",
             "-vv",
             "--log-tool-payloads=requests",
+            "--tool-log-level",
+            "warn",
             "--tool-log-max-request-bytes",
             "1536",
             "--tool-log-max-response-bytes",
@@ -1644,6 +1663,7 @@ mod tests {
 
         assert_eq!(parsed.verbose, 2);
         assert_eq!(parsed.log_tool_payloads, Some(ToolLogMode::Requests));
+        assert_eq!(parsed.tool_log_level, Some(ToolLogLevel::Warn));
         assert_eq!(parsed.tool_log_max_request_bytes, Some(1536));
         assert_eq!(parsed.tool_log_max_response_bytes, Some(3072));
         assert_eq!(parsed.tool_log_redact_env, ["MCP_SECRET"]);
@@ -1784,6 +1804,7 @@ mod tests {
                 "codexMcp": { "enabled": false },
                 "toolLogging": {
                     "mode": "responses",
+                    "level": "debug",
                     "maxRequestBytes": 1024,
                     "maxResponseBytes": 2048,
                     "redactEnv": ["FILE_SECRET"]
@@ -1794,11 +1815,13 @@ mod tests {
         .unwrap();
         let mut args = cli(root.path(), &config_path);
         args.log_tool_payloads = Some(ToolLogMode::All);
+        args.tool_log_level = Some(ToolLogLevel::Error);
         args.tool_log_max_request_bytes = Some(4096);
         args.tool_log_redact_env = vec!["CLI_SECRET".to_string(), "FILE_SECRET".to_string()];
 
         let config = load_config(args).unwrap();
         assert_eq!(config.tool_logging.mode, ToolLogMode::All);
+        assert_eq!(config.tool_logging.level, ToolLogLevel::Error);
         assert_eq!(config.tool_logging.max_request_bytes, 4096);
         assert_eq!(config.tool_logging.max_response_bytes, 2048);
         assert_eq!(
@@ -1819,6 +1842,22 @@ mod tests {
 
         let error = load_config(cli(root.path(), &config_path)).unwrap_err();
         assert!(error.contains("toolLogging.maxResponseBytes"), "{error}");
+
+        std::fs::write(
+            &config_path,
+            r#"{"codexMcp":{"enabled":false},"toolLogging":{"maxRequestBytes":0}}"#,
+        )
+        .unwrap();
+        let error = load_config(cli(root.path(), &config_path)).unwrap_err();
+        assert!(error.contains("toolLogging.maxRequestBytes"), "{error}");
+
+        std::fs::write(
+            &config_path,
+            r#"{"codexMcp":{"enabled":false},"toolLogging":{"maxRequestBytes":-1}}"#,
+        )
+        .unwrap();
+        let error = load_config(cli(root.path(), &config_path)).unwrap_err();
+        assert!(error.contains("invalid config file"), "{error}");
     }
 
     #[test]

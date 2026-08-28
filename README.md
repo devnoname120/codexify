@@ -282,9 +282,10 @@ Each release ships a compiled binary per platform — `windows-x64`, `linux-x64`
 | `--config` | No | `CODEXIFY_CONFIG`, user config, then legacy `./codex.config.json` | Explicit config file path. The user config is `~/.codexify/codex.config.json`; relative explicit paths resolve from the startup directory, and a missing file is tolerated |
 | `--codex-cli` | No | Auto when available | Require successful Codex CLI-backed MCP discovery. When omitted, failure produces a warning and direct `config.toml` parsing remains the fallback |
 | `-v`, `--verbose` | No | Info logs | Enable Codexify debug diagnostics; repeat (`-vv`) for trace diagnostics (`--log-tool-calls` remains an alias) |
-| `--log-tool-payloads[=<MODE>]` | No | `off` | Log bounded, redacted tool request/response payloads at info level. `MODE` is `requests`, `responses`, or `all`; omitting it selects `all` |
-| `--tool-log-max-request-bytes <BYTES>` | No | `2048` | Maximum UTF-8 bytes retained from each redacted request payload (`1`-`65536`) |
-| `--tool-log-max-response-bytes <BYTES>` | No | `4096` | Maximum UTF-8 bytes retained from each redacted response payload (`1`-`65536`) |
+| `--log-tool-payloads[=<MODE>]` | No | `off` | Emit paired tool invocation lifecycle events with bounded, redacted payloads. `MODE` is `requests`, `responses`, or `all`; omitting it selects `all` |
+| `--tool-log-level <LEVEL>` | No | `info` | Severity for tool invocation events: `trace`, `debug`, `info`, `warn`, or `error` |
+| `--tool-log-max-request-bytes <BYTES>` | No | `2048` | Maximum UTF-8 bytes retained from each redacted request payload (`64`-`65536`) |
+| `--tool-log-max-response-bytes <BYTES>` | No | `4096` | Maximum UTF-8 bytes retained from each redacted response payload (`64`-`65536`) |
 | `--tool-log-redact-env <NAME>` | No | - | Redact the current value of an environment variable from tool payload logs; repeat for multiple names |
 | `--audit <FILE>` | No | Disabled | Append privacy-preserving tool activity events to a JSONL file (`--audit-log` is an alias) |
 | `--audit-command-preview` | No | Disabled | Add bounded, redacted previews for `exec_command` and `run_command` to the audit log |
@@ -467,6 +468,7 @@ an existing config keeps working.
   },
   "toolLogging": {
     "mode": "off",
+    "level": "info",
     "maxRequestBytes": 2048,
     "maxResponseBytes": 4096,
     "redactEnv": []
@@ -555,24 +557,38 @@ codexify \
   --log-tool-payloads=requests \
   --tool-log-max-request-bytes 8192 \
   --tool-log-redact-env PRIVATE_REPOSITORY_TOKEN
+
+# Put the same paired events at debug severity.
+codexify --work-dir /path/to/project --log-tool-payloads --tool-log-level debug
 ```
 
-Each request/response event has a monotonic `call_id`, downstream `tool`, `status` and duration where applicable, the compact JSON payload preview, its serialized byte count, and whether the preview was truncated. Truncation is UTF-8 byte strict and keeps both the beginning and end around a `...[truncated]...` marker. MCP image content blocks are represented only by MIME type and base64 byte count; their base64 data is never written to these logs. Resource links retain descriptive metadata but replace the URI with an omission marker and its byte count, so opaque download capabilities are not persisted.
+Every enabled mode emits exactly one start and one completion event with the same monotonic `call_id`. The request and response toggles control payload inclusion independently without removing the lifecycle record. Completion includes `status` and `duration_ms`. Payload fields contain compact JSON previews, an observed serialized byte count, whether that count is exact, and explicit truncation and serializer-failure flags. When exact size is available, the event also reports the omitted byte count. Serialization stops as soon as the configured prefix budget is full, then appends `...[truncated]...` at a UTF-8 boundary. It does not clone, traverse, or serialize the unseen remainder merely to measure it.
+
+Short representative events look like this (timestamps and unrelated tracing fields omitted):
+
+```text
+INFO codexify::tool_payload: tool invocation started call_id=12 phase="start" tool="read_file" resolved_tool="read_file" status="started" request="{\"path\":\"src/lib.rs\"}"
+INFO codexify::tool_payload: tool invocation completed call_id=12 phase="finish" tool="read_file" resolved_tool="read_file" status="ok" duration_ms=2 response="{\"content\":[{\"type\":\"text\",\"text\":\"...\"}],\"isError\":false}"
+INFO codexify::tool_payload: tool invocation started call_id=13 phase="start" tool="mcp_call_tool" resolved_tool="mcp:IDA MCP/decompile_function" mcp_server="IDA MCP" mcp_tool="decompile_function" status="started" request="{\"source\":\"ida_mcp\",\"tool\":\"decompile_function\",\"arguments\":{\"address\":\"0x81000000\"}}"
+```
+
+MCP image content blocks are represented only by MIME type and base64 byte count; their base64 data is never written to these logs. Resource links retain redacted descriptive metadata but replace the URI with an omission marker and its byte count, so opaque download capabilities are not persisted.
 
 MCP dispatchers also emit `resolved_tool`, `mcp_server`, and `mcp_tool`. These contain the raw configured server name and raw upstream tool name even when the downstream capability is a generic gateway or `mcp_call_tool`; model-visible catalog IDs remain available in the request preview. The ordinary info-level completion event carries the same resolved identity even when payload logging is disabled.
 
-Payloads are redacted before serialization and truncation. Codexify removes configured API/conversation credentials, credential-labelled and nontrivial MCP environment/HTTP-header values, resolved MCP bearer/header environment variables, the OpenAI tunnel key when readable, common secret-bearing process environment variables, values named through `toolLogging.redactEnv` / `--tool-log-redact-env`, secret-labelled JSON fields, signed native-file `download_url` and `file_id` values, and common command-line/header credential syntax. This is defense in depth, not a proof that arbitrary source text or tool output contains no sensitive literal. Tool payload logging is therefore disabled by default and should be treated as sensitive operational data.
+Payloads are redacted lazily before their bytes reach the bounded serializer. Codexify removes configured API/conversation credentials, credential-labelled and nontrivial MCP environment/HTTP-header values, resolved MCP bearer/header environment variables, the OpenAI tunnel key when readable, common secret-bearing process environment variables, values named through `toolLogging.redactEnv` / `--tool-log-redact-env`, input fields marked `writeOnly` or `format: "password"` by the tool schema, secret/checksum-labelled JSON fields, signed native-file `download_url` and `file_id` values, signed-URL query parameters, and common command-line/header credential syntax. This is defense in depth, not proof that arbitrary source text or tool output contains no unknown sensitive literal. JSON has no raw byte-buffer type, so image blocks and resource capabilities receive explicit safe representations; an application-specific base64 string in an otherwise ordinary text field is inside the operator trust boundary. Tool payload logging is therefore disabled by default and should be treated as sensitive operational data.
 
 The `toolLogging` config block provides the same controls:
 
 | Key | Default | Description |
 |-----|---------|-------------|
 | `mode` | `"off"` | `off`, `requests`, `responses`, or `all` |
-| `maxRequestBytes` | `2048` | Maximum UTF-8 bytes retained from each redacted request; accepted range is `1`-`65536` |
-| `maxResponseBytes` | `4096` | Maximum UTF-8 bytes retained from each redacted response; accepted range is `1`-`65536` |
+| `level` | `"info"` | Event severity: `trace`, `debug`, `info`, `warn`, or `error` |
+| `maxRequestBytes` | `2048` | Maximum UTF-8 bytes retained from each redacted request; accepted range is `64`-`65536` |
+| `maxResponseBytes` | `4096` | Maximum UTF-8 bytes retained from each redacted response; accepted range is `64`-`65536` |
 | `redactEnv` | `[]` | Environment-variable names whose current values must be removed from payloads |
 
-CLI mode and byte-limit options replace their corresponding config values. Repeated `--tool-log-redact-env` values are merged with `toolLogging.redactEnv` so a CLI invocation cannot accidentally remove configured redactions. Payload events use the `codexify::tool_payload` tracing target at info level, so an explicit restrictive `RUST_LOG` filter can suppress them. The pre-existing `--log-tool-calls` alias deliberately remains equivalent to `-v`; it does not opt an existing deployment into retaining payloads.
+CLI mode, level, and byte-limit options replace their corresponding config values. Repeated `--tool-log-redact-env` values are merged with `toolLogging.redactEnv` so a CLI invocation cannot accidentally remove configured redactions. Payload events use the `codexify::tool_payload` tracing target at the selected level, so an explicit restrictive `RUST_LOG` filter can suppress them. The pre-existing `--log-tool-calls` alias deliberately remains equivalent to `-v`; it does not opt an existing deployment into retaining payloads.
 
 Audit logging is separate from diagnostic tracing and is disabled unless a file is configured:
 
@@ -582,7 +598,7 @@ codexify \
   --audit ~/.codexify/audit/tools.jsonl
 ```
 
-The append-only JSONL stream begins with `audit_started`, which identifies the server version, OS process, random run ID, and command-preview policy, then emits `tool_start` and `tool_finish` records. Tool records carry an RFC 3339 timestamp, monotonic call ID, transport-session ID, hashed ChatGPT conversation and project identifiers, tool name, duration, status, argument shape, returned byte/token counts, truncation status when the tool can report it, and resident `exec_command` session/PID metadata. Argument summaries include only fields declared by the tool's input schema; unknown keys and dynamic maps are counted but their key names are omitted. Raw conversation identifiers, project paths, scalar argument values, image data, structured output, and returned text are not written.
+The append-only JSONL stream begins with `audit_started`, which identifies the server version, OS process, random run ID, and command-preview policy, then emits schema-version-2 `tool_start` and `tool_finish` records. Tool records carry an RFC 3339 timestamp, monotonic call ID, transport-session ID, hashed ChatGPT conversation and project identifiers, downstream and resolved tool identities (including raw MCP server/tool names), duration, status, argument shape, returned byte/token counts, truncation status when the tool can report it, and resident `exec_command` session/PID metadata. Argument summaries include only fields declared by the tool's input schema; unknown keys and dynamic maps are counted but their key names are omitted. Raw conversation identifiers, project paths, scalar argument values, image data, structured output, and returned text are not written.
 
 Command previews are a separate opt-in because shell commands can contain credentials, source code, paths, and environment values:
 

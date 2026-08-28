@@ -653,6 +653,7 @@ impl WorktreeUpstreamRefreshMode {
 #[derive(Debug, Clone)]
 pub struct ToolLoggingConfig {
     pub mode: ToolLogMode,
+    pub level: ToolLogLevel,
     pub max_request_bytes: usize,
     pub max_response_bytes: usize,
     pub redact_env: Vec<String>,
@@ -662,9 +663,34 @@ impl Default for ToolLoggingConfig {
     fn default() -> Self {
         Self {
             mode: ToolLogMode::Off,
+            level: ToolLogLevel::Info,
             max_request_bytes: 2 * 1024,
             max_response_bytes: 4 * 1024,
             redact_env: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "lowercase")]
+#[value(rename_all = "lowercase")]
+pub enum ToolLogLevel {
+    Trace,
+    Debug,
+    #[default]
+    Info,
+    Warn,
+    Error,
+}
+
+impl ToolLogLevel {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Trace => "trace",
+            Self::Debug => "debug",
+            Self::Info => "info",
+            Self::Warn => "warn",
+            Self::Error => "error",
         }
     }
 }

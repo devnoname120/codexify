@@ -15,9 +15,10 @@ use sha2::{Digest, Sha256};
 use crate::exec_sessions::approx_token_count;
 use crate::project_bindings::ConversationIdentity;
 use crate::redaction::SecretRedactor;
+use crate::tool::ToolCallIdentity;
 use crate::types::{AppConfig, ToolContent, ToolResult};
 
-const SCHEMA_VERSION: u64 = 1;
+const SCHEMA_VERSION: u64 = 2;
 const HASH_HEX_CHARS: usize = 24;
 const MAX_ARGUMENT_FIELDS: usize = 64;
 const MAX_ARGUMENT_DEPTH: usize = 3;
@@ -67,8 +68,7 @@ impl AuditLogger {
         };
         let file = open_private_append(&path)?;
         let include_command_preview = config.audit.include_command_preview;
-        let redactor = include_command_preview
-            .then(|| SecretRedactor::from_config(config, &config.audit.redact_env));
+        let redactor = include_command_preview.then(|| SecretRedactor::for_audit(config));
         let logger = Self {
             path,
             run_id: random_id()?,
@@ -101,7 +101,7 @@ impl AuditLogger {
 
     pub(crate) fn begin_tool(
         &self,
-        tool: &str,
+        identity: &ToolCallIdentity,
         arguments: &Value,
         input_schema: Option<&Value>,
         scope: &AuditScope,
@@ -122,13 +122,16 @@ impl AuditLogger {
             ("conversation_id".to_string(), json!(scope.conversation_id)),
             ("access_root_id".to_string(), json!(scope.access_root_id)),
             ("project_id".to_string(), json!(scope.project_id)),
-            ("tool".to_string(), json!(tool)),
+            ("tool".to_string(), json!(identity.downstream_tool)),
+            ("resolved_tool".to_string(), json!(identity.resolved_tool())),
+            ("mcp_server".to_string(), json!(identity.mcp_server)),
+            ("mcp_tool".to_string(), json!(identity.mcp_tool)),
             (
                 "argument_summary".to_string(),
                 summarize_arguments(arguments, input_schema),
             ),
         ]);
-        if let Some(preview) = self.command_preview(tool, arguments) {
+        if let Some(preview) = self.command_preview(&identity.downstream_tool, arguments) {
             event.insert("command_preview".to_string(), json!(preview));
         }
         self.record(Value::Object(event));
@@ -138,7 +141,7 @@ impl AuditLogger {
     pub(crate) fn finish_tool(
         &self,
         call: &AuditCall,
-        tool: &str,
+        identity: &ToolCallIdentity,
         result: &ToolResult,
         duration_ms: u64,
         scope: &AuditScope,
@@ -153,7 +156,10 @@ impl AuditLogger {
             "conversation_id": scope.conversation_id,
             "access_root_id": scope.access_root_id,
             "project_id": scope.project_id,
-            "tool": tool,
+            "tool": identity.downstream_tool,
+            "resolved_tool": identity.resolved_tool(),
+            "mcp_server": identity.mcp_server,
+            "mcp_tool": identity.mcp_tool,
             "duration_ms": duration_ms,
             "status": if result.is_error { "error" } else { "ok" },
             "output": summarize_output(result),
@@ -724,9 +730,10 @@ mod tests {
                 "workdir": { "type": "string" }
             }
         });
-        let call = logger.begin_tool("exec_command", &arguments, Some(&schema), &scope);
+        let identity = ToolCallIdentity::native("exec_command");
+        let call = logger.begin_tool(&identity, &arguments, Some(&schema), &scope);
         let result = ToolResult::text("returned sensitive output").with_truncation(true);
-        logger.finish_tool(&call, "exec_command", &result, 17, &scope);
+        logger.finish_tool(&call, &identity, &result, 17, &scope);
         drop(logger);
 
         let contents = std::fs::read_to_string(path).unwrap();
@@ -744,9 +751,45 @@ mod tests {
         assert!(events[0]["server_process_id"].as_u64().is_some());
         assert_eq!(events[1]["event"], "tool_start");
         assert_eq!(events[2]["event"], "tool_finish");
+        assert_eq!(events[1]["schema_version"], 2);
+        assert_eq!(events[1]["tool"], "exec_command");
+        assert_eq!(events[1]["resolved_tool"], "exec_command");
+        assert!(events[1]["mcp_server"].is_null());
+        assert!(events[1]["mcp_tool"].is_null());
         assert_eq!(events[2]["duration_ms"], 17);
         assert_eq!(events[2]["output"]["truncated"], true);
         assert_eq!(events[2]["output"]["text_bytes"], 25);
+    }
+
+    #[test]
+    fn audit_records_raw_mcp_identity_for_dispatchers() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("audit.jsonl");
+        let mut config = default_config(root.path().to_path_buf());
+        config.audit.log_file = Some(path.clone());
+        let logger = AuditLogger::open(&config).unwrap().unwrap();
+        let scope = AuditScope::new(1, None, root.path(), None);
+        let identity = ToolCallIdentity::mcp(
+            "mcp_call_tool",
+            "IDA MCP!",
+            Some("decompile_function".to_string()),
+        );
+
+        let call = logger.begin_tool(&identity, &json!({}), None, &scope);
+        logger.finish_tool(&call, &identity, &ToolResult::text("ok"), 1, &scope);
+        drop(logger);
+
+        let events = std::fs::read_to_string(path).unwrap();
+        let events = events
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        for event in &events[1..] {
+            assert_eq!(event["tool"], "mcp_call_tool");
+            assert_eq!(event["resolved_tool"], "mcp:IDA MCP!/decompile_function");
+            assert_eq!(event["mcp_server"], "IDA MCP!");
+            assert_eq!(event["mcp_tool"], "decompile_function");
+        }
     }
 
     #[test]

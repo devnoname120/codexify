@@ -164,9 +164,11 @@ Five integration surfaces are exposed to the client:
    policy to textual `content` and explicit `structuredContent`, then fills default
    structured text mirrors within the same ceiling. Component-only result `_meta`
    is deliberately excluded. Every tracing lifecycle event includes the resolved
-   identity. Optional `toolLogging` tracing emits paired, redacted, byte-bounded
-   request/response previews for every tool class. Separately, audit logging emits
-   JSONL `tool_start` / `tool_finish` records: conversation and project identities
+   resolved identity. Optional `toolLogging` tracing emits one correlated start and
+   completion record for every tool class, with independently selectable request
+   and response payloads, configurable severity, lazy redaction, and work-bounded
+   UTF-8 previews. Separately, audit logging emits JSONL `tool_start` / `tool_finish`
+   records with the same resolved MCP identity: conversation and project identities
    are hashed, and scalar argument values and returned payloads are replaced by
    schema-bounded shape and size accounting (unknown argument keys and dynamic-map
    keys are not recorded).
@@ -492,10 +494,10 @@ the original order and rejects duplicate names.
 | `artifact_ingress/` | OpenAI native-file validation and streaming plus capability-confined, atomic no-overwrite workspace publication. It never accepts a local source path, and constrains the download URL and every redirect hop to the configurable `artifactIngress.allowedHosts` allowlist (default `"*"`, which still rejects loopback, private, link-local, unique-local, CGNAT, `localhost`, and metadata addresses). |
 | `artifact_egress.rs` | Capability-confined regular-file snapshotting plus a process-wide bounded store of immutable bytes. It returns random opaque `codexify://artifact/...` resource capabilities, enforces per-file/total-byte/reference/TTL limits, and serves blobs only through `resources/read`; absolute paths, traversal, symlink escapes, and delayed path rereads are excluded. |
 | `logging.rs` | Tracing initialization with default filters for normal, `-v`, and `-vv` operation (an explicit `RUST_LOG` remains authoritative), plus a non-overridable filter that suppresses RMCP framework events, preventing native-file bearer URLs from appearing in logs before tool dispatch or malformed-session errors. |
-| `tool_logging.rs` | Opt-in info-level request/response tracing for every native and bridged tool, monotonic call pairing, resolved raw MCP identities, compact MCP-shaped response rendering, MCP image content-block and resource-capability elision, and UTF-8 byte-strict head/tail truncation. |
-| `redaction.rs` | Shared value/JSON/argv redaction for audit command previews and tool payload tracing. It collects configured and environment-backed connector/MCP/tunnel secrets, removes secret-labelled fields and native-file capability URLs, and applies credential-syntax heuristics before payload truncation. |
+| `tool_logging.rs` | Opt-in configurable-level invocation tracing for every native and bridged tool, monotonic call pairing, resolved raw MCP identities, compact MCP-shaped response rendering, MCP image content-block and resource-capability elision, a serializer that stops at the byte budget, and UTF-8-safe prefix markers. |
+| `redaction.rs` | Shared value/JSON/argv redaction for audit command previews and tool payload tracing. It collects configured and environment-backed connector/MCP/tunnel secrets, removes secret/checksum-labelled fields and native-file capability URLs, applies schema sensitivity and credential-syntax heuristics, and supplies lazy serialization wrappers so payload redaction does not require cloning the full value. |
 | `output_budget.rs` | Line/byte windowing and list caps, each cut announced with the continuation argument. |
-| `audit.rs` | Private append-only JSONL tool lifecycle records, stable hashed identities, redacted argument summaries, output accounting, and opt-in bounded command previews using the shared redactor. |
+| `audit.rs` | Private append-only JSONL tool lifecycle records, resolved raw MCP identities, stable hashed conversation/project identities, redacted argument summaries, output accounting, and opt-in bounded command previews using the shared redactor. |
 | `conversation_auth.rs` | Authentication-token generation and validation, constant-time comparison, copyable ChatGPT instruction rendering with the innocuous wire vocabulary, durable per-conversation authorization markers, and transport-session fallback. |
 | `ignore_rules.rs` | One `.gitignore`-accurate matcher (the `ignore` crate) shared by glob/grep/tree/list_directory. |
 | `exec_policy.rs` | Shell-string allowlist guard for `exec_command` (a guardrail, not a sandbox). |
@@ -737,6 +739,7 @@ the legacy fallback. All fields are optional.
   "output": { "maxToolOutputTokens": 10000, "maxFileLines": 1000, "maxFileBytes": 131072, "maxEntries": 500, "maxTreeNodes": 1000 },
   "review": { "maxPatchBytes": 4194304 },
   "toolLogging": { "mode": "off",       // off | requests | responses | all
+                   "level": "info",      // trace | debug | info | warn | error
                    "maxRequestBytes": 2048, "maxResponseBytes": 4096,
                    "redactEnv": [] },
   "audit": { "logFile": null, "includeCommandPreview": false,
@@ -823,7 +826,7 @@ Audit command previews: disabled
   a direct proxy, gateway dispatcher, or catalog dispatcher selected one.
 - `-v` and `-vv` increase Codexify diagnostics without dumping raw tool payloads;
   `RUST_LOG` overrides those defaults. `toolLogging` / `--log-tool-payloads` is the
-  separate payload opt-in; the banner prints its mode and byte limits. When audit
+  separate payload opt-in; the banner prints its mode, severity, and byte limits. When audit
   logging is configured, the banner prints its destination and whether command
   previews are enabled.
 

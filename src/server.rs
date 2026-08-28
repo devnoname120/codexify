@@ -315,24 +315,29 @@ impl ServerHandler for CodexHandler {
         let call_identity = tool
             .map(|tool| tool.call_identity(&args))
             .unwrap_or_else(|| ToolCallIdentity::native(name.clone()));
-        let tool_log_call = self
-            .tool_logging
-            .as_ref()
-            .map(|logger| logger.begin(&call_identity, &args));
 
         // Verbose-diagnostics / audit preamble (#15). `needs_scope` gates the cost
         // of building an audit scope and argument summaries to the cases that will
         // actually consume them.
         let needs_scope = self.audit.is_some()
             || tracing::enabled!(target: "codexify::tool", tracing::Level::DEBUG);
-        let input_schema = needs_scope
+        let needs_input_schema = needs_scope
+            || self
+                .tool_logging
+                .as_ref()
+                .is_some_and(|logger| logger.mode().logs_requests());
+        let input_schema = needs_input_schema
             .then(|| tool.map(|tool| tool.input_schema()))
             .flatten();
+        let tool_log_call = self
+            .tool_logging
+            .as_ref()
+            .map(|logger| logger.begin(&call_identity, &args, input_schema.as_ref()));
         let start_scope = needs_scope.then(|| self.audit_scope(conversation.as_ref()));
         let audit_call = self.audit.as_ref().and_then(|audit| {
             start_scope
                 .as_ref()
-                .map(|scope| audit.begin_tool(&name, &args, input_schema.as_ref(), scope))
+                .map(|scope| audit.begin_tool(&call_identity, &args, input_schema.as_ref(), scope))
         });
         if let Some(scope) = start_scope.as_ref() {
             tracing::debug!(
@@ -482,16 +487,18 @@ impl ServerHandler for CodexHandler {
         if let (Some(logger), Some(call)) = (&self.tool_logging, tool_log_call.as_ref()) {
             logger.finish(call, &call_identity, &result, duration_ms);
         }
-        tracing::info!(
-            target: "codexify::tool",
-            tool = %name,
-            resolved_tool = %call_identity.resolved_tool(),
-            mcp_server = call_identity.mcp_server.as_deref().unwrap_or("-"),
-            mcp_tool = call_identity.mcp_tool.as_deref().unwrap_or("-"),
-            status = if result.is_error { "error" } else { "ok" },
-            duration_ms,
-            "tool completed"
-        );
+        if self.tool_logging.is_none() {
+            tracing::info!(
+                target: "codexify::tool",
+                tool = %name,
+                resolved_tool = %call_identity.resolved_tool(),
+                mcp_server = call_identity.mcp_server.as_deref().unwrap_or("-"),
+                mcp_tool = call_identity.mcp_tool.as_deref().unwrap_or("-"),
+                status = if result.is_error { "error" } else { "ok" },
+                duration_ms,
+                "tool completed"
+            );
+        }
         if tracing::enabled!(target: "codexify::tool", tracing::Level::DEBUG) {
             tracing::debug!(
                 target: "codexify::tool",
@@ -508,9 +515,9 @@ impl ServerHandler for CodexHandler {
         {
             if name == SetProjectRoot::NAME {
                 let finish_scope = self.audit_scope(conversation.as_ref());
-                audit.finish_tool(call, &name, &result, duration_ms, &finish_scope);
+                audit.finish_tool(call, &call_identity, &result, duration_ms, &finish_scope);
             } else {
-                audit.finish_tool(call, &name, &result, duration_ms, start_scope);
+                audit.finish_tool(call, &call_identity, &result, duration_ms, start_scope);
             }
         }
         Ok(to_call_tool_result(result).into())
@@ -707,8 +714,9 @@ pub async fn start_http_server(mut config: AppConfig) -> anyhow::Result<()> {
     }
     if let Some(logger) = tool_logging.as_ref() {
         println!(
-            "Tool payload logging: {} (requests <= {} bytes, responses <= {} bytes; redacted)",
+            "Tool payload logging: {} at {} (requests <= {} bytes, responses <= {} bytes; redacted)",
             logger.mode().as_str(),
+            logger.level().as_str(),
             logger.max_request_bytes(),
             logger.max_response_bytes()
         );
@@ -1034,7 +1042,216 @@ async fn shutdown_signal() {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+    use std::fmt;
+    use std::sync::Mutex;
+
+    use async_trait::async_trait;
+    use rmcp::ServiceExt;
+    use tracing::field::{Field, Visit};
+    use tracing::{Event, Subscriber};
+    use tracing_subscriber::layer::{Context, SubscriberExt};
+    use tracing_subscriber::{Layer, Registry};
+
     use super::*;
+
+    struct NewlyRegisteredTool {
+        name: &'static str,
+        answer: &'static str,
+        is_error: bool,
+    }
+
+    #[async_trait]
+    impl Tool for NewlyRegisteredTool {
+        fn name(&self) -> &'static str {
+            self.name
+        }
+
+        fn description(&self) -> String {
+            "A tool registered only by the dispatch-boundary regression test.".to_string()
+        }
+
+        fn input_schema(&self) -> Value {
+            json!({
+                "type": "object",
+                "properties": {
+                    "value": { "type": "string" },
+                    "private": { "type": "string", "writeOnly": true }
+                },
+                "required": ["value"],
+                "additionalProperties": false
+            })
+        }
+
+        fn requires_project_root(&self) -> bool {
+            false
+        }
+
+        async fn call(
+            &self,
+            _args: Value,
+            _config: &AppConfig,
+            _session: &SessionState,
+        ) -> ToolResult {
+            if self.is_error {
+                ToolResult::error(self.answer)
+            } else {
+                ToolResult::text(self.answer)
+            }
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct ToolPayloadCapture {
+        events: Arc<Mutex<Vec<HashMap<String, String>>>>,
+    }
+
+    impl<S> Layer<S> for ToolPayloadCapture
+    where
+        S: Subscriber,
+    {
+        fn on_event(&self, event: &Event<'_>, _context: Context<'_, S>) {
+            if event.metadata().target() != "codexify::tool_payload" {
+                return;
+            }
+            let mut fields = HashMap::new();
+            event.record(&mut ToolPayloadFieldVisitor(&mut fields));
+            self.events.lock().unwrap().push(fields);
+        }
+    }
+
+    struct ToolPayloadFieldVisitor<'a>(&'a mut HashMap<String, String>);
+
+    impl Visit for ToolPayloadFieldVisitor<'_> {
+        fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
+            self.0
+                .insert(field.name().to_string(), format!("{value:?}"));
+        }
+
+        fn record_u64(&mut self, field: &Field, value: u64) {
+            self.0.insert(field.name().to_string(), value.to_string());
+        }
+
+        fn record_bool(&mut self, field: &Field, value: bool) {
+            self.0.insert(field.name().to_string(), value.to_string());
+        }
+
+        fn record_str(&mut self, field: &Field, value: &str) {
+            self.0.insert(field.name().to_string(), value.to_string());
+        }
+    }
+
+    fn handler_with_tools(root: &std::path::Path, tools: Vec<Box<dyn Tool>>) -> CodexHandler {
+        let mut config = crate::config::default_config(root.to_path_buf());
+        config.tool_logging.mode = crate::types::ToolLogMode::All;
+        let tool_logging = ToolCallLogger::new(&config).map(Arc::new);
+        CodexHandler {
+            config: Arc::new(config),
+            tools: Arc::new(tools),
+            project_bindings: Arc::new(ProjectBindingStore::new(root.join("bindings"))),
+            conversation_authorizations: Arc::new(ConversationAuthorizationStore::new()),
+            conversation_exec_sessions: Arc::new(ConversationExecSessionStore::new()),
+            review_checkpoints: Arc::new(ReviewCheckpointManager::new()),
+            artifact_egress: Arc::new(ArtifactEgressStore::new(
+                crate::types::ArtifactEgressConfig::default(),
+            )),
+            audit: None,
+            tool_logging,
+            session: SessionState::new(),
+        }
+    }
+
+    #[test]
+    fn common_dispatch_boundary_observes_new_tools_and_preserves_results() {
+        let root = tempfile::tempdir().unwrap();
+        let handler = handler_with_tools(
+            root.path(),
+            vec![
+                Box::new(NewlyRegisteredTool {
+                    name: "new_success_fixture",
+                    answer: "unchanged success answer",
+                    is_error: false,
+                }),
+                Box::new(NewlyRegisteredTool {
+                    name: "new_failure_fixture",
+                    answer: "unchanged failure answer",
+                    is_error: true,
+                }),
+            ],
+        );
+        let capture = ToolPayloadCapture::default();
+        let events = capture.events.clone();
+        let subscriber = Registry::default().with(capture);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        let (success, failure) = tracing::subscriber::with_default(subscriber, || {
+            runtime.block_on(async move {
+                let (server_transport, client_transport) = tokio::io::duplex(16 * 1024);
+                let server_task = tokio::spawn(async move {
+                    handler
+                        .serve(server_transport)
+                        .await
+                        .unwrap()
+                        .waiting()
+                        .await
+                        .unwrap();
+                });
+                let client = ().serve(client_transport).await.unwrap();
+                let arguments = json!({
+                    "value": "visible request",
+                    "private": "schema-protected request"
+                })
+                .as_object()
+                .unwrap()
+                .clone();
+                let success = client
+                    .call_tool(
+                        CallToolRequestParams::new("new_success_fixture")
+                            .with_arguments(arguments.clone()),
+                    )
+                    .await
+                    .unwrap();
+                let failure = client
+                    .call_tool(
+                        CallToolRequestParams::new("new_failure_fixture").with_arguments(arguments),
+                    )
+                    .await
+                    .unwrap();
+                client.cancel().await.unwrap();
+                server_task.await.unwrap();
+                (success, failure)
+            })
+        });
+
+        assert_eq!(success.is_error, Some(false));
+        assert_eq!(
+            success.content[0].as_text().unwrap().text,
+            "unchanged success answer"
+        );
+        assert_eq!(failure.is_error, Some(true));
+        assert_eq!(
+            failure.content[0].as_text().unwrap().text,
+            "unchanged failure answer"
+        );
+
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 4);
+        for pair in events.chunks_exact(2) {
+            assert_eq!(pair[0]["phase"], "start");
+            assert_eq!(pair[1]["phase"], "finish");
+            assert_eq!(pair[0]["call_id"], pair[1]["call_id"]);
+            assert_eq!(pair[0]["resolved_tool"], pair[0]["tool"]);
+            assert!(pair[0]["request"].contains("visible request"));
+            assert!(!pair[0]["request"].contains("schema-protected request"));
+        }
+        assert_eq!(events[1]["status"], "ok");
+        assert!(events[1]["response"].contains("unchanged success answer"));
+        assert_eq!(events[3]["status"], "error");
+        assert!(events[3]["response"].contains("unchanged failure answer"));
+    }
 
     #[test]
     fn advertises_review_resources_and_mcp_apps_extension() {
