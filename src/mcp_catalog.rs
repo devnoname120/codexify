@@ -975,18 +975,19 @@ impl Tool for McpCallToolTool {
     }
 
     fn call_identity(&self, args: &Value) -> ToolCallIdentity {
-        let resolved = args
+        let source = args
             .get("source")
             .and_then(Value::as_str)
-            .and_then(|source_id| self.catalog.source(source_id).ok())
-            .and_then(|source| {
-                args.get("tool")
+            .and_then(|source_id| self.catalog.source(source_id).ok());
+        match source {
+            Some(source) => {
+                let tool = args
+                    .get("tool")
                     .and_then(Value::as_str)
                     .and_then(|tool_id| self.catalog.tool(source, tool_id).ok())
-                    .map(|tool| (source.raw_name.clone(), tool.raw.name.to_string()))
-            });
-        match resolved {
-            Some((server, tool)) => ToolCallIdentity::mcp(self.name(), server, Some(tool)),
+                    .map(|tool| tool.raw.name.to_string());
+                ToolCallIdentity::mcp(self.name(), source.raw_name.clone(), tool)
+            }
             None => ToolCallIdentity::native(self.name()),
         }
     }

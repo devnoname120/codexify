@@ -10,6 +10,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use axum::{Router, extract::State, response::Json, routing::get};
@@ -83,6 +84,7 @@ pub struct CodexHandler {
     artifact_egress: Arc<ArtifactEgressStore>,
     audit: Option<Arc<AuditLogger>>,
     tool_logging: Option<Arc<ToolCallLogger>>,
+    next_tool_call_id: Arc<AtomicU64>,
     session: SessionState,
 }
 
@@ -301,6 +303,7 @@ impl ServerHandler for CodexHandler {
         });
         let name = request.name.as_ref().to_string();
         let args = request.arguments.map(Value::Object).unwrap_or(Value::Null);
+        let call_id = self.next_tool_call_id.fetch_add(1, Ordering::Relaxed);
         let tool_context = ToolRequestContext {
             conversation: conversation.clone(),
             conversation_authorizations: self.conversation_authorizations.clone(),
@@ -325,23 +328,24 @@ impl ServerHandler for CodexHandler {
             || self
                 .tool_logging
                 .as_ref()
-                .is_some_and(|logger| logger.mode().logs_requests());
+                .is_some_and(|logger| logger.logs_requests());
         let input_schema = needs_input_schema
             .then(|| tool.map(|tool| tool.input_schema()))
             .flatten();
         let tool_log_call = self
             .tool_logging
             .as_ref()
-            .map(|logger| logger.begin(&call_identity, &args, input_schema.as_ref()));
+            .map(|logger| logger.begin(call_id, &call_identity, &args, input_schema.as_ref()));
         let start_scope = needs_scope.then(|| self.audit_scope(conversation.as_ref()));
         let audit_call = self.audit.as_ref().and_then(|audit| {
-            start_scope
-                .as_ref()
-                .map(|scope| audit.begin_tool(&call_identity, &args, input_schema.as_ref(), scope))
+            start_scope.as_ref().map(|scope| {
+                audit.begin_tool(call_id, &call_identity, &args, input_schema.as_ref(), scope)
+            })
         });
         if let Some(scope) = start_scope.as_ref() {
             tracing::debug!(
                 target: "codexify::tool",
+                call_id,
                 tool = %name,
                 resolved_tool = %call_identity.resolved_tool(),
                 mcp_server = call_identity.mcp_server.as_deref().unwrap_or("-"),
@@ -356,6 +360,7 @@ impl ServerHandler for CodexHandler {
         if tracing::enabled!(target: "codexify::tool", tracing::Level::TRACE) {
             tracing::trace!(
                 target: "codexify::tool",
+                call_id,
                 tool = %name,
                 resolved_tool = %call_identity.resolved_tool(),
                 mcp_server = call_identity.mcp_server.as_deref().unwrap_or("-"),
@@ -487,9 +492,13 @@ impl ServerHandler for CodexHandler {
         if let (Some(logger), Some(call)) = (&self.tool_logging, tool_log_call.as_ref()) {
             logger.finish(call, &call_identity, &result, duration_ms);
         }
-        if self.tool_logging.is_none() {
+        if !tool_log_call
+            .as_ref()
+            .is_some_and(|call| call.events_enabled())
+        {
             tracing::info!(
                 target: "codexify::tool",
+                call_id,
                 tool = %name,
                 resolved_tool = %call_identity.resolved_tool(),
                 mcp_server = call_identity.mcp_server.as_deref().unwrap_or("-"),
@@ -502,6 +511,7 @@ impl ServerHandler for CodexHandler {
         if tracing::enabled!(target: "codexify::tool", tracing::Level::DEBUG) {
             tracing::debug!(
                 target: "codexify::tool",
+                call_id,
                 tool = %name,
                 resolved_tool = %call_identity.resolved_tool(),
                 mcp_server = call_identity.mcp_server.as_deref().unwrap_or("-"),
@@ -539,6 +549,7 @@ pub async fn start_http_server(mut config: AppConfig) -> anyhow::Result<()> {
     }
     let audit = AuditLogger::open(&config)?.map(Arc::new);
     let tool_logging = ToolCallLogger::new(&config).map(Arc::new);
+    let next_tool_call_id = Arc::new(AtomicU64::new(1));
     // Gateway-mode upstreams write their generated skills here; keyed by port so
     // concurrent instances don't clobber each other, and rebuilt fresh per start.
     let gen_dir = std::env::temp_dir()
@@ -623,6 +634,7 @@ pub async fn start_http_server(mut config: AppConfig) -> anyhow::Result<()> {
     let factory_artifact_egress = artifact_egress.clone();
     let factory_audit = audit.clone();
     let factory_tool_logging = tool_logging.clone();
+    let factory_next_tool_call_id = next_tool_call_id.clone();
     let service = StreamableHttpService::new(
         move || {
             let session = SessionState::new();
@@ -637,6 +649,7 @@ pub async fn start_http_server(mut config: AppConfig) -> anyhow::Result<()> {
                 artifact_egress: factory_artifact_egress.clone(),
                 audit: factory_audit.clone(),
                 tool_logging: factory_tool_logging.clone(),
+                next_tool_call_id: factory_next_tool_call_id.clone(),
                 session,
             })
         },
@@ -1050,6 +1063,7 @@ mod tests {
     use rmcp::ServiceExt;
     use tracing::field::{Field, Visit};
     use tracing::{Event, Subscriber};
+    use tracing_subscriber::filter::LevelFilter;
     use tracing_subscriber::layer::{Context, SubscriberExt};
     use tracing_subscriber::{Layer, Registry};
 
@@ -1104,6 +1118,7 @@ mod tests {
     #[derive(Clone, Default)]
     struct ToolPayloadCapture {
         events: Arc<Mutex<Vec<HashMap<String, String>>>>,
+        ordinary_info_completions: Arc<std::sync::atomic::AtomicUsize>,
     }
 
     impl<S> Layer<S> for ToolPayloadCapture
@@ -1111,6 +1126,12 @@ mod tests {
         S: Subscriber,
     {
         fn on_event(&self, event: &Event<'_>, _context: Context<'_, S>) {
+            if event.metadata().target() == "codexify::tool"
+                && *event.metadata().level() == tracing::Level::INFO
+            {
+                self.ordinary_info_completions
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
             if event.metadata().target() != "codexify::tool_payload" {
                 return;
             }
@@ -1141,10 +1162,17 @@ mod tests {
         }
     }
 
-    fn handler_with_tools(root: &std::path::Path, tools: Vec<Box<dyn Tool>>) -> CodexHandler {
+    fn handler_with_tools(
+        root: &std::path::Path,
+        tools: Vec<Box<dyn Tool>>,
+        tool_log_level: crate::types::ToolLogLevel,
+    ) -> CodexHandler {
         let mut config = crate::config::default_config(root.to_path_buf());
         config.tool_logging.mode = crate::types::ToolLogMode::All;
+        config.tool_logging.level = tool_log_level;
+        config.audit.log_file = Some(root.join("audit.jsonl"));
         let tool_logging = ToolCallLogger::new(&config).map(Arc::new);
+        let audit = AuditLogger::open(&config).unwrap().map(Arc::new);
         CodexHandler {
             config: Arc::new(config),
             tools: Arc::new(tools),
@@ -1155,8 +1183,9 @@ mod tests {
             artifact_egress: Arc::new(ArtifactEgressStore::new(
                 crate::types::ArtifactEgressConfig::default(),
             )),
-            audit: None,
+            audit,
             tool_logging,
+            next_tool_call_id: Arc::new(AtomicU64::new(1)),
             session: SessionState::new(),
         }
     }
@@ -1178,9 +1207,11 @@ mod tests {
                     is_error: true,
                 }),
             ],
+            crate::types::ToolLogLevel::Info,
         );
         let capture = ToolPayloadCapture::default();
         let events = capture.events.clone();
+        let ordinary_info_completions = capture.ordinary_info_completions.clone();
         let subscriber = Registry::default().with(capture);
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -1239,7 +1270,12 @@ mod tests {
 
         let events = events.lock().unwrap();
         assert_eq!(events.len(), 4);
-        for pair in events.chunks_exact(2) {
+        assert_eq!(
+            ordinary_info_completions.load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "payload observation must replace, not duplicate, the ordinary info completion"
+        );
+        for pair in events.as_chunks::<2>().0 {
             assert_eq!(pair[0]["phase"], "start");
             assert_eq!(pair[1]["phase"], "finish");
             assert_eq!(pair[0]["call_id"], pair[1]["call_id"]);
@@ -1251,6 +1287,79 @@ mod tests {
         assert!(events[1]["response"].contains("unchanged success answer"));
         assert_eq!(events[3]["status"], "error");
         assert!(events[3]["response"].contains("unchanged failure answer"));
+        let payload_call_ids = events
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| pair[0]["call_id"].parse::<u64>().unwrap())
+            .collect::<Vec<_>>();
+        drop(events);
+
+        let audit_events = std::fs::read_to_string(root.path().join("audit.jsonl")).unwrap();
+        let audit_events = audit_events
+            .lines()
+            .skip(1)
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        let audit_call_ids = audit_events
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| pair[0]["call_id"].as_u64().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(payload_call_ids, audit_call_ids);
+    }
+
+    #[test]
+    fn filtered_payload_level_falls_back_to_the_ordinary_completion_event() {
+        let root = tempfile::tempdir().unwrap();
+        let handler = handler_with_tools(
+            root.path(),
+            vec![Box::new(NewlyRegisteredTool {
+                name: "filtered_payload_fixture",
+                answer: "ordinary completion remains visible",
+                is_error: false,
+            })],
+            crate::types::ToolLogLevel::Debug,
+        );
+        let capture = ToolPayloadCapture::default();
+        let events = capture.events.clone();
+        let ordinary_info_completions = capture.ordinary_info_completions.clone();
+        let subscriber = Registry::default().with(capture).with(LevelFilter::INFO);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        let result = tracing::subscriber::with_default(subscriber, || {
+            runtime.block_on(async move {
+                let (server_transport, client_transport) = tokio::io::duplex(16 * 1024);
+                let server_task = tokio::spawn(async move {
+                    handler
+                        .serve(server_transport)
+                        .await
+                        .unwrap()
+                        .waiting()
+                        .await
+                        .unwrap();
+                });
+                let client = ().serve(client_transport).await.unwrap();
+                let result = client
+                    .call_tool(CallToolRequestParams::new("filtered_payload_fixture"))
+                    .await
+                    .unwrap();
+                client.cancel().await.unwrap();
+                server_task.await.unwrap();
+                result
+            })
+        });
+
+        assert_eq!(result.is_error, Some(false));
+        assert!(events.lock().unwrap().is_empty());
+        assert_eq!(
+            ordinary_info_completions.load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
     }
 
     #[test]
@@ -1268,6 +1377,7 @@ mod tests {
             )),
             audit: None,
             tool_logging: None,
+            next_tool_call_id: Arc::new(AtomicU64::new(1)),
             session: SessionState::new(),
         };
 
@@ -1303,6 +1413,7 @@ mod tests {
             )),
             audit: None,
             tool_logging: None,
+            next_tool_call_id: Arc::new(AtomicU64::new(1)),
             session: SessionState::new(),
         };
         let first = ConversationIdentity::from_openai_session("first-chat").unwrap();

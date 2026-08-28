@@ -1,6 +1,5 @@
 use std::cell::Cell;
 use std::io::{self, Write};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::ser::{SerializeMap, SerializeSeq};
 use serde::{Serialize, Serializer};
@@ -51,11 +50,17 @@ pub(crate) struct ToolCallLogger {
     max_request_bytes: usize,
     max_response_bytes: usize,
     redactor: SecretRedactor,
-    next_call_id: AtomicU64,
 }
 
 pub(crate) struct ToolLogCall {
     id: u64,
+    enabled: bool,
+}
+
+impl ToolLogCall {
+    pub(crate) fn events_enabled(&self) -> bool {
+        self.enabled
+    }
 }
 
 struct PayloadPreview {
@@ -79,12 +84,15 @@ impl ToolCallLogger {
             max_request_bytes: config.tool_logging.max_request_bytes,
             max_response_bytes: config.tool_logging.max_response_bytes,
             redactor: SecretRedactor::for_tool_logging(config),
-            next_call_id: AtomicU64::new(1),
         })
     }
 
     pub(crate) fn mode(&self) -> ToolLogMode {
         self.mode
+    }
+
+    pub(crate) fn logs_requests(&self) -> bool {
+        self.mode.logs_requests() && self.events_enabled()
     }
 
     pub(crate) fn level(&self) -> ToolLogLevel {
@@ -101,13 +109,19 @@ impl ToolCallLogger {
 
     pub(crate) fn begin(
         &self,
+        call_id: u64,
         identity: &ToolCallIdentity,
         arguments: &Value,
         input_schema: Option<&Value>,
     ) -> ToolLogCall {
+        let enabled = self.events_enabled();
         let call = ToolLogCall {
-            id: self.next_call_id.fetch_add(1, Ordering::Relaxed),
+            id: call_id,
+            enabled,
         };
+        if !enabled {
+            return call;
+        }
         let resolved_tool = identity.resolved_tool();
         if self.mode.logs_requests() {
             let preview = self.preview_request(arguments, input_schema);
@@ -152,6 +166,9 @@ impl ToolCallLogger {
         result: &ToolResult,
         duration_ms: u64,
     ) {
+        if !call.enabled {
+            return;
+        }
         let resolved_tool = identity.resolved_tool();
         if self.mode.logs_responses() {
             let preview = self.preview_response(result);
@@ -210,6 +227,31 @@ impl ToolCallLogger {
             traversal_truncated: &traversal_truncated,
         };
         preview_serializable(&response, self.max_response_bytes, &traversal_truncated)
+    }
+
+    fn events_enabled(&self) -> bool {
+        match self.level {
+            ToolLogLevel::Trace => tracing::enabled!(
+                target: "codexify::tool_payload",
+                tracing::Level::TRACE
+            ),
+            ToolLogLevel::Debug => tracing::enabled!(
+                target: "codexify::tool_payload",
+                tracing::Level::DEBUG
+            ),
+            ToolLogLevel::Info => tracing::enabled!(
+                target: "codexify::tool_payload",
+                tracing::Level::INFO
+            ),
+            ToolLogLevel::Warn => tracing::enabled!(
+                target: "codexify::tool_payload",
+                tracing::Level::WARN
+            ),
+            ToolLogLevel::Error => tracing::enabled!(
+                target: "codexify::tool_payload",
+                tracing::Level::ERROR
+            ),
+        }
     }
 }
 
@@ -705,7 +747,7 @@ mod tests {
 
             tracing::subscriber::with_default(subscriber, || {
                 let identity = ToolCallIdentity::native("fixture");
-                let call = logger.begin(&identity, &json!({ "value": 7 }), None);
+                let call = logger.begin(1, &identity, &json!({ "value": 7 }), None);
                 logger.finish(&call, &identity, &ToolResult::text("answer"), 3);
             });
 
@@ -745,6 +787,7 @@ mod tests {
 
         tracing::subscriber::with_default(subscriber, || {
             let call = logger.begin(
+                1,
                 &identity,
                 &json!({ "arguments": { "token": "known-emitted-secret", "address": "0x81000000" } }),
                 None,
@@ -791,15 +834,20 @@ mod tests {
         let subscriber = Registry::default().with(capture);
 
         tracing::subscriber::with_default(subscriber, || {
-            for identity in &cases {
-                let call = logger.begin(identity, &json!({ "address": "0x81000000" }), None);
+            for (index, identity) in cases.iter().enumerate() {
+                let call = logger.begin(
+                    index as u64 + 1,
+                    identity,
+                    &json!({ "address": "0x81000000" }),
+                    None,
+                );
                 logger.finish(&call, identity, &ToolResult::text("upstream answer"), 1);
             }
         });
 
         let events = events.lock().unwrap();
         assert_eq!(events.len(), 6);
-        for (pair, identity) in events.chunks_exact(2).zip(cases) {
+        for (pair, identity) in events.as_chunks::<2>().0.iter().zip(cases) {
             assert_eq!(pair[0]["tool"], identity.downstream_tool);
             assert_eq!(pair[0]["resolved_tool"], identity.resolved_tool());
             assert_eq!(pair[0]["mcp_server"], "IDA MCP!");
@@ -822,7 +870,7 @@ mod tests {
         let subscriber = Registry::default().with(capture);
 
         tracing::subscriber::with_default(subscriber, || {
-            let call = logger.begin(&identity, &Value::Null, None);
+            let call = logger.begin(1, &identity, &Value::Null, None);
             logger.finish(&call, &identity, &result, 9);
         });
 
@@ -839,18 +887,22 @@ mod tests {
         let mut config = default_config(root.path().to_path_buf());
         config.tool_logging.mode = ToolLogMode::All;
         let logger = Arc::new(ToolCallLogger::new(&config).unwrap());
+        let next_call_id = Arc::new(std::sync::atomic::AtomicU64::new(1));
         let capture = CaptureLayer::default();
         let events = capture.events.clone();
 
         std::thread::scope(|scope| {
             for value in 0..8 {
                 let logger = logger.clone();
+                let next_call_id = next_call_id.clone();
                 let capture = capture.clone();
                 scope.spawn(move || {
                     let subscriber = Registry::default().with(capture);
                     tracing::subscriber::with_default(subscriber, || {
                         let identity = ToolCallIdentity::native("concurrent_fixture");
-                        let call = logger.begin(&identity, &json!({ "value": value }), None);
+                        let call_id = next_call_id.fetch_add(1, AtomicOrdering::Relaxed);
+                        let call =
+                            logger.begin(call_id, &identity, &json!({ "value": value }), None);
                         logger.finish(
                             &call,
                             &identity,

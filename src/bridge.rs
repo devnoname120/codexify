@@ -1481,6 +1481,16 @@ mod tests {
         );
         let source_id = listed["sources"][0]["id"].as_str().unwrap().to_string();
         assert_eq!(source_id, "IDA_MCP_");
+        let unresolved_identity = bridge_tool(&bridge, MCP_CALL_TOOL).call_identity(&json!({
+            "source": source_id,
+            "tool": "unknown-tool-id"
+        }));
+        assert_eq!(unresolved_identity.mcp_server.as_deref(), Some("IDA MCP!"));
+        assert_eq!(unresolved_identity.mcp_tool, None);
+        assert_eq!(
+            unresolved_identity.resolved_tool(),
+            "mcp:IDA MCP!/<unresolved>"
+        );
 
         let filtered_sources = call_bridge_tool(
             &bridge,

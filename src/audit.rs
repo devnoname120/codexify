@@ -4,7 +4,6 @@ use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, bail};
 use chrono::{SecondsFormat, Utc};
@@ -54,7 +53,6 @@ pub(crate) struct AuditCall {
 pub(crate) struct AuditLogger {
     path: PathBuf,
     run_id: String,
-    next_call_id: AtomicU64,
     file: Mutex<File>,
     include_command_preview: bool,
     command_preview_max_bytes: usize,
@@ -72,7 +70,6 @@ impl AuditLogger {
         let logger = Self {
             path,
             run_id: random_id()?,
-            next_call_id: AtomicU64::new(1),
             file: Mutex::new(file),
             include_command_preview,
             command_preview_max_bytes: config.audit.command_preview_max_bytes,
@@ -101,14 +98,13 @@ impl AuditLogger {
 
     pub(crate) fn begin_tool(
         &self,
+        call_id: u64,
         identity: &ToolCallIdentity,
         arguments: &Value,
         input_schema: Option<&Value>,
         scope: &AuditScope,
     ) -> AuditCall {
-        let call = AuditCall {
-            id: self.next_call_id.fetch_add(1, Ordering::Relaxed),
-        };
+        let call = AuditCall { id: call_id };
         let mut event = Map::from_iter([
             ("schema_version".to_string(), json!(SCHEMA_VERSION)),
             ("timestamp".to_string(), json!(timestamp())),
@@ -731,7 +727,7 @@ mod tests {
             }
         });
         let identity = ToolCallIdentity::native("exec_command");
-        let call = logger.begin_tool(&identity, &arguments, Some(&schema), &scope);
+        let call = logger.begin_tool(1, &identity, &arguments, Some(&schema), &scope);
         let result = ToolResult::text("returned sensitive output").with_truncation(true);
         logger.finish_tool(&call, &identity, &result, 17, &scope);
         drop(logger);
@@ -775,7 +771,7 @@ mod tests {
             Some("decompile_function".to_string()),
         );
 
-        let call = logger.begin_tool(&identity, &json!({}), None, &scope);
+        let call = logger.begin_tool(1, &identity, &json!({}), None, &scope);
         logger.finish_tool(&call, &identity, &ToolResult::text("ok"), 1, &scope);
         drop(logger);
 

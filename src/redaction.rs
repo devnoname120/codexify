@@ -89,10 +89,6 @@ impl SecretRedactor {
             .collect()
     }
 
-    pub(crate) fn redact_json_with_schema(&self, value: &Value, schema: Option<&Value>) -> Value {
-        self.redact_json_value(value, None, schema)
-    }
-
     pub(crate) fn redacted_json<'a>(
         &'a self,
         value: &'a Value,
@@ -156,40 +152,6 @@ impl SecretRedactor {
             redacted.push_str(VALUE_TRUNCATED);
         }
         redacted
-    }
-
-    fn redact_json_value(&self, value: &Value, key: Option<&str>, schema: Option<&Value>) -> Value {
-        if key.is_some_and(sensitive_json_key) || schema.is_some_and(schema_marks_sensitive) {
-            return Value::String(REDACTED.to_string());
-        }
-        match value {
-            Value::Null | Value::Bool(_) | Value::Number(_) => value.clone(),
-            Value::String(text) => Value::String(self.redact_text(text)),
-            Value::Array(values) => Value::Array(
-                values
-                    .iter()
-                    .map(|value| self.redact_json_value(value, None, schema.and_then(schema_items)))
-                    .collect(),
-            ),
-            Value::Object(values) => {
-                let mut redacted = Map::with_capacity(values.len());
-                for (name, value) in values {
-                    if schema.is_some_and(|schema| schema_property_is_sensitive(schema, name)) {
-                        redacted.insert(name.clone(), Value::String(REDACTED.to_string()));
-                        continue;
-                    }
-                    redacted.insert(
-                        name.clone(),
-                        self.redact_json_value(
-                            value,
-                            Some(name.as_str()),
-                            schema.and_then(|schema| schema_property(schema, name)),
-                        ),
-                    );
-                }
-                Value::Object(redacted)
-            }
-        }
     }
 }
 
@@ -408,19 +370,38 @@ fn schema_property_is_sensitive_at(schema: &Value, property: &str, depth: usize)
 }
 
 fn schema_property<'a>(schema: &'a Value, property: &str) -> Option<&'a Value> {
+    schema_property_at(schema, property, 0)
+}
+
+fn schema_property_at<'a>(schema: &'a Value, property: &str, depth: usize) -> Option<&'a Value> {
+    if depth >= MAX_SCHEMA_COMPOSITION_DEPTH
+        || schema_composition_count(schema) > MAX_SCHEMA_COMPOSITION_BRANCHES
+    {
+        return None;
+    }
     schema
         .get("properties")
         .and_then(Value::as_object)
         .and_then(|properties| properties.get(property))
         .or_else(|| {
-            schema_compositions(schema).find_map(|schema| schema_property(schema, property))
+            schema_compositions(schema)
+                .find_map(|schema| schema_property_at(schema, property, depth + 1))
         })
 }
 
 fn schema_items(schema: &Value) -> Option<&Value> {
-    schema
-        .get("items")
-        .or_else(|| schema_compositions(schema).find_map(|schema| schema_items(schema)))
+    schema_items_at(schema, 0)
+}
+
+fn schema_items_at(schema: &Value, depth: usize) -> Option<&Value> {
+    if depth >= MAX_SCHEMA_COMPOSITION_DEPTH
+        || schema_composition_count(schema) > MAX_SCHEMA_COMPOSITION_BRANCHES
+    {
+        return None;
+    }
+    schema.get("items").or_else(|| {
+        schema_compositions(schema).find_map(|schema| schema_items_at(schema, depth + 1))
+    })
 }
 
 fn schema_composition_count(schema: &Value) -> usize {
@@ -428,7 +409,7 @@ fn schema_composition_count(schema: &Value) -> usize {
         .into_iter()
         .filter_map(|keyword| schema.get(keyword).and_then(Value::as_array))
         .map(Vec::len)
-        .sum()
+        .fold(0usize, usize::saturating_add)
 }
 
 fn schema_compositions(schema: &Value) -> impl Iterator<Item = &Value> {
@@ -522,7 +503,22 @@ fn secret_flag_takes_next(argument: &str) -> bool {
         return false;
     }
     let name = argument.trim_start_matches('-').to_ascii_lowercase();
-    matches!(name.as_str(), "u" | "user" | "proxy-user") || secret_env_name(&name)
+    matches!(name.as_str(), "u" | "user" | "proxy-user") || sensitive_value_name(&name)
+}
+
+fn sensitive_value_name(name: &str) -> bool {
+    let normalized: String = name
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect();
+    secret_env_name(name)
+        || normalized.contains("checksum")
+        || normalized.contains("digest")
+        || matches!(
+            normalized.as_str(),
+            "md5" | "sha1" | "sha256" | "sha384" | "sha512"
+        )
 }
 
 fn secret_patterns() -> Vec<(Regex, &'static str)> {
@@ -536,15 +532,15 @@ fn secret_patterns() -> Vec<(Regex, &'static str)> {
             "$1[REDACTED]",
         ),
         (
-            r#"(?i)((?:^|\s)--?[A-Za-z0-9_-]*(?:api[-_]?key|token|secret|password|passphrase|authorization|credential)[A-Za-z0-9_-]*(?:=|\s+))(?:\"[^\"]*\"|'[^']*'|[^\s;]+)"#,
+            r#"(?i)((?:^|\s)--?[A-Za-z0-9_-]*(?:api[-_]?key|token|secret|password|passphrase|authorization|credential|checksum|digest|sha(?:1|256|384|512)|md5)[A-Za-z0-9_-]*(?:=|\s+))(?:\"[^\"]*\"|'[^']*'|[^\s;]+)"#,
             "$1[REDACTED]",
         ),
         (
-            r#"(?i)(\b[A-Za-z0-9_]*(?:api[_-]?key|token|secret|password|passphrase|authorization|credential)[A-Za-z0-9_]*\s*=\s*)(?:\"[^\"]*\"|'[^']*'|[^\s;]+)"#,
+            r#"(?i)(\b[A-Za-z0-9_]*(?:api[_-]?key|token|secret|password|passphrase|authorization|credential|checksum|digest|sha(?:1|256|384|512)|md5)[A-Za-z0-9_]*\s*=\s*)(?:\"[^\"]*\"|'[^']*'|[^\s;]+)"#,
             "$1[REDACTED]",
         ),
         (
-            r#"(?i)([\"']?[A-Za-z0-9_-]*(?:api[-_]?key|token|secret|password|passphrase|credential)[A-Za-z0-9_-]*[\"']?\s*:\s*)(?:\"[^\"]*\"|'[^']*'|[^\s,;}]+)"#,
+            r#"(?i)([\"']?[A-Za-z0-9_-]*(?:api[-_]?key|token|secret|password|passphrase|credential|checksum|digest|sha(?:1|256|384|512)|md5)[A-Za-z0-9_-]*[\"']?\s*:\s*)(?:\"[^\"]*\"|'[^']*'|[^\s,;}]+)"#,
             "$1[REDACTED]",
         ),
         (
@@ -589,8 +585,14 @@ mod tests {
             "nested": { "accessToken": "nested-secret", "message": "visible" }
         });
 
-        let redacted = redactor.redact_json_with_schema(&value, None);
-        let rendered = redacted.to_string();
+        let traversal_truncated = Cell::new(false);
+        let rendered = serde_json::to_string(&redactor.redacted_json(
+            &value,
+            None,
+            4096,
+            &traversal_truncated,
+        ))
+        .unwrap();
         assert!(rendered.contains("src/main.rs"));
         assert!(rendered.contains("original_token_count"));
         assert!(rendered.contains("42"));
@@ -614,10 +616,13 @@ mod tests {
             "separate-secret".into(),
             "--header".into(),
             "Authorization: Bearer header-secret".into(),
+            "--checksum".into(),
+            "deadbeef-checksum".into(),
         ]);
         let rendered = serde_json::to_string(&redacted).unwrap();
         assert!(!rendered.contains("separate-secret"));
         assert!(!rendered.contains("header-secret"));
+        assert!(!rendered.contains("deadbeef-checksum"));
     }
 
     #[test]
@@ -688,9 +693,14 @@ mod tests {
             }
         });
 
-        let rendered = redactor
-            .redact_json_with_schema(&value, Some(&schema))
-            .to_string();
+        let traversal_truncated = Cell::new(false);
+        let rendered = serde_json::to_string(&redactor.redacted_json(
+            &value,
+            Some(&schema),
+            4096,
+            &traversal_truncated,
+        ))
+        .unwrap();
         assert!(!rendered.contains("stale-auth-reference"));
         assert!(!rendered.contains("schema-password"));
         assert!(rendered.contains("keep-me"));

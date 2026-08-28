@@ -164,11 +164,12 @@ Five integration surfaces are exposed to the client:
    policy to textual `content` and explicit `structuredContent`, then fills default
    structured text mirrors within the same ceiling. Component-only result `_meta`
    is deliberately excluded. Every tracing lifecycle event includes the resolved
-   resolved identity. Optional `toolLogging` tracing emits one correlated start and
-   completion record for every tool class, with independently selectable request
+   identity. Dispatch assigns one server-wide call ID before observers run.
+   Optional `toolLogging` tracing emits one correlated start and completion record
+   for every tool class, with independently selectable request
    and response payloads, configurable severity, lazy redaction, and work-bounded
    UTF-8 previews. Separately, audit logging emits JSONL `tool_start` / `tool_finish`
-   records with the same resolved MCP identity: conversation and project identities
+   records with the same call ID and resolved MCP identity: conversation and project identities
    are hashed, and scalar argument values and returned payloads are replaced by
    schema-bounded shape and size accounting (unknown argument keys and dynamic-map
    keys are not recorded).
@@ -826,7 +827,9 @@ Audit command previews: disabled
   a direct proxy, gateway dispatcher, or catalog dispatcher selected one.
 - `-v` and `-vv` increase Codexify diagnostics without dumping raw tool payloads;
   `RUST_LOG` overrides those defaults. `toolLogging` / `--log-tool-payloads` is the
-  separate payload opt-in; the banner prints its mode, severity, and byte limits. When audit
+  separate payload opt-in; the banner prints its mode, severity, and byte limits.
+  If the selected payload severity is filtered out, dispatch retains the ordinary
+  info-level completion record rather than suppressing all call visibility. When audit
   logging is configured, the banner prints its destination and whether command
   previews are enabled.
 
