@@ -156,7 +156,9 @@ Five integration surfaces are exposed to the client:
 9. Tool dispatch supplies a request context containing the stable conversation
    identity, shared authorization store, and shared review manager; tools that do
    not need it use the default context-free implementation. The server fills in
-   default `structuredContent` when appropriate. Dispatch also emits diagnostic tracing and, when audit
+   the model-output policy to textual `content` and explicit `structuredContent`,
+   then fills default structured text mirrors within the same ceiling. Component-only
+   result `_meta` is deliberately excluded. Dispatch also emits diagnostic tracing and, when audit
    logging is enabled, paired JSONL `tool_start` / `tool_finish` records: identity
    and project values are hashed, and scalar argument values and returned payloads
    are replaced by schema-bounded shape and size accounting (unknown argument keys
@@ -197,6 +199,7 @@ trait Tool: Send + Sync {
     fn input_schema(&self) -> Value;
     fn output_schema(&self) -> Option<Value>;
     fn fills_structured_content(&self) -> bool;         // opt out of default-fill
+    fn manages_model_output_budget(&self) -> bool;      // false by default
     fn requires_project_root(&self) -> bool;            // true by default
     fn uses_exec_session_state(&self) -> bool;          // false by default
     fn may_modify_project(&self) -> bool;               // fail closed on review errors
@@ -206,11 +209,17 @@ trait Tool: Send + Sync {
 ```
 
 ### `ToolResult` (`types.rs`)
-`{ content: Vec<ToolContent>, is_error: bool, structured_content: Option<Value>, audit: ToolAuditMetadata }`.
+`{ content: Vec<ToolContent>, is_error: bool, structured_content: Option<Value>, meta: Option<MetaObject>, audit: ToolAuditMetadata }`.
 The server converts it to rmcp's `CallToolResult`. Tools with an `outputSchema`
 whose text *is* the structured form rely on the server's default-fill
 (`{ "content": <joined text> }`); tools that build their own structured content —
 or bridge it from upstream — return `fills_structured_content() == false`.
+Before conversion, the server applies `output.maxToolOutputTokens` to every
+non-self-managed textual result. Default text mirrors are fitted after JSON
+escaping. Oversized explicit structured data becomes an error response because
+arbitrary partial JSON cannot be guaranteed to satisfy the advertised schema.
+`exec_command` and `write_stdin` self-manage the policy around their nested output
+receipt. Result `_meta`, images and resource links are not text-truncated.
 `ToolAuditMetadata` is not sent over MCP; bounded-output and resident-process tools
 use it to report truncation, original token count, exec-session ID and PID without
 putting operational fields into their public output schema.
@@ -713,7 +722,7 @@ the legacy fallback. All fields are optional.
               "extraAllowedCommands": ["ls", "cat", …], "maxSessions": 8,
               "defaultShell": "…" },
   "ignore": { "useGitignore": true, "useDefaultPatterns": true, "customPatterns": [] },
-  "output": { "maxFileLines": 1000, "maxFileBytes": 131072, "maxEntries": 500, "maxTreeNodes": 1000 },
+  "output": { "maxToolOutputTokens": 10000, "maxFileLines": 1000, "maxFileBytes": 131072, "maxEntries": 500, "maxTreeNodes": 1000 },
   "review": { "maxPatchBytes": 4194304 },
   "audit": { "logFile": null, "includeCommandPreview": false,
              "commandPreviewMaxBytes": 512, "redactEnv": [] },

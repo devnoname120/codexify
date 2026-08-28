@@ -452,6 +452,7 @@ an existing config keeps working.
     "rootMarkers": [".git"]
   },
   "output": {
+    "maxToolOutputTokens": 10000,
     "maxFileLines": 1000,
     "maxFileBytes": 131072,
     "maxEntries": 500,
@@ -639,9 +640,10 @@ The `output` block bounds what a single tool call may return. See [Context and m
 
 | Key | Default | Description |
 |-----|---------|-------------|
+| `maxToolOutputTokens` | `10000` | Approximate token ceiling applied independently to textual `content` and `structuredContent` visible to the model. Call-level command budgets may lower it but cannot raise it |
 | `maxFileLines` | `1000` | Lines `read_file` returns per call; a caller's own `limit` can lower this but not raise it |
 | `maxFileBytes` | `131072` | Byte ceiling for the same window, which is what actually bounds a minified file |
-| `maxEntries` | `500` | Results per `glob` or `list_directory` call |
+| `maxEntries` | `500` | Results per `glob`, `grep`, or `list_directory` call |
 | `maxTreeNodes` | `1000` | Nodes in one `tree` walk, counted across the whole tree rather than per directory |
 
 The `review` block bounds presentation without changing checkpoint semantics:
@@ -854,13 +856,13 @@ Codexify also advertises the standard MCP Apps extension and serves a self-conta
 
 Codex runs against a large context window and keeps its session in a process you control. ChatGPT Web does neither: the window is smaller than most real tasks, and when it fills — or when you open a new chat — the plan and everything learned along the way are gone, with no sign to the model that they ever existed. Codexify attacks both halves of that.
 
-**Spend the window on less.** Every tool that could return an unbounded amount of text stops at a budget and says so on its last line, naming the argument that continues from where it stopped:
+**Spend the window on less.** Every non-self-managed tool result passes through a 10,000-token model-output ceiling by default. The policy covers both textual `content` and model-visible `structuredContent`; component-only result `_meta` remains outside model context. File and list tools still stop at their semantic paging boundaries and name the argument that continues from where they stopped:
 
 ```
 (showing lines 1-1000 of 4820 — call again with offset=1000 for the rest)
 ```
 
-That line matters as much as the cap. Silent truncation reads as "that was the whole file", which is worse than no cap at all. `read_file` has a byte ceiling as well as a line one, because a minified bundle is a single line several megabytes long that a line cap alone would hand back in full. `exec_command` and `grep` are bounded too, ported that way from Codex.
+That line matters as much as the cap. Silent truncation reads as "that was the whole file", which is worse than no cap at all. `read_file` has a byte ceiling as well as a line one, because a minified bundle is a single line several megabytes long that a line cap alone would hand back in full. `grep` additionally caps context, match count and individual lines while preserving the actual match inside a long minified line. `exec_command` and `write_stdin` keep Codex's 10,000-token default but clamp larger requests to server policy. `run_command` drains stdout and stderr through bounded head/tail buffers before applying the same model-output policy, so a chatty or timed-out child cannot consume unbounded process memory or context. Oversized arbitrary `structuredContent` becomes a bounded error requesting narrower arguments rather than invalid partial JSON.
 
 **Keep what would be expensive to rediscover.** `remember` writes one keyed note; `recall` hands back the notes and the current plan. `update_plan` persists too, so the plan survives the conversation that made it. Writing to a key that exists replaces it, and an empty value deletes it — a keyed store stays current where an append log accumulates contradictions until it is worthless.
 

@@ -7,11 +7,19 @@ use serde_json::{Value, json};
 
 use crate::exec_sessions::SessionState;
 use crate::ignore_rules::{IgnoreMatcher, build_ignore, to_rel_posix};
+use crate::output_budget::{
+    approx_bytes_for_tokens, entry_budget, tool_output_token_budget, truncate_text,
+};
 use crate::safe_path::resolve_safe_path;
-use crate::tool::{Tool, arg_bool, arg_str};
+use crate::tool::{Tool, arg_bool, arg_str, arg_u64};
 use crate::types::{AppConfig, ToolResult};
 
 pub struct Grep;
+
+const DEFAULT_MAX_RESULTS: usize = 500;
+const MAX_CONTEXT_LINES: usize = 20;
+const MAX_RENDERED_LINE_BYTES: usize = 4_096;
+const OUTPUT_NOTICE_RESERVE_BYTES: usize = 256;
 
 /// File extensions treated as binary and never searched.
 const BINARY_EXTENSIONS: &[&str] = &[
@@ -72,7 +80,7 @@ impl Tool for Grep {
     }
 
     fn description(&self) -> String {
-        "Search file contents across the project using a regex pattern. Returns matching lines with file paths and line numbers (e.g. 'src/app.ts:42:const server = ...'). Recursively searches all text files, skipping binary files and common directories (node_modules, .git, dist). Use this to find function definitions, usages, error messages, or any text across the codebase.".into()
+        "Search file contents across the project using a regex pattern. Returns bounded matching lines with file paths and line numbers (e.g. 'src/app.ts:42:const server = ...'); long lines are elided around the actual match. Recursively searches text files while respecting ignore rules. Use this to find definitions, usages, error messages, or other codebase text.".into()
     }
 
     fn input_schema(&self) -> Value {
@@ -82,9 +90,9 @@ impl Tool for Grep {
                 "pattern": { "type": "string", "description": "Regex pattern to search for" },
                 "path": { "type": "string", "description": "Subdirectory to search in. Default: work-dir root" },
                 "include": { "type": "string", "description": "Only search files matching this glob (e.g. *.ts)" },
-                "context": { "type": "number", "description": "Number of context lines before and after each match" },
+                "context": { "type": "number", "minimum": 0, "description": format!("Number of context lines before and after each match. Capped at {MAX_CONTEXT_LINES}.") },
                 "ignoreCase": { "type": "boolean", "description": "Case-insensitive search. Default: false" },
-                "maxResults": { "type": "number", "description": "Max number of matching lines to return. Default: 500" },
+                "maxResults": { "type": "number", "minimum": 1, "description": format!("Max number of matching lines to return. Defaults to {DEFAULT_MAX_RESULTS} and cannot exceed the configured output.maxEntries limit.") },
                 "filesOnly": { "type": "boolean", "description": "Only return file paths that contain matches, not the matching lines" }
             },
             "required": ["pattern"]
@@ -110,17 +118,27 @@ impl Tool for Grep {
             None => config.work_dir.clone(),
         };
 
-        let context_lines = args
-            .get("context")
-            .and_then(|v| v.as_i64())
-            .filter(|n| *n >= 0)
+        let requested_context = arg_u64(&args, "context")
+            .map(|value| usize::try_from(value).unwrap_or(usize::MAX))
             .unwrap_or(0);
+        let context_lines = requested_context.min(MAX_CONTEXT_LINES);
+        let context_clamped = requested_context > context_lines;
         let include_pattern = arg_str(&args, "include");
         let ignore_case = arg_bool(&args, "ignoreCase");
-        let max_results = args
-            .get("maxResults")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(500);
+        let requested_max_results = arg_u64(&args, "maxResults");
+        if requested_max_results == Some(0) {
+            return ToolResult::error("maxResults must be positive");
+        }
+        let configured_max_results = entry_budget(config);
+        let requested_max_results = requested_max_results
+            .map(|value| usize::try_from(value).unwrap_or(usize::MAX))
+            .unwrap_or(DEFAULT_MAX_RESULTS);
+        let max_results = if configured_max_results == 0 {
+            requested_max_results
+        } else {
+            requested_max_results.min(configured_max_results)
+        };
+        let max_results_clamped = requested_max_results > max_results;
         let files_only = arg_bool(&args, "filesOnly");
 
         let pattern = arg_str(&args, "pattern").unwrap_or("");
@@ -142,15 +160,16 @@ impl Tool for Grep {
         let mut files: Vec<PathBuf> = Vec::new();
         collect_files(&search_path, ext_match.as_deref(), &matcher, &mut files);
 
-        let mut results: Vec<String> = Vec::new();
-        let mut match_count: i64 = 0;
-        let mut truncated = false;
+        let output_tokens = tool_output_token_budget(config);
+        let output_bytes = approx_bytes_for_tokens(output_tokens);
+        let mut results =
+            OutputCollector::new(output_bytes.saturating_sub(OUTPUT_NOTICE_RESERVE_BYTES));
+        let mut match_count = 0usize;
+        let mut match_limit_reached = false;
+        let mut output_limit_reached = false;
+        let mut line_content_truncated = false;
 
-        for file_path in &files {
-            if truncated {
-                break;
-            }
-
+        'files: for file_path in &files {
             let bytes = match std::fs::read(file_path) {
                 Ok(b) => b,
                 Err(_) => continue,
@@ -163,10 +182,14 @@ impl Tool for Grep {
             if files_only {
                 for line in &lines {
                     if regex.is_match(line) {
-                        results.push(rel_path.clone());
                         match_count += 1;
-                        if match_count >= max_results {
-                            truncated = true;
+                        if match_count > max_results {
+                            match_limit_reached = true;
+                            break 'files;
+                        }
+                        if !results.push_line(&rel_path) {
+                            output_limit_reached = true;
+                            break 'files;
                         }
                         break;
                     }
@@ -181,11 +204,11 @@ impl Tool for Grep {
                 if regex.is_match(line) {
                     match_count += 1;
                     if match_count > max_results {
-                        truncated = true;
+                        match_limit_reached = true;
                         break;
                     }
-                    let start = (i as i64 - context_lines).max(0) as usize;
-                    let end = i.saturating_add(context_lines as usize).min(last);
+                    let start = i.saturating_sub(context_lines);
+                    let end = i.saturating_add(context_lines).min(last);
                     for j in start..=end {
                         match_indices.insert(j);
                     }
@@ -199,23 +222,194 @@ impl Tool for Grep {
             let mut prev_idx: i64 = -2;
             for idx in &match_indices {
                 let idx = *idx;
-                if context_lines > 0 && (idx as i64) - prev_idx > 1 && prev_idx >= 0 {
-                    results.push("--".to_string());
+                if context_lines > 0
+                    && (idx as i64) - prev_idx > 1
+                    && prev_idx >= 0
+                    && !results.push_line("--")
+                {
+                    output_limit_reached = true;
+                    break 'files;
                 }
-                let marker = if regex.is_match(lines[idx]) { ":" } else { "-" };
-                results.push(format!("{}:{}{}{}", rel_path, idx + 1, marker, lines[idx]));
+                let matched = regex.is_match(lines[idx]);
+                let marker = if matched { ":" } else { "-" };
+                let (rendered, line_truncated) = render_result_line(
+                    &rel_path,
+                    idx + 1,
+                    marker,
+                    lines[idx],
+                    matched.then(|| regex.find(lines[idx])).flatten(),
+                    results.remaining_line_bytes().min(MAX_RENDERED_LINE_BYTES),
+                );
+                line_content_truncated |= line_truncated;
+                if !results.push_line(&rendered) {
+                    output_limit_reached = true;
+                    break 'files;
+                }
                 prev_idx = idx as i64;
+            }
+            if match_limit_reached {
+                break 'files;
             }
         }
 
-        if results.is_empty() {
+        if results.is_empty() && match_count == 0 {
             return ToolResult::text("No matches found.");
         }
 
-        let mut output = results.join("\n");
-        if truncated {
-            output.push_str(&format!("\n\n(truncated at {max_results} matches)"));
+        let mut reasons = Vec::new();
+        if match_limit_reached {
+            reasons.push(format!("stopped at {max_results} matches"));
         }
-        ToolResult::text(output).with_truncation(truncated)
+        if output_limit_reached {
+            reasons.push(format!(
+                "stopped at the configured {output_tokens}-token model-output limit"
+            ));
+        }
+        if context_clamped {
+            reasons.push(format!("context capped at {MAX_CONTEXT_LINES} lines"));
+        }
+        if line_content_truncated {
+            reasons.push("long result lines were elided".to_string());
+        }
+        if match_limit_reached && max_results_clamped {
+            reasons.push(format!("maxResults capped at {max_results}"));
+        }
+
+        let mut output = results.finish();
+        if !reasons.is_empty() {
+            if !output.is_empty() {
+                output.push_str("\n\n");
+            }
+            output.push_str(&format!("(truncated: {})", reasons.join("; ")));
+        }
+        let bounded = truncate_text(&output, output_tokens);
+        ToolResult::text(bounded.text)
+            .with_truncation(!reasons.is_empty() || results.truncated || bounded.truncated)
     }
+}
+
+struct OutputCollector {
+    text: String,
+    max_bytes: usize,
+    truncated: bool,
+}
+
+impl OutputCollector {
+    fn new(max_bytes: usize) -> Self {
+        Self {
+            text: String::new(),
+            max_bytes,
+            truncated: false,
+        }
+    }
+
+    fn push_line(&mut self, line: &str) -> bool {
+        let separator = usize::from(!self.text.is_empty());
+        if self
+            .text
+            .len()
+            .saturating_add(separator)
+            .saturating_add(line.len())
+            > self.max_bytes
+        {
+            self.truncated = true;
+            return false;
+        }
+        if separator > 0 {
+            self.text.push('\n');
+        }
+        self.text.push_str(line);
+        true
+    }
+
+    fn remaining_line_bytes(&self) -> usize {
+        let separator = usize::from(!self.text.is_empty());
+        self.max_bytes
+            .saturating_sub(self.text.len().saturating_add(separator))
+    }
+
+    fn is_empty(&self) -> bool {
+        self.text.is_empty()
+    }
+
+    fn finish(&self) -> String {
+        self.text.clone()
+    }
+}
+
+fn render_result_line(
+    path: &str,
+    line_number: usize,
+    marker: &str,
+    line: &str,
+    matched_range: Option<regex::Match<'_>>,
+    max_bytes: usize,
+) -> (String, bool) {
+    let prefix = format!("{path}:{line_number}{marker}");
+    if prefix.len() >= max_bytes {
+        return bounded_line(&prefix, None, max_bytes);
+    }
+    let available = max_bytes.saturating_sub(prefix.len());
+    let snippet = bounded_line(
+        line,
+        matched_range.map(|matched| (matched.start(), matched.end())),
+        available,
+    );
+    (format!("{prefix}{}", snippet.0), snippet.1)
+}
+
+fn bounded_line(line: &str, focus: Option<(usize, usize)>, max_bytes: usize) -> (String, bool) {
+    if line.len() <= max_bytes {
+        return (line.to_string(), false);
+    }
+    if max_bytes <= 8 {
+        return (
+            line[..floor_char_boundary(line, max_bytes)].to_string(),
+            true,
+        );
+    }
+
+    let content_bytes = max_bytes - 8;
+    let (focus_start, focus_end) = focus.unwrap_or((0, 0));
+    let focus_len = focus_end.saturating_sub(focus_start);
+    let (mut start, mut end) = if focus_len >= content_bytes {
+        (
+            focus_start,
+            focus_start.saturating_add(content_bytes).min(line.len()),
+        )
+    } else {
+        let surrounding = content_bytes - focus_len;
+        let before = surrounding / 2;
+        let mut start = focus_start.saturating_sub(before);
+        let mut end = focus_end.saturating_add(surrounding - (focus_start - start));
+        if end > line.len() {
+            let shift = end - line.len();
+            start = start.saturating_sub(shift);
+            end = line.len();
+        }
+        (start, end)
+    };
+
+    start = floor_char_boundary(line, start);
+    end = floor_char_boundary(line, end.max(start));
+    let mut snippet = String::with_capacity(max_bytes);
+    if start > 0 {
+        snippet.push_str("... ");
+    }
+    snippet.push_str(&line[start..end]);
+    if end < line.len() {
+        snippet.push_str(" ...");
+    }
+    (snippet, true)
+}
+
+fn floor_char_boundary(text: &str, index: usize) -> usize {
+    if index >= text.len() {
+        return text.len();
+    }
+    let mut index = index;
+    while index > 0 && !text.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
 }

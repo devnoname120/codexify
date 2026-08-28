@@ -82,6 +82,13 @@ pub trait Tool: Send + Sync {
         true
     }
 
+    /// Whether this tool applies the configured model-output policy internally.
+    /// Structured command results need to budget their nested `output` field
+    /// before serialising the surrounding receipt.
+    fn manages_model_output_budget(&self) -> bool {
+        false
+    }
+
     /// Whether this tool needs an active project root for the current call.
     /// Upstream tools and project-independent clocks opt out.
     fn requires_project_root(&self) -> bool {

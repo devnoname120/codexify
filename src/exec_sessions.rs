@@ -16,6 +16,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::{ChildStdin, Command};
 use tokio::sync::{Mutex as TokioMutex, Notify};
 
+use crate::output_budget::{
+    approx_token_count as count_output_tokens, truncate_text as truncate_model_text,
+};
 use crate::process_env::scrub_untrusted_child_env;
 use crate::project_bindings::{
     ConversationIdentity, ProjectBindingScope, ProjectRootSelection, prepare_project_root,
@@ -34,14 +37,14 @@ pub const EXEC_MAX_YIELD_MS: u64 = 30_000;
 pub const STDIN_WRITE_DEFAULT_YIELD_MS: u64 = 250;
 pub const STDIN_POLL_DEFAULT_YIELD_MS: u64 = 5_000;
 pub const STDIN_POLL_MAX_YIELD_MS: u64 = 300_000;
-pub const DEFAULT_MAX_OUTPUT_TOKENS: u64 = 10_000;
+pub const DEFAULT_MAX_OUTPUT_TOKENS: u64 = crate::output_budget::DEFAULT_MAX_TOOL_OUTPUT_TOKENS;
 
 static TRANSPORT_SESSION_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 /// Codex's `approx_token_count` equivalent: roughly four characters per token.
 /// Counted in UTF-16 code units to match the TS `text.length`.
 pub fn approx_token_count(text: &str) -> u64 {
-    (text.encode_utf16().count() as u64).div_ceil(4)
+    count_output_tokens(text)
 }
 
 pub fn clamp(value: u64, min: u64, max: u64) -> u64 {
@@ -71,22 +74,11 @@ pub struct UnifiedExecOutput {
 /// the model always knows the true size. `truncated` is the separate signal
 /// callers use for audit.
 pub fn truncate_output(text: &str, max_output_tokens: u64) -> (String, u64, bool) {
-    let budget_chars = (max_output_tokens.max(1) as usize) * 4;
-    // Measured and sliced in UTF-16 code units, matching the TS `text.length`
-    // and `text.slice(...)`.
-    let units: Vec<u16> = text.encode_utf16().collect();
-    let original = (units.len() as u64).div_ceil(4);
-    if units.len() <= budget_chars {
-        return (text.to_string(), original, false);
-    }
-    let keep = budget_chars / 2;
-    let head = String::from_utf16_lossy(&units[..keep]);
-    let tail = String::from_utf16_lossy(&units[units.len() - keep..]);
-    let omitted = units.len() - keep - keep;
+    let truncated = truncate_model_text(text, max_output_tokens);
     (
-        format!("{head}\n\n[... {omitted} bytes omitted ...]\n\n{tail}"),
-        original,
-        true,
+        truncated.text,
+        truncated.original_token_count,
+        truncated.truncated,
     )
 }
 
@@ -1274,8 +1266,10 @@ mod tests {
         let (out, orig, truncated) = truncate_output(&text, 4); // budget 16 chars
         assert!(truncated);
         assert_eq!(orig, 25); // 100 UTF-16 units / 4
-        assert!(out.contains("omitted"));
-        assert!(out.starts_with("aaaaaaaa"));
+        assert!(out.contains("..."));
+        assert!(out.starts_with('a'));
+        assert!(out.ends_with('a'));
+        assert!(approx_token_count(&out) <= 4);
     }
 
     #[test]

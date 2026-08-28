@@ -19,8 +19,10 @@ use codexify::exec_sessions::{
     ShellType, default_shell_bin, resolve_shell, shell_type_of, wrap_for_shell,
 };
 use codexify::output_budget::{
-    DEFAULT_MAX_ENTRIES, DEFAULT_MAX_FILE_BYTES, DEFAULT_MAX_FILE_LINES, DEFAULT_MAX_TREE_NODES,
-    FileBudget, entry_budget, file_budget, limit_list, tree_node_budget, window_file_lines,
+    DEFAULT_MAX_ENTRIES, DEFAULT_MAX_FILE_BYTES, DEFAULT_MAX_FILE_LINES,
+    DEFAULT_MAX_TOOL_OUTPUT_TOKENS, DEFAULT_MAX_TREE_NODES, FileBudget, entry_budget, file_budget,
+    limit_list, resolve_requested_output_tokens, tool_output_token_budget, tree_node_budget,
+    window_file_lines,
 };
 use codexify::types::{AppConfig, ExecMode};
 
@@ -482,6 +484,10 @@ fn budget_accessors_fall_back_to_defaults() {
     assert_eq!(fb.max_bytes, DEFAULT_MAX_FILE_BYTES);
     assert_eq!(entry_budget(&config), DEFAULT_MAX_ENTRIES);
     assert_eq!(tree_node_budget(&config), DEFAULT_MAX_TREE_NODES);
+    assert_eq!(
+        tool_output_token_budget(&config),
+        DEFAULT_MAX_TOOL_OUTPUT_TOKENS
+    );
 }
 
 #[test]
@@ -489,10 +495,14 @@ fn budget_accessors_take_each_configured_key() {
     let mut config = default_config(PathBuf::from("/tmp"));
     config.output.max_file_lines = Some(10);
     config.output.max_entries = Some(7);
+    config.output.max_tool_output_tokens = Some(123);
     let fb = file_budget(&config);
     assert_eq!(fb.max_lines, 10);
     assert_eq!(fb.max_bytes, DEFAULT_MAX_FILE_BYTES);
     assert_eq!(entry_budget(&config), 7);
+    assert_eq!(tool_output_token_budget(&config), 123);
+    assert_eq!(resolve_requested_output_tokens(&config, Some(999)), 123);
+    assert_eq!(resolve_requested_output_tokens(&config, Some(17)), 17);
 }
 
 #[test]

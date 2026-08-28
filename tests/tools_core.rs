@@ -12,6 +12,7 @@ use tempfile::TempDir;
 
 use codexify::config::default_config;
 use codexify::exec_sessions::SessionState;
+use codexify::output_budget::approx_token_count;
 use codexify::tool::Tool;
 use codexify::tools::apply_patch::ApplyPatch;
 use codexify::tools::clock_curr_time::ClockCurrTime;
@@ -546,24 +547,86 @@ async fn run_command_returns_exit_code_on_failure() {
     assert!(r.joined_text().contains("exit code"));
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn run_command_bounds_large_stdout_before_returning_it() {
+    let dir = TempDir::new().unwrap();
+    let mut config = config_in(&dir);
+    config.allowed_commands = vec!["sh".to_string()];
+    config.output.max_tool_output_tokens = Some(100);
+    let session = SessionState::new();
+
+    let r = RunCommand
+        .call(
+            json!({
+                "command": "sh",
+                "args": ["-c", "head -c 2000000 /dev/zero | tr '\\0' x"],
+                "timeout": 10_000
+            }),
+            &config,
+            &session,
+        )
+        .await;
+
+    let text = r.joined_text();
+    assert!(!r.is_error, "{text}");
+    assert_eq!(r.audit.truncated, Some(true));
+    assert!(text.contains("output truncated"), "{text}");
+    assert!(text.contains("exit code: 0"), "{text}");
+    assert!(approx_token_count(&text) <= 100);
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn run_command_bounds_large_stdout_before_returning_it() {
+    let dir = TempDir::new().unwrap();
+    let mut config = config_in(&dir);
+    config.allowed_commands = vec!["powershell.exe".to_string()];
+    config.output.max_tool_output_tokens = Some(100);
+    let session = SessionState::new();
+
+    let r = RunCommand
+        .call(
+            json!({
+                "command": "powershell.exe",
+                "args": ["-NoProfile", "-Command", "[Console]::Out.Write('x' * 2000000)"],
+                "timeout": 10_000
+            }),
+            &config,
+            &session,
+        )
+        .await;
+
+    let text = r.joined_text();
+    assert!(!r.is_error, "{text}");
+    assert_eq!(r.audit.truncated, Some(true));
+    assert!(text.contains("output truncated"), "{text}");
+    assert!(text.contains("exit code: 0"), "{text}");
+    assert!(approx_token_count(&text) <= 100);
+}
+
 #[cfg(windows)]
 #[tokio::test]
 async fn run_command_respects_timeout() {
     let dir = TempDir::new().unwrap();
     let mut config = config_in(&dir);
-    config.allowed_commands = vec!["ping".to_string()];
+    config.allowed_commands = vec!["powershell.exe".to_string()];
     let session = SessionState::new();
 
-    // `ping -n 60` runs ~60s; a 1s timeout fires first.
     let r = RunCommand
         .call(
-            json!({ "command": "ping", "args": ["-n", "60", "127.0.0.1"], "timeout": 1000 }),
+            json!({
+                "command": "powershell.exe",
+                "args": ["-NoProfile", "-Command", "[Console]::Out.Write('ready'); Start-Sleep -Seconds 60"],
+                "timeout": 100
+            }),
             &config,
             &session,
         )
         .await;
 
     assert!(r.is_error);
+    assert!(r.joined_text().contains("ready"));
     assert!(r.joined_text().contains("timed out"));
 }
 
@@ -572,18 +635,23 @@ async fn run_command_respects_timeout() {
 async fn run_command_respects_timeout() {
     let dir = TempDir::new().unwrap();
     let mut config = config_in(&dir);
-    config.allowed_commands = vec!["sleep".to_string()];
+    config.allowed_commands = vec!["sh".to_string()];
     let session = SessionState::new();
 
     let r = RunCommand
         .call(
-            json!({ "command": "sleep", "args": ["60"], "timeout": 1000 }),
+            json!({
+                "command": "sh",
+                "args": ["-c", "printf ready; sleep 60"],
+                "timeout": 100
+            }),
             &config,
             &session,
         )
         .await;
 
     assert!(r.is_error);
+    assert!(r.joined_text().contains("ready"));
     assert!(r.joined_text().contains("timed out"));
 }
 

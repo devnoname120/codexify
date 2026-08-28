@@ -18,6 +18,7 @@ use tempfile::TempDir;
 use codexify::config::default_config;
 use codexify::exec_sessions::SessionState;
 use codexify::ignore_rules::{DEFAULT_IGNORE, build_ignore, to_rel_posix};
+use codexify::output_budget::approx_token_count;
 use codexify::tool::Tool;
 use codexify::tools::glob::Glob;
 use codexify::tools::grep::Grep;
@@ -322,6 +323,82 @@ async fn grep_filters_by_include_pattern() {
     .await;
     assert!(out.contains("README.md"), "{out}");
     assert!(!out.contains("index.ts"), "{out}");
+}
+
+#[tokio::test]
+async fn grep_bounds_a_single_enormous_matching_line() {
+    let dir = TempDir::new().unwrap();
+    let line = format!("{}NEEDLE{}", "a".repeat(20_000), "z".repeat(20_000));
+    write(dir.path(), "bundle.js", &line);
+    let mut config = default_config(dir.path().to_path_buf());
+    config.output.max_tool_output_tokens = Some(200);
+
+    let result = run_result(&Grep, json!({ "pattern": "NEEDLE" }), &config).await;
+    let out = result.joined_text();
+    assert!(out.contains("NEEDLE"), "{out}");
+    assert!(out.contains("long result lines were elided"), "{out}");
+    assert_eq!(result.audit.truncated, Some(true));
+    assert!(
+        approx_token_count(&out) <= 200,
+        "tokens={}\n{out}",
+        approx_token_count(&out)
+    );
+}
+
+#[tokio::test]
+async fn grep_clamps_max_results_to_the_configured_entry_limit() {
+    let dir = TempDir::new().unwrap();
+    for index in 0..10 {
+        write(dir.path(), &format!("match-{index}.txt"), "needle\n");
+    }
+    let mut config = default_config(dir.path().to_path_buf());
+    config.output.max_entries = Some(3);
+
+    let result = run_result(
+        &Grep,
+        json!({ "pattern": "needle", "maxResults": 1_000 }),
+        &config,
+    )
+    .await;
+    let out = result.joined_text();
+    assert_eq!(
+        out.lines()
+            .filter(|line| line.contains(":1:needle"))
+            .count(),
+        3
+    );
+    assert!(out.contains("stopped at 3 matches"), "{out}");
+    assert!(out.contains("maxResults capped at 3"), "{out}");
+    assert_eq!(result.audit.truncated, Some(true));
+}
+
+#[tokio::test]
+async fn grep_caps_requested_context_lines() {
+    let dir = TempDir::new().unwrap();
+    let body = (0..100)
+        .map(|index| {
+            if index == 50 {
+                "needle".to_string()
+            } else {
+                format!("line-{index}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    write(dir.path(), "context.txt", &body);
+    let config = default_config(dir.path().to_path_buf());
+
+    let result = run_result(
+        &Grep,
+        json!({ "pattern": "needle", "context": 10_000 }),
+        &config,
+    )
+    .await;
+    let out = result.joined_text();
+    assert!(out.contains("context capped at 20 lines"), "{out}");
+    assert!(!out.contains("line-0"), "{out}");
+    assert!(!out.contains("line-99"), "{out}");
+    assert_eq!(result.audit.truncated, Some(true));
 }
 
 #[tokio::test]

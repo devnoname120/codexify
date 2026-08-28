@@ -6,6 +6,7 @@ use crate::exec_sessions::{
     STDIN_POLL_MAX_YIELD_MS, STDIN_WRITE_DEFAULT_YIELD_MS, SessionState, UnifiedExecOutput, clamp,
     generate_chunk_id, truncate_output,
 };
+use crate::output_budget::resolve_requested_output_tokens;
 use crate::tool::{Tool, arg_str, arg_u64};
 use crate::tools::exec_command::{render_unified_exec_output, unified_exec_output_schema};
 use crate::types::{AppConfig, ToolAuditMetadata, ToolContent, ToolResult};
@@ -29,7 +30,7 @@ impl Tool for WriteStdin {
                 "session_id": { "type": "number", "description": "Identifier of the running exec session, as returned by exec_command." },
                 "chars": { "type": "string", "description": "Bytes to write to stdin. Defaults to empty, which polls without writing." },
                 "yield_time_ms": { "type": "number", "description": format!("Wait before yielding output. Non-empty writes default to {STDIN_WRITE_DEFAULT_YIELD_MS} ms and cap at {EXEC_MAX_YIELD_MS} ms; empty polls wait {STDIN_POLL_DEFAULT_YIELD_MS}-{STDIN_POLL_MAX_YIELD_MS} ms by default.") },
-                "max_output_tokens": { "type": "number", "description": format!("Output token budget. Defaults to {DEFAULT_MAX_OUTPUT_TOKENS} tokens; the middle of longer output is elided.") }
+                "max_output_tokens": { "type": "number", "description": format!("Output token budget. Defaults to {DEFAULT_MAX_OUTPUT_TOKENS} tokens; larger requests are capped by the server output policy and the middle of longer output is elided.") }
             },
             "required": ["session_id"],
             "additionalProperties": false
@@ -44,11 +45,15 @@ impl Tool for WriteStdin {
         true
     }
 
+    fn manages_model_output_budget(&self) -> bool {
+        true
+    }
+
     fn may_modify_project(&self) -> bool {
         true
     }
 
-    async fn call(&self, args: Value, _config: &AppConfig, session: &SessionState) -> ToolResult {
+    async fn call(&self, args: Value, config: &AppConfig, session: &SessionState) -> ToolResult {
         let Some(session_id) = arg_u64(&args, "session_id") else {
             return ToolResult::error("session_id must be a number");
         };
@@ -83,10 +88,8 @@ impl Tool for WriteStdin {
                 EXEC_MAX_YIELD_MS,
             )
         };
-        let max_output_tokens = match arg_u64(&args, "max_output_tokens") {
-            Some(n) if n > 0 => n,
-            _ => DEFAULT_MAX_OUTPUT_TOKENS,
-        };
+        let max_output_tokens =
+            resolve_requested_output_tokens(config, arg_u64(&args, "max_output_tokens"));
 
         let started = std::time::Instant::now();
 

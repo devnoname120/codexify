@@ -40,6 +40,9 @@ use crate::conversation_auth::{AUTHORIZATION_TOOL_WIRE_NAME, ConversationAuthori
 use crate::exec_sessions::{ConversationExecSessionStore, SessionState};
 use crate::instructions::build_initial_instructions;
 use crate::openai_tunnel::TunnelHealth;
+use crate::output_budget::{
+    enforce_tool_result_budget, fill_text_mirror_with_budget, tool_output_token_budget,
+};
 use crate::project_bindings::{ConversationIdentity, ProjectBindingStore};
 use crate::registry::load_tools_for_config;
 use crate::review::{ReviewAvailability, ReviewCheckpointManager, ReviewOwner};
@@ -156,6 +159,32 @@ fn to_call_tool_result(result: ToolResult) -> CallToolResult {
     ctr.structured_content = result.structured_content;
     ctr.meta = result.meta;
     ctr
+}
+
+fn finalize_model_visible_result(
+    tool: Option<&dyn Tool>,
+    result: &mut ToolResult,
+    config: &AppConfig,
+) {
+    let budget = tool_output_token_budget(config);
+    let manages_budget = tool.is_some_and(Tool::manages_model_output_budget);
+    if !manages_budget {
+        enforce_tool_result_budget(result, budget);
+    }
+
+    let should_fill = tool.is_some_and(|tool| {
+        tool.output_schema().is_some()
+            && tool.fills_structured_content()
+            && !result.is_error
+            && result.structured_content.is_none()
+    });
+    if should_fill {
+        if manages_budget {
+            result.structured_content = Some(json!({ "content": result.joined_text() }));
+        } else {
+            fill_text_mirror_with_budget(result, budget);
+        }
+    }
 }
 
 fn advertised_tool(tool: &dyn Tool, config: &AppConfig) -> rmcp::model::Tool {
@@ -432,19 +461,7 @@ impl ServerHandler for CodexHandler {
             }
         };
 
-        // Fill in the `structuredContent` the MCP spec expects from any tool that
-        // advertises an `outputSchema`. Most tools use the `{ content: string }`
-        // schema, for which the text they return *is* the structured form; tools
-        // with a different schema build their own and pass through. Errors are
-        // left alone — the spec exempts `isError` results.
-        if let Some(tool) = tool
-            && tool.output_schema().is_some()
-            && tool.fills_structured_content()
-            && !result.is_error
-            && result.structured_content.is_none()
-        {
-            result.structured_content = Some(json!({ "content": result.joined_text() }));
-        }
+        finalize_model_visible_result(tool.map(|tool| tool.as_ref()), &mut result, &self.config);
 
         let duration_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
         tracing::info!(
@@ -1114,6 +1131,50 @@ mod tests {
                 .and_then(|metadata| metadata.0.get("trace")),
             Some(&json!("upstream"))
         );
+    }
+
+    #[test]
+    fn finalizer_bounds_text_and_generated_structured_mirror() {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = crate::config::default_config(root.path().to_path_buf());
+        config.output.max_tool_output_tokens = Some(20);
+        let tool = crate::tools::grep::Grep;
+        let mut result = ToolResult::text("\"\\\n".repeat(1_000));
+
+        finalize_model_visible_result(Some(&tool), &mut result, &config);
+
+        assert!(!result.is_error);
+        assert_eq!(result.audit.truncated, Some(true));
+        let structured = result.structured_content.as_ref().unwrap();
+        let text = result.joined_text();
+        assert_eq!(
+            structured.get("content").and_then(Value::as_str),
+            Some(text.as_str())
+        );
+        let serialized = serde_json::to_string(structured).unwrap();
+        assert!(crate::output_budget::approx_token_count(&serialized) <= 20);
+    }
+
+    #[test]
+    fn finalizer_rejects_oversized_explicit_structured_content() {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = crate::config::default_config(root.path().to_path_buf());
+        config.output.max_tool_output_tokens = Some(20);
+        let tool = crate::tools::grep::Grep;
+        let mut result = ToolResult::text("fallback").with_structured(json!({
+            "payload": "x".repeat(10_000)
+        }));
+
+        finalize_model_visible_result(Some(&tool), &mut result, &config);
+
+        assert!(result.is_error);
+        assert!(result.structured_content.is_none());
+        assert!(
+            result
+                .joined_text()
+                .contains("Retry with narrower arguments")
+        );
+        assert!(crate::output_budget::approx_token_count(&result.joined_text()) <= 20);
     }
 
     #[test]

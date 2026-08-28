@@ -32,6 +32,13 @@
     },
     "entries": []
   },
+  "output": {
+    "maxToolOutputTokens": 10000,
+    "maxFileLines": 1000,
+    "maxFileBytes": 131072,
+    "maxEntries": 500,
+    "maxTreeNodes": 1000
+  },
   "review": {
     "maxPatchBytes": 4194304
   },

@@ -7,6 +7,7 @@ use crate::exec_sessions::{
     SessionState, ShellType, UnifiedExecOutput, clamp, generate_chunk_id, resolve_shell,
     shell_type_of, start_exec_session, truncate_output,
 };
+use crate::output_budget::resolve_requested_output_tokens;
 use crate::safe_path::resolve_safe_path;
 use crate::tool::{Tool, arg_str, arg_u64};
 use crate::types::{AppConfig, ExecMode, ToolAuditMetadata, ToolResult};
@@ -95,7 +96,7 @@ impl Tool for ExecCommand {
                 "workdir": { "type": "string", "description": "Working directory for the command, relative to the project root. Defaults to the project root." },
                 "tty": { "type": "boolean", "description": "Unsupported by this bridge — commands always run with plain pipes. Passing true returns an error." },
                 "yield_time_ms": { "type": "number", "description": format!("Wait before yielding output. Defaults to {EXEC_DEFAULT_YIELD_MS} ms; effective range is {EXEC_MIN_YIELD_MS}-{EXEC_MAX_YIELD_MS} ms.") },
-                "max_output_tokens": { "type": "number", "description": format!("Output token budget. Defaults to {DEFAULT_MAX_OUTPUT_TOKENS} tokens; the middle of longer output is elided.") },
+                "max_output_tokens": { "type": "number", "description": format!("Output token budget. Defaults to {DEFAULT_MAX_OUTPUT_TOKENS} tokens; larger requests are capped by the server output policy and the middle of longer output is elided.") },
                 "shell": { "type": "string", "description": "Shell binary to launch. Defaults to the platform shell." }
             },
             "required": ["cmd"],
@@ -108,6 +109,10 @@ impl Tool for ExecCommand {
     }
 
     fn uses_exec_session_state(&self) -> bool {
+        true
+    }
+
+    fn manages_model_output_budget(&self) -> bool {
         true
     }
 
@@ -136,10 +141,8 @@ impl Tool for ExecCommand {
         // return before any output has surfaced.
         #[cfg(windows)]
         let yield_ms = yield_ms.max(EXEC_DEFAULT_YIELD_MS);
-        let max_output_tokens = match arg_u64(&args, "max_output_tokens") {
-            Some(n) if n > 0 => n,
-            _ => DEFAULT_MAX_OUTPUT_TOKENS,
-        };
+        let max_output_tokens =
+            resolve_requested_output_tokens(config, arg_u64(&args, "max_output_tokens"));
 
         let cwd = match resolve_safe_path(
             arg_str(&args, "workdir").unwrap_or(""),
@@ -216,7 +219,16 @@ impl Tool for ExecCommand {
 mod tests {
     use super::*;
     use crate::config::default_config;
+    use crate::output_budget::approx_token_count;
     use serde_json::json;
+
+    fn large_output_command() -> &'static str {
+        if cfg!(windows) {
+            "[Console]::Out.Write('x' * 4000)"
+        } else {
+            "head -c 4000 /dev/zero | tr '\\0' x"
+        }
+    }
 
     #[tokio::test]
     async fn completed_command_reports_process_audit_metadata() {
@@ -237,5 +249,38 @@ mod tests {
         assert_eq!(result.audit.resident, Some(false));
         assert!(result.audit.exec_session_id.is_some());
         assert!(result.audit.process_id.is_some());
+    }
+
+    #[tokio::test]
+    async fn requested_output_budget_cannot_exceed_server_policy() {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = default_config(root.path().to_path_buf());
+        config.exec.mode = ExecMode::Unrestricted;
+        config.output.max_tool_output_tokens = Some(20);
+        let session = SessionState::new();
+
+        let result = ExecCommand
+            .call(
+                json!({
+                    "cmd": large_output_command(),
+                    "yield_time_ms": 3000,
+                    "max_output_tokens": 70000
+                }),
+                &config,
+                &session,
+            )
+            .await;
+
+        assert!(!result.is_error, "{}", result.joined_text());
+        let output = result
+            .structured_content
+            .as_ref()
+            .and_then(|value| value.get("output"))
+            .and_then(Value::as_str)
+            .unwrap();
+        assert!(approx_token_count(output) <= 20, "{output}");
+        assert!(output.contains("output truncated"), "{output}");
+        assert_eq!(result.audit.truncated, Some(true));
+        assert!(result.audit.original_output_tokens.unwrap() > 20);
     }
 }

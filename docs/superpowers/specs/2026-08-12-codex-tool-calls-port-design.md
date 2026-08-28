@@ -263,9 +263,7 @@ Behavior: look up the session (unknown id → `isError` with the list of live id
 
 ### Output Truncation
 
-Both exec tools honor `max_output_tokens`. Tokens are approximated as `chars / 4` — no tokenizer dependency, and the budget is advisory.
-
-When output exceeds budget: keep the first 30% and last 70% of the allowance (tails carry errors and exit messages, which matter more), join with `\n... [<n> lines truncated] ...\n`, and set `original_token_count` to the pre-truncation estimate.
+Both exec tools honor `max_output_tokens`. Tokens are approximated as four UTF-16 code units each, without a tokenizer dependency. Since the bounded-model-output follow-up, a call may lower this budget but cannot raise it beyond `output.maxToolOutputTokens`; output retains bounded head and tail text with an explicit middle marker and reports the pre-truncation estimate. See `2026-08-28-bounded-model-output-design.md` for the connector-wide policy.
 
 ### `apply_patch`
 

@@ -1309,6 +1309,8 @@ pub fn load_config(cli: Cli) -> Result<AppConfig, String> {
     artifact_ingress.validate()?;
     let artifact_egress = file.artifact_egress.unwrap_or_default();
     artifact_egress.validate()?;
+    let output = file.output.unwrap_or_default();
+    output.validate()?;
 
     Ok(AppConfig {
         work_dir,
@@ -1326,7 +1328,7 @@ pub fn load_config(cli: Cli) -> Result<AppConfig, String> {
         command,
         exec,
         project_doc: file.project_doc.unwrap_or_default(),
-        output: file.output.unwrap_or_default(),
+        output,
         review: file.review.unwrap_or_default(),
         artifact_ingress,
         artifact_egress,
@@ -2127,6 +2129,28 @@ mod tests {
         let configured: FileConfig =
             serde_json::from_str(r#"{"review":{"maxPatchBytes":1234}}"#).unwrap();
         assert_eq!(configured.review.unwrap().max_patch_bytes, 1234);
+    }
+
+    #[test]
+    fn output_config_accepts_model_output_token_override() {
+        let configured: FileConfig =
+            serde_json::from_str(r#"{"output":{"maxToolOutputTokens":1234,"maxEntries":7}}"#)
+                .unwrap();
+        let output = configured.output.unwrap();
+        assert_eq!(output.max_tool_output_tokens, Some(1234));
+        assert_eq!(output.max_entries, Some(7));
+    }
+
+    #[test]
+    fn output_config_rejects_zero_model_output_budget() {
+        let root = tempfile::tempdir().unwrap();
+        let config_path = root.path().join("config.json");
+        std::fs::write(&config_path, r#"{"output":{"maxToolOutputTokens":0}}"#).unwrap();
+        let error = load_config(cli(root.path(), &config_path)).unwrap_err();
+        assert!(
+            error.contains("maxToolOutputTokens must be positive"),
+            "{error}"
+        );
     }
 
     #[test]

@@ -427,6 +427,8 @@ pub struct IgnoreConfig {
 #[serde(rename_all = "camelCase")]
 pub struct OutputConfig {
     #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub max_tool_output_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub max_file_lines: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub max_file_bytes: Option<usize>,
@@ -434,6 +436,15 @@ pub struct OutputConfig {
     pub max_entries: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub max_tree_nodes: Option<usize>,
+}
+
+impl OutputConfig {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.max_tool_output_tokens == Some(0) {
+            return Err("output.maxToolOutputTokens must be positive".to_string());
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -6,6 +6,25 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `output.maxToolOutputTokens`, defaulting to 10,000 approximate tokens, as a
+  connector-wide ceiling for textual model-visible tool results.
+
+### Changed
+
+- `exec_command` and `write_stdin` now clamp caller-requested output budgets to
+  server policy. `grep` caps match count, context and individual long lines while
+  keeping the actual match visible, and `run_command` returns bounded partial
+  output on timeout.
+
+### Security
+
+- Tool `content` and `structuredContent` are finalized through a common output
+  policy before entering model context. One-shot command stdout and stderr are
+  drained through bounded head/tail buffers, while component-only `_meta` remains
+  outside the model-visible limit.
+
 ## [1.8.0] - 2026-08-28
 
 ### Added
