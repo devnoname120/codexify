@@ -1,15 +1,24 @@
 use async_trait::async_trait;
-use serde_json::{Value, json};
+use schemars::JsonSchema;
+use serde::Deserialize;
+use serde_json::Value;
 use std::path::PathBuf;
 
 use crate::exec_sessions::SessionState;
 use crate::ignore_rules::build_ignore;
 use crate::output_budget::{entry_budget, limit_list};
 use crate::safe_path::resolve_safe_path;
-use crate::tool::{Tool, arg_str};
+use crate::tool::{Tool, ToolBehavior, parse_tool_args, schema_for, text_output_schema};
 use crate::types::{AppConfig, ToolResult};
 
 pub struct ListDirectory;
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ListDirectoryArgs {
+    /// Project-relative directory. Defaults to the project root.
+    path: Option<String>,
+}
 
 #[async_trait]
 impl Tool for ListDirectory {
@@ -17,31 +26,39 @@ impl Tool for ListDirectory {
         "list_directory"
     }
 
+    fn title(&self) -> String {
+        "List directory".to_string()
+    }
+
+    fn behavior(&self) -> ToolBehavior {
+        ToolBehavior::new(
+            true,
+            false,
+            true,
+            false,
+            "Lists local directory entries without modifying filesystem state.",
+        )
+    }
+
     fn description(&self) -> String {
         "List all files and subdirectories in a directory with their type (file/dir) and size. Returns tab-separated lines. Use this to inspect a specific directory's contents in detail, unlike tree which shows the full hierarchy.".into()
     }
 
     fn input_schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "path": { "type": "string", "description": "Directory path relative to work-dir. Default: root" }
-            }
-        })
+        schema_for::<ListDirectoryArgs>()
     }
 
     fn output_schema(&self) -> Option<Value> {
-        Some(json!({
-            "type": "object",
-            "properties": {
-                "content": { "type": "string", "description": "Tab-separated lines of 'type\\tsize\\tname' for each directory entry" }
-            }
-        }))
+        Some(text_output_schema())
     }
 
     async fn call(&self, args: Value, config: &AppConfig, _session: &SessionState) -> ToolResult {
+        let ListDirectoryArgs { path } = match parse_tool_args(args) {
+            Ok(args) => args,
+            Err(error) => return *error,
+        };
         // Treat an empty-string path the same as an absent one (TS falsy check).
-        let dir_path: PathBuf = match arg_str(&args, "path").filter(|s| !s.is_empty()) {
+        let dir_path: PathBuf = match path.as_deref().filter(|path| !path.is_empty()) {
             Some(p) => match resolve_safe_path(p, &config.work_dir, false) {
                 Ok(resolved) => resolved,
                 Err(e) => return ToolResult::error(e),

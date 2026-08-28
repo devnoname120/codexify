@@ -1,14 +1,24 @@
 use async_trait::async_trait;
-use rmcp::model::{MetaObject, ToolAnnotations};
+use rmcp::model::MetaObject;
+use schemars::JsonSchema;
+use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
 use crate::artifact_egress::{ArtifactEgressStore, snapshot_project_file};
 use crate::exec_sessions::SessionState;
-use crate::tool::{Tool, ToolRequestContext, arg_str};
+use crate::tool::{Tool, ToolBehavior, ToolRequestContext, parse_tool_args, schema_for};
 use crate::types::{AppConfig, ToolContent, ToolResult};
 
 pub struct ExportHostFile;
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ExportHostFileArgs {
+    /// Existing project-relative file path.
+    #[schemars(length(min = 1))]
+    path: String,
+}
 
 impl ExportHostFile {
     pub const NAME: &'static str = "export_host_file";
@@ -25,12 +35,13 @@ impl ExportHostFile {
                 "artifact_egress_disabled: File export is disabled by configuration.",
             );
         }
-        let Some(path) = arg_str(&args, "path") else {
-            return ToolResult::error("path must be a string");
+        let ExportHostFileArgs { path } = match parse_tool_args(args) {
+            Ok(args) => args,
+            Err(error) => return *error,
         };
         let snapshot = match snapshot_project_file(
             &config.work_dir,
-            path,
+            &path,
             &config.artifact_egress,
             cancellation,
         )
@@ -73,17 +84,17 @@ impl Tool for ExportHostFile {
         Self::NAME
     }
 
-    fn title(&self) -> Option<String> {
-        Some("Download project file".to_string())
+    fn title(&self) -> String {
+        "Download project file".to_string()
     }
 
-    fn annotations(&self) -> Option<ToolAnnotations> {
-        Some(
-            ToolAnnotations::new()
-                .read_only(true)
-                .destructive(false)
-                .idempotent(false)
-                .open_world(false),
+    fn behavior(&self) -> ToolBehavior {
+        ToolBehavior::new(
+            true,
+            false,
+            true,
+            false,
+            "Reads a local file and creates only private short-lived return-resource bookkeeping without modifying project, user-owned, or external state.",
         )
     }
 
@@ -103,17 +114,7 @@ impl Tool for ExportHostFile {
     }
 
     fn input_schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "Existing file path relative to the active project root."
-                }
-            },
-            "required": ["path"],
-            "additionalProperties": false
-        })
+        schema_for::<ExportHostFileArgs>()
     }
 
     fn output_schema(&self) -> Option<Value> {
@@ -122,10 +123,10 @@ impl Tool for ExportHostFile {
             "properties": {
                 "path": { "type": "string" },
                 "name": { "type": "string" },
-                "bytes": { "type": "integer" },
-                "sha256": { "type": "string" },
+                "bytes": { "type": "integer", "minimum": 0 },
+                "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
                 "mimeType": { "type": "string" },
-                "expiresInMs": { "type": "integer" }
+                "expiresInMs": { "type": "integer", "minimum": 0 }
             },
             "required": [
                 "path",
@@ -207,7 +208,7 @@ mod tests {
         let annotations = tool.annotations().unwrap();
         assert_eq!(annotations.read_only_hint, Some(true));
         assert_eq!(annotations.destructive_hint, Some(false));
-        assert_eq!(annotations.idempotent_hint, Some(false));
+        assert_eq!(annotations.idempotent_hint, Some(true));
         assert_eq!(annotations.open_world_hint, Some(false));
     }
 }

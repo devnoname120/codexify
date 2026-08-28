@@ -3,7 +3,9 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use serde_json::{Value, json};
+use schemars::JsonSchema;
+use serde::Deserialize;
+use serde_json::Value;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
 use tokio::task::JoinHandle;
@@ -13,10 +15,24 @@ use crate::output_budget::{
     BoundedTextBuffer, approx_token_count, tool_output_token_budget, truncate_text,
 };
 use crate::process_env::scrub_untrusted_child_env;
-use crate::tool::{Tool, arg_str, arg_u64};
+use crate::tool::{Tool, ToolBehavior, parse_tool_args, schema_for, text_output_schema};
 use crate::types::{AppConfig, ToolAuditMetadata, ToolContent, ToolResult};
 
 pub struct RunCommand;
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct RunCommandArgs {
+    /// Allowlisted executable name.
+    #[schemars(length(min = 1))]
+    command: String,
+    /// Arguments passed directly to the executable without shell parsing.
+    #[serde(default)]
+    args: Vec<String>,
+    /// Timeout in milliseconds. Defaults to the configured command timeout.
+    #[schemars(range(min = 1))]
+    timeout: Option<u64>,
+}
 
 const RUN_COMMAND_STREAM_MAX_BYTES: usize = 512 * 1024;
 const DRAIN_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
@@ -27,29 +43,30 @@ impl Tool for RunCommand {
         "run_command"
     }
 
+    fn title(&self) -> String {
+        "Run command".to_string()
+    }
+
+    fn behavior(&self) -> ToolBehavior {
+        ToolBehavior::new(
+            false,
+            true,
+            false,
+            true,
+            "The selected executable can modify or delete local state and can contact external systems.",
+        )
+    }
+
     fn description(&self) -> String {
-        "Execute an allowlisted binary with an argument array in the project directory. Returns bounded stdout, stderr, and exit code; timed-out commands return bounded partial output. Use exec_command instead when shell syntax such as pipes or redirects is required. Times out after 30s by default.".into()
+        "Execute an allowlisted binary with an argument array in the project directory. Returns bounded stdout, stderr, and exit code; timed-out commands return bounded partial output. Use exec_command instead when shell syntax such as pipes or redirects is required. The timeout defaults to the server's configured command timeout.".into()
     }
 
     fn input_schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "command": { "type": "string", "description": "The command/binary to run" },
-                "args": { "type": "array", "items": { "type": "string" }, "description": "Command arguments" },
-                "timeout": { "type": "number", "description": "Timeout in milliseconds. Default: 30000" }
-            },
-            "required": ["command"]
-        })
+        schema_for::<RunCommandArgs>()
     }
 
     fn output_schema(&self) -> Option<Value> {
-        Some(json!({
-            "type": "object",
-            "properties": {
-                "content": { "type": "string", "description": "Combined stdout/stderr output followed by exit code" }
-            }
-        }))
+        Some(text_output_schema())
     }
 
     fn may_modify_project(&self) -> bool {
@@ -57,25 +74,19 @@ impl Tool for RunCommand {
     }
 
     async fn call(&self, args: Value, config: &AppConfig, _session: &SessionState) -> ToolResult {
-        let Some(command) = arg_str(&args, "command") else {
-            return ToolResult::error("command must be a string");
+        let RunCommandArgs {
+            command,
+            args: cmd_args,
+            timeout,
+        } = match parse_tool_args(args) {
+            Ok(args) => args,
+            Err(error) => return *error,
         };
-
-        let cmd_args: Vec<String> = args
-            .get("args")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        let timeout = arg_u64(&args, "timeout")
+        let timeout = timeout
             .unwrap_or(config.command.default_timeout)
             .min(config.command.max_timeout);
 
-        if !config.allowed_commands.iter().any(|c| c == command) {
+        if !config.allowed_commands.iter().any(|c| c == &command) {
             return ToolResult::error(format!(
                 "Command not allowed: \"{}\". Allowed: {}",
                 command,
@@ -83,7 +94,7 @@ impl Tool for RunCommand {
             ));
         }
 
-        let mut cmd = Command::new(command);
+        let mut cmd = Command::new(&command);
         cmd.args(&cmd_args)
             .current_dir(&config.work_dir)
             .stdout(Stdio::piped())

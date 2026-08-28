@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use rmcp::model::{MetaObject, ToolAnnotations};
+use rmcp::model::MetaObject;
+use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::Semaphore;
 use tokio::time::{Duration, Instant, timeout_at};
@@ -9,11 +10,18 @@ use tokio_util::sync::CancellationToken;
 
 use crate::artifact_ingress::{OpenAiFileParam, import_openai_file_before};
 use crate::exec_sessions::SessionState;
-use crate::tool::{Tool, ToolRequestContext, arg_str};
+use crate::tool::{Tool, ToolBehavior, ToolRequestContext, parse_tool_args};
 use crate::types::{AppConfig, DEFAULT_ARTIFACT_MAX_CONCURRENT_DOWNLOADS, ToolResult};
 
 pub struct ImportHostFile {
     permits: Arc<Semaphore>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ImportHostFileArgs {
+    file: Value,
+    path: String,
 }
 
 impl ImportHostFile {
@@ -36,13 +44,11 @@ impl ImportHostFile {
                 "artifact_ingress_disabled: Native file ingress is disabled by configuration.",
             );
         }
-        let Some(file_value) = args.get("file") else {
-            return ToolResult::error("file must be a ChatGPT native-file object");
+        let ImportHostFileArgs { file, path } = match parse_tool_args(args) {
+            Ok(args) => args,
+            Err(error) => return *error,
         };
-        let Some(path) = arg_str(&args, "path") else {
-            return ToolResult::error("path must be a string");
-        };
-        let file = match OpenAiFileParam::parse(file_value) {
+        let file = match OpenAiFileParam::parse(&file) {
             Ok(file) => file,
             Err(error) => return ToolResult::error(error.to_string()),
         };
@@ -74,7 +80,7 @@ impl ImportHostFile {
                 }
             }
         };
-        let result = import_openai_file_before(config, &file, path, deadline, cancellation).await;
+        let result = import_openai_file_before(config, &file, &path, deadline, cancellation).await;
         drop(permit);
 
         match result {
@@ -104,17 +110,17 @@ impl Tool for ImportHostFile {
         Self::NAME
     }
 
-    fn title(&self) -> Option<String> {
-        Some("Import attached file".to_string())
+    fn title(&self) -> String {
+        "Import attached file".to_string()
     }
 
-    fn annotations(&self) -> Option<ToolAnnotations> {
-        Some(
-            ToolAnnotations::new()
-                .read_only(false)
-                .destructive(false)
-                .idempotent(false)
-                .open_world(true),
+    fn behavior(&self) -> ToolBehavior {
+        ToolBehavior::new(
+            false,
+            false,
+            true,
+            true,
+            "Downloads an authorized external file and publishes it only to a new local path without overwriting existing content.",
         )
     }
 
@@ -141,10 +147,10 @@ impl Tool for ImportHostFile {
                 "OpenAIFile": {
                     "type": "object",
                     "properties": {
-                        "download_url": { "type": "string" },
-                        "file_id": { "type": "string" },
-                        "mime_type": { "type": "string" },
-                        "file_name": { "type": "string" }
+                        "download_url": { "type": "string", "minLength": 1 },
+                        "file_id": { "type": "string", "minLength": 1, "maxLength": 512 },
+                        "mime_type": { "type": "string", "minLength": 1, "maxLength": 255 },
+                        "file_name": { "type": "string", "minLength": 1, "maxLength": 1024 }
                     },
                     "required": ["download_url", "file_id"],
                     "additionalProperties": false
@@ -153,10 +159,12 @@ impl Tool for ImportHostFile {
             "properties": {
                 "file": {
                     "$ref": "#/$defs/OpenAIFile",
+                    "writeOnly": true,
                     "description": "Native file value authorized and supplied by ChatGPT."
                 },
                 "path": {
                     "type": "string",
+                    "minLength": 1,
                     "description": "New destination file path relative to the active project root."
                 }
             },
@@ -170,8 +178,8 @@ impl Tool for ImportHostFile {
             "type": "object",
             "properties": {
                 "path": { "type": "string" },
-                "bytes": { "type": "integer" },
-                "sha256": { "type": "string" },
+                "bytes": { "type": "integer", "minimum": 0 },
+                "sha256": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
                 "source": { "type": "string", "enum": ["openai_file"] },
                 "mimeType": { "type": "string" }
             },
@@ -218,14 +226,28 @@ mod tests {
             assert_eq!(file["properties"][property]["type"], "string");
         }
         assert_eq!(schema["required"], json!(["file", "path"]));
+        assert_eq!(schema["properties"]["file"]["writeOnly"], true);
 
         let meta = tool.meta().unwrap();
         assert_eq!(meta["openai/fileParams"], json!(["file"]));
         let annotations = tool.annotations().unwrap();
         assert_eq!(annotations.read_only_hint, Some(false));
         assert_eq!(annotations.destructive_hint, Some(false));
-        assert_eq!(annotations.idempotent_hint, Some(false));
+        assert_eq!(annotations.idempotent_hint, Some(true));
         assert_eq!(annotations.open_world_hint, Some(true));
+    }
+
+    #[test]
+    fn output_schema_accepts_the_real_receipt_hash_format() {
+        let schema = ImportHostFile::default().output_schema().unwrap();
+        let validator = jsonschema::draft202012::options().build(&schema).unwrap();
+        assert!(validator.is_valid(&json!({
+            "path": "payload.bin",
+            "bytes": 4,
+            "sha256": format!("sha256:{}", "a".repeat(64)),
+            "source": "openai_file",
+            "mimeType": "application/octet-stream"
+        })));
     }
 
     #[tokio::test]

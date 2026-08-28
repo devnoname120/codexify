@@ -1,15 +1,24 @@
 use async_trait::async_trait;
+use schemars::JsonSchema;
+use serde::Deserialize;
 use std::future::Future;
 
-use rmcp::model::ToolAnnotations;
 use serde_json::{Value, json};
 
 use crate::exec_sessions::SessionState;
 use crate::project_bindings::{ProjectBindingScope, ProjectRootSelection};
-use crate::tool::{Tool, arg_str};
+use crate::tool::{Tool, ToolBehavior, schema_for};
 use crate::types::{AppConfig, ToolResult};
 
 pub struct SetProjectRoot;
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct SetProjectRootArgs {
+    /// Existing project selector/path or supported exact GitHub URL.
+    #[schemars(length(min = 1))]
+    path: String,
+}
 
 impl SetProjectRoot {
     pub const NAME: &'static str = "set_project_root";
@@ -20,11 +29,12 @@ where
     F: FnOnce(String) -> Fut,
     Fut: Future<Output = Result<ProjectRootSelection, String>>,
 {
-    let Some(path) = arg_str(args, "path") else {
-        return ToolResult::error("path must be a string");
+    let SetProjectRootArgs { path } = match serde_json::from_value(args.clone()) {
+        Ok(args) => args,
+        Err(error) => return ToolResult::error(format!("Invalid tool arguments: {error}")),
     };
 
-    let selection = match select(path.to_string()).await {
+    let selection = match select(path).await {
         Ok(selection) => selection,
         Err(error) => return ToolResult::error(error),
     };
@@ -106,17 +116,17 @@ impl Tool for SetProjectRoot {
         Self::NAME
     }
 
-    fn title(&self) -> Option<String> {
-        Some("Set project root".to_string())
+    fn title(&self) -> String {
+        "Set project root".to_string()
     }
 
-    fn annotations(&self) -> Option<ToolAnnotations> {
-        Some(
-            ToolAnnotations::new()
-                .read_only(false)
-                .destructive(false)
-                .idempotent(true)
-                .open_world(true),
+    fn behavior(&self) -> ToolBehavior {
+        ToolBehavior::new(
+            false,
+            false,
+            true,
+            true,
+            "Persists a project binding and may clone or fetch an external GitHub repository without overwriting an existing source checkout.",
         )
     }
 
@@ -138,17 +148,7 @@ impl Tool for SetProjectRoot {
     }
 
     fn input_schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "Existing project directory (relative to the configured access root or absolute inside it), selector returned by list_projects, GitHub repository-root URL, HTTPS GitHub branch URL (/tree/<branch>), HTTPS GitHub pull-request URL (/pull/<number>), or HTTPS GitHub commit URL (/commit/<sha>, full 40-character hexadecimal commit ID) to reuse or clone and select"
-                }
-            },
-            "required": ["path"],
-            "additionalProperties": false
-        })
+        schema_for::<SetProjectRootArgs>()
     }
 
     fn output_schema(&self) -> Option<Value> {
@@ -169,7 +169,8 @@ impl Tool for SetProjectRoot {
                 "binding_scope": { "type": "string", "enum": ["chatgpt_conversation", "mcp_transport_session"] },
                 "content": { "type": "string" }
             },
-            "required": ["access_root", "source_project_root", "project_root", "repository_url", "cloned", "managed_worktree", "worktree_git_root", "worktrees_root", "worktree_mode", "warnings", "newly_selected", "binding_scope", "content"]
+            "required": ["access_root", "source_project_root", "project_root", "repository_url", "cloned", "managed_worktree", "worktree_git_root", "worktrees_root", "worktree_mode", "warnings", "newly_selected", "binding_scope", "content"],
+            "additionalProperties": false
         }))
     }
 

@@ -1,9 +1,9 @@
 use async_trait::async_trait;
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use crate::exec_sessions::SessionState;
 use crate::memory::{load_memory, memory_enabled, render_memory};
-use crate::tool::Tool;
+use crate::tool::{Tool, ToolBehavior, empty_object_schema, text_output_schema};
 use crate::types::{AppConfig, ToolResult};
 
 pub const NOTHING_REMEMBERED: &str =
@@ -17,25 +17,30 @@ impl Tool for Recall {
         "recall"
     }
 
+    fn title(&self) -> String {
+        "Recall project memory".to_string()
+    }
+
+    fn behavior(&self) -> ToolBehavior {
+        ToolBehavior::new(
+            true,
+            false,
+            true,
+            false,
+            "Reads persisted project memory without modifying it.",
+        )
+    }
+
     fn description(&self) -> String {
         "Return the plan and the notes saved for this project by earlier turns or earlier conversations. Call this when you have lost the thread — a new chat, a task you are resuming, or any point where you are about to ask the user to repeat something they may already have told you. It is cheap and returns nothing when nothing was stored.".into()
     }
 
     fn input_schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {},
-            "additionalProperties": false
-        })
+        empty_object_schema()
     }
 
     fn output_schema(&self) -> Option<Value> {
-        Some(json!({
-            "type": "object",
-            "properties": {
-                "content": { "type": "string", "description": "The stored plan and notes, or a line saying there are none." }
-            }
-        }))
+        Some(text_output_schema())
     }
 
     async fn call(&self, _args: Value, config: &AppConfig, _session: &SessionState) -> ToolResult {

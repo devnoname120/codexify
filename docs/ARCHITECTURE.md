@@ -111,7 +111,7 @@ Five integration surfaces are exposed to the client:
    environment because ChatGPT's conversation identity arrives in request `_meta`
    on tool calls, after initialization.
 3. `tools/list` → `CodexHandler::list_tools` maps the shared tool registry into
-   rmcp `Tool` definitions, including optional titles, behavioral annotations,
+   rmcp `Tool` definitions, including mandatory titles, complete behavioral annotations,
    icons, input/output schemas, OpenAI file-parameter metadata, and MCP Apps
    resource metadata. Transitive definitions held by the private MCP catalog are
    deliberately absent from this registry. `resources/list` exposes only the
@@ -155,15 +155,20 @@ Five integration surfaces are exposed to the client:
    the first such call, the review manager captures the scoped project-open snapshot.
    Non-Git projects report review as unavailable; a Git snapshot failure blocks
    mutating tools before dispatch.
-9. Tool dispatch first resolves a `ToolCallIdentity`. Native tools retain their
+9. Tool dispatch first validates arguments against the cached JSON Schema compiled
+   when the registry was built. Native fixed-shape argument objects are closed;
+   validation failures are returned before project resolution or side effects, and
+   diagnostics mask values covered by `writeOnly`. Dispatch then resolves a
+   `ToolCallIdentity`. Native tools retain their
    downstream name; direct, gateway, and catalog MCP proxies map the call to the
    raw configured upstream server/tool before execution. Dispatch then supplies a
    request context containing the stable conversation identity, shared
    authorization store, and shared review manager; tools that do not need it use
    the default context-free implementation. The server applies the model-output
    policy to textual `content` and explicit `structuredContent`, then fills default
-   structured text mirrors within the same ceiling. Component-only result `_meta`
-   is deliberately excluded. Every tracing lifecycle event includes the resolved
+   structured text mirrors within the same ceiling. A successful result is checked
+   against the tool's cached output validator before it leaves the server. Component-only
+   result `_meta` is deliberately excluded. Every tracing lifecycle event includes the resolved
    identity. Dispatch assigns one server-wide call ID before observers run.
    Optional `toolLogging` tracing emits one correlated start and completion record
    for every tool class, with independently selectable request
@@ -203,13 +208,18 @@ trait Tool: Send + Sync {
     fn name(&self) -> &'static str;
     fn description(&self) -> String;
     fn describe(&self, cfg: &AppConfig) -> String;      // config-aware override
-    fn title(&self) -> Option<String>;                  // host-facing card title
-    fn annotations(&self) -> Option<ToolAnnotations>;  // MCP behavior hints
+    fn title(&self) -> String;                          // mandatory host-facing title
+    fn behavior(&self) -> ToolBehavior;                // four MCP hints + justification
     fn meta(&self) -> Option<MetaObject>;               // MCP Apps and extensions
     fn input_schema(&self) -> Value;
+    fn requires_closed_input_schema(&self) -> bool;     // true for native tools
     fn call_identity(&self, args: &Value) -> ToolCallIdentity; // resolved native/MCP target
     fn output_schema(&self) -> Option<Value>;
+    fn requires_closed_output_schema(&self) -> bool;    // true for native tools
     fn fills_structured_content(&self) -> bool;         // opt out of default-fill
+    fn permits_missing_structured_content(&self) -> bool; // direct upstream compatibility
+    fn validate_arguments(&self, args: &Value) -> Result<(), String>;
+    fn validate_structured_output(&self, value: Option<&Value>) -> Result<(), String>;
     fn manages_model_output_budget(&self) -> bool;      // false by default
     fn requires_project_root(&self) -> bool;            // true by default
     fn uses_exec_session_state(&self) -> bool;          // false by default
@@ -219,9 +229,19 @@ trait Tool: Send + Sync {
 }
 ```
 
+`ToolBehavior` makes `readOnlyHint`, `destructiveHint`, `idempotentHint`, and
+`openWorldHint` explicit for every tool and keeps a non-empty review justification
+beside the implementation. `ValidatedTool` compiles Draft 2020-12 input/output
+validators once, rejects malformed native descriptors at startup, and enforces the
+same contract at the dispatch boundary. Invalid third-party direct descriptors are
+skipped with a warning rather than preventing valid native tools or sibling MCP
+sources from starting. Native argument structures may derive `Deserialize` and
+`JsonSchema`; `schema_for` and `parse_tool_args` keep the wire schema and parser on
+the same Rust type where a tool does not require a host-specific dynamic schema.
+
 ### `ToolResult` (`types.rs`)
 `{ content: Vec<ToolContent>, is_error: bool, structured_content: Option<Value>, meta: Option<MetaObject>, audit: ToolAuditMetadata }`.
-The server converts it to rmcp's `CallToolResult`. Tools with an `outputSchema`
+The server converts it to rmcp's `CallToolResult`. Tools with an exact `outputSchema`
 whose text *is* the structured form rely on the server's default-fill
 (`{ "content": <joined text> }`); tools that build their own structured content —
 or bridge it from upstream — return `fills_structured_content() == false`.
@@ -229,6 +249,9 @@ Before conversion, the server applies `output.maxToolOutputTokens` to every
 non-self-managed textual result. Default text mirrors are fitted after JSON
 escaping. Oversized explicit structured data becomes an error response because
 arbitrary partial JSON cannot be guaranteed to satisfy the advertised schema.
+After budgeting and default-fill, successful structured content is validated; a
+handler/schema regression becomes an explicit tool error rather than a malformed MCP
+success response.
 `exec_command` and `write_stdin` self-manage the policy around their nested output
 receipt. Result `_meta`, images and resource links are not text-truncated.
 `ToolAuditMetadata` is not sent over MCP; bounded-output and resident-process tools
@@ -338,9 +361,12 @@ clients use the transport state above. Snapshots seed a private index with only
 tracked entries beneath the logical project path, refresh that scope from the
 working tree, and create root commits without touching the user's index. Comparisons
 repeat the same literal pathspec, return project-relative file records and patch
-headers, bound file and patch results, and advance `last-review` through `git update-ref`
-compare-and-swap. The same per-owner/project lock spans mutating tool calls through
-completion so reviews cannot capture an in-process write halfway through.
+headers, and bound file and patch results. By default `show_changes` records the
+emitted snapshot as the next incremental baseline through `git update-ref`
+compare-and-swap. That cursor is connector-private bookkeeping, so the tool remains
+annotated read-only: it does not modify project files, Git history, user-owned data,
+or external systems. The same per-owner/project lock spans mutating tool calls through
+completion so a review cannot capture an in-process write halfway through.
 
 ### `AppConfig` (`types.rs`)
 The fully-resolved config handed to every tool. `config.rs` selects one JSON file
@@ -477,7 +503,7 @@ a private per-run temporary directory and are removed after shutdown.
 
 ---
 
-## 5. Native tools (28 default, 30 multi-project)
+## 5. Native tools (30 default, 32 multi-project)
 
 | Group | Tools |
 |-------|-------|
@@ -485,14 +511,14 @@ a private per-run temporary directory and are removed after shutdown.
 | Commands | `run_command` (allowlisted argv), `exec_command` / `write_stdin` (resident shell sessions) |
 | Git / review | `git_status`, `show_changes`, `git_push`, `git_commit`, `git_log` |
 | Environment / project | `get_environment`, `get_project_doc`, `get_agent_brief` |
-| Task state | `update_plan`, `remember`, `recall` |
+| Task state | `update_plan`, `remember`, `update_memory_note`, `forget_memory_note`, `recall` |
 | Skills | `skills_list`, `skills_read` |
 | Timing | `clock_curr_time`, `clock_sleep` |
 | Project selection (multi-project only) | `list_projects`, `set_project_root` |
 
 Conversation authorization prepends the ChatGPT-facing `setup` wire tool; multi-project mode then
 prepends `list_projects` and `set_project_root`. The optional tools are omitted
-from the ordinary single-project registry, preserving the 28-tool default surface
+from the ordinary single-project registry, preserving the 30-tool default surface
 and behaviour. Enabling the gate raises the applicable count by one.
 `artifactIngress.enabled = false` independently removes `import_host_file`, while
 `artifactEgress.enabled = false` independently removes `export_host_file`; each
@@ -525,10 +551,11 @@ the original order and rejects duplicate names.
 | `project_clone.rs` | Strict GitHub repository/branch/PR/commit URL parsing, normalized remote matching, existing-checkout discovery, exact target-ref or object-ID fetching, bounded non-interactive cloning below `projectCloneDir`, cross-process repository locks, collision refusal, and post-clone verification. |
 | `worktrees.rs` | Per-conversation managed Git worktree lifecycle: create a detached checkout under `worktrees.root` via `git worktree add`, optionally at an exact fetched commit, dual source/worktree root tracking, startup sweep bounded by `keepCount`, Windows `\\?\`-prefix handling, and the opt-in `allowSetupScript` gate for per-worktree environment setup. |
 | `project_catalog.rs` | Live, read-only project discovery from native Codex plus explicit metadata; canonical access-root filtering, deduplication, deterministic query ranking, sanitized MCP warnings, and local diagnostics. |
-| `exec_sessions.rs` | Generic-client transport fallback plus conversation-owned unified-exec sessions and transport-local review state: shell resolution, PowerShell exit-code wrapping, background stdout/stderr drain tasks, process-group kill, idle cleanup, and output truncation (UTF-16 units to match the TS). |
-| `review.rs` | Project-scoped Git snapshots, persistent conversation refs, transport-local fallbacks, incremental compare-and-swap checkpoints, diff parsing and component-payload budgets. |
+| `exec_sessions.rs` | Generic-client transport fallback plus conversation-owned unified-exec sessions and transport-local review state: trusted configured-shell resolution, Codex-compatible model shell-type selection by basename, PowerShell exit-code wrapping, background stdout/stderr drain tasks, process-group kill, idle cleanup, and output truncation (UTF-16 units to match the TS). |
+| `review.rs` | Project-scoped Git snapshots, persistent conversation refs, transport-local fallbacks, incremental comparisons whose emitted snapshot can advance the private review cursor through compare-and-swap, diff parsing and component-payload budgets. |
 | `review_ui.rs` | Embedded MCP Apps resource, component-only review-result metadata, and persisted private interaction state for the interactive `show_changes` card. |
-| `apply_patch.rs` | The Codex patch format: parse then apply, atomically, with fuzzy context matching and CRLF preservation. |
+| `apply_patch.rs` | The Codex patch format: verify the whole patch, then apply file operations sequentially with Codex-compatible partial-failure behavior, fuzzy context matching and CRLF preservation. |
+| `tool.rs` | Mandatory titles and `ToolBehavior`, typed-schema helpers, startup descriptor checks, cached dialect-aware JSON Schema validators, masked input diagnostics, and successful structured-output validation. |
 | `memory.rs` | Working memory outside the repo, keyed by a hash of the normalized active root, with `O_EXCL` locking and atomic writes. In multi-project mode, a configured `memory.dir` is a base containing one hashed child per project. |
 | `quickstart.rs` | Interactive first-install wizard for project scope, native tunnel credentials, JSON config merging, preservation of preconfigured advanced conversation authorization, and the ChatGPT developer-mode connector handoff. |
 | `service.rs` | Per-user systemd, launchd, and Windows Task Scheduler definitions; service lifecycle commands; bounded child restart supervision; private rotating stdout/stderr logs; and `service logs [-f]`. |
@@ -654,8 +681,10 @@ rematerialize an upstream catalogue.
 Each selected upstream tool becomes a `BridgedTool` named `<server>__<tool>`
 (sanitized to `[A-Za-z0-9_]`, so `remote-exec` becomes
 `remote_exec__exec`). Calls forward by stored raw server/tool name. Direct
-descriptors retain the upstream title, description, input/output schemas,
-annotations, icons, and `_meta`; call results use the common passthrough path. A
+descriptors retain the upstream title, description, input/output schemas, icons,
+`_meta`, and every supplied annotation field. Missing safety hints are filled with
+their MCP defaults so the downstream descriptor is explicit; call results use the
+common passthrough path. A
 name colliding with an existing downstream tool is skipped with a warning.
 
 This is the default only for standalone explicit `mcpServers` entries. It is the

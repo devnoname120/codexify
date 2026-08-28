@@ -31,7 +31,7 @@ use tokio_util::sync::CancellationToken;
 use crate::exec_sessions::SessionState;
 use crate::mcp_catalog::{CatalogSourceInput, build_catalog_tools};
 use crate::process_env::scrub_untrusted_child_env;
-use crate::tool::{Tool, ToolCallIdentity, ToolRequestContext};
+use crate::tool::{Tool, ToolBehavior, ToolCallIdentity, ToolRequestContext};
 use crate::types::{AppConfig, McpToolExposure, ToolContent, ToolResult};
 
 /// How long to wait for an upstream to start up and answer `tools/list` before
@@ -101,12 +101,45 @@ impl Tool for BridgedTool {
         self.description.clone()
     }
 
-    fn title(&self) -> Option<String> {
-        self.title.clone()
+    fn title(&self) -> String {
+        self.title
+            .clone()
+            .unwrap_or_else(|| self.original_name.clone())
+    }
+
+    fn behavior(&self) -> ToolBehavior {
+        let annotations = self.annotations.as_ref();
+        ToolBehavior::new(
+            annotations
+                .and_then(|value| value.read_only_hint)
+                .unwrap_or(false),
+            annotations
+                .and_then(|value| value.destructive_hint)
+                .unwrap_or(true),
+            annotations
+                .and_then(|value| value.idempotent_hint)
+                .unwrap_or(false),
+            annotations
+                .and_then(|value| value.open_world_hint)
+                .unwrap_or(true),
+            "Mirrors the upstream MCP annotations; omitted hints use the MCP defaults.",
+        )
     }
 
     fn annotations(&self) -> Option<ToolAnnotations> {
-        self.annotations.clone()
+        let behavior = self.behavior();
+        let mut annotations = self.annotations.clone().unwrap_or_default();
+        annotations.read_only_hint.get_or_insert(behavior.read_only);
+        annotations
+            .destructive_hint
+            .get_or_insert(behavior.destructive);
+        annotations
+            .idempotent_hint
+            .get_or_insert(behavior.idempotent);
+        annotations
+            .open_world_hint
+            .get_or_insert(behavior.open_world);
+        Some(annotations)
     }
 
     fn icons(&self) -> Option<Vec<Icon>> {
@@ -119,6 +152,14 @@ impl Tool for BridgedTool {
 
     fn input_schema(&self) -> Value {
         self.input_schema.clone()
+    }
+
+    fn requires_closed_input_schema(&self) -> bool {
+        false
+    }
+
+    fn requires_closed_output_schema(&self) -> bool {
+        false
     }
 
     fn call_identity(&self, _args: &Value) -> ToolCallIdentity {
@@ -137,6 +178,10 @@ impl Tool for BridgedTool {
     /// structured result that would not match the upstream's own schema.
     fn fills_structured_content(&self) -> bool {
         false
+    }
+
+    fn permits_missing_structured_content(&self) -> bool {
+        true
     }
 
     fn requires_project_root(&self) -> bool {
@@ -383,15 +428,22 @@ pub async fn connect_upstreams(config: &AppConfig) -> Bridge {
                                 unique_name(bridged_name(&sanitized, &original_name), &used);
                             used.insert(display.clone());
                             let leaked: &'static str = Box::leak(display.into_boxed_str());
+                            let title = tool.title.filter(|title| !title.trim().is_empty());
+                            let description = tool
+                                .description
+                                .map(|description| description.to_string())
+                                .filter(|description| !description.trim().is_empty())
+                                .unwrap_or_else(|| {
+                                    format!(
+                                        "Call the `{original_name}` tool on the `{server_name}` MCP server."
+                                    )
+                                });
                             tools.push(Box::new(BridgedTool {
                                 name: leaked,
                                 original_name,
                                 server: server_name.clone(),
-                                title: tool.title,
-                                description: tool
-                                    .description
-                                    .map(|c| c.to_string())
-                                    .unwrap_or_default(),
+                                title,
+                                description,
                                 input_schema: Value::Object((*tool.input_schema).clone()),
                                 output_schema: tool
                                     .output_schema
@@ -586,6 +638,20 @@ impl GatewayTool {
 impl Tool for GatewayTool {
     fn name(&self) -> &'static str {
         self.name
+    }
+
+    fn title(&self) -> String {
+        format!("Call {} MCP tool", self.server)
+    }
+
+    fn behavior(&self) -> ToolBehavior {
+        ToolBehavior::new(
+            false,
+            true,
+            false,
+            true,
+            "A gateway can select upstream tools with arbitrary local, destructive, or external side effects.",
+        )
     }
 
     fn description(&self) -> String {
@@ -1172,7 +1238,7 @@ mod tests {
             .with_title("Decompile function")
             .with_raw_output_schema(Arc::new(decompile_output))
             .with_annotations(
-                ToolAnnotations::new()
+                ToolAnnotations::with_title("Decompiler action")
                     .read_only(true)
                     .destructive(false)
                     .idempotent(true)
@@ -1420,7 +1486,7 @@ mod tests {
                 .iter()
                 .all(|tool| !tool.requires_project_root())
         );
-        assert!(bridge.tools.iter().all(|tool| tool.title().is_some()));
+        assert!(bridge.tools.iter().all(|tool| !tool.title().is_empty()));
         assert!(
             bridge_tool(&bridge, MCP_LIST_SOURCES)
                 .output_schema()
@@ -1863,7 +1929,13 @@ mod tests {
             .iter()
             .find(|tool| tool.name() == "IDA_MCP___decompile_function")
             .unwrap();
-        assert_eq!(decompile.title().as_deref(), Some("Decompile function"));
+        assert_eq!(decompile.title(), "Decompile function");
+        assert_eq!(
+            decompile
+                .annotations()
+                .and_then(|annotations| annotations.title),
+            Some("Decompiler action".to_string())
+        );
         assert_eq!(
             decompile
                 .annotations()

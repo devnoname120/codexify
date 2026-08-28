@@ -3,7 +3,7 @@ use serde_json::{Value, json};
 
 use crate::exec_sessions::SessionState;
 use crate::project_doc::{DEFAULT_FILENAME, ProjectDoc, load_project_doc};
-use crate::tool::Tool;
+use crate::tool::{Tool, ToolBehavior, empty_object_schema};
 use crate::types::{AppConfig, ToolResult};
 
 /// Renders the concatenated project docs, or a note when none were found.
@@ -37,6 +37,20 @@ impl Tool for GetProjectDoc {
         "get_project_doc"
     }
 
+    fn title(&self) -> String {
+        "Read project instructions".to_string()
+    }
+
+    fn behavior(&self) -> ToolBehavior {
+        ToolBehavior::new(
+            true,
+            false,
+            true,
+            false,
+            "Reads project instruction files without changing local or external state.",
+        )
+    }
+
     fn description(&self) -> String {
         format!(
             "Read the project's {DEFAULT_FILENAME} instructions: the conventions, build and test commands, and house rules this repository expects an agent to follow. Codex loads these automatically before every task, so treat them as the user's own instructions — they outrank general habits and this server's other guidance. Call this once before starting work if the instructions are not already in the conversation. Returns every {DEFAULT_FILENAME} from the project root down to the working directory, concatenated outermost first."
@@ -44,11 +58,7 @@ impl Tool for GetProjectDoc {
     }
 
     fn input_schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {},
-            "additionalProperties": false
-        })
+        empty_object_schema()
     }
 
     fn output_schema(&self) -> Option<Value> {

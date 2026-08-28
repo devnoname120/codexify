@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::exec_policy::{assert_exec_allowed, effective_allowlist};
@@ -9,7 +10,7 @@ use crate::exec_sessions::{
 };
 use crate::output_budget::resolve_requested_output_tokens;
 use crate::safe_path::resolve_safe_path;
-use crate::tool::{Tool, arg_str, arg_u64};
+use crate::tool::{Tool, ToolBehavior, parse_tool_args};
 use crate::types::{AppConfig, ExecMode, ToolAuditMetadata, ToolResult};
 
 /// The output schema shared by `exec_command` and `write_stdin`.
@@ -19,12 +20,22 @@ pub fn unified_exec_output_schema() -> Value {
         "properties": {
             "chunk_id": { "type": "string", "description": "Chunk identifier included when the response reports one." },
             "wall_time_seconds": { "type": "number", "description": "Elapsed wall time spent waiting for output in seconds." },
-            "exit_code": { "type": "number", "description": "Process exit code when the command finished during this call." },
-            "session_id": { "type": "number", "description": "Session identifier to pass to write_stdin when the process is still running." },
-            "original_token_count": { "type": "number", "description": "Approximate token count before output truncation." },
+            "exit_code": { "type": "integer", "description": "Process exit code when the command finished during this call." },
+            "session_id": { "type": "integer", "minimum": 1, "description": "Session identifier to pass to write_stdin when the process is still running." },
+            "original_token_count": { "type": "integer", "minimum": 0, "description": "Approximate token count before output truncation." },
             "output": { "type": "string", "description": "Command output text, possibly truncated." }
         },
-        "required": ["wall_time_seconds", "output"],
+        "required": ["chunk_id", "wall_time_seconds", "original_token_count", "output"],
+        "oneOf": [
+            {
+                "required": ["exit_code"],
+                "not": { "required": ["session_id"] }
+            },
+            {
+                "required": ["session_id"],
+                "not": { "required": ["exit_code"] }
+            }
+        ],
         "additionalProperties": false
     })
 }
@@ -33,7 +44,7 @@ pub fn render_unified_exec_output(result: &UnifiedExecOutput) -> String {
     serde_json::to_string_pretty(result).unwrap_or_else(|_| "{}".to_string())
 }
 
-const BASE_DESCRIPTION: &str = "Runs a command in a shell and returns its output. Use this for anything the structured tools do not cover: build pipelines, test runners, package managers, interactive REPLs.\n\nIf the command finishes within yield_time_ms the full result is returned with its exit_code. If it is still running, a session_id comes back instead — pass that to write_stdin to send input, poll for more output, or wait for it to finish. That makes long-running and interactive processes (dev servers, REPLs, prompts asking for confirmation) workable in a single session.\n\nCommands run through the platform shell, so pipes, redirection and && chains work. Note this bridge runs commands with plain pipes, not a PTY.";
+const BASE_DESCRIPTION: &str = "Runs a command in a shell and returns its output. Use this for anything the structured tools do not cover: build pipelines, test runners, package managers, interactive REPLs.\n\nIf the command finishes within yield-time_ms the full result is returned with its exit_code. If it is still running, a session_id comes back instead — pass that to write_stdin to send input, poll for more output, or wait for it to finish. That makes long-running and interactive processes workable in a single session.\n\nCommands run through the platform shell, so pipes, redirection and && chains work. This bridge uses plain pipes rather than a PTY. The optional shell value follows Codex semantics: it selects a recognized shell type by basename, and is never executed as an arbitrary model-provided path.";
 
 const WINDOWS_SHELL_GUIDANCE: &str = "Windows safety rules:\n- Do not compose destructive filesystem commands across shells. Do not enumerate paths in PowerShell and then pass them to `cmd /c`, batch builtins, or another shell for deletion or moving. Use one shell end-to-end, prefer native PowerShell cmdlets such as `Remove-Item` / `Move-Item` with `-LiteralPath`, and avoid string-built shell commands for file operations.\n- Before any recursive delete or move on Windows, verify the resolved absolute target paths stay within the intended workspace or explicitly named target directory. Never issue a recursive delete or move against a computed path if the final target has not been checked.\n- When using `Start-Process` to launch a background helper or service, pass `-WindowStyle Hidden` unless the user explicitly asked for a visible interactive window. Use visible windows only for interactive tools the user needs to see or control.";
 
@@ -74,10 +85,35 @@ pub fn describe_exec_command(config: &AppConfig) -> String {
 
 pub struct ExecCommand;
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExecCommandArgs {
+    cmd: String,
+    workdir: Option<String>,
+    tty: Option<bool>,
+    yield_time_ms: Option<u64>,
+    max_output_tokens: Option<u64>,
+    shell: Option<String>,
+}
+
 #[async_trait]
 impl Tool for ExecCommand {
     fn name(&self) -> &'static str {
         "exec_command"
+    }
+
+    fn title(&self) -> String {
+        "Execute shell command".to_string()
+    }
+
+    fn behavior(&self) -> ToolBehavior {
+        ToolBehavior::new(
+            false,
+            true,
+            false,
+            true,
+            "A shell command can modify or delete local state and interact with external systems.",
+        )
     }
 
     fn description(&self) -> String {
@@ -92,12 +128,12 @@ impl Tool for ExecCommand {
         json!({
             "type": "object",
             "properties": {
-                "cmd": { "type": "string", "description": "Shell command to execute." },
+                "cmd": { "type": "string", "minLength": 1, "description": "Shell command to execute." },
                 "workdir": { "type": "string", "description": "Working directory for the command, relative to the project root. Defaults to the project root." },
-                "tty": { "type": "boolean", "description": "Unsupported by this bridge — commands always run with plain pipes. Passing true returns an error." },
-                "yield_time_ms": { "type": "number", "description": format!("Wait before yielding output. Defaults to {EXEC_DEFAULT_YIELD_MS} ms; effective range is {EXEC_MIN_YIELD_MS}-{EXEC_MAX_YIELD_MS} ms.") },
-                "max_output_tokens": { "type": "number", "description": format!("Output token budget. Defaults to {DEFAULT_MAX_OUTPUT_TOKENS} tokens; larger requests are capped by the server output policy and the middle of longer output is elided.") },
-                "shell": { "type": "string", "description": "Shell binary to launch. Defaults to the platform shell." }
+                "tty": { "type": "boolean", "const": false, "description": "Commands use plain pipes; only false is supported." },
+                "yield_time_ms": { "type": "integer", "minimum": 0, "description": format!("Wait before yielding output. Defaults to {EXEC_DEFAULT_YIELD_MS} ms and is clamped to the effective range {EXEC_MIN_YIELD_MS}-{EXEC_MAX_YIELD_MS} ms (at least {EXEC_DEFAULT_YIELD_MS} ms on Windows).") },
+                "max_output_tokens": { "type": "integer", "minimum": 0, "description": format!("Output token budget. Zero or omission uses the {DEFAULT_MAX_OUTPUT_TOKENS}-token default; larger requests are capped by the server output policy and the middle of longer output is elided.") },
+                "shell": { "type": "string", "minLength": 1, "description": "Recognized shell type selector such as bash, zsh, sh, powershell, pwsh, or cmd. A path is used only for its basename; the supplied path is never executed directly. Unrecognized or unavailable shell types use Codex's platform fallback (/bin/sh on POSIX, cmd.exe on Windows)." }
             },
             "required": ["cmd"],
             "additionalProperties": false
@@ -121,18 +157,28 @@ impl Tool for ExecCommand {
     }
 
     async fn call(&self, args: Value, config: &AppConfig, session: &SessionState) -> ToolResult {
-        let cmd = arg_str(&args, "cmd").unwrap_or("");
+        let ExecCommandArgs {
+            cmd,
+            workdir,
+            tty,
+            yield_time_ms,
+            max_output_tokens,
+            shell,
+        } = match parse_tool_args(args) {
+            Ok(args) => args,
+            Err(error) => return *error,
+        };
         if cmd.trim().is_empty() {
             return ToolResult::error("cmd must be a non-empty string");
         }
-        if args.get("tty").and_then(|v| v.as_bool()) == Some(true) {
+        if tty == Some(true) {
             return ToolResult::error(
                 "tty is not supported by this bridge; commands run with plain pipes. Omit tty or pass false.",
             );
         }
 
         let yield_ms = clamp(
-            arg_u64(&args, "yield_time_ms").unwrap_or(EXEC_DEFAULT_YIELD_MS),
+            yield_time_ms.unwrap_or(EXEC_DEFAULT_YIELD_MS),
             EXEC_MIN_YIELD_MS,
             EXEC_MAX_YIELD_MS,
         );
@@ -141,38 +187,33 @@ impl Tool for ExecCommand {
         // return before any output has surfaced.
         #[cfg(windows)]
         let yield_ms = yield_ms.max(EXEC_DEFAULT_YIELD_MS);
-        let max_output_tokens =
-            resolve_requested_output_tokens(config, arg_u64(&args, "max_output_tokens"));
+        let max_output_tokens = resolve_requested_output_tokens(config, max_output_tokens);
 
-        let cwd = match resolve_safe_path(
-            arg_str(&args, "workdir").unwrap_or(""),
-            &config.work_dir,
-            true,
-        ) {
+        let cwd = match resolve_safe_path(workdir.as_deref().unwrap_or(""), &config.work_dir, true)
+        {
             Ok(p) => p,
             Err(e) => return ToolResult::error(e),
         };
 
-        if let Err(e) = assert_exec_allowed(cmd, config) {
+        if let Err(e) = assert_exec_allowed(&cmd, config) {
             return ToolResult::error(e.to_string());
         }
 
         let started = std::time::Instant::now();
-        let exec_session =
-            match start_exec_session(session, config, cmd, &cwd, arg_str(&args, "shell")) {
-                Ok(s) => s,
-                Err(e) => {
-                    let hint = if config.exec.mode == ExecMode::Allowlist {
-                        format!(
-                            "\nAllowed commands: {}",
-                            effective_allowlist(config).join(", ")
-                        )
-                    } else {
-                        String::new()
-                    };
-                    return ToolResult::error(format!("{e}{hint}"));
-                }
-            };
+        let exec_session = match start_exec_session(session, config, &cmd, &cwd, shell.as_deref()) {
+            Ok(s) => s,
+            Err(e) => {
+                let hint = if config.exec.mode == ExecMode::Allowlist {
+                    format!(
+                        "\nAllowed commands: {}",
+                        effective_allowlist(config).join(", ")
+                    )
+                } else {
+                    String::new()
+                };
+                return ToolResult::error(format!("{e}{hint}"));
+            }
+        };
 
         let (output, exited, buffer_truncated) =
             exec_session.yield_output_with_metadata(yield_ms).await;
@@ -187,10 +228,10 @@ impl Tool for ExecCommand {
         };
 
         let is_error = if exited {
-            let code = exec_session.exit_code();
-            result.exit_code = code;
+            let code = exec_session.exit_code().unwrap_or(-1);
+            result.exit_code = Some(code);
             session.remove_exec_session(exec_session.id);
-            code.unwrap_or(0) != 0
+            code != 0
         } else {
             result.session_id = Some(exec_session.id);
             false

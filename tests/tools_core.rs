@@ -142,6 +142,53 @@ async fn apply_patch_writes_nothing_when_a_later_hunk_fails() {
 }
 
 #[tokio::test]
+async fn apply_patch_reports_partial_application_after_a_filesystem_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = default_config(dir.path().to_path_buf());
+    let session = SessionState::new();
+    let patch = "*** Begin Patch\n*** Add File: blocker\n+created before failure\n*** Add File: blocker/child.txt\n+cannot create beneath a file\n*** End Patch";
+
+    let result = ApplyPatch
+        .call(json!({ "input": patch }), &config, &session)
+        .await;
+
+    assert!(result.is_error);
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("blocker")).unwrap(),
+        "created before failure\n"
+    );
+    let message = result.joined_text();
+    assert!(message.contains("Completed before failure:\nA blocker"));
+    assert!(message.contains("failing operation may also have modified its target"));
+}
+
+#[tokio::test]
+async fn apply_patch_rechecks_context_after_an_earlier_move() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("source.txt"), "source\n").unwrap();
+    std::fs::write(dir.path().join("destination.txt"), "destination\n").unwrap();
+    let config = default_config(dir.path().to_path_buf());
+    let session = SessionState::new();
+    let patch = "*** Begin Patch\n*** Update File: source.txt\n*** Move to: destination.txt\n@@\n-source\n+moved\n*** Update File: destination.txt\n@@\n-destination\n+updated\n*** End Patch";
+
+    let result = ApplyPatch
+        .call(json!({ "input": patch }), &config, &session)
+        .await;
+
+    assert!(result.is_error);
+    assert!(!dir.path().join("source.txt").exists());
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("destination.txt")).unwrap(),
+        "moved\n"
+    );
+    assert!(
+        result
+            .joined_text()
+            .contains("Completed before failure:\nR source.txt -> destination.txt")
+    );
+}
+
+#[tokio::test]
 async fn apply_patch_rejects_a_malformed_patch() {
     let dir = TempDir::new().unwrap();
     let config = config_in(&dir);
@@ -334,7 +381,7 @@ async fn clock_sleep_rejects_a_non_numeric_duration() {
         .await;
 
     assert!(r.is_error);
-    assert!(r.joined_text().contains("duration_ms must be a number"));
+    assert!(r.joined_text().contains("Invalid tool arguments"));
 }
 
 // --- update_plan ------------------------------------------------------------
@@ -413,7 +460,7 @@ async fn update_plan_rejects_an_unknown_status() {
         .await;
 
     assert!(r.is_error);
-    assert!(r.joined_text().contains("status must be one of"));
+    assert!(r.joined_text().contains("Invalid tool arguments"));
 }
 
 #[tokio::test]
@@ -427,7 +474,7 @@ async fn update_plan_rejects_a_plan_that_is_not_an_array() {
         .await;
 
     assert!(r.is_error);
-    assert!(r.joined_text().contains("plan must be an array"));
+    assert!(r.joined_text().contains("Invalid tool arguments"));
 }
 
 // --- read_file / write_file round trip --------------------------------------

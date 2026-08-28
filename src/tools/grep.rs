@@ -2,7 +2,9 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
+use globset::{GlobBuilder, GlobMatcher};
 use regex::{Regex, RegexBuilder};
+use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::exec_sessions::SessionState;
@@ -11,10 +13,24 @@ use crate::output_budget::{
     approx_bytes_for_tokens, entry_budget, tool_output_token_budget, truncate_text,
 };
 use crate::safe_path::resolve_safe_path;
-use crate::tool::{Tool, arg_bool, arg_str, arg_u64};
+use crate::tool::{Tool, ToolBehavior, parse_tool_args, text_output_schema};
 use crate::types::{AppConfig, ToolResult};
 
 pub struct Grep;
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct GrepArgs {
+    pattern: String,
+    path: Option<String>,
+    include: Option<String>,
+    context: Option<u64>,
+    #[serde(default)]
+    ignore_case: bool,
+    max_results: Option<u64>,
+    #[serde(default)]
+    files_only: bool,
+}
 
 const DEFAULT_MAX_RESULTS: usize = 500;
 const MAX_CONTEXT_LINES: usize = 20;
@@ -29,11 +45,12 @@ const BINARY_EXTENSIONS: &[&str] = &[
 ];
 
 /// Recursively collect searchable files under `dir`, skipping binary
-/// extensions, an optional `*.ext` include filter, pruned directories, and any
+/// extensions, an optional basename or relative-path include glob, pruned directories, and any
 /// path the ignore policy hides.
 fn collect_files(
     dir: &Path,
-    ext_match: Option<&str>,
+    root: &Path,
+    include: Option<&IncludeMatcher>,
     matcher: &IgnoreMatcher,
     out: &mut Vec<PathBuf>,
 ) {
@@ -50,7 +67,7 @@ fn collect_files(
         };
         if is_dir {
             if !matcher.should_prune(&name, &path) {
-                collect_files(&path, ext_match, matcher, out);
+                collect_files(&path, root, include, matcher, out);
             }
         } else {
             let ext = match name.rfind('.') {
@@ -60,9 +77,7 @@ fn collect_files(
             if BINARY_EXTENSIONS.contains(&ext) {
                 continue;
             }
-            if let Some(em) = ext_match
-                && ext != em
-            {
+            if include.is_some_and(|include| !include.is_match(&path, root)) {
                 continue;
             }
             if matcher.is_ignored(&path, false) {
@@ -73,10 +88,57 @@ fn collect_files(
     }
 }
 
+struct IncludeMatcher {
+    matcher: GlobMatcher,
+    basename_only: bool,
+}
+
+impl IncludeMatcher {
+    fn compile(pattern: &str) -> Result<Self, String> {
+        let matcher = GlobBuilder::new(pattern)
+            .literal_separator(true)
+            .build()
+            .map_err(|error| format!("Invalid include glob {pattern:?}: {error}"))?
+            .compile_matcher();
+        Ok(Self {
+            matcher,
+            basename_only: !pattern.contains(['/', '\\']),
+        })
+    }
+
+    fn is_match(&self, path: &Path, root: &Path) -> bool {
+        let Some(relative) = to_rel_posix(path, root) else {
+            return false;
+        };
+        if self.basename_only {
+            relative
+                .rsplit('/')
+                .next()
+                .is_some_and(|name| self.matcher.is_match(name))
+        } else {
+            self.matcher.is_match(relative)
+        }
+    }
+}
+
 #[async_trait]
 impl Tool for Grep {
     fn name(&self) -> &'static str {
         "grep"
+    }
+
+    fn title(&self) -> String {
+        "Search file contents".to_string()
+    }
+
+    fn behavior(&self) -> ToolBehavior {
+        ToolBehavior::new(
+            true,
+            false,
+            true,
+            false,
+            "Searches local project files without modifying them or contacting external systems.",
+        )
     }
 
     fn description(&self) -> String {
@@ -90,27 +152,35 @@ impl Tool for Grep {
                 "pattern": { "type": "string", "description": "Regex pattern to search for" },
                 "path": { "type": "string", "description": "Subdirectory to search in. Default: work-dir root" },
                 "include": { "type": "string", "description": "Only search files matching this glob (e.g. *.ts)" },
-                "context": { "type": "number", "minimum": 0, "description": format!("Number of context lines before and after each match. Capped at {MAX_CONTEXT_LINES}.") },
+                "context": { "type": "integer", "minimum": 0, "description": format!("Number of context lines before and after each match. Values above {MAX_CONTEXT_LINES} are capped.") },
                 "ignoreCase": { "type": "boolean", "description": "Case-insensitive search. Default: false" },
-                "maxResults": { "type": "number", "minimum": 1, "description": format!("Max number of matching lines to return. Defaults to {DEFAULT_MAX_RESULTS} and cannot exceed the configured output.maxEntries limit.") },
+                "maxResults": { "type": "integer", "minimum": 1, "description": format!("Max number of matching lines to return. Defaults to {DEFAULT_MAX_RESULTS} and cannot exceed the configured output.maxEntries limit.") },
                 "filesOnly": { "type": "boolean", "description": "Only return file paths that contain matches, not the matching lines" }
             },
-            "required": ["pattern"]
+            "required": ["pattern"],
+            "additionalProperties": false
         })
     }
 
     fn output_schema(&self) -> Option<Value> {
-        Some(json!({
-            "type": "object",
-            "properties": {
-                "content": { "type": "string", "description": "Grep results as 'file:line:match' lines with optional context, or file paths if filesOnly is true" }
-            }
-        }))
+        Some(text_output_schema())
     }
 
     async fn call(&self, args: Value, config: &AppConfig, _session: &SessionState) -> ToolResult {
+        let GrepArgs {
+            pattern,
+            path,
+            include,
+            context,
+            ignore_case,
+            max_results,
+            files_only,
+        } = match parse_tool_args(args) {
+            Ok(args) => args,
+            Err(error) => return *error,
+        };
         // An empty `path` is falsy in the TS and falls back to the work dir.
-        let search_path = match arg_str(&args, "path").filter(|p| !p.is_empty()) {
+        let search_path = match path.as_deref().filter(|path| !path.is_empty()) {
             Some(p) => match resolve_safe_path(p, &config.work_dir, false) {
                 Ok(p) => p,
                 Err(e) => return ToolResult::error(e),
@@ -118,14 +188,19 @@ impl Tool for Grep {
             None => config.work_dir.clone(),
         };
 
-        let requested_context = arg_u64(&args, "context")
+        let requested_context = context
             .map(|value| usize::try_from(value).unwrap_or(usize::MAX))
             .unwrap_or(0);
         let context_lines = requested_context.min(MAX_CONTEXT_LINES);
         let context_clamped = requested_context > context_lines;
-        let include_pattern = arg_str(&args, "include");
-        let ignore_case = arg_bool(&args, "ignoreCase");
-        let requested_max_results = arg_u64(&args, "maxResults");
+        let include = match include.as_deref() {
+            Some(pattern) => match IncludeMatcher::compile(pattern) {
+                Ok(matcher) => Some(matcher),
+                Err(error) => return ToolResult::error(error),
+            },
+            None => None,
+        };
+        let requested_max_results = max_results;
         if requested_max_results == Some(0) {
             return ToolResult::error("maxResults must be positive");
         }
@@ -139,10 +214,7 @@ impl Tool for Grep {
             requested_max_results.min(configured_max_results)
         };
         let max_results_clamped = requested_max_results > max_results;
-        let files_only = arg_bool(&args, "filesOnly");
-
-        let pattern = arg_str(&args, "pattern").unwrap_or("");
-        let regex: Regex = match RegexBuilder::new(pattern)
+        let regex: Regex = match RegexBuilder::new(&pattern)
             .case_insensitive(ignore_case)
             .build()
         {
@@ -150,15 +222,15 @@ impl Tool for Grep {
             Err(_) => return ToolResult::error(format!("Invalid regex: {pattern}")),
         };
 
-        // include of the form "*.ext" is honoured as an extension filter, as in
-        // the TS collectFiles.
-        let ext_match: Option<String> = include_pattern
-            .filter(|g| g.starts_with("*."))
-            .map(|g| g[1..].to_string());
-
         let matcher = build_ignore(config);
         let mut files: Vec<PathBuf> = Vec::new();
-        collect_files(&search_path, ext_match.as_deref(), &matcher, &mut files);
+        collect_files(
+            &search_path,
+            &search_path,
+            include.as_ref(),
+            &matcher,
+            &mut files,
+        );
 
         let output_tokens = tool_output_token_budget(config);
         let output_bytes = approx_bytes_for_tokens(output_tokens);

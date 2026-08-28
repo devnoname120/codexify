@@ -2,16 +2,28 @@ use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use globset::GlobBuilder;
-use serde_json::{Value, json};
+use schemars::JsonSchema;
+use serde::Deserialize;
+use serde_json::Value;
 
 use crate::exec_sessions::SessionState;
 use crate::ignore_rules::{IgnoreMatcher, build_ignore, to_rel_posix};
 use crate::output_budget::{entry_budget, limit_list};
 use crate::safe_path::resolve_safe_path;
-use crate::tool::{Tool, arg_str};
+use crate::tool::{Tool, ToolBehavior, parse_tool_args, schema_for, text_output_schema};
 use crate::types::{AppConfig, ToolResult};
 
 pub struct Glob;
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct GlobArgs {
+    /// Glob pattern to match.
+    #[schemars(length(min = 1))]
+    pattern: String,
+    /// Project-relative subdirectory. Defaults to the project root.
+    path: Option<String>,
+}
 
 /// Whether the pattern opts into matching dot-prefixed path segments. fast-glob
 /// runs with `dot: false`, so wildcard segments never match a leading `.`; a
@@ -57,37 +69,40 @@ impl Tool for Glob {
         "glob"
     }
 
+    fn title(&self) -> String {
+        "Find files".to_string()
+    }
+
+    fn behavior(&self) -> ToolBehavior {
+        ToolBehavior::new(
+            true,
+            false,
+            true,
+            false,
+            "Searches project paths without modifying the filesystem or external systems.",
+        )
+    }
+
     fn description(&self) -> String {
         "Find files matching a glob pattern within the project. Supports patterns like **/*.ts (all TypeScript files), src/**/*.test.ts (test files in src), *.json (JSON files in root). Returns a sorted list of matching file paths. Use this to discover files before reading them, or to understand the project structure.".into()
     }
 
     fn input_schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "pattern": { "type": "string", "description": "Glob pattern to match" },
-                "path": { "type": "string", "description": "Subdirectory to search in. Default: work-dir root" }
-            },
-            "required": ["pattern"]
-        })
+        schema_for::<GlobArgs>()
     }
 
     fn output_schema(&self) -> Option<Value> {
-        Some(json!({
-            "type": "object",
-            "properties": {
-                "content": { "type": "string", "description": "Newline-separated list of matched file paths relative to work-dir" }
-            }
-        }))
+        Some(text_output_schema())
     }
 
     async fn call(&self, args: Value, config: &AppConfig, _session: &SessionState) -> ToolResult {
-        let Some(pattern) = arg_str(&args, "pattern") else {
-            return ToolResult::error("pattern must be a string");
+        let GlobArgs { pattern, path } = match parse_tool_args(args) {
+            Ok(args) => args,
+            Err(error) => return *error,
         };
 
         // An empty `path` is falsy in the TS and falls back to the work dir.
-        let base_path = match arg_str(&args, "path").filter(|p| !p.is_empty()) {
+        let base_path = match path.as_deref().filter(|path| !path.is_empty()) {
             Some(p) => match resolve_safe_path(p, &config.work_dir, false) {
                 Ok(p) => p,
                 Err(e) => return ToolResult::error(e),
@@ -97,11 +112,11 @@ impl Tool for Glob {
 
         // fast-glob treats an unparseable pattern (e.g. an unclosed bracket) as a
         // literal rather than erroring; the common outcome is no match.
-        let glob = match GlobBuilder::new(pattern).literal_separator(true).build() {
+        let glob = match GlobBuilder::new(&pattern).literal_separator(true).build() {
             Ok(g) => g.compile_matcher(),
             Err(_) => return ToolResult::text("No files found matching pattern."),
         };
-        let allow_dot = pattern_allows_dot(pattern);
+        let allow_dot = pattern_allows_dot(&pattern);
 
         let matcher = build_ignore(config);
 

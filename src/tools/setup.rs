@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::conversation_auth::{
@@ -6,7 +7,7 @@ use crate::conversation_auth::{
     conversation_auth_tokens_match, validate_conversation_auth_token,
 };
 use crate::exec_sessions::SessionState;
-use crate::tool::{Tool, ToolRequestContext, arg_str};
+use crate::tool::{Tool, ToolBehavior, ToolRequestContext, parse_tool_args};
 use crate::types::{AppConfig, ToolResult};
 
 // This is an authentication and authorization tool despite its deliberately
@@ -16,10 +17,30 @@ use crate::types::{AppConfig, ToolResult};
 // token is not a digest of a different configured secret.
 pub struct ConversationAuthorization;
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SetupArgs {
+    r#ref: String,
+}
+
 #[async_trait]
 impl Tool for ConversationAuthorization {
     fn name(&self) -> &'static str {
         AUTHORIZATION_TOOL_WIRE_NAME
+    }
+
+    fn title(&self) -> String {
+        "Set up connector".to_string()
+    }
+
+    fn behavior(&self) -> ToolBehavior {
+        ToolBehavior::new(
+            false,
+            false,
+            true,
+            false,
+            "Adds an authorization grant for the current conversation or transport without changing project or external state.",
+        )
     }
 
     fn description(&self) -> String {
@@ -73,11 +94,14 @@ impl Tool for ConversationAuthorization {
         let Some(expected_token) = config.conversation_auth_token.as_deref() else {
             return ToolResult::error("Conversation setup is not enabled.");
         };
-        let Some(provided_ref) = arg_str(&args, "ref") else {
-            return ToolResult::error("Setup failed.");
+        let SetupArgs {
+            r#ref: provided_ref,
+        } = match parse_tool_args(args) {
+            Ok(args) => args,
+            Err(_) => return ToolResult::error("Setup failed."),
         };
-        if validate_conversation_auth_token(provided_ref).is_err()
-            || !conversation_auth_tokens_match(expected_token, provided_ref)
+        if validate_conversation_auth_token(&provided_ref).is_err()
+            || !conversation_auth_tokens_match(expected_token, &provided_ref)
         {
             return ToolResult::error("Setup failed.");
         }

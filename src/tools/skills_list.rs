@@ -3,7 +3,7 @@ use serde_json::{Value, json};
 
 use crate::exec_sessions::SessionState;
 use crate::skills::{SKILL_FILENAME, SkillCatalog, discover_skills, skills_enabled};
-use crate::tool::Tool;
+use crate::tool::{Tool, ToolBehavior, empty_object_schema};
 use crate::types::{AppConfig, ToolResult};
 
 /// Reproduces the TS `renderSkillList`.
@@ -65,6 +65,20 @@ impl Tool for SkillsList {
         "skills_list"
     }
 
+    fn title(&self) -> String {
+        "List skills".to_string()
+    }
+
+    fn behavior(&self) -> ToolBehavior {
+        ToolBehavior::new(
+            true,
+            false,
+            true,
+            false,
+            "Discovers local skill metadata without modifying files or external systems.",
+        )
+    }
+
     fn description(&self) -> String {
         format!(
             "List the skills available for this project. A skill is a set of instructions stored in a {SKILL_FILENAME}, covering a task the user or the repository has already worked out how to do well. Skills are found under .agents/skills, .codex/skills and .claude/skills, in the project and in the user's home directory. Each entry gives a name and a description of when it applies; call skills_read with the name to get the instructions themselves. If the user names a skill, or the task clearly matches one of these descriptions, use it."
@@ -72,11 +86,7 @@ impl Tool for SkillsList {
     }
 
     fn input_schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {},
-            "additionalProperties": false
-        })
+        empty_object_schema()
     }
 
     fn output_schema(&self) -> Option<Value> {

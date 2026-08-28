@@ -1,10 +1,10 @@
 use async_trait::async_trait;
-use serde_json::{Value, json};
+use serde_json::Value;
 use tokio::process::Command;
 
 use crate::exec_sessions::SessionState;
 use crate::process_env::scrub_untrusted_child_env;
-use crate::tool::Tool;
+use crate::tool::{Tool, ToolBehavior, empty_object_schema, text_output_schema};
 use crate::types::{AppConfig, ToolResult};
 
 pub struct GitStatus;
@@ -15,24 +15,30 @@ impl Tool for GitStatus {
         "git_status"
     }
 
+    fn title(&self) -> String {
+        "Get Git status".to_string()
+    }
+
+    fn behavior(&self) -> ToolBehavior {
+        ToolBehavior::new(
+            true,
+            false,
+            true,
+            false,
+            "Reads the local Git working-tree status without changing repository state.",
+        )
+    }
+
     fn description(&self) -> String {
         "Show the current git status of the project. Returns a list of modified, added, deleted, and untracked files with their status codes (M=modified, A=added, D=deleted, ??=untracked). Use this before committing to see what has changed, or to understand the current state of the working tree.".into()
     }
 
     fn input_schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {}
-        })
+        empty_object_schema()
     }
 
     fn output_schema(&self) -> Option<Value> {
-        Some(json!({
-            "type": "object",
-            "properties": {
-                "content": { "type": "string", "description": "Changed file count header followed by git porcelain status lines (e.g. ' M file.ts')" }
-            }
-        }))
+        Some(text_output_schema())
     }
 
     async fn call(&self, _args: Value, config: &AppConfig, _session: &SessionState) -> ToolResult {

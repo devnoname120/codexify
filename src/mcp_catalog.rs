@@ -7,16 +7,14 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use rmcp::RoleClient;
-use rmcp::model::{
-    CallToolRequestParams, Implementation, ServerPeerInfo, Tool as McpTool, ToolAnnotations,
-};
+use rmcp::model::{CallToolRequestParams, Implementation, ServerPeerInfo, Tool as McpTool};
 use rmcp::service::Peer;
 use serde_json::{Map, Value, json};
 use tokio_util::sync::CancellationToken;
 
 use crate::bridge::forward_tool_call;
 use crate::exec_sessions::SessionState;
-use crate::tool::{Tool, ToolCallIdentity, ToolRequestContext};
+use crate::tool::{Tool, ToolBehavior, ToolCallIdentity, ToolRequestContext};
 use crate::types::{AppConfig, McpServerProvenance, ToolResult};
 
 pub(crate) const MCP_LIST_SOURCES: &str = "mcp_list_sources";
@@ -629,20 +627,134 @@ fn structured_json(value: Value) -> ToolResult {
     ToolResult::text(rendered).with_structured(value)
 }
 
-fn read_only_annotations() -> ToolAnnotations {
-    ToolAnnotations::new()
-        .read_only(true)
-        .destructive(false)
-        .idempotent(true)
-        .open_world(false)
+fn catalog_read_behavior() -> ToolBehavior {
+    ToolBehavior::new(
+        true,
+        false,
+        true,
+        false,
+        "Reads the in-process catalog of already connected MCP sources without invoking an upstream tool.",
+    )
 }
 
-fn dispatcher_annotations() -> ToolAnnotations {
-    ToolAnnotations::new()
-        .read_only(false)
-        .destructive(true)
-        .idempotent(false)
-        .open_world(true)
+fn dispatcher_behavior() -> ToolBehavior {
+    ToolBehavior::new(
+        false,
+        true,
+        false,
+        true,
+        "Can dispatch to any cataloged upstream tool, including destructive and open-world operations.",
+    )
+}
+
+fn icon_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "src": { "type": "string" },
+            "mimeType": { "type": "string" },
+            "sizes": { "type": "array", "items": { "type": "string" } },
+            "theme": { "type": "string", "enum": ["light", "dark"] }
+        },
+        "required": ["src"],
+        "additionalProperties": false
+    })
+}
+
+fn implementation_schema() -> Value {
+    let icon = icon_schema();
+    json!({
+        "type": "object",
+        "properties": {
+            "name": { "type": "string" },
+            "title": { "type": "string" },
+            "version": { "type": "string" },
+            "description": { "type": "string" },
+            "icons": { "type": "array", "items": icon },
+            "websiteUrl": { "type": "string" }
+        },
+        "required": ["name", "version"],
+        "additionalProperties": false
+    })
+}
+
+fn annotations_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "title": { "type": "string" },
+            "readOnlyHint": { "type": "boolean" },
+            "destructiveHint": { "type": "boolean" },
+            "idempotentHint": { "type": "boolean" },
+            "openWorldHint": { "type": "boolean" }
+        },
+        "additionalProperties": false
+    })
+}
+
+fn source_summary_schema() -> Value {
+    let implementation = implementation_schema();
+    json!({
+        "type": "object",
+        "properties": {
+            "id": { "type": "string" },
+            "name": { "type": "string" },
+            "provenance": { "type": "string", "enum": ["explicit", "codex-config", "codex-cli"] },
+            "transport": { "type": "string" },
+            "exposure": { "type": "string", "const": "catalog" },
+            "toolCount": { "type": "integer", "minimum": 0 },
+            "implementation": implementation,
+            "instructions": { "type": "string" }
+        },
+        "required": ["id", "name", "provenance", "transport", "exposure", "toolCount"],
+        "additionalProperties": false
+    })
+}
+
+fn tool_summary_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "sourceId": { "type": "string" },
+            "sourceName": { "type": "string" },
+            "toolId": { "type": "string" },
+            "toolName": { "type": "string" },
+            "title": { "type": ["string", "null"] },
+            "description": { "type": ["string", "null"] },
+            "score": { "type": "number", "minimum": 0 }
+        },
+        "required": [
+            "sourceId",
+            "sourceName",
+            "toolId",
+            "toolName",
+            "title",
+            "description",
+            "score"
+        ],
+        "additionalProperties": false
+    })
+}
+
+fn upstream_tool_schema() -> Value {
+    let annotations = annotations_schema();
+    let icon = icon_schema();
+    json!({
+        "type": "object",
+        "properties": {
+            "id": { "type": "string" },
+            "name": { "type": "string" },
+            "title": { "type": "string" },
+            "description": { "type": "string" },
+            "inputSchema": { "type": "object" },
+            "outputSchema": { "type": "object" },
+            "annotations": annotations,
+            "icons": { "type": "array", "items": icon },
+            "_meta": { "type": "object" }
+        },
+        "required": ["id", "name", "inputSchema"],
+        "additionalProperties": false
+    })
 }
 
 struct McpListSourcesTool {
@@ -656,16 +768,16 @@ impl Tool for McpListSourcesTool {
         MCP_LIST_SOURCES
     }
 
-    fn title(&self) -> Option<String> {
-        Some("List transitive MCP sources".to_string())
+    fn title(&self) -> String {
+        "List transitive MCP sources".to_string()
     }
 
     fn description(&self) -> String {
         self.description.clone()
     }
 
-    fn annotations(&self) -> Option<ToolAnnotations> {
-        Some(read_only_annotations())
+    fn behavior(&self) -> ToolBehavior {
+        catalog_read_behavior()
     }
 
     fn input_schema(&self) -> Value {
@@ -688,10 +800,11 @@ impl Tool for McpListSourcesTool {
     }
 
     fn output_schema(&self) -> Option<Value> {
+        let source = source_summary_schema();
         Some(json!({
             "type": "object",
             "properties": {
-                "sources": { "type": "array", "items": { "type": "object" } },
+                "sources": { "type": "array", "items": source },
                 "total": { "type": "integer", "minimum": 0 }
             },
             "required": ["sources", "total"],
@@ -728,16 +841,16 @@ impl Tool for McpSearchToolsTool {
         MCP_SEARCH_TOOLS
     }
 
-    fn title(&self) -> Option<String> {
-        Some("Search transitive MCP tools".to_string())
+    fn title(&self) -> String {
+        "Search transitive MCP tools".to_string()
     }
 
     fn description(&self) -> String {
         self.description.clone()
     }
 
-    fn annotations(&self) -> Option<ToolAnnotations> {
-        Some(read_only_annotations())
+    fn behavior(&self) -> ToolBehavior {
+        catalog_read_behavior()
     }
 
     fn input_schema(&self) -> Value {
@@ -746,10 +859,14 @@ impl Tool for McpSearchToolsTool {
             "properties": {
                 "query": {
                     "type": "string",
+                    "minLength": 1,
+                    "pattern": "\\S",
                     "description": "Ranked full-text query. The BM25 index covers source metadata, tool id/name/title/description, and recursively useful input/output schema property names and descriptions."
                 },
                 "source": {
                     "type": "string",
+                    "minLength": 1,
+                    "pattern": "\\S",
                     "description": format!("Optional model-visible source id returned by `{MCP_LIST_SOURCES}`.")
                 },
                 "limit": {
@@ -765,12 +882,13 @@ impl Tool for McpSearchToolsTool {
     }
 
     fn output_schema(&self) -> Option<Value> {
+        let tool = tool_summary_schema();
         Some(json!({
             "type": "object",
             "properties": {
                 "query": { "type": "string" },
                 "source": { "type": ["string", "null"] },
-                "matches": { "type": "array", "items": { "type": "object" } },
+                "matches": { "type": "array", "items": tool },
                 "total": { "type": "integer", "minimum": 0 }
             },
             "required": ["query", "source", "matches", "total"],
@@ -813,8 +931,8 @@ impl Tool for McpGetToolTool {
         MCP_GET_TOOL
     }
 
-    fn title(&self) -> Option<String> {
-        Some("Get a transitive MCP tool definition".to_string())
+    fn title(&self) -> String {
+        "Get a transitive MCP tool definition".to_string()
     }
 
     fn description(&self) -> String {
@@ -823,8 +941,8 @@ impl Tool for McpGetToolTool {
         )
     }
 
-    fn annotations(&self) -> Option<ToolAnnotations> {
-        Some(read_only_annotations())
+    fn behavior(&self) -> ToolBehavior {
+        catalog_read_behavior()
     }
 
     fn input_schema(&self) -> Value {
@@ -833,10 +951,14 @@ impl Tool for McpGetToolTool {
             "properties": {
                 "source": {
                     "type": "string",
+                    "minLength": 1,
+                    "pattern": "\\S",
                     "description": format!("Model-visible source id returned by `{MCP_LIST_SOURCES}` or `{MCP_SEARCH_TOOLS}`.")
                 },
                 "tool": {
                     "type": "string",
+                    "minLength": 1,
+                    "pattern": "\\S",
                     "description": format!("Model-visible tool id returned by `{MCP_SEARCH_TOOLS}`.")
                 }
             },
@@ -846,11 +968,13 @@ impl Tool for McpGetToolTool {
     }
 
     fn output_schema(&self) -> Option<Value> {
+        let source = source_summary_schema();
+        let tool = upstream_tool_schema();
         Some(json!({
             "type": "object",
             "properties": {
-                "source": { "type": "object" },
-                "tool": { "type": "object" }
+                "source": source,
+                "tool": tool
             },
             "required": ["source", "tool"],
             "additionalProperties": false
@@ -938,8 +1062,8 @@ impl Tool for McpCallToolTool {
         MCP_CALL_TOOL
     }
 
-    fn title(&self) -> Option<String> {
-        Some("Call a transitive MCP tool".to_string())
+    fn title(&self) -> String {
+        "Call a transitive MCP tool".to_string()
     }
 
     fn description(&self) -> String {
@@ -948,8 +1072,8 @@ impl Tool for McpCallToolTool {
         )
     }
 
-    fn annotations(&self) -> Option<ToolAnnotations> {
-        Some(dispatcher_annotations())
+    fn behavior(&self) -> ToolBehavior {
+        dispatcher_behavior()
     }
 
     fn input_schema(&self) -> Value {
@@ -958,10 +1082,14 @@ impl Tool for McpCallToolTool {
             "properties": {
                 "source": {
                     "type": "string",
+                    "minLength": 1,
+                    "pattern": "\\S",
                     "description": format!("Model-visible source id returned by `{MCP_LIST_SOURCES}` or `{MCP_SEARCH_TOOLS}`.")
                 },
                 "tool": {
                     "type": "string",
+                    "minLength": 1,
+                    "pattern": "\\S",
                     "description": format!("Model-visible tool id returned by `{MCP_SEARCH_TOOLS}`.")
                 },
                 "arguments": {
@@ -1044,6 +1172,7 @@ pub(crate) fn build_catalog_tools(inputs: Vec<CatalogSourceInput>) -> Vec<Box<dy
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rmcp::model::{Icon, ToolAnnotations};
 
     #[test]
     fn tokenizer_splits_names_for_ranked_search() {
@@ -1081,5 +1210,69 @@ mod tests {
         assert!(terms.contains_key("function"));
         assert!(terms.contains_key("address"));
         assert!(terms.contains_key("decompile"));
+    }
+
+    #[test]
+    fn catalog_record_schemas_accept_current_rmcp_serialization() {
+        let mut implementation = Implementation::new("fixture", "1.0.0");
+        implementation.title = Some("Fixture server".to_string());
+        implementation.description = Some("Test implementation".to_string());
+        implementation.icons = Some(vec![
+            Icon::new("https://example.invalid/server.svg")
+                .with_mime_type("image/svg+xml")
+                .with_sizes(vec!["any".to_string()])
+                .with_theme(rmcp::model::IconTheme::Dark),
+        ]);
+        implementation.website_url = Some("https://example.invalid".to_string());
+        let source = json!({
+            "id": "fixture",
+            "name": "fixture",
+            "provenance": "explicit",
+            "transport": "streamable-http",
+            "exposure": "catalog",
+            "toolCount": 1,
+            "implementation": implementation,
+            "instructions": "Use for fixture operations."
+        });
+        assert!(
+            jsonschema::draft202012::options()
+                .build(&source_summary_schema())
+                .unwrap()
+                .is_valid(&source)
+        );
+
+        let raw = McpTool::new(
+            "fixture_tool",
+            "Fixture tool",
+            json!({
+                "type": "object",
+                "properties": { "value": { "type": "string" } },
+                "additionalProperties": false
+            })
+            .as_object()
+            .unwrap()
+            .clone(),
+        )
+        .with_title("Fixture tool")
+        .with_annotations(
+            ToolAnnotations::with_title("Fixture action")
+                .read_only(true)
+                .destructive(false)
+                .idempotent(true)
+                .open_world(false),
+        )
+        .with_icons(vec![Icon::new("https://example.invalid/tool.png")]);
+        let mut tool = serde_json::to_value(raw)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .clone();
+        tool.insert("id".to_string(), Value::String("fixture_tool".to_string()));
+        assert!(
+            jsonschema::draft202012::options()
+                .build(&upstream_tool_schema())
+                .unwrap()
+                .is_valid(&Value::Object(tool))
+        );
     }
 }

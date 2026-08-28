@@ -48,7 +48,9 @@ use crate::project_bindings::{ConversationIdentity, ProjectBindingStore};
 use crate::registry::load_tools_for_config;
 use crate::review::{ReviewAvailability, ReviewCheckpointManager, ReviewOwner};
 use crate::review_ui;
-use crate::tool::{Tool, ToolCallIdentity, ToolRequestContext};
+use crate::tool::{
+    Tool, ToolCallIdentity, ToolRequestContext, validate_and_wrap_tool, validate_and_wrap_tools,
+};
 use crate::tool_logging::ToolCallLogger;
 use crate::tools::set_project_root::{SetProjectRoot, select_and_render};
 use crate::types::{AppConfig, ToolContent, ToolResult};
@@ -193,13 +195,12 @@ fn finalize_model_visible_result(
 
 fn advertised_tool(tool: &dyn Tool, config: &AppConfig) -> rmcp::model::Tool {
     let schema = tool.input_schema().as_object().cloned().unwrap_or_default();
-    let mut advertised = rmcp::model::Tool::new(tool.name(), tool.describe(config), schema);
-    if let Some(title) = tool.title() {
-        advertised = advertised.with_title(title);
-    }
-    if let Some(annotations) = tool.annotations() {
-        advertised = advertised.with_annotations(annotations);
-    }
+    let mut advertised = rmcp::model::Tool::new(tool.name(), tool.describe(config), schema)
+        .with_title(tool.title())
+        .with_annotations(
+            tool.annotations()
+                .unwrap_or_else(|| tool.behavior().annotations()),
+        );
     if let Some(icons) = tool.icons() {
         advertised = advertised.with_icons(icons);
     }
@@ -302,7 +303,10 @@ impl ServerHandler for CodexHandler {
                 .and_then(ConversationIdentity::from_request_meta)
         });
         let name = request.name.as_ref().to_string();
-        let args = request.arguments.map(Value::Object).unwrap_or(Value::Null);
+        let args = request
+            .arguments
+            .map(Value::Object)
+            .unwrap_or_else(|| json!({}));
         let call_id = self.next_tool_call_id.fetch_add(1, Ordering::Relaxed);
         let tool_context = ToolRequestContext {
             conversation: conversation.clone(),
@@ -375,6 +379,8 @@ impl ServerHandler for CodexHandler {
             self.conversation_auth_error(&name, conversation.as_ref())
         {
             error
+        } else if let Some(error) = tool.and_then(|tool| tool.validate_arguments(&args).err()) {
+            ToolResult::error(format!("Invalid arguments for `{name}`: {error}"))
         } else {
             // A ChatGPT conversation gets its own exec-session view (#12); generic MCP
             // clients fall back to the transport-owned session.
@@ -487,6 +493,15 @@ impl ServerHandler for CodexHandler {
         };
 
         finalize_model_visible_result(tool.map(|tool| tool.as_ref()), &mut result, &self.config);
+        if !result.is_error
+            && let Some(tool) = tool
+            && let Err(error) = tool.validate_structured_output(result.structured_content.as_ref())
+        {
+            tracing::error!(tool = %name, %error, "tool returned structured content that violates its output schema");
+            result = ToolResult::error(format!(
+                "Tool `{name}` returned structured content that violates its declared output schema: {error}"
+            ));
+        }
 
         let duration_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
         if let (Some(logger), Some(call)) = (&self.tool_logging, tool_log_call.as_ref()) {
@@ -589,7 +604,8 @@ pub async fn start_http_server(mut config: AppConfig) -> anyhow::Result<()> {
     let bridge_report = bridge.report;
     let _bridge_services = bridge.services;
 
-    let mut all_tools = load_tools_for_config(&config);
+    let mut all_tools = validate_and_wrap_tools(load_tools_for_config(&config))
+        .map_err(|error| anyhow::anyhow!("invalid native tool contract: {error}"))?;
     let native: std::collections::HashSet<&'static str> =
         all_tools.iter().map(|t| t.name()).collect();
     let mut seen = native.clone();
@@ -599,8 +615,17 @@ pub async fn start_http_server(mut config: AppConfig) -> anyhow::Result<()> {
             tracing::warn!("bridged tool '{name}' collides with an existing tool; skipping");
             continue;
         }
-        seen.insert(name);
-        all_tools.push(tool);
+        match validate_and_wrap_tool(tool) {
+            Ok(tool) => {
+                seen.insert(name);
+                all_tools.push(tool);
+            }
+            Err(error) => {
+                tracing::warn!(
+                    "bridged tool '{name}' has an invalid contract and was skipped: {error}"
+                );
+            }
+        }
     }
     let bridged_count = all_tools.len() - native.len();
 
@@ -1075,10 +1100,28 @@ mod tests {
         is_error: bool,
     }
 
+    struct SecretInputTool;
+
+    struct InvalidStructuredOutputTool;
+
     #[async_trait]
     impl Tool for NewlyRegisteredTool {
         fn name(&self) -> &'static str {
             self.name
+        }
+
+        fn title(&self) -> String {
+            "Test tool".to_string()
+        }
+
+        fn behavior(&self) -> crate::tool::ToolBehavior {
+            crate::tool::ToolBehavior::new(
+                true,
+                false,
+                true,
+                false,
+                "Test-only tool without side effects.",
+            )
         }
 
         fn description(&self) -> String {
@@ -1112,6 +1155,113 @@ mod tests {
             } else {
                 ToolResult::text(self.answer)
             }
+        }
+    }
+
+    #[async_trait]
+    impl Tool for SecretInputTool {
+        fn name(&self) -> &'static str {
+            "secret_input_fixture"
+        }
+
+        fn title(&self) -> String {
+            "Secret input fixture".to_string()
+        }
+
+        fn behavior(&self) -> crate::tool::ToolBehavior {
+            crate::tool::ToolBehavior::new(
+                true,
+                false,
+                true,
+                false,
+                "Test-only tool without side effects.",
+            )
+        }
+
+        fn description(&self) -> String {
+            "A test-only tool for input-schema enforcement.".to_string()
+        }
+
+        fn input_schema(&self) -> Value {
+            json!({
+                "type": "object",
+                "properties": {
+                    "ref": {
+                        "type": "string",
+                        "pattern": "^[0-9a-f]{64}$",
+                        "writeOnly": true
+                    }
+                },
+                "required": ["ref"],
+                "additionalProperties": false
+            })
+        }
+
+        fn output_schema(&self) -> Option<Value> {
+            Some(crate::tool::text_output_schema())
+        }
+
+        fn requires_project_root(&self) -> bool {
+            false
+        }
+
+        async fn call(
+            &self,
+            _args: Value,
+            _config: &AppConfig,
+            _session: &SessionState,
+        ) -> ToolResult {
+            ToolResult::text("accepted")
+        }
+    }
+
+    #[async_trait]
+    impl Tool for InvalidStructuredOutputTool {
+        fn name(&self) -> &'static str {
+            "invalid_structured_output_fixture"
+        }
+
+        fn title(&self) -> String {
+            "Invalid structured output fixture".to_string()
+        }
+
+        fn behavior(&self) -> crate::tool::ToolBehavior {
+            crate::tool::ToolBehavior::new(
+                true,
+                false,
+                true,
+                false,
+                "Test-only tool without side effects.",
+            )
+        }
+
+        fn description(&self) -> String {
+            "A test-only tool for output-schema enforcement.".to_string()
+        }
+
+        fn input_schema(&self) -> Value {
+            crate::tool::empty_object_schema()
+        }
+
+        fn output_schema(&self) -> Option<Value> {
+            Some(crate::tool::text_output_schema())
+        }
+
+        fn fills_structured_content(&self) -> bool {
+            false
+        }
+
+        fn requires_project_root(&self) -> bool {
+            false
+        }
+
+        async fn call(
+            &self,
+            _args: Value,
+            _config: &AppConfig,
+            _session: &SessionState,
+        ) -> ToolResult {
+            ToolResult::text("invalid").with_structured(json!({ "content": 7 }))
         }
     }
 
@@ -1173,6 +1323,7 @@ mod tests {
         config.audit.log_file = Some(root.join("audit.jsonl"));
         let tool_logging = ToolCallLogger::new(&config).map(Arc::new);
         let audit = AuditLogger::open(&config).unwrap().map(Arc::new);
+        let tools = validate_and_wrap_tools(tools).expect("test tool contracts must be valid");
         CodexHandler {
             config: Arc::new(config),
             tools: Arc::new(tools),
@@ -1310,6 +1461,65 @@ mod tests {
         assert_eq!(payload_call_ids, audit_call_ids);
     }
 
+    #[tokio::test]
+    async fn dispatch_enforces_input_and_output_schemas_without_echoing_write_only_values() {
+        let root = tempfile::tempdir().unwrap();
+        let handler = handler_with_tools(
+            root.path(),
+            vec![
+                Box::new(SecretInputTool),
+                Box::new(InvalidStructuredOutputTool),
+            ],
+            crate::types::ToolLogLevel::Info,
+        );
+        let (server_transport, client_transport) = tokio::io::duplex(16 * 1024);
+        let server_task = tokio::spawn(async move {
+            handler
+                .serve(server_transport)
+                .await
+                .unwrap()
+                .waiting()
+                .await
+                .unwrap();
+        });
+        let client = ().serve(client_transport).await.unwrap();
+
+        let protected_value = "not-a-valid-reference-and-must-never-be-returned";
+        let invalid_input = client
+            .call_tool(
+                CallToolRequestParams::new("secret_input_fixture").with_arguments(
+                    json!({ "ref": protected_value, "unexpected": true })
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ),
+            )
+            .await
+            .unwrap();
+        assert_eq!(invalid_input.is_error, Some(true));
+        let invalid_input_text = invalid_input.content[0].as_text().unwrap().text.as_str();
+        assert!(invalid_input_text.contains("Invalid arguments"));
+        assert!(!invalid_input_text.contains(protected_value));
+
+        let invalid_output = client
+            .call_tool(CallToolRequestParams::new(
+                "invalid_structured_output_fixture",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(invalid_output.is_error, Some(true));
+        assert!(
+            invalid_output.content[0]
+                .as_text()
+                .unwrap()
+                .text
+                .contains("violates its declared output schema")
+        );
+
+        client.cancel().await.unwrap();
+        server_task.await.unwrap();
+    }
+
     #[test]
     fn filtered_payload_level_falls_back_to_the_ordinary_completion_event() {
         let root = tempfile::tempdir().unwrap();
@@ -1344,8 +1554,15 @@ mod tests {
                         .unwrap();
                 });
                 let client = ().serve(client_transport).await.unwrap();
+                let arguments = json!({ "value": "visible request" })
+                    .as_object()
+                    .unwrap()
+                    .clone();
                 let result = client
-                    .call_tool(CallToolRequestParams::new("filtered_payload_fixture"))
+                    .call_tool(
+                        CallToolRequestParams::new("filtered_payload_fixture")
+                            .with_arguments(arguments),
+                    )
                     .await
                     .unwrap();
                 client.cancel().await.unwrap();
@@ -1474,7 +1691,7 @@ mod tests {
         let annotations = advertised.annotations.unwrap();
         assert_eq!(annotations.read_only_hint, Some(false));
         assert_eq!(annotations.destructive_hint, Some(false));
-        assert_eq!(annotations.idempotent_hint, Some(false));
+        assert_eq!(annotations.idempotent_hint, Some(true));
         assert_eq!(annotations.open_world_hint, Some(true));
     }
 

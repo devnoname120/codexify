@@ -150,6 +150,65 @@ async fn last_review_advances_while_project_open_remains_immutable() {
 }
 
 #[tokio::test]
+async fn repeating_the_same_review_is_effect_idempotent() {
+    let repo = init_repo();
+    let file = repo.path().join("file.txt");
+    std::fs::write(&file, "zero\n").unwrap();
+    commit_all(repo.path(), "seed");
+
+    let config = default_config(repo.path().to_path_buf());
+    let manager = ReviewCheckpointManager::new();
+    let owner = conversation("idempotent-review");
+    manager
+        .ensure_initialized(&config, owner.clone())
+        .await
+        .unwrap();
+
+    std::fs::write(&file, "one\n").unwrap();
+    let first = manager
+        .show_changes(
+            &config,
+            owner.clone(),
+            request(ReviewBaseline::LastReview, true),
+        )
+        .await
+        .unwrap();
+    assert!(first.checkpoint_advanced);
+    let first_ref = git(
+        repo.path(),
+        &[
+            "for-each-ref",
+            "--format=%(objectname) %(refname)",
+            "refs/codexify/review/",
+        ],
+    )
+    .lines()
+    .find(|line| line.ends_with("/last-review"))
+    .unwrap()
+    .to_string();
+
+    let repeated = manager
+        .show_changes(&config, owner, request(ReviewBaseline::LastReview, true))
+        .await
+        .unwrap();
+    assert!(repeated.checkpoint_advanced);
+    assert_eq!(repeated.summary.files, 0);
+    let repeated_ref = git(
+        repo.path(),
+        &[
+            "for-each-ref",
+            "--format=%(objectname) %(refname)",
+            "refs/codexify/review/",
+        ],
+    )
+    .lines()
+    .find(|line| line.ends_with("/last-review"))
+    .unwrap()
+    .to_string();
+    assert_eq!(repeated_ref, first_ref);
+}
+
+#[tokio::test]
 async fn conversation_checkpoints_survive_manager_replacement() {
     let repo = init_repo();
     let file = repo.path().join("file.txt");

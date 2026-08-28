@@ -8,6 +8,7 @@ use std::fmt;
 use std::ops::Deref;
 
 use rmcp::model::{MetaObject, Resource};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use zeroize::Zeroize;
@@ -109,7 +110,7 @@ impl ToolResult {
 
 // ─── Plan state ────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum PlanStepStatus {
     Pending,
@@ -136,8 +137,10 @@ impl PlanStepStatus {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[schemars(deny_unknown_fields)]
 pub struct PlanItem {
+    #[schemars(length(min = 1))]
     pub step: String,
     pub status: PlanStepStatus,
 }

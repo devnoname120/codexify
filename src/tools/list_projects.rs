@@ -1,14 +1,22 @@
 use async_trait::async_trait;
+use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::exec_sessions::SessionState;
 use crate::project_catalog::{
     DEFAULT_PROJECT_LIMIT, MAX_PROJECT_LIMIT, ProjectListOutput, discover_project_catalog,
 };
-use crate::tool::{Tool, arg_str, arg_u64};
+use crate::tool::{Tool, ToolBehavior, parse_tool_args};
 use crate::types::{AppConfig, ToolResult};
 
 pub struct ListProjects;
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ListProjectsArgs {
+    query: Option<String>,
+    limit: Option<u64>,
+}
 
 impl ListProjects {
     pub const NAME: &'static str = "list_projects";
@@ -56,6 +64,20 @@ fn render(output: &ProjectListOutput) -> String {
 impl Tool for ListProjects {
     fn name(&self) -> &'static str {
         Self::NAME
+    }
+
+    fn title(&self) -> String {
+        "List projects".to_string()
+    }
+
+    fn behavior(&self) -> ToolBehavior {
+        ToolBehavior::new(
+            true,
+            false,
+            true,
+            false,
+            "Discovers configured local project candidates without binding or modifying them.",
+        )
     }
 
     fn description(&self) -> String {
@@ -140,34 +162,30 @@ impl Tool for ListProjects {
     }
 
     async fn call(&self, args: Value, config: &AppConfig, _session: &SessionState) -> ToolResult {
+        let ListProjectsArgs { query, limit } = match parse_tool_args(args) {
+            Ok(args) => args,
+            Err(error) => return *error,
+        };
         if !config.multi_project {
             return ToolResult::error(
                 "Project catalogue discovery is disabled. Start codexify with `--multi-project` or set `multiProject` to true.",
             );
         }
-        if let Some(value) = args.get("query")
-            && !value.is_string()
-        {
-            return ToolResult::error("query must be a string");
-        }
-        let query = arg_str(&args, "query");
-        let limit = match args.get("limit") {
+        let limit = match limit {
             None => DEFAULT_PROJECT_LIMIT,
-            Some(_) => match arg_u64(&args, "limit") {
-                Some(limit) if (1..=MAX_PROJECT_LIMIT as u64).contains(&limit) => limit as usize,
-                _ => {
-                    return ToolResult::error(format!(
-                        "limit must be an integer between 1 and {MAX_PROJECT_LIMIT}"
-                    ));
-                }
-            },
+            Some(limit) if (1..=MAX_PROJECT_LIMIT as u64).contains(&limit) => limit as usize,
+            Some(_) => {
+                return ToolResult::error(format!(
+                    "limit must be an integer between 1 and {MAX_PROJECT_LIMIT}"
+                ));
+            }
         };
 
         let catalog = match discover_project_catalog(config) {
             Ok(catalog) => catalog,
             Err(error) => return ToolResult::error(error),
         };
-        let output = catalog.list(query, limit);
+        let output = catalog.list(query.as_deref(), limit);
         let structured = serde_json::to_value(&output)
             .expect("ProjectListOutput contains only serializable fields");
         ToolResult::text(render(&output)).with_structured(structured)

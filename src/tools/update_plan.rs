@@ -1,45 +1,12 @@
 use async_trait::async_trait;
-use serde_json::{Value, json};
+use schemars::JsonSchema;
+use serde::Deserialize;
+use serde_json::Value;
 
 use crate::exec_sessions::SessionState;
 use crate::memory::save_plan;
-use crate::tool::{Tool, arg_str};
+use crate::tool::{Tool, ToolBehavior, parse_tool_args, schema_for, text_output_schema};
 use crate::types::{AppConfig, PlanItem, PlanState, PlanStepStatus, ToolResult};
-
-/// Parse the raw `plan` argument into typed items, mirroring the TS `parsePlan`
-/// error messages verbatim.
-fn parse_plan(raw: &Value) -> Result<Vec<PlanItem>, String> {
-    let Some(arr) = raw.as_array() else {
-        return Err("plan must be an array of { step, status } objects".to_string());
-    };
-
-    let mut out: Vec<PlanItem> = Vec::with_capacity(arr.len());
-    for (index, entry) in arr.iter().enumerate() {
-        if !entry.is_object() {
-            return Err(format!(
-                "plan[{index}] must be an object with \"step\" and \"status\""
-            ));
-        }
-        let step = match entry.get("step").and_then(|v| v.as_str()) {
-            Some(s) if !s.trim().is_empty() => s.to_string(),
-            _ => return Err(format!("plan[{index}].step must be a non-empty string")),
-        };
-        let status = match entry
-            .get("status")
-            .and_then(|v| v.as_str())
-            .and_then(PlanStepStatus::parse)
-        {
-            Some(s) => s,
-            None => {
-                return Err(format!(
-                    "plan[{index}].status must be one of: pending, in_progress, completed"
-                ));
-            }
-        };
-        out.push(PlanItem { step, status });
-    }
-    Ok(out)
-}
 
 fn marker(status: PlanStepStatus) -> &'static str {
     match status {
@@ -76,10 +43,33 @@ fn render_plan(plan: &PlanState) -> String {
 
 pub struct UpdatePlan;
 
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct UpdatePlanArgs {
+    /// Optional explanation for this update.
+    explanation: Option<String>,
+    /// Complete replacement plan.
+    plan: Vec<PlanItem>,
+}
+
 #[async_trait]
 impl Tool for UpdatePlan {
     fn name(&self) -> &'static str {
         "update_plan"
+    }
+
+    fn title(&self) -> String {
+        "Update plan".to_string()
+    }
+
+    fn behavior(&self) -> ToolBehavior {
+        ToolBehavior::new(
+            false,
+            true,
+            true,
+            false,
+            "Replaces the persisted task plan, overwriting any previous plan state.",
+        )
     }
 
     fn description(&self) -> String {
@@ -87,44 +77,23 @@ impl Tool for UpdatePlan {
     }
 
     fn input_schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "explanation": { "type": "string", "description": "Optional explanation for this plan update." },
-                "plan": {
-                    "type": "array",
-                    "description": "The list of steps",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "step": { "type": "string", "description": "Task step text." },
-                            "status": { "type": "string", "enum": ["pending", "in_progress", "completed"], "description": "Step status." }
-                        },
-                        "required": ["step", "status"],
-                        "additionalProperties": false
-                    }
-                }
-            },
-            "required": ["plan"],
-            "additionalProperties": false
-        })
+        schema_for::<UpdatePlanArgs>()
     }
 
     fn output_schema(&self) -> Option<Value> {
-        Some(json!({
-            "type": "object",
-            "properties": {
-                "content": { "type": "string", "description": "The stored plan rendered as a checklist" }
-            }
-        }))
+        Some(text_output_schema())
     }
 
     async fn call(&self, args: Value, config: &AppConfig, session: &SessionState) -> ToolResult {
-        let raw = args.get("plan").cloned().unwrap_or(Value::Null);
-        let plan = match parse_plan(&raw) {
-            Ok(p) => p,
-            Err(msg) => return ToolResult::error(msg),
+        let UpdatePlanArgs { explanation, plan } = match parse_tool_args(args) {
+            Ok(args) => args,
+            Err(error) => return *error,
         };
+        for (index, item) in plan.iter().enumerate() {
+            if item.step.trim().is_empty() {
+                return ToolResult::error(format!("plan[{index}].step must be a non-empty string"));
+            }
+        }
 
         let in_progress: Vec<&PlanItem> = plan
             .iter()
@@ -143,7 +112,6 @@ impl Tool for UpdatePlan {
             ));
         }
 
-        let explanation = arg_str(&args, "explanation").map(|s| s.to_string());
         let state = PlanState { explanation, plan };
 
         let rendered = render_plan(&state);

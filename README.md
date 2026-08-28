@@ -391,12 +391,12 @@ Structured primitives — cheaper and safer than shelling out for the same job, 
 | `export_host_file` | Snapshot one project-relative file and return a short-lived, opaque MCP resource that ChatGPT can download without receiving a local path or base64 text |
 | `run_command` | Execute a command in the work directory (allowlist-restricted) |
 | `git_status` | Show git status, parsed into changed files with status codes |
-| `show_changes` | Compare the scoped working tree with the project-open or last-review checkpoint, optionally advancing the incremental baseline; compatible hosts receive the bounded diff in an interactive component-only review card |
-| `git_push` | Push commits to a remote |
+| `show_changes` | Present the scoped working-tree diff from the project-open or last-review checkpoint and, by default, record the emitted snapshot as the next incremental baseline; compatible hosts receive the bounded diff in an interactive component-only review card |
+| `git_push` | Push one existing local branch to the same branch name on a configured remote; arbitrary refspecs, force syntax, and deletion syntax are rejected |
 | `git_commit` | Create a commit, optionally staging all tracked changes |
 | `git_log` | Show recent commit history |
 | `glob` | Find files matching a glob pattern (`.gitignore`-aware) |
-| `grep` | Search file contents by regex, with optional context lines (`.gitignore`-aware) |
+| `grep` | Search file contents by regex, with optional context lines and a real basename or relative-path include glob (`.gitignore`-aware) |
 | `list_directory` | List files and directories with name, type, and size |
 | `tree` | Print directory tree as ASCII art |
 
@@ -411,8 +411,8 @@ Codex-compatible agent tools:
 
 | Tool | Codex name | Description |
 |------|------------|-------------|
-| `apply_patch` | `apply_patch` | Edit files with a context patch instead of rewriting them |
-| `exec_command` | `exec_command` | Run a shell command; returns output, or a session id if it is still running |
+| `apply_patch` | `apply_patch` | Verify the complete context patch, then apply its file operations sequentially with Codex-compatible partial-failure semantics |
+| `exec_command` | `exec_command` | Run a shell command; returns output, or a session id if it is still running. A model-provided `shell` selects only a recognized installed shell type by basename |
 | `write_stdin` | `write_stdin` | Write to (or poll) a running `exec_command` session |
 | `view_image` | `view_image` | Load a local image file for visual inspection |
 | `update_plan` | `update_plan` | Track a multi-step plan; saved to disk so a later conversation can pick it up |
@@ -423,14 +423,16 @@ Codex-compatible agent tools:
 
 Codex's dotted names are flattened to underscores because MCP tool names must match `^[a-zA-Z0-9_-]{1,64}$`.
 
-Five always-on tools have no Codex counterpart:
+Seven always-on tools have no Codex counterpart:
 
 | Tool | Description |
 |------|-------------|
 | `get_agent_brief` | Return the whole operating brief — behaviour, environment, saved state and project rules — in one call |
 | `get_environment` | Report the OS, the shell `exec_command` uses, the work directory, and what the policy allows |
 | `get_project_doc` | Read the project's `AGENTS.md` instructions |
-| `remember` | Save one durable note about the task under a short key |
+| `remember` | Create one durable note under a new short key; existing keys are never overwritten |
+| `update_memory_note` | Replace one existing durable note without creating a missing key |
+| `forget_memory_note` | Delete one existing durable note |
 | `recall` | Return the plan and notes saved by earlier turns or earlier conversations |
 
 Multi-project mode adds two project-control tools:
@@ -440,14 +442,14 @@ Multi-project mode adds two project-control tools:
 | `list_projects` | Search the read-only project catalogue before binding. Returns relative selectors for existing canonical directories authorized beneath the access root, plus names, aliases, descriptions, trust metadata, sources, and sanitized warnings. It never selects a project |
 | `set_project_root` | Bind the current ChatGPT conversation to an existing directory beneath the configured access root, an HTTPS/SSH GitHub repository-root URL, an HTTPS branch URL (`/tree/<branch>`), an HTTPS pull-request URL (`/pull/<number>`), or an HTTPS commit URL (`/commit/<sha>`). URL selection reuses a matching checkout or clones into `projectCloneDir`; targeted URLs fetch and select the exact target without moving an unrelated source checkout. Repeating the same canonical directory or exact URL selection is idempotent, but switching is rejected. Without ChatGPT conversation metadata, the binding lasts for the MCP transport session |
 
-These tools expose runtime context, project instructions, and durable task state through MCP. See [Context and memory](#context-and-memory), [Acting as a Codex agent](#acting-as-a-codex-agent), [Shells and the host](#shells-and-the-host), [AGENTS.md](#agentsmd) and [Skills](#skills).
+These tools expose runtime context, project instructions, and the four durable memory/task-state operations through MCP. See [Context and memory](#context-and-memory), [Acting as a Codex agent](#acting-as-a-codex-agent), [Shells and the host](#shells-and-the-host), [AGENTS.md](#agentsmd) and [Skills](#skills).
 
-That is 28 native tools in the default single-project mode and 30 in multi-project mode. Enabling conversation authorization adds the ChatGPT-facing `setup` tool, producing 29 or 31 respectively. Setting `artifactIngress.enabled` to `false` removes `import_host_file`; setting `artifactEgress.enabled` to `false` independently removes `export_host_file`. Each disabled direction reduces the applicable count by one. One or more [catalog-mode MCP upstreams](#catalog-mode-default-for-automatic-imports) add one shared four-tool discovery/call surface regardless of how many transitive tools they contain. Direct mode adds one downstream tool per selected upstream tool; gateway mode adds one downstream dispatcher per upstream server.
+That is 30 native tools in the default single-project mode and 32 in multi-project mode. Enabling conversation authorization adds the ChatGPT-facing `setup` tool, producing 31 or 33 respectively. Setting `artifactIngress.enabled` to `false` removes `import_host_file`; setting `artifactEgress.enabled` to `false` independently removes `export_host_file`. Each disabled direction reduces the applicable count by one. One or more [catalog-mode MCP upstreams](#catalog-mode-default-for-automatic-imports) add one shared four-tool discovery/call surface regardless of how many transitive tools they contain. Direct mode adds one downstream tool per selected upstream tool; gateway mode adds one downstream dispatcher per upstream server.
 
 MCP-specific tool behavior:
 
-- **`apply_patch` takes a JSON string.** MCP has no freeform tools, so the patch is supplied through the `input` string parameter.
-- **`exec_command` runs with plain pipes, not a PTY.** `tty: true` is rejected. Programs that require an attached terminal behave as piped processes.
+- **`apply_patch` takes a JSON string.** MCP has no freeform tools, so the patch is supplied through the `input` string parameter. All hunks are verified before the first write; a later filesystem error can still leave earlier verified operations applied.
+- **`exec_command` runs with plain pipes, not a PTY.** `tty: true` is rejected. Programs that require an attached terminal behave as piped processes. `shell` is a shell-type hint rather than an executable path: only the basename is considered, and an unavailable or unrecognized shell uses the platform fallback (`/bin/sh` on POSIX, `cmd.exe` on Windows).
 
 For ChatGPT calls carrying `_meta["openai/session"]`, an `exec_command` process
 belongs to that hashed conversation identity rather than the current MCP
@@ -458,7 +460,7 @@ survive a Codexify restart, and `exec.idleTimeoutMs` expires abandoned sessions.
 
 `clock_sleep` caps at 5 minutes because a longer wait would outlive the HTTP request through the tunnel.
 
-Every tool that advertises an `outputSchema` also returns `structuredContent` matching it, as the MCP spec asks. `exec_command` and `write_stdin` return Codex's unified-exec object, `import_host_file` returns its destination, byte count and SHA-256 receipt, `export_host_file` returns its immutable-snapshot receipt and a standard MCP `resource_link`, `clock_curr_time` returns `{ current_time }`, `get_environment` returns the environment object, `get_project_doc` returns `{ files, content }` and `skills_list` returns `{ skills, content }`; the rest return `{ content: <text> }`, which the server derives from the text blocks so handlers don't repeat it. `show_changes` deliberately advertises no output schema: its model-visible result is concise text, while its complete review payload is attached as component-only result `_meta` for the MCP App.
+Every native fixed-shape input schema is closed and compiled at startup. Calls are validated before dispatch, including integer bounds and nested objects; validation diagnostics mask `writeOnly` values. Native tools and fixed dispatchers that advertise an `outputSchema` must return matching `structuredContent`, and successful results are validated before they leave the server. Directly bridged upstream tools preserve the upstream convention that structured content may be absent, while any structured content they do return is checked against the advertised upstream schema. `exec_command` and `write_stdin` return Codex's unified-exec object, `import_host_file` returns its destination, byte count and SHA-256 receipt, `export_host_file` returns its immutable-snapshot receipt and a standard MCP `resource_link`, `clock_curr_time` returns `{ current_time }`, `get_environment` returns the environment object, `get_project_doc` returns `{ files, content }` and `skills_list` returns `{ skills, content }`; the rest return the exact `{ content: <text> }` object, which the server derives from text blocks so handlers do not repeat it. `show_changes` deliberately advertises no output schema: its model-visible result is concise text, while its complete review payload is attached as component-only result `_meta` for the MCP App. Catalog discovery records have static exact wrapper schemas even though their source and tool values are discovered at runtime; `mcp_call_tool` has no output schema because the selected upstream tool determines that result shape.
 
 All project-scoped paths are resolved relative to the active project root: `--work-dir` in single-project mode, or the root selected for the current ChatGPT conversation in multi-project mode. Non-ChatGPT clients use the root selected for their current MCP transport session.
 
@@ -959,12 +961,12 @@ To clear a stray binding, delete its file under `~/.codexify/conversation-projec
 
 ## Review checkpoints and ChatGPT UI
 
-Review state is initialized immediately before the first project-scoped tool call for a conversation or generic MCP transport. That timing captures the checkout as the agent first sees it, before a write, formatter, generator, or shell command can change it. Mutating tool calls and `show_changes` are serialized for the same owner and project through tool completion, so a review cannot advance over a partially completed write. A resident `exec_command` process may continue changing files after its initiating call returns, so every review remains a point-in-time snapshot. Non-Git projects remain usable; inside a Git worktree, a snapshot failure blocks mutating tools rather than silently losing the baseline. Two baselines are maintained:
+Review state is initialized immediately before the first project-scoped tool call for a conversation or generic MCP transport. That timing captures the checkout as the agent first sees it, before a write, formatter, generator, or shell command can change it. Mutating tool calls and `show_changes` are serialized for the same owner and project through tool completion, so the incremental cursor cannot advance over a partially completed write. A resident `exec_command` process may continue changing files after its initiating call returns, so every review remains a point-in-time snapshot. Non-Git projects remain usable; inside a Git worktree, a snapshot failure blocks mutating tools rather than silently losing the baseline. Two baselines are maintained:
 
 - **project open** is immutable and shows the complete task diff;
-- **last review** advances only when `show_changes` is called with `advance=true` (the default), so the next review is incremental.
+- **last review** records the most recent snapshot emitted by `show_changes`, so the next default review is incremental.
 
-`show_changes` accepts `since: "last_review" | "project_open"`, `advance`, and `include_patch`. Use `advance=false` for a read-only inspection. The ordinary model-visible result is a concise aggregate summary with checkpoint status and warnings; it deliberately has no `structuredContent`. Compatible MCP Apps receive bounded file records, rename sources, binary markers, warnings, and the complete unified binary patch through namespaced result `_meta`, which ChatGPT forwards to the component without adding it to model context. Oversized patches are omitted explicitly rather than returned as invalid partial hunks.
+`show_changes` accepts `since: "last_review" | "project_open"`, `advance`, and `include_patch`. By default it records the emitted snapshot as the next incremental baseline; `advance=false` leaves that cursor unchanged. This bookkeeping is connector-private: the tool remains annotated read-only because it does not modify project files, Git history, user-owned data, or external systems. The ordinary model-visible review result is a concise aggregate summary and deliberately has no `structuredContent`. Compatible MCP Apps receive bounded file records, rename sources, binary markers, warnings, and the complete unified binary patch through namespaced result `_meta`, which ChatGPT forwards to the component without adding it to model context. Oversized patches are omitted explicitly rather than returned as invalid partial hunks.
 
 Snapshots use Git objects, but they do **not** touch the real index or working tree. Codexify builds a private temporary index containing only the logical project root, then carries the same literal pathspec through every comparison. If the selected project is `packages/app` inside a monorepo, sibling changes under `packages/other` cannot enter its checkpoint or diff. Paths in the component-only review payload are relative to the selected project, not the repository root.
 
@@ -977,7 +979,7 @@ refs/codexify/review/<project-hash>/<conversation-hash>/last-review
 
 The raw conversation identifier is never written. The refs survive MCP reconnects and Codexify restarts. Generic MCP clients receive transport-local in-memory checkpoints instead. Each conversation/project pair retains only its current two referenced snapshots; unreferenced synthetic commits are ordinary Git-GC candidates. To inspect or remove conversation refs manually, use `git for-each-ref refs/codexify/review/` and `git update-ref -d <ref>`. Removing both refs resets that owner to the current scoped state on its next project call.
 
-Codexify advertises the standard MCP Apps extension and serves a self-contained review resource at `ui://codexify/review/v3/mcp-app.html`. Compatible ChatGPT developer connectors render `show_changes` as an interactive GitHub-style file/statistic/patch card from component-only result metadata, while other clients receive the concise text result. Expansion state is persisted as private widget state. Checkpoint advancement completes before the result is returned, and the card updates at the `show_changes` tool-call boundary rather than continuously watching the filesystem.
+Codexify advertises the standard MCP Apps extension and serves a self-contained review resource at `ui://codexify/review/v3/mcp-app.html`. Compatible ChatGPT developer connectors render `show_changes` as an interactive GitHub-style file/statistic/patch card from component-only result metadata; the component is model-visible but is not granted app-side tool access. Other clients receive the concise text result. Expansion state is persisted as private widget state. Cursor advancement completes before the result is returned and never waits for widget interaction, and the card updates at the `show_changes` tool-call boundary rather than continuously watching the filesystem.
 
 ## Context and memory
 
@@ -991,7 +993,7 @@ Codexify bounds model-visible tool output and persists task state so long-runnin
 
 That line matters as much as the cap. Silent truncation reads as "that was the whole file", which is worse than no cap at all. `read_file` has a byte ceiling as well as a line one, because a minified bundle is a single line several megabytes long that a line cap alone would hand back in full. `grep` additionally caps context, match count and individual lines while preserving the actual match inside a long minified line. `exec_command` and `write_stdin` keep Codex's 10,000-token default but clamp larger requests to server policy. `run_command` drains stdout and stderr through bounded head/tail buffers before applying the same model-output policy, so a chatty or timed-out child cannot consume unbounded process memory or context. Oversized arbitrary `structuredContent` becomes a bounded error requesting narrower arguments rather than invalid partial JSON.
 
-**Keep what would be expensive to rediscover.** `remember` writes one keyed note; `recall` hands back the notes and the current plan. `update_plan` persists too, so the plan survives the conversation that made it. Writing to a key that exists replaces it, and an empty value deletes it — a keyed store stays current where an append log accumulates contradictions until it is worthless.
+**Keep what would be expensive to rediscover.** `remember` creates one keyed note and refuses an existing key; `update_memory_note` replaces an existing note without creating a missing key; `forget_memory_note` deletes an existing note; `recall` hands back the notes and the current plan. `update_plan` persists too, so the plan survives the conversation that made it. Separating creation, replacement, and deletion gives each operation an accurate safety classification and prevents an empty string from doubling as an implicit delete command.
 
 Task state lives in `~/.codexify/projects/<name>-<hash>/memory.json`, keyed by the absolute active project root. Nothing is written into the repository you pointed the server at, and two checkouts of the same repo do not share notes. Multi-project conversations therefore share task state only when they select the same canonical project root.
 
@@ -1320,7 +1322,7 @@ The private catalogue is a startup snapshot. Dynamic upstream `tools/list_change
 
 ### Direct mode
 
-With `"mode": "direct"`, each upstream tool becomes a `BridgedTool` named `<server>__<tool>` (sanitized to `[A-Za-z0-9_]`, so `remote-exec` becomes `remote_exec__exec`). Calls use the tool's stored **raw upstream name**, not the downstream identifier. Input/output schemas, title, annotations, icons, and `_meta` are preserved in downstream `tools/list`; text, images, structured content, error state, and result metadata pass through on calls. A downstream name colliding with a native or already registered tool is skipped with a warning.
+With `"mode": "direct"`, each upstream tool becomes a `BridgedTool` named `<server>__<tool>` (sanitized to `[A-Za-z0-9_]`, so `remote-exec` becomes `remote_exec__exec`). Calls use the tool's stored **raw upstream name**, not the downstream identifier. Input/output schemas, title, icons, `_meta`, and every upstream annotation field are preserved in downstream `tools/list`; omitted safety hints are materialized with MCP defaults so the descriptor is complete. Text, images, structured content, error state, and result metadata pass through on calls. A downstream name colliding with a native or already registered tool is skipped with a warning.
 
 Direct mode places every selected schema in the connector capability catalogue. Use `tools`/`disabledTools` to curate it when full exposure is unnecessary.
 

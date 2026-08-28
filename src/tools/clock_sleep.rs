@@ -1,10 +1,11 @@
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::exec_sessions::SessionState;
-use crate::tool::Tool;
+use crate::tool::{Tool, ToolBehavior, parse_tool_args, text_output_schema};
 use crate::types::{AppConfig, ToolResult};
 
 /// Codex allows up to 12 hours here. This bridge caps at 5 minutes: the MCP
@@ -15,10 +16,30 @@ const MAX_SLEEP_DURATION_MS: u64 = 5 * 60 * 1000;
 
 pub struct ClockSleep;
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ClockSleepArgs {
+    duration_ms: f64,
+}
+
 #[async_trait]
 impl Tool for ClockSleep {
     fn name(&self) -> &'static str {
         "clock_sleep"
+    }
+
+    fn title(&self) -> String {
+        "Sleep".to_string()
+    }
+
+    fn behavior(&self) -> ToolBehavior {
+        ToolBehavior::new(
+            true,
+            false,
+            true,
+            false,
+            "Waits locally without changing local or external state.",
+        )
     }
 
     fn description(&self) -> String {
@@ -33,6 +54,8 @@ impl Tool for ClockSleep {
             "properties": {
                 "duration_ms": {
                     "type": "number",
+                    "minimum": 1,
+                    "maximum": MAX_SLEEP_DURATION_MS,
                     "description": format!("How long to sleep in milliseconds. Must be between 1 and {MAX_SLEEP_DURATION_MS}.")
                 }
             },
@@ -42,12 +65,7 @@ impl Tool for ClockSleep {
     }
 
     fn output_schema(&self) -> Option<Value> {
-        Some(json!({
-            "type": "object",
-            "properties": {
-                "content": { "type": "string", "description": "Elapsed wall-clock time and a completion message" }
-            }
-        }))
+        Some(text_output_schema())
     }
 
     fn requires_project_root(&self) -> bool {
@@ -55,8 +73,9 @@ impl Tool for ClockSleep {
     }
 
     async fn call(&self, args: Value, _config: &AppConfig, _session: &SessionState) -> ToolResult {
-        let Some(duration_ms) = args.get("duration_ms").and_then(|v| v.as_f64()) else {
-            return ToolResult::error("duration_ms must be a number");
+        let ClockSleepArgs { duration_ms } = match parse_tool_args(args) {
+            Ok(args) => args,
+            Err(error) => return *error,
         };
 
         if duration_ms < 1.0 || duration_ms > MAX_SLEEP_DURATION_MS as f64 {

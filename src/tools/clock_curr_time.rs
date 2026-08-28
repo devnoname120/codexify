@@ -3,7 +3,7 @@ use chrono::Utc;
 use serde_json::{Value, json};
 
 use crate::exec_sessions::SessionState;
-use crate::tool::Tool;
+use crate::tool::{Tool, ToolBehavior, empty_object_schema};
 use crate::types::{AppConfig, ToolResult};
 
 pub struct ClockCurrTime;
@@ -19,12 +19,26 @@ impl Tool for ClockCurrTime {
         "clock_curr_time"
     }
 
+    fn title(&self) -> String {
+        "Get current time".to_string()
+    }
+
+    fn behavior(&self) -> ToolBehavior {
+        ToolBehavior::new(
+            true,
+            false,
+            true,
+            false,
+            "Reads the local clock without changing local or external state.",
+        )
+    }
+
     fn description(&self) -> String {
         "Return the current time in UTC. Use this to timestamp work, measure how long something took, or reason about deadlines — the conversation itself carries no reliable clock.".into()
     }
 
     fn input_schema(&self) -> Value {
-        json!({ "type": "object", "properties": {}, "additionalProperties": false })
+        empty_object_schema()
     }
 
     fn output_schema(&self) -> Option<Value> {

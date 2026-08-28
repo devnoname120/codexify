@@ -1,5 +1,7 @@
 use async_trait::async_trait;
-use serde_json::{Value, json};
+use schemars::JsonSchema;
+use serde::Deserialize;
+use serde_json::Value;
 use std::cmp::Ordering;
 use std::path::Path;
 
@@ -7,10 +9,19 @@ use crate::exec_sessions::SessionState;
 use crate::ignore_rules::{IgnoreMatcher, build_ignore};
 use crate::output_budget::tree_node_budget;
 use crate::safe_path::resolve_safe_path;
-use crate::tool::{Tool, arg_f64, arg_str};
+use crate::tool::{Tool, ToolBehavior, parse_tool_args, schema_for, text_output_schema};
 use crate::types::{AppConfig, ToolResult};
 
 pub struct Tree;
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct TreeArgs {
+    /// Project-relative directory. Defaults to the project root.
+    path: Option<String>,
+    /// Maximum traversal depth. Defaults to the configured tree depth.
+    depth: Option<usize>,
+}
 
 #[async_trait]
 impl Tool for Tree {
@@ -18,38 +29,45 @@ impl Tool for Tree {
         "tree"
     }
 
+    fn title(&self) -> String {
+        "Show directory tree".to_string()
+    }
+
+    fn behavior(&self) -> ToolBehavior {
+        ToolBehavior::new(
+            true,
+            false,
+            true,
+            false,
+            "Walks local project directories without modifying them or external systems.",
+        )
+    }
+
     fn description(&self) -> String {
-        "Show the project directory structure as an ASCII tree. Automatically ignores common directories (node_modules, .git, dist, __pycache__). Use this first to understand the project layout before diving into specific files. Depth defaults to 3 and the walk stops at a node budget, so point 'path' at a subdirectory rather than asking for a deep tree of the whole repo.".into()
+        "Show the project directory structure as an ASCII tree. Automatically ignores common directories (node_modules, .git, dist, __pycache__). Use this first to understand the project layout before diving into specific files. Depth defaults to the server's configured tree depth and the walk stops at a node budget, so point 'path' at a subdirectory rather than asking for a deep tree of the whole repo.".into()
     }
 
     fn input_schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "path": { "type": "string", "description": "Directory path relative to work-dir. Default: root" },
-                "depth": { "type": "number", "description": "Max depth to traverse. Default: 3" }
-            }
-        })
+        schema_for::<TreeArgs>()
     }
 
     fn output_schema(&self) -> Option<Value> {
-        Some(json!({
-            "type": "object",
-            "properties": {
-                "content": { "type": "string", "description": "ASCII tree representation of directory structure" }
-            }
-        }))
+        Some(text_output_schema())
     }
 
     async fn call(&self, args: Value, config: &AppConfig, _session: &SessionState) -> ToolResult {
-        let root_path = match arg_str(&args, "path").filter(|s| !s.is_empty()) {
+        let TreeArgs { path, depth } = match parse_tool_args(args) {
+            Ok(args) => args,
+            Err(error) => return *error,
+        };
+        let root_path = match path.as_deref().filter(|path| !path.is_empty()) {
             Some(p) => match resolve_safe_path(p, &config.work_dir, false) {
                 Ok(resolved) => resolved,
                 Err(e) => return ToolResult::error(e),
             },
             None => config.work_dir.clone(),
         };
-        let max_depth = arg_f64(&args, "depth").unwrap_or(config.tree.default_depth as f64);
+        let max_depth = depth.unwrap_or(config.tree.default_depth);
         let ig = build_ignore(config);
 
         let mut state = WalkState {
@@ -92,11 +110,11 @@ fn build_tree(
     dir_path: &Path,
     prefix: &str,
     depth: usize,
-    max_depth: f64,
+    max_depth: usize,
     ig: &IgnoreMatcher,
     state: &mut WalkState,
 ) -> Result<(), String> {
-    if (depth as f64) >= max_depth || state.stopped {
+    if depth >= max_depth || state.stopped {
         return Ok(());
     }
 

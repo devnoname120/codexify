@@ -90,7 +90,7 @@ async fn read_file_reads_invalid_utf8_lossily() {
     );
 }
 
-// #11 / #12: negative/fractional read_file offset and limit behave like the TS.
+// Numeric paging arguments are exact non-negative integers, matching the schema.
 #[tokio::test]
 async fn read_file_numeric_offset_and_limit() {
     let dir = TempDir::new().unwrap();
@@ -98,17 +98,21 @@ async fn read_file_numeric_offset_and_limit() {
     let config = default_config(dir.path().to_path_buf());
     let session = SessionState::new();
 
-    // fractional offset truncates toward zero (2.9 -> line index 2 -> "3\tl3")
-    let r = ReadFile
+    let valid = ReadFile
+        .call(json!({ "path": "f.txt", "offset": 2 }), &config, &session)
+        .await;
+    assert!(!valid.is_error);
+    assert!(valid.joined_text().contains("3\tl3"));
+
+    let fractional = ReadFile
         .call(json!({ "path": "f.txt", "offset": 2.9 }), &config, &session)
         .await;
-    assert!(r.joined_text().contains("3\tl3"));
+    assert!(fractional.is_error);
 
-    // negative limit yields zero lines (no content lines returned)
-    let r2 = ReadFile
+    let negative = ReadFile
         .call(json!({ "path": "f.txt", "limit": -1 }), &config, &session)
         .await;
-    assert!(!r2.joined_text().contains("l1"));
+    assert!(negative.is_error);
 }
 
 // #15: skill lookup is case-insensitive with full-Unicode folding.

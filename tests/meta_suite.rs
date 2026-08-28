@@ -19,21 +19,21 @@ use codexify::config::default_config;
 use codexify::exec_sessions::SessionState;
 use codexify::registry::{load_tools, load_tools_for_config, load_tools_for_mode};
 use codexify::safe_path::resolve_safe_path;
-use codexify::tool::Tool;
+use codexify::tool::{Tool, ToolBehavior, validate_and_wrap_tools};
 use codexify::types::{AppConfig, ToolContent, ToolResult};
 
 // ─── registry.test.ts ──────────────────────────────────────────────────
 
 #[test]
-fn loads_all_28_tools() {
+fn loads_all_30_tools() {
     let tools = load_tools();
-    assert_eq!(tools.len(), 28);
+    assert_eq!(tools.len(), 30);
 }
 
 #[test]
 fn multi_project_mode_adds_catalogue_and_session_selector() {
     let tools = load_tools_for_mode(true);
-    assert_eq!(tools.len(), 30);
+    assert_eq!(tools.len(), 32);
     assert_eq!(tools[0].name(), "list_projects");
     assert_eq!(tools[1].name(), "set_project_root");
 }
@@ -46,7 +46,7 @@ fn artifact_ingress_can_be_omitted_by_configuration() {
         .into_iter()
         .map(|tool| tool.name())
         .collect::<Vec<_>>();
-    assert_eq!(names.len(), 27);
+    assert_eq!(names.len(), 29);
     assert!(!names.contains(&"import_host_file"));
 }
 
@@ -58,7 +58,7 @@ fn artifact_egress_can_be_omitted_by_configuration() {
         .into_iter()
         .map(|tool| tool.name())
         .collect::<Vec<_>>();
-    assert_eq!(names.len(), 27);
+    assert_eq!(names.len(), 29);
     assert!(!names.contains(&"export_host_file"));
 }
 
@@ -68,7 +68,7 @@ fn conversation_auth_mode_adds_innocuously_named_gate_before_protected_tools() {
     config.conversation_auth_token =
         Some("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into());
     let tools = load_tools_for_config(&config);
-    assert_eq!(tools.len(), 29);
+    assert_eq!(tools.len(), 31);
     assert_eq!(tools[0].name(), "setup");
     let schema = tools[0].input_schema();
     assert!(schema["properties"].get("ref").is_some());
@@ -91,7 +91,7 @@ fn conversation_auth_mode_adds_innocuously_named_gate_before_protected_tools() {
 
     config.multi_project = true;
     let tools = load_tools_for_config(&config);
-    assert_eq!(tools.len(), 31);
+    assert_eq!(tools.len(), 33);
     assert_eq!(tools[0].name(), "setup");
     assert_eq!(tools[1].name(), "list_projects");
     assert_eq!(tools[2].name(), "set_project_root");
@@ -116,13 +116,130 @@ fn all_tools_have_required_fields() {
             !tool.description().is_empty(),
             "description must be non-empty"
         );
-        // inputSchema truthy: must be a JSON object.
+        assert!(!tool.title().is_empty(), "title must be non-empty");
+        assert!(
+            !tool.behavior().justification.is_empty(),
+            "annotation justification must be non-empty"
+        );
         assert!(
             tool.input_schema().is_object(),
             "input_schema for {} must be an object",
             tool.name()
         );
+        assert_eq!(
+            tool.input_schema()["additionalProperties"],
+            false,
+            "input_schema for {} must be closed",
+            tool.name()
+        );
+        assert_nested_object_schemas_are_closed(&tool.input_schema(), tool.name(), "inputSchema");
+        if let Some(schema) = tool.output_schema() {
+            assert_eq!(
+                schema["additionalProperties"],
+                false,
+                "output_schema for {} must be closed",
+                tool.name()
+            );
+            let required = schema["required"].as_array().unwrap_or_else(|| {
+                panic!("output_schema for {} must declare required", tool.name())
+            });
+            for property in required {
+                let property = property.as_str().unwrap();
+                assert!(
+                    schema["properties"].get(property).is_some(),
+                    "output_schema for {} requires undeclared property {property}",
+                    tool.name()
+                );
+            }
+            assert_nested_object_schemas_are_closed(&schema, tool.name(), "outputSchema");
+        }
     }
+    validate_and_wrap_tools(load_tools()).expect("all static tool contracts must validate");
+}
+
+fn assert_nested_object_schemas_are_closed(schema: &Value, tool: &str, path: &str) {
+    match schema {
+        Value::Object(object) => {
+            if object.get("type").and_then(Value::as_str) == Some("object") {
+                assert_eq!(
+                    object.get("additionalProperties"),
+                    Some(&Value::Bool(false)),
+                    "{tool} has an open object schema at {path}"
+                );
+            }
+            for (key, value) in object {
+                assert_nested_object_schemas_are_closed(value, tool, &format!("{path}/{key}"));
+            }
+        }
+        Value::Array(values) => {
+            for (index, value) in values.iter().enumerate() {
+                assert_nested_object_schemas_are_closed(value, tool, &format!("{path}/{index}"));
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+    }
+}
+
+#[test]
+fn native_tool_annotations_match_the_reviewed_side_effect_matrix() {
+    let mut config = default_config(PathBuf::from("/tmp"));
+    config.multi_project = true;
+    config.conversation_auth_token =
+        Some("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into());
+    let actual = load_tools_for_config(&config)
+        .into_iter()
+        .map(|tool| {
+            let behavior = tool.behavior();
+            (
+                tool.name().to_string(),
+                (
+                    behavior.read_only,
+                    behavior.destructive,
+                    behavior.idempotent,
+                    behavior.open_world,
+                ),
+            )
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let expected = [
+        ("apply_patch", (false, true, false, false)),
+        ("clock_curr_time", (true, false, true, false)),
+        ("clock_sleep", (true, false, true, false)),
+        ("exec_command", (false, true, false, true)),
+        ("export_host_file", (true, false, true, false)),
+        ("forget_memory_note", (false, true, true, false)),
+        ("get_agent_brief", (true, false, true, false)),
+        ("get_environment", (true, false, true, false)),
+        ("get_project_doc", (true, false, true, false)),
+        ("git_commit", (false, true, false, true)),
+        ("git_log", (true, false, true, false)),
+        ("git_push", (false, true, false, true)),
+        ("git_status", (true, false, true, false)),
+        ("glob", (true, false, true, false)),
+        ("grep", (true, false, true, false)),
+        ("import_host_file", (false, false, true, true)),
+        ("list_directory", (true, false, true, false)),
+        ("list_projects", (true, false, true, false)),
+        ("read_file", (true, false, true, false)),
+        ("recall", (true, false, true, false)),
+        ("remember", (false, false, true, false)),
+        ("run_command", (false, true, false, true)),
+        ("set_project_root", (false, false, true, true)),
+        ("setup", (false, false, true, false)),
+        ("show_changes", (true, false, true, false)),
+        ("skills_list", (true, false, true, false)),
+        ("skills_read", (true, false, true, false)),
+        ("tree", (true, false, true, false)),
+        ("update_memory_note", (false, true, true, false)),
+        ("update_plan", (false, true, true, false)),
+        ("view_image", (true, false, true, false)),
+        ("write_file", (false, true, true, false)),
+        ("write_stdin", (false, true, false, true)),
+    ]
+    .into_iter()
+    .map(|(name, behavior)| (name.to_string(), behavior))
+    .collect::<std::collections::BTreeMap<_, _>>();
+    assert_eq!(actual, expected);
 }
 
 #[test]
@@ -177,6 +294,8 @@ fn includes_tools_codex_has_no_equivalent_of() {
         "get_project_doc",
         "get_agent_brief",
         "remember",
+        "update_memory_note",
+        "forget_memory_note",
         "recall",
     ] {
         assert!(names.contains(&expected), "missing tool: {expected}");
@@ -213,7 +332,7 @@ fn show_changes_links_the_review_mcp_app() {
         .iter()
         .find(|tool| tool.name() == "show_changes")
         .unwrap();
-    assert_eq!(tool.title().as_deref(), Some("Show changes"));
+    assert_eq!(tool.title(), "Show changes");
     let meta = tool.meta().unwrap();
     assert_eq!(
         meta.get("ui")
@@ -274,11 +393,27 @@ impl Tool for FakeTool {
     fn name(&self) -> &'static str {
         "fake"
     }
+    fn title(&self) -> String {
+        "Fake tool".to_string()
+    }
+    fn behavior(&self) -> ToolBehavior {
+        ToolBehavior::new(
+            true,
+            false,
+            true,
+            false,
+            "Test-only tool without side effects.",
+        )
+    }
     fn description(&self) -> String {
-        String::new()
+        "Test-only tool.".to_string()
     }
     fn input_schema(&self) -> Value {
-        json!({ "type": "object" })
+        json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+        })
     }
     fn output_schema(&self) -> Option<Value> {
         self.schema.clone()
@@ -297,7 +432,9 @@ impl Tool for FakeTool {
 fn content_schema() -> Value {
     json!({
         "type": "object",
-        "properties": { "content": { "type": "string" } }
+        "properties": { "content": { "type": "string" } },
+        "required": ["content"],
+        "additionalProperties": false
     })
 }
 

@@ -1,5 +1,7 @@
 use async_trait::async_trait;
-use serde_json::{Value, json};
+use schemars::JsonSchema;
+use serde::Deserialize;
+use serde_json::Value;
 
 use crate::exec_sessions::SessionState;
 use crate::output_budget::{file_budget, window_file_lines};
@@ -7,15 +9,43 @@ use crate::skills::{
     MAX_SKILL_PACKAGE_FILES, SKILL_FILENAME, discover_skills, find_skill, resolve_skill_resource,
     skill_package_files, skills_enabled,
 };
-use crate::tool::{Tool, arg_str, arg_u64};
+use crate::tool::{Tool, ToolBehavior, parse_tool_args, schema_for, text_output_schema};
 use crate::types::{AppConfig, ToolResult};
 
 pub struct SkillsRead;
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct SkillsReadArgs {
+    /// Skill name returned by skills_list.
+    #[schemars(length(min = 1))]
+    name: String,
+    /// Package-relative resource path. Defaults to SKILL.md.
+    resource: Option<String>,
+    /// Zero-based first line. Defaults to 0.
+    offset: Option<u64>,
+    /// Maximum lines before the server's own line and byte ceilings.
+    limit: Option<u64>,
+}
 
 #[async_trait]
 impl Tool for SkillsRead {
     fn name(&self) -> &'static str {
         "skills_read"
+    }
+
+    fn title(&self) -> String {
+        "Read skill".to_string()
+    }
+
+    fn behavior(&self) -> ToolBehavior {
+        ToolBehavior::new(
+            true,
+            false,
+            true,
+            false,
+            "Reads a local skill package without modifying files or external systems.",
+        )
     }
 
     fn description(&self) -> String {
@@ -25,37 +55,28 @@ impl Tool for SkillsRead {
     }
 
     fn input_schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "name": { "type": "string", "description": "Skill name, as listed by skills_list." },
-                "resource": {
-                    "type": "string",
-                    "description": format!("File to read inside the skill's directory, relative to it (e.g. 'references/api.md'). Defaults to {SKILL_FILENAME}.")
-                },
-                "offset": { "type": "number", "description": "Start reading from this line (0-based). Default: 0" },
-                "limit": { "type": "number", "description": "Maximum number of lines to return. Capped by the server's own line and byte budget." }
-            },
-            "required": ["name"],
-            "additionalProperties": false
-        })
+        schema_for::<SkillsReadArgs>()
     }
 
     fn output_schema(&self) -> Option<Value> {
-        Some(json!({
-            "type": "object",
-            "properties": {
-                "content": { "type": "string", "description": "The file's text, with a trailing note when it was cut short." }
-            }
-        }))
+        Some(text_output_schema())
     }
 
     async fn call(&self, args: Value, config: &AppConfig, _session: &SessionState) -> ToolResult {
+        let SkillsReadArgs {
+            name,
+            resource,
+            offset,
+            limit,
+        } = match parse_tool_args(args) {
+            Ok(args) => args,
+            Err(error) => return *error,
+        };
         if !skills_enabled(config) {
             return ToolResult::error("Skills are disabled by the server configuration.");
         }
 
-        let name = arg_str(&args, "name").map(|s| s.trim()).unwrap_or("");
+        let name = name.trim();
         if name.is_empty() {
             return ToolResult::error("A skill name is required.");
         }
@@ -79,7 +100,7 @@ impl Tool for SkillsRead {
             }
         };
 
-        let resource = match arg_str(&args, "resource") {
+        let resource = match resource.as_deref() {
             Some(r) if !r.trim().is_empty() => r.trim().to_string(),
             _ => SKILL_FILENAME.to_string(),
         };
@@ -97,8 +118,10 @@ impl Tool for SkillsRead {
         };
 
         let lines: Vec<&str> = contents.split('\n').collect();
-        let offset = arg_u64(&args, "offset").unwrap_or(0) as usize;
-        let limit = arg_u64(&args, "limit").map(|n| n as usize);
+        let offset = offset
+            .map(|value| usize::try_from(value).unwrap_or(usize::MAX))
+            .unwrap_or(0);
+        let limit = limit.map(|value| usize::try_from(value).unwrap_or(usize::MAX));
         let window = window_file_lines(&lines, offset, limit, file_budget(config));
         let truncated = window.notice.is_some();
 

@@ -326,6 +326,35 @@ async fn grep_filters_by_include_pattern() {
 }
 
 #[tokio::test]
+async fn grep_include_supports_relative_path_globs() {
+    let dir = TempDir::new().unwrap();
+    write(dir.path(), "src/lib.rs", "needle\n");
+    write(dir.path(), "tests/lib.rs", "needle\n");
+    let config = default_config(dir.path().to_path_buf());
+    let out = run_text(
+        &Grep,
+        json!({ "pattern": "needle", "include": "src/**/*.rs" }),
+        &config,
+    )
+    .await;
+    assert!(out.contains("src/lib.rs"), "{out}");
+    assert!(!out.contains("tests/lib.rs"), "{out}");
+}
+
+#[tokio::test]
+async fn grep_include_rejects_an_invalid_glob() {
+    let (_dir, config) = fs_fixture();
+    let result = run_result(
+        &Grep,
+        json!({ "pattern": "hello", "include": "[" }),
+        &config,
+    )
+    .await;
+    assert!(result.is_error);
+    assert!(result.joined_text().contains("Invalid include glob"));
+}
+
+#[tokio::test]
 async fn grep_bounds_a_single_enormous_matching_line() {
     let dir = TempDir::new().unwrap();
     let line = format!("{}NEEDLE{}", "a".repeat(20_000), "z".repeat(20_000));

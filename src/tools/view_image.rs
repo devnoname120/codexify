@@ -1,10 +1,12 @@
 use async_trait::async_trait;
 use base64::{Engine, engine::general_purpose::STANDARD};
-use serde_json::{Value, json};
+use schemars::JsonSchema;
+use serde::Deserialize;
+use serde_json::Value;
 
 use crate::exec_sessions::SessionState;
 use crate::safe_path::resolve_safe_path;
-use crate::tool::{Tool, arg_str};
+use crate::tool::{Tool, ToolBehavior, parse_tool_args, schema_for};
 use crate::types::{AppConfig, ToolResult};
 
 /// Images are base64-inlined into the response, which roughly grows them by a
@@ -42,10 +44,42 @@ fn detect_mime_type(bytes: &[u8]) -> Option<&'static str> {
 
 pub struct ViewImage;
 
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+enum ImageDetail {
+    Auto,
+    Low,
+    High,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ViewImageArgs {
+    /// Project-relative image path.
+    #[schemars(length(min = 1))]
+    path: String,
+    /// Compatibility hint; the full image is always returned.
+    detail: Option<ImageDetail>,
+}
+
 #[async_trait]
 impl Tool for ViewImage {
     fn name(&self) -> &'static str {
         "view_image"
+    }
+
+    fn title(&self) -> String {
+        "View image".to_string()
+    }
+
+    fn behavior(&self) -> ToolBehavior {
+        ToolBehavior::new(
+            true,
+            false,
+            true,
+            false,
+            "Reads and returns one local image without modifying state.",
+        )
     }
 
     fn description(&self) -> String {
@@ -53,23 +87,19 @@ impl Tool for ViewImage {
     }
 
     fn input_schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "path": { "type": "string", "description": "Image file path relative to work-dir" },
-                "detail": { "type": "string", "description": "Optional detail hint (e.g. auto, low, high). Accepted for compatibility with Codex clients and currently ignored — the full image is always sent." }
-            },
-            "required": ["path"],
-            "additionalProperties": false
-        })
+        schema_for::<ViewImageArgs>()
     }
 
     async fn call(&self, args: Value, config: &AppConfig, _session: &SessionState) -> ToolResult {
-        let Some(input_path) = arg_str(&args, "path") else {
-            return ToolResult::error("path must be a string");
+        let ViewImageArgs {
+            path: input_path,
+            detail: _detail,
+        } = match parse_tool_args(args) {
+            Ok(args) => args,
+            Err(error) => return *error,
         };
 
-        let file_path = match resolve_safe_path(input_path, &config.work_dir, false) {
+        let file_path = match resolve_safe_path(&input_path, &config.work_dir, false) {
             Ok(p) => p,
             Err(e) => return ToolResult::error(e),
         };

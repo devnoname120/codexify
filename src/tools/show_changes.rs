@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use rmcp::model::MetaObject;
+use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::exec_sessions::SessionState;
@@ -7,17 +8,17 @@ use crate::review::{
     ReviewBaseline, ReviewCheckpointManager, ReviewOwner, ReviewRequest, ReviewResult,
 };
 use crate::review_ui;
-use crate::tool::{Tool, ToolRequestContext};
+use crate::tool::{Tool, ToolBehavior, ToolRequestContext};
 use crate::types::{AppConfig, ToolResult};
 
 pub struct ShowChanges;
 
-fn bool_argument(args: &Value, key: &str, default: bool) -> Result<bool, String> {
-    match args.get(key) {
-        None => Ok(default),
-        Some(Value::Bool(value)) => Ok(*value),
-        Some(_) => Err(format!("{key} must be a boolean")),
-    }
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ShowChangesArgs {
+    since: Option<String>,
+    advance: Option<bool>,
+    include_patch: Option<bool>,
 }
 
 impl ShowChanges {
@@ -30,15 +31,18 @@ impl ShowChanges {
     }
 
     fn request(args: &Value) -> Result<ReviewRequest, String> {
-        let since = match args.get("since") {
-            None => None,
-            Some(Value::String(value)) => Some(value.as_str()),
-            Some(_) => return Err("since must be a string".to_string()),
+        let ShowChangesArgs {
+            since,
+            advance,
+            include_patch,
+        } = match serde_json::from_value(args.clone()) {
+            Ok(args) => args,
+            Err(error) => return Err(format!("Invalid tool arguments: {error}")),
         };
         Ok(ReviewRequest {
-            since: ReviewBaseline::parse(since)?,
-            advance: bool_argument(args, "advance", true)?,
-            include_patch: bool_argument(args, "include_patch", true)?,
+            since: ReviewBaseline::parse(since.as_deref())?,
+            advance: advance.unwrap_or(true),
+            include_patch: include_patch.unwrap_or(true),
         })
     }
 
@@ -70,8 +74,18 @@ impl Tool for ShowChanges {
         Self::NAME
     }
 
-    fn title(&self) -> Option<String> {
-        Some("Show changes".to_string())
+    fn title(&self) -> String {
+        "Show changes".to_string()
+    }
+
+    fn behavior(&self) -> ToolBehavior {
+        ToolBehavior::new(
+            true,
+            false,
+            true,
+            false,
+            "Presents project state and updates only Codexify's private incremental-delivery cursor; it does not modify project files, Git history, user-owned data, or external systems.",
+        )
     }
 
     fn meta(&self) -> Option<MetaObject> {
@@ -79,7 +93,7 @@ impl Tool for ShowChanges {
     }
 
     fn description(&self) -> String {
-        "Present project-scoped working-tree changes against the immutable project-open checkpoint or the incremental last-review checkpoint. The interactive widget receives tracked, untracked, deleted, renamed, executable, symlink, and binary changes through component-only result metadata without adding the patch to model-visible structured content. By default the returned review advances the last-review checkpoint, so call once after a related batch of edits rather than after every file. Set advance=false for a read-only comparison."
+        "Present project-scoped working-tree changes against the immutable project-open checkpoint or the incremental last-review checkpoint. The interactive widget receives tracked, untracked, deleted, renamed, executable, symlink, and binary changes through component-only result metadata without adding the patch to model-visible structured content. By default the emitted snapshot becomes the next incremental baseline; this updates only Codexify's private review cursor and does not modify project files, Git history, or external state. Set advance=false to inspect without moving that cursor."
             .to_string()
     }
 
@@ -94,7 +108,7 @@ impl Tool for ShowChanges {
                 },
                 "advance": {
                     "type": "boolean",
-                    "description": "Advance the last-review checkpoint to the current scoped snapshot after comparison. Default: true."
+                    "description": "Record the emitted snapshot as the next incremental baseline. This changes only Codexify's private review cursor. Default: true."
                 },
                 "include_patch": {
                     "type": "boolean",

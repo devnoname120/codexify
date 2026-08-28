@@ -133,6 +133,14 @@ pub fn default_shell_bin() -> String {
     }
 }
 
+fn ultimate_fallback_shell_bin() -> String {
+    if cfg!(windows) {
+        "cmd.exe".to_string()
+    } else {
+        "/bin/sh".to_string()
+    }
+}
+
 /// Builds the argv prefix that makes `bin` execute a command string. The flag
 /// follows the shell, not the host (Codex's `Shell::derive_exec_args`).
 pub fn resolve_shell(explicit: Option<&str>) -> Vec<String> {
@@ -140,10 +148,122 @@ pub fn resolve_shell(explicit: Option<&str>) -> Vec<String> {
         Some(s) if !s.is_empty() => s.to_string(),
         _ => default_shell_bin(),
     };
+    shell_argv(bin)
+}
+
+/// Model-provided shell values select a known shell by basename. The supplied
+/// path is never executed directly, matching Codex's shell-selection contract.
+pub fn resolve_model_shell(explicit: &str) -> Vec<String> {
+    let base = explicit.rsplit(['\\', '/']).next().unwrap_or(explicit);
+    let base = if base.len() >= 4 && base[base.len() - 4..].eq_ignore_ascii_case(".exe") {
+        &base[..base.len() - 4]
+    } else {
+        base
+    };
+    let requested = base.to_ascii_lowercase();
+    let default = default_shell_bin();
+    if shell_basename(&default)
+        .as_deref()
+        .is_some_and(|name| shell_names_match(name, &requested))
+        && is_executable_file(std::path::Path::new(&default))
+    {
+        return shell_argv(default);
+    }
+
+    let candidates: &[&str] = match requested.as_str() {
+        "zsh" => &["zsh", "/bin/zsh"],
+        "bash" => &["bash", "/bin/bash", "/usr/bin/bash"],
+        "sh" => &["sh", "/bin/sh"],
+        #[cfg(windows)]
+        "pwsh" => &[
+            "pwsh",
+            "powershell",
+            r"C:\Program Files\PowerShell\7\pwsh.exe",
+        ],
+        #[cfg(not(windows))]
+        "pwsh" => &["pwsh", "powershell", "/usr/local/bin/pwsh"],
+        #[cfg(windows)]
+        "powershell" => &[
+            "powershell",
+            "pwsh",
+            r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+            r"C:\Program Files\PowerShell\7\pwsh.exe",
+        ],
+        #[cfg(not(windows))]
+        "powershell" => &["powershell", "pwsh", "/usr/local/bin/pwsh"],
+        "cmd" => &["cmd.exe", "cmd"],
+        _ => &[],
+    };
+    let bin = candidates
+        .iter()
+        .find_map(|candidate| executable_on_path(candidate))
+        .unwrap_or_else(ultimate_fallback_shell_bin);
+    shell_argv(bin)
+}
+
+fn shell_basename(path: &str) -> Option<String> {
+    let base = path.rsplit(['\\', '/']).next()?;
+    let base = if base.len() >= 4 && base[base.len() - 4..].eq_ignore_ascii_case(".exe") {
+        &base[..base.len() - 4]
+    } else {
+        base
+    };
+    Some(base.to_ascii_lowercase())
+}
+
+fn shell_names_match(actual: &str, requested: &str) -> bool {
+    actual == requested
+        || matches!(
+            (actual, requested),
+            ("pwsh", "powershell") | ("powershell", "pwsh")
+        )
+}
+
+fn shell_argv(bin: String) -> Vec<String> {
     match shell_type_of(&bin) {
         ShellType::PowerShell => vec![bin, "-NoProfile".into(), "-Command".into()],
         ShellType::Cmd => vec![bin, "/c".into()],
         ShellType::Posix => vec![bin, "-c".into()],
+    }
+}
+
+fn executable_on_path(name: &str) -> Option<String> {
+    let path = std::path::Path::new(name);
+    if path.is_absolute() && is_executable_file(path) {
+        return Some(path.to_string_lossy().into_owned());
+    }
+    let search = std::env::var_os("PATH")?;
+    for directory in std::env::split_paths(&search) {
+        let candidate = directory.join(name);
+        if is_executable_file(&candidate) {
+            return Some(candidate.to_string_lossy().into_owned());
+        }
+        #[cfg(windows)]
+        if candidate.extension().is_none() {
+            let executable = candidate.with_extension("exe");
+            if is_executable_file(&executable) {
+                return Some(executable.to_string_lossy().into_owned());
+            }
+        }
+    }
+    None
+}
+
+fn is_executable_file(path: &std::path::Path) -> bool {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
     }
 }
 
@@ -998,8 +1118,10 @@ pub fn start_exec_session(
         }
     }
 
-    let shell_choice = shell.or(config.exec.default_shell.as_deref());
-    let parts = resolve_shell(shell_choice);
+    let parts = match shell.filter(|value| !value.is_empty()) {
+        Some(model_shell) => resolve_model_shell(model_shell),
+        None => resolve_shell(config.exec.default_shell.as_deref()),
+    };
     let bin = parts[0].clone();
     let shell_args = &parts[1..];
     let wrapped = wrap_for_shell(cmd, &bin);
@@ -1176,6 +1298,26 @@ mod tests {
             vec!["powershell", "-NoProfile", "-Command"]
         );
         assert_eq!(resolve_shell(Some("cmd")), vec!["cmd", "/c"]);
+    }
+
+    #[test]
+    fn model_shell_uses_only_a_recognized_basename() {
+        let supplied = if cfg!(windows) {
+            r"C:\untrusted\powershell.exe"
+        } else {
+            "/untrusted/bash"
+        };
+        let resolved = resolve_model_shell(supplied);
+        assert_ne!(resolved[0], supplied);
+        assert_eq!(shell_type_of(&resolved[0]), shell_type_of(supplied));
+    }
+
+    #[test]
+    fn unknown_model_shell_uses_codex_ultimate_fallback() {
+        assert_eq!(
+            resolve_model_shell("not-a-supported-shell"),
+            shell_argv(ultimate_fallback_shell_bin())
+        );
     }
 
     #[test]

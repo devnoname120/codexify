@@ -294,33 +294,75 @@ pub struct RememberResult {
     pub message: String,
 }
 
-/// Set, replace or drop one note. An empty value removes the key. Over budget is
-/// a rejected write rather than a silent eviction.
-pub fn remember(config: &AppConfig, key: &str, value: &str, now: &str) -> RememberResult {
-    with_memory_lock(config, || remember_locked(config, key, value, now))
+#[derive(Clone, Copy)]
+enum NoteWriteMode {
+    Create,
+    Update,
+    Upsert,
 }
 
-fn remember_locked(config: &AppConfig, key: &str, value: &str, now: &str) -> RememberResult {
+pub fn create_note(config: &AppConfig, key: &str, value: &str, now: &str) -> RememberResult {
+    with_memory_lock(config, || {
+        write_note_locked(config, key, value, now, NoteWriteMode::Create)
+    })
+}
+
+pub fn update_note(config: &AppConfig, key: &str, value: &str, now: &str) -> RememberResult {
+    with_memory_lock(config, || {
+        write_note_locked(config, key, value, now, NoteWriteMode::Update)
+    })
+}
+
+pub fn delete_note(config: &AppConfig, key: &str) -> RememberResult {
+    with_memory_lock(config, || delete_note_locked(config, key))
+}
+
+/// Retained for callers of the original storage API. Connector tools expose
+/// create, update, and delete as separate operations with distinct annotations.
+pub fn remember(config: &AppConfig, key: &str, value: &str, now: &str) -> RememberResult {
+    if value.trim().is_empty() {
+        delete_note(config, key)
+    } else {
+        with_memory_lock(config, || {
+            write_note_locked(config, key, value, now, NoteWriteMode::Upsert)
+        })
+    }
+}
+
+fn write_note_locked(
+    config: &AppConfig,
+    key: &str,
+    value: &str,
+    now: &str,
+    mode: NoteWriteMode,
+) -> RememberResult {
     let mut memory = load_memory(config);
     let trimmed_key = key.trim().to_string();
-
-    if value.trim().is_empty() {
-        if !memory.notes.contains_key(&trimmed_key) {
+    let existing = memory.notes.get(&trimmed_key);
+    match mode {
+        NoteWriteMode::Create if existing.is_some() => {
             return RememberResult {
                 ok: false,
-                message: format!("No note named {trimmed_key:?} to remove."),
+                message: format!(
+                    "Note {trimmed_key:?} already exists. Use update_memory_note to replace it."
+                ),
             };
         }
-        memory.notes.remove(&trimmed_key);
-        let stored = save_memory(config, &memory);
-        return RememberResult {
-            ok: true,
-            message: if stored {
-                format!("Removed note {trimmed_key:?}.")
-            } else {
-                format!("Removed note {trimmed_key:?}, but memory could not be written to disk.")
-            },
-        };
+        NoteWriteMode::Update if existing.is_none() => {
+            return RememberResult {
+                ok: false,
+                message: format!(
+                    "No note named {trimmed_key:?} exists. Use remember to create it."
+                ),
+            };
+        }
+        NoteWriteMode::Update if existing.is_some_and(|note| note.value == value) => {
+            return RememberResult {
+                ok: true,
+                message: format!("Note {trimmed_key:?} already has that value."),
+            };
+        }
+        NoteWriteMode::Create | NoteWriteMode::Update | NoteWriteMode::Upsert => {}
     }
 
     let mut candidate = memory.notes.clone();
@@ -334,21 +376,15 @@ fn remember_locked(config: &AppConfig, key: &str, value: &str, now: &str) -> Rem
     let budget = memory_max_bytes(config);
     let size = notes_bytes(&candidate);
     if size > budget {
-        let existing: Vec<&String> = memory.notes.keys().collect();
-        let keys = if existing.is_empty() {
+        let keys = if memory.notes.is_empty() {
             "none".to_string()
         } else {
-            existing
-                .iter()
-                .map(|k| k.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
+            memory.notes.keys().cloned().collect::<Vec<_>>().join(", ")
         };
         return RememberResult {
             ok: false,
             message: format!(
-                "Note rejected: notes would total {size} bytes, over the {budget}-byte budget. \
-                 Remove or shorten one first by calling remember with an empty value. Current keys: {keys}."
+                "Note rejected: notes would total {size} bytes, over the {budget}-byte budget. Remove or shorten one first with forget_memory_note or update_memory_note. Current keys: {keys}."
             ),
         };
     }
@@ -356,12 +392,36 @@ fn remember_locked(config: &AppConfig, key: &str, value: &str, now: &str) -> Rem
     memory.notes = candidate;
     let stored = save_memory(config, &memory);
     RememberResult {
-        ok: true,
+        ok: stored,
         message: if stored {
-            format!("Remembered {trimmed_key:?} ({size}/{budget} bytes used).")
+            format!("Stored note {trimmed_key:?} ({size}/{budget} bytes used).")
         } else {
             format!(
                 "Could not write memory to {}; the note is not saved.",
+                memory_path(config).display()
+            )
+        },
+    }
+}
+
+fn delete_note_locked(config: &AppConfig, key: &str) -> RememberResult {
+    let mut memory = load_memory(config);
+    let trimmed_key = key.trim().to_string();
+    if !memory.notes.contains_key(&trimmed_key) {
+        return RememberResult {
+            ok: false,
+            message: format!("No note named {trimmed_key:?} to remove."),
+        };
+    }
+    memory.notes.remove(&trimmed_key);
+    let stored = save_memory(config, &memory);
+    RememberResult {
+        ok: stored,
+        message: if stored {
+            format!("Removed note {trimmed_key:?}.")
+        } else {
+            format!(
+                "Could not write memory to {}; the note was not removed.",
                 memory_path(config).display()
             )
         },

@@ -333,7 +333,7 @@ impl ReviewCheckpointManager {
                         result.checkpoint_advanced = true;
                     } else {
                         result.warnings.push(
-                            "the last-review checkpoint changed concurrently; call show_changes again before advancing"
+                            "the last-review checkpoint changed concurrently; call show_changes again to refresh the incremental diff"
                                 .to_string(),
                         );
                     }

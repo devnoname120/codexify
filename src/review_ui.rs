@@ -12,7 +12,10 @@ pub const REVIEW_RESULT_META_KEY: &str = "io.github.devnoname120/codexify/review
 
 pub fn tool_meta() -> MetaObject {
     serde_json::from_value(json!({
-        "ui": { "resourceUri": REVIEW_UI_URI },
+        "ui": {
+            "resourceUri": REVIEW_UI_URI,
+            "visibility": ["model"]
+        },
         "ui/resourceUri": REVIEW_UI_URI
     }))
     .expect("static review tool metadata must be an object")
@@ -1150,6 +1153,10 @@ mod tests {
                 .and_then(|value| value.get("resourceUri"))
                 .and_then(serde_json::Value::as_str),
             Some(REVIEW_UI_URI)
+        );
+        assert_eq!(
+            meta.get("ui").and_then(|value| value.get("visibility")),
+            Some(&json!(["model"]))
         );
         assert_eq!(
             meta.get("ui/resourceUri")

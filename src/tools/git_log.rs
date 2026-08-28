@@ -1,13 +1,26 @@
 use async_trait::async_trait;
-use serde_json::{Value, json};
+use schemars::JsonSchema;
+use serde::Deserialize;
+use serde_json::Value;
 use tokio::process::Command;
 
 use crate::exec_sessions::SessionState;
 use crate::process_env::scrub_untrusted_child_env;
-use crate::tool::{Tool, arg_bool, arg_u64};
+use crate::tool::{Tool, ToolBehavior, parse_tool_args, schema_for, text_output_schema};
 use crate::types::{AppConfig, ToolResult};
 
 pub struct GitLog;
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct GitLogArgs {
+    /// Number of commits to show. Defaults to 10.
+    #[schemars(range(min = 1))]
+    count: Option<u64>,
+    /// Use compact one-line formatting.
+    #[serde(default)]
+    oneline: bool,
+}
 
 #[async_trait]
 impl Tool for GitLog {
@@ -15,35 +28,42 @@ impl Tool for GitLog {
         "git_log"
     }
 
+    fn title(&self) -> String {
+        "Read Git log".to_string()
+    }
+
+    fn behavior(&self) -> ToolBehavior {
+        ToolBehavior::new(
+            true,
+            false,
+            true,
+            false,
+            "Reads local Git history without changing repository or external state.",
+        )
+    }
+
     fn description(&self) -> String {
         "Show recent git commit history of the project. Returns commit hash, author, date, and message for each commit. Use oneline=true for a compact view. Useful to understand recent changes, find when a bug was introduced, or review what has been done.".into()
     }
 
     fn input_schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "count": { "type": "number", "description": "Number of commits to show. Default: 10" },
-                "oneline": { "type": "boolean", "description": "Show compact one-line format. Default: false" }
-            }
-        })
+        schema_for::<GitLogArgs>()
     }
 
     fn output_schema(&self) -> Option<Value> {
-        Some(json!({
-            "type": "object",
-            "properties": {
-                "content": { "type": "string", "description": "Formatted git log output with commit hash, author, date, and message" }
-            }
-        }))
+        Some(text_output_schema())
     }
 
     async fn call(&self, args: Value, config: &AppConfig, _session: &SessionState) -> ToolResult {
-        let count = arg_u64(&args, "count").unwrap_or(10);
+        let GitLogArgs { count, oneline } = match parse_tool_args(args) {
+            Ok(args) => args,
+            Err(error) => return *error,
+        };
+        let count = count.unwrap_or(10);
         let max_count = format!("--max-count={count}");
         let mut log_args: Vec<&str> = vec!["log", &max_count];
 
-        if arg_bool(&args, "oneline") {
+        if oneline {
             log_args.push("--oneline");
         } else {
             log_args.push("--format=%H %an <%ae> %ai%n  %s%n");
