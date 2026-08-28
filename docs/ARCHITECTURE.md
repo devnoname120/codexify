@@ -155,16 +155,21 @@ Five integration surfaces are exposed to the client:
    the first such call, the review manager captures the scoped project-open snapshot.
    Non-Git projects report review as unavailable; a Git snapshot failure blocks
    mutating tools before dispatch.
-9. Tool dispatch supplies a request context containing the stable conversation
-   identity, shared authorization store, and shared review manager; tools that do
-   not need it use the default context-free implementation. The server fills in
-   the model-output policy to textual `content` and explicit `structuredContent`,
-   then fills default structured text mirrors within the same ceiling. Component-only
-   result `_meta` is deliberately excluded. Dispatch also emits diagnostic tracing and, when audit
-   logging is enabled, paired JSONL `tool_start` / `tool_finish` records: identity
-   and project values are hashed, and scalar argument values and returned payloads
-   are replaced by schema-bounded shape and size accounting (unknown argument keys
-   and dynamic-map keys are not recorded).
+9. Tool dispatch first resolves a `ToolCallIdentity`. Native tools retain their
+   downstream name; direct, gateway, and catalog MCP proxies map the call to the
+   raw configured upstream server/tool before execution. Dispatch then supplies a
+   request context containing the stable conversation identity, shared
+   authorization store, and shared review manager; tools that do not need it use
+   the default context-free implementation. The server applies the model-output
+   policy to textual `content` and explicit `structuredContent`, then fills default
+   structured text mirrors within the same ceiling. Component-only result `_meta`
+   is deliberately excluded. Every tracing lifecycle event includes the resolved
+   identity. Optional `toolLogging` tracing emits paired, redacted, byte-bounded
+   request/response previews for every tool class. Separately, audit logging emits
+   JSONL `tool_start` / `tool_finish` records: conversation and project identities
+   are hashed, and scalar argument values and returned payloads are replaced by
+   schema-bounded shape and size accounting (unknown argument keys and dynamic-map
+   keys are not recorded).
 10. `exec_command` and `write_stdin` opt into resident-process routing. With a
    ChatGPT conversation identity, dispatch substitutes the shared conversation's
    exec state while retaining the transport's other mutable state. Without one,
@@ -199,6 +204,7 @@ trait Tool: Send + Sync {
     fn annotations(&self) -> Option<ToolAnnotations>;  // MCP behavior hints
     fn meta(&self) -> Option<MetaObject>;               // MCP Apps and extensions
     fn input_schema(&self) -> Value;
+    fn call_identity(&self, args: &Value) -> ToolCallIdentity; // resolved native/MCP target
     fn output_schema(&self) -> Option<Value>;
     fn fills_structured_content(&self) -> bool;         // opt out of default-fill
     fn manages_model_output_budget(&self) -> bool;      // false by default
@@ -486,8 +492,10 @@ the original order and rejects duplicate names.
 | `artifact_ingress/` | OpenAI native-file validation and streaming plus capability-confined, atomic no-overwrite workspace publication. It never accepts a local source path, and constrains the download URL and every redirect hop to the configurable `artifactIngress.allowedHosts` allowlist (default `"*"`, which still rejects loopback, private, link-local, unique-local, CGNAT, `localhost`, and metadata addresses). |
 | `artifact_egress.rs` | Capability-confined regular-file snapshotting plus a process-wide bounded store of immutable bytes. It returns random opaque `codexify://artifact/...` resource capabilities, enforces per-file/total-byte/reference/TTL limits, and serves blobs only through `resources/read`; absolute paths, traversal, symlink escapes, and delayed path rereads are excluded. |
 | `logging.rs` | Tracing initialization with default filters for normal, `-v`, and `-vv` operation (an explicit `RUST_LOG` remains authoritative), plus a non-overridable filter that suppresses RMCP framework events, preventing native-file bearer URLs from appearing in logs before tool dispatch or malformed-session errors. |
+| `tool_logging.rs` | Opt-in info-level request/response tracing for every native and bridged tool, monotonic call pairing, resolved raw MCP identities, compact MCP-shaped response rendering, MCP image content-block and resource-capability elision, and UTF-8 byte-strict head/tail truncation. |
+| `redaction.rs` | Shared value/JSON/argv redaction for audit command previews and tool payload tracing. It collects configured and environment-backed connector/MCP/tunnel secrets, removes secret-labelled fields and native-file capability URLs, and applies credential-syntax heuristics before payload truncation. |
 | `output_budget.rs` | Line/byte windowing and list caps, each cut announced with the continuation argument. |
-| `audit.rs` | Private append-only JSONL tool lifecycle records, stable hashed identities, redacted argument summaries, output accounting, and opt-in bounded command previews. |
+| `audit.rs` | Private append-only JSONL tool lifecycle records, stable hashed identities, redacted argument summaries, output accounting, and opt-in bounded command previews using the shared redactor. |
 | `conversation_auth.rs` | Authentication-token generation and validation, constant-time comparison, copyable ChatGPT instruction rendering with the innocuous wire vocabulary, durable per-conversation authorization markers, and transport-session fallback. |
 | `ignore_rules.rs` | One `.gitignore`-accurate matcher (the `ignore` crate) shared by glob/grep/tree/list_directory. |
 | `exec_policy.rs` | Shell-string allowlist guard for `exec_command` (a guardrail, not a sandbox). |
@@ -728,6 +736,9 @@ the legacy fallback. All fields are optional.
   "ignore": { "useGitignore": true, "useDefaultPatterns": true, "customPatterns": [] },
   "output": { "maxToolOutputTokens": 10000, "maxFileLines": 1000, "maxFileBytes": 131072, "maxEntries": 500, "maxTreeNodes": 1000 },
   "review": { "maxPatchBytes": 4194304 },
+  "toolLogging": { "mode": "off",       // off | requests | responses | all
+                   "maxRequestBytes": 2048, "maxResponseBytes": 4096,
+                   "redactEnv": [] },
   "audit": { "logFile": null, "includeCommandPreview": false,
              "commandPreviewMaxBytes": 512, "redactEnv": [] },
   "artifactIngress": { "enabled": true, "maxFileBytes": 104857600,
@@ -789,6 +800,7 @@ Upstream MCP servers:
   remote-exec -> catalog (84 private tool(s))
 Auth: disabled (no --api-key)
 Conversation authorization: enabled (one token check per chat)
+Tool payload logging: disabled
 Audit log: /private/path/tools.jsonl
 Audit command previews: disabled
 ```
@@ -807,9 +819,13 @@ Audit command previews: disabled
   directory; its native count is 30 because the selectors are present.
 - Conversation authorization adds one native tool and prints only whether the
   gate is enabled; neither the token nor its derived namespace is printed.
+- Tool completion diagnostics always include the resolved raw MCP server/tool when
+  a direct proxy, gateway dispatcher, or catalog dispatcher selected one.
 - `-v` and `-vv` increase Codexify diagnostics without dumping raw tool payloads;
-  `RUST_LOG` overrides those defaults. When audit logging is configured, the banner
-  prints its destination and whether command previews are enabled.
+  `RUST_LOG` overrides those defaults. `toolLogging` / `--log-tool-payloads` is the
+  separate payload opt-in; the banner prints its mode and byte limits. When audit
+  logging is configured, the banner prints its destination and whether command
+  previews are enabled.
 
 ---
 

@@ -26,8 +26,8 @@ use crate::types::{
     AppConfig, ArtifactEgressConfig, ArtifactIngressConfig, AuditConfig, CodexProjectCatalogConfig,
     CommandConfig, ConversationAuthToken, ExecConfig, ExecMode, IgnoreConfig, McpServerSpec,
     McpToolExposure, MemoryConfig, OpenAiTunnelConfig, OutputConfig, ProjectCatalogConfig,
-    ProjectCatalogEntryConfig, ProjectDocConfig, ReviewConfig, SkillsConfig, TreeConfig,
-    WorktreeConfig, WorktreeMode, WorktreeUpstreamRefreshMode,
+    ProjectCatalogEntryConfig, ProjectDocConfig, ReviewConfig, SkillsConfig, ToolLogMode,
+    ToolLoggingConfig, TreeConfig, WorktreeConfig, WorktreeMode, WorktreeUpstreamRefreshMode,
 };
 use crate::util::home_dir;
 
@@ -52,6 +52,37 @@ pub struct Cli {
         global = true
     )]
     pub verbose: u8,
+
+    /// Log bounded, redacted tool payloads. MODE is off, requests, responses, or all.
+    #[arg(
+        long = "log-tool-payloads",
+        value_enum,
+        num_args = 0..=1,
+        default_missing_value = "all",
+        value_name = "MODE",
+        global = true
+    )]
+    pub log_tool_payloads: Option<ToolLogMode>,
+
+    /// Maximum UTF-8 bytes retained from each logged tool request.
+    #[arg(
+        long = "tool-log-max-request-bytes",
+        value_name = "BYTES",
+        global = true
+    )]
+    pub tool_log_max_request_bytes: Option<usize>,
+
+    /// Maximum UTF-8 bytes retained from each logged tool response.
+    #[arg(
+        long = "tool-log-max-response-bytes",
+        value_name = "BYTES",
+        global = true
+    )]
+    pub tool_log_max_response_bytes: Option<usize>,
+
+    /// Redact the current value of this environment variable from tool payload logs.
+    #[arg(long = "tool-log-redact-env", value_name = "NAME", action = ArgAction::Append, global = true)]
+    pub tool_log_redact_env: Vec<String>,
 
     #[command(subcommand)]
     pub command: Option<CliCommand>,
@@ -260,6 +291,15 @@ struct PartialAudit {
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct PartialToolLogging {
+    mode: Option<ToolLogMode>,
+    max_request_bytes: Option<usize>,
+    max_response_bytes: Option<usize>,
+    redact_env: Option<Vec<String>>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct PartialWorktrees {
     mode: Option<WorktreeMode>,
     root: Option<String>,
@@ -463,6 +503,7 @@ struct FileConfig {
     memory: Option<MemoryConfig>,
     skills: Option<SkillsConfig>,
     ignore: Option<IgnoreConfig>,
+    tool_logging: Option<PartialToolLogging>,
     audit: Option<PartialAudit>,
     codex_mcp: Option<CodexMcpConfig>,
     project_catalog: Option<PartialProjectCatalog>,
@@ -661,6 +702,7 @@ pub fn default_config(work_dir: std::path::PathBuf) -> AppConfig {
         memory: MemoryConfig::default(),
         skills: SkillsConfig::default(),
         ignore: IgnoreConfig::default(),
+        tool_logging: ToolLoggingConfig::default(),
         audit: AuditConfig::default(),
         allowed_hosts: Vec::new(),
         openai_tunnel: None,
@@ -1194,6 +1236,52 @@ fn resolve_openai_tunnel(
     }))
 }
 
+fn resolve_tool_logging(
+    file: Option<PartialToolLogging>,
+    cli: &Cli,
+) -> Result<ToolLoggingConfig, String> {
+    const MAX_PAYLOAD_BYTES: usize = 64 * 1024;
+
+    let file = file.unwrap_or_default();
+    let defaults = ToolLoggingConfig::default();
+    let mode = cli.log_tool_payloads.or(file.mode).unwrap_or(defaults.mode);
+    let max_request_bytes = cli
+        .tool_log_max_request_bytes
+        .or(file.max_request_bytes)
+        .unwrap_or(defaults.max_request_bytes);
+    let max_response_bytes = cli
+        .tool_log_max_response_bytes
+        .or(file.max_response_bytes)
+        .unwrap_or(defaults.max_response_bytes);
+    for (name, value) in [
+        ("toolLogging.maxRequestBytes", max_request_bytes),
+        ("toolLogging.maxResponseBytes", max_response_bytes),
+    ] {
+        if !(1..=MAX_PAYLOAD_BYTES).contains(&value) {
+            return Err(format!("{name} must be between 1 and {MAX_PAYLOAD_BYTES}"));
+        }
+    }
+
+    let mut redact_env = file.redact_env.unwrap_or_default();
+    redact_env.extend(cli.tool_log_redact_env.iter().cloned());
+    for name in &redact_env {
+        if !valid_env_name(name) {
+            return Err(format!(
+                "toolLogging.redactEnv contains an invalid environment-variable name: {name}"
+            ));
+        }
+    }
+    redact_env.sort();
+    redact_env.dedup();
+
+    Ok(ToolLoggingConfig {
+        mode,
+        max_request_bytes,
+        max_response_bytes,
+        redact_env,
+    })
+}
+
 fn resolve_audit(file: Option<PartialAudit>, cli: &Cli) -> Result<AuditConfig, String> {
     const MAX_COMMAND_PREVIEW_BYTES: usize = 16 * 1024;
 
@@ -1295,6 +1383,7 @@ pub fn load_config(cli: Cli) -> Result<AppConfig, String> {
     let project_catalog = resolve_project_catalog(&mut file);
     let mcp_servers = resolve_mcp_servers(&mut file, &cli)?;
     let openai_tunnel = resolve_openai_tunnel(file.openai_tunnel, &cli)?;
+    let tool_logging = resolve_tool_logging(file.tool_logging, &cli)?;
     let audit = resolve_audit(file.audit, &cli)?;
     let worktrees = resolve_worktree_config(file.worktrees.take(), &cli);
     let api_key = cli.api_key.or(file.api_key);
@@ -1335,6 +1424,7 @@ pub fn load_config(cli: Cli) -> Result<AppConfig, String> {
         memory: file.memory.unwrap_or_default(),
         skills: file.skills.unwrap_or_default(),
         ignore: file.ignore.unwrap_or_default(),
+        tool_logging,
         audit,
         allowed_hosts: file.allowed_hosts.unwrap_or_default(),
         openai_tunnel,
@@ -1384,6 +1474,10 @@ mod tests {
     fn cli(work_dir: &Path, config: &Path) -> Cli {
         Cli {
             verbose: 0,
+            log_tool_payloads: None,
+            tool_log_max_request_bytes: None,
+            tool_log_max_response_bytes: None,
+            tool_log_redact_env: Vec::new(),
             command: None,
             work_dir: Some(work_dir.to_string_lossy().into_owned()),
             multi_project: false,
@@ -1525,11 +1619,17 @@ mod tests {
     }
 
     #[test]
-    fn cli_parses_verbose_and_audit_controls() {
+    fn cli_parses_verbose_tool_logging_and_audit_controls() {
         let parsed = Cli::try_parse_from([
             "codexify",
-            "-v",
-            "--log-tool-calls",
+            "-vv",
+            "--log-tool-payloads=requests",
+            "--tool-log-max-request-bytes",
+            "1536",
+            "--tool-log-max-response-bytes",
+            "3072",
+            "--tool-log-redact-env",
+            "MCP_SECRET",
             "--work-dir",
             "/tmp/project",
             "--audit-log",
@@ -1543,9 +1643,37 @@ mod tests {
         .unwrap();
 
         assert_eq!(parsed.verbose, 2);
+        assert_eq!(parsed.log_tool_payloads, Some(ToolLogMode::Requests));
+        assert_eq!(parsed.tool_log_max_request_bytes, Some(1536));
+        assert_eq!(parsed.tool_log_max_response_bytes, Some(3072));
+        assert_eq!(parsed.tool_log_redact_env, ["MCP_SECRET"]);
         assert_eq!(parsed.audit_log.as_deref(), Some("/tmp/audit.jsonl"));
         assert!(parsed.audit_command_preview);
         assert_eq!(parsed.audit_redact_env, ["GITHUB_TOKEN", "CUSTOM_SECRET"]);
+    }
+
+    #[test]
+    fn legacy_log_tool_calls_alias_remains_non_payload_verbose_mode() {
+        let parsed =
+            Cli::try_parse_from(["codexify", "--log-tool-calls", "--work-dir", "/tmp/project"])
+                .unwrap();
+
+        assert_eq!(parsed.verbose, 1);
+        assert_eq!(parsed.log_tool_payloads, None);
+    }
+
+    #[test]
+    fn log_tool_payloads_without_a_mode_defaults_to_all() {
+        let parsed = Cli::try_parse_from([
+            "codexify",
+            "--log-tool-payloads",
+            "--work-dir",
+            "/tmp/project",
+        ])
+        .unwrap();
+
+        assert_eq!(parsed.verbose, 0);
+        assert_eq!(parsed.log_tool_payloads, Some(ToolLogMode::All));
     }
 
     #[test]
@@ -1644,6 +1772,53 @@ mod tests {
         let error = load_config(cli(root.path(), &config_path)).unwrap_err();
 
         assert!(error.contains("conversationAuthToken"));
+    }
+
+    #[test]
+    fn tool_logging_cli_overrides_file_limits_and_extends_redactions() {
+        let root = tempfile::tempdir().unwrap();
+        let config_path = root.path().join("config.json");
+        std::fs::write(
+            &config_path,
+            serde_json::to_vec(&json!({
+                "codexMcp": { "enabled": false },
+                "toolLogging": {
+                    "mode": "responses",
+                    "maxRequestBytes": 1024,
+                    "maxResponseBytes": 2048,
+                    "redactEnv": ["FILE_SECRET"]
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let mut args = cli(root.path(), &config_path);
+        args.log_tool_payloads = Some(ToolLogMode::All);
+        args.tool_log_max_request_bytes = Some(4096);
+        args.tool_log_redact_env = vec!["CLI_SECRET".to_string(), "FILE_SECRET".to_string()];
+
+        let config = load_config(args).unwrap();
+        assert_eq!(config.tool_logging.mode, ToolLogMode::All);
+        assert_eq!(config.tool_logging.max_request_bytes, 4096);
+        assert_eq!(config.tool_logging.max_response_bytes, 2048);
+        assert_eq!(
+            config.tool_logging.redact_env,
+            ["CLI_SECRET", "FILE_SECRET"]
+        );
+    }
+
+    #[test]
+    fn tool_logging_payload_limits_are_bounded() {
+        let root = tempfile::tempdir().unwrap();
+        let config_path = root.path().join("config.json");
+        std::fs::write(
+            &config_path,
+            r#"{"codexMcp":{"enabled":false},"toolLogging":{"maxResponseBytes":65537}}"#,
+        )
+        .unwrap();
+
+        let error = load_config(cli(root.path(), &config_path)).unwrap_err();
+        assert!(error.contains("toolLogging.maxResponseBytes"), "{error}");
     }
 
     #[test]

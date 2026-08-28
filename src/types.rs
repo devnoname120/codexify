@@ -651,6 +651,55 @@ impl WorktreeUpstreamRefreshMode {
 }
 
 #[derive(Debug, Clone)]
+pub struct ToolLoggingConfig {
+    pub mode: ToolLogMode,
+    pub max_request_bytes: usize,
+    pub max_response_bytes: usize,
+    pub redact_env: Vec<String>,
+}
+
+impl Default for ToolLoggingConfig {
+    fn default() -> Self {
+        Self {
+            mode: ToolLogMode::Off,
+            max_request_bytes: 2 * 1024,
+            max_response_bytes: 4 * 1024,
+            redact_env: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+#[value(rename_all = "kebab-case")]
+pub enum ToolLogMode {
+    #[default]
+    Off,
+    Requests,
+    Responses,
+    All,
+}
+
+impl ToolLogMode {
+    pub fn logs_requests(self) -> bool {
+        matches!(self, Self::Requests | Self::All)
+    }
+
+    pub fn logs_responses(self) -> bool {
+        matches!(self, Self::Responses | Self::All)
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Requests => "requests",
+            Self::Responses => "responses",
+            Self::All => "all",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct AuditConfig {
     pub log_file: Option<std::path::PathBuf>,
     pub include_command_preview: bool,
@@ -704,8 +753,8 @@ pub struct WorktreeConfig {
 /// The fully-resolved server configuration handed to every tool.
 ///
 /// `work_dir` and `port` are always concrete. `project_catalog`, `projectDoc`,
-/// `output`, `review`, `artifactIngress`, `artifactEgress`, `memory`, `skills`, `ignore` and
-/// `audit` carry their resolved/defaultable module settings.
+/// `output`, `review`, `artifactIngress`, `artifactEgress`, `memory`, `skills`,
+/// `ignore`, `toolLogging` and `audit` carry their resolved/defaultable module settings.
 #[derive(Debug, Clone)]
 pub struct AppConfig {
     pub work_dir: std::path::PathBuf,
@@ -728,6 +777,7 @@ pub struct AppConfig {
     pub memory: MemoryConfig,
     pub skills: SkillsConfig,
     pub ignore: IgnoreConfig,
+    pub tool_logging: ToolLoggingConfig,
     pub audit: AuditConfig,
     /// Host authorities accepted for DNS-rebinding protection. Empty means
     /// "accept any Host", which the original bridge did so it works behind a

@@ -16,7 +16,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::bridge::forward_tool_call;
 use crate::exec_sessions::SessionState;
-use crate::tool::{Tool, ToolRequestContext};
+use crate::tool::{Tool, ToolCallIdentity, ToolRequestContext};
 use crate::types::{AppConfig, McpServerProvenance, ToolResult};
 
 pub(crate) const MCP_LIST_SOURCES: &str = "mcp_list_sources";
@@ -972,6 +972,23 @@ impl Tool for McpCallToolTool {
             "required": ["source", "tool"],
             "additionalProperties": false
         })
+    }
+
+    fn call_identity(&self, args: &Value) -> ToolCallIdentity {
+        let resolved = args
+            .get("source")
+            .and_then(Value::as_str)
+            .and_then(|source_id| self.catalog.source(source_id).ok())
+            .and_then(|source| {
+                args.get("tool")
+                    .and_then(Value::as_str)
+                    .and_then(|tool_id| self.catalog.tool(source, tool_id).ok())
+                    .map(|tool| (source.raw_name.clone(), tool.raw.name.to_string()))
+            });
+        match resolved {
+            Some((server, tool)) => ToolCallIdentity::mcp(self.name(), server, Some(tool)),
+            None => ToolCallIdentity::native(self.name()),
+        }
     }
 
     fn fills_structured_content(&self) -> bool {

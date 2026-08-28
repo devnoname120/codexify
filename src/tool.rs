@@ -29,6 +29,43 @@ pub struct ToolRequestContext {
     pub cancellation: CancellationToken,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolCallIdentity {
+    pub downstream_tool: String,
+    pub mcp_server: Option<String>,
+    pub mcp_tool: Option<String>,
+}
+
+impl ToolCallIdentity {
+    pub fn native(tool: impl Into<String>) -> Self {
+        Self {
+            downstream_tool: tool.into(),
+            mcp_server: None,
+            mcp_tool: None,
+        }
+    }
+
+    pub fn mcp(
+        downstream_tool: impl Into<String>,
+        server: impl Into<String>,
+        tool: Option<String>,
+    ) -> Self {
+        Self {
+            downstream_tool: downstream_tool.into(),
+            mcp_server: Some(server.into()),
+            mcp_tool: tool,
+        }
+    }
+
+    pub fn resolved_tool(&self) -> String {
+        match (&self.mcp_server, &self.mcp_tool) {
+            (Some(server), Some(tool)) => format!("mcp:{server}/{tool}"),
+            (Some(server), None) => format!("mcp:{server}/<unresolved>"),
+            _ => self.downstream_tool.clone(),
+        }
+    }
+}
+
 #[async_trait]
 pub trait Tool: Send + Sync {
     /// MCP tool name (e.g. `read_file`). Must match `^[a-zA-Z0-9_-]{1,64}$`.
@@ -66,6 +103,13 @@ pub trait Tool: Send + Sync {
 
     /// The JSON Schema object for the tool's arguments.
     fn input_schema(&self) -> Value;
+
+    /// Resolve the operational identity logged for this call. MCP dispatchers
+    /// override this so logs name the raw upstream server/tool rather than only
+    /// the downstream proxy or gateway function.
+    fn call_identity(&self, _args: &Value) -> ToolCallIdentity {
+        ToolCallIdentity::native(self.name())
+    }
 
     /// Optional JSON Schema object for the structured result. Tools that set one
     /// get the `structuredContent` default-fill in the server unless they build

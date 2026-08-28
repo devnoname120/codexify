@@ -47,7 +47,8 @@ use crate::project_bindings::{ConversationIdentity, ProjectBindingStore};
 use crate::registry::load_tools_for_config;
 use crate::review::{ReviewAvailability, ReviewCheckpointManager, ReviewOwner};
 use crate::review_ui;
-use crate::tool::{Tool, ToolRequestContext};
+use crate::tool::{Tool, ToolCallIdentity, ToolRequestContext};
+use crate::tool_logging::ToolCallLogger;
 use crate::tools::set_project_root::{SetProjectRoot, select_and_render};
 use crate::types::{AppConfig, ToolContent, ToolResult};
 
@@ -81,6 +82,7 @@ pub struct CodexHandler {
     review_checkpoints: Arc<ReviewCheckpointManager>,
     artifact_egress: Arc<ArtifactEgressStore>,
     audit: Option<Arc<AuditLogger>>,
+    tool_logging: Option<Arc<ToolCallLogger>>,
     session: SessionState,
 }
 
@@ -310,6 +312,13 @@ impl ServerHandler for CodexHandler {
         // Keep `tool` as an Option so that even an unknown-tool call flows through
         // the audit begin/finish pairing below rather than short-circuiting.
         let tool = self.tools.iter().find(|t| t.name() == name);
+        let call_identity = tool
+            .map(|tool| tool.call_identity(&args))
+            .unwrap_or_else(|| ToolCallIdentity::native(name.clone()));
+        let tool_log_call = self
+            .tool_logging
+            .as_ref()
+            .map(|logger| logger.begin(&call_identity, &args));
 
         // Verbose-diagnostics / audit preamble (#15). `needs_scope` gates the cost
         // of building an audit scope and argument summaries to the cases that will
@@ -329,6 +338,9 @@ impl ServerHandler for CodexHandler {
             tracing::debug!(
                 target: "codexify::tool",
                 tool = %name,
+                resolved_tool = %call_identity.resolved_tool(),
+                mcp_server = call_identity.mcp_server.as_deref().unwrap_or("-"),
+                mcp_tool = call_identity.mcp_tool.as_deref().unwrap_or("-"),
                 transport_session_id = scope.transport_session_id,
                 conversation_id = scope.conversation_id.as_deref().unwrap_or("-"),
                 project_id = scope.project_id.as_deref().unwrap_or("-"),
@@ -340,6 +352,9 @@ impl ServerHandler for CodexHandler {
             tracing::trace!(
                 target: "codexify::tool",
                 tool = %name,
+                resolved_tool = %call_identity.resolved_tool(),
+                mcp_server = call_identity.mcp_server.as_deref().unwrap_or("-"),
+                mcp_tool = call_identity.mcp_tool.as_deref().unwrap_or("-"),
                 argument_summary = %summarize_arguments(&args, input_schema.as_ref()),
                 "tool arguments summarized"
             );
@@ -464,9 +479,15 @@ impl ServerHandler for CodexHandler {
         finalize_model_visible_result(tool.map(|tool| tool.as_ref()), &mut result, &self.config);
 
         let duration_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+        if let (Some(logger), Some(call)) = (&self.tool_logging, tool_log_call.as_ref()) {
+            logger.finish(call, &call_identity, &result, duration_ms);
+        }
         tracing::info!(
             target: "codexify::tool",
             tool = %name,
+            resolved_tool = %call_identity.resolved_tool(),
+            mcp_server = call_identity.mcp_server.as_deref().unwrap_or("-"),
+            mcp_tool = call_identity.mcp_tool.as_deref().unwrap_or("-"),
             status = if result.is_error { "error" } else { "ok" },
             duration_ms,
             "tool completed"
@@ -475,6 +496,9 @@ impl ServerHandler for CodexHandler {
             tracing::debug!(
                 target: "codexify::tool",
                 tool = %name,
+                resolved_tool = %call_identity.resolved_tool(),
+                mcp_server = call_identity.mcp_server.as_deref().unwrap_or("-"),
+                mcp_tool = call_identity.mcp_tool.as_deref().unwrap_or("-"),
                 output_summary = %summarize_output(&result),
                 "tool output summarized"
             );
@@ -507,6 +531,7 @@ pub async fn start_http_server(mut config: AppConfig) -> anyhow::Result<()> {
         config.api_key = Some(generate_internal_bearer_token()?);
     }
     let audit = AuditLogger::open(&config)?.map(Arc::new);
+    let tool_logging = ToolCallLogger::new(&config).map(Arc::new);
     // Gateway-mode upstreams write their generated skills here; keyed by port so
     // concurrent instances don't clobber each other, and rebuilt fresh per start.
     let gen_dir = std::env::temp_dir()
@@ -590,6 +615,7 @@ pub async fn start_http_server(mut config: AppConfig) -> anyhow::Result<()> {
     let factory_review_checkpoints = review_checkpoints.clone();
     let factory_artifact_egress = artifact_egress.clone();
     let factory_audit = audit.clone();
+    let factory_tool_logging = tool_logging.clone();
     let service = StreamableHttpService::new(
         move || {
             let session = SessionState::new();
@@ -603,6 +629,7 @@ pub async fn start_http_server(mut config: AppConfig) -> anyhow::Result<()> {
                 review_checkpoints: factory_review_checkpoints.clone(),
                 artifact_egress: factory_artifact_egress.clone(),
                 audit: factory_audit.clone(),
+                tool_logging: factory_tool_logging.clone(),
                 session,
             })
         },
@@ -677,6 +704,16 @@ pub async fn start_http_server(mut config: AppConfig) -> anyhow::Result<()> {
         println!("Conversation authorization: enabled (one token check per chat)");
     } else {
         println!("Conversation authorization: disabled");
+    }
+    if let Some(logger) = tool_logging.as_ref() {
+        println!(
+            "Tool payload logging: {} (requests <= {} bytes, responses <= {} bytes; redacted)",
+            logger.mode().as_str(),
+            logger.max_request_bytes(),
+            logger.max_response_bytes()
+        );
+    } else {
+        println!("Tool payload logging: disabled");
     }
     if let Some(audit) = audit.as_ref() {
         println!("Audit log: {}", audit.path().display());
@@ -1013,6 +1050,7 @@ mod tests {
                 crate::types::ArtifactEgressConfig::default(),
             )),
             audit: None,
+            tool_logging: None,
             session: SessionState::new(),
         };
 
@@ -1047,6 +1085,7 @@ mod tests {
                 crate::types::ArtifactEgressConfig::default(),
             )),
             audit: None,
+            tool_logging: None,
             session: SessionState::new(),
         };
         let first = ConversationIdentity::from_openai_session("first-chat").unwrap();

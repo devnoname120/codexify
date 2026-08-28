@@ -8,21 +8,19 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, bail};
 use chrono::{SecondsFormat, Utc};
-use regex::Regex;
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
-use zeroize::Zeroizing;
 
 use crate::exec_sessions::approx_token_count;
 use crate::project_bindings::ConversationIdentity;
+use crate::redaction::SecretRedactor;
 use crate::types::{AppConfig, ToolContent, ToolResult};
 
 const SCHEMA_VERSION: u64 = 1;
 const HASH_HEX_CHARS: usize = 24;
 const MAX_ARGUMENT_FIELDS: usize = 64;
 const MAX_ARGUMENT_DEPTH: usize = 3;
-const MAX_REFERENCED_SECRET_BYTES: u64 = 64 * 1024;
 
 #[derive(Debug, Clone)]
 pub(crate) struct AuditScope {
@@ -59,8 +57,7 @@ pub(crate) struct AuditLogger {
     file: Mutex<File>,
     include_command_preview: bool,
     command_preview_max_bytes: usize,
-    secrets: Zeroizing<Vec<String>>,
-    secret_patterns: Vec<(Regex, &'static str)>,
+    redactor: Option<SecretRedactor>,
 }
 
 impl AuditLogger {
@@ -70,11 +67,8 @@ impl AuditLogger {
         };
         let file = open_private_append(&path)?;
         let include_command_preview = config.audit.include_command_preview;
-        let (secrets, secret_patterns) = if include_command_preview {
-            (collect_secret_values(config), secret_patterns())
-        } else {
-            (Zeroizing::new(Vec::new()), Vec::new())
-        };
+        let redactor = include_command_preview
+            .then(|| SecretRedactor::from_config(config, &config.audit.redact_env));
         let logger = Self {
             path,
             run_id: random_id()?,
@@ -82,8 +76,7 @@ impl AuditLogger {
             file: Mutex::new(file),
             include_command_preview,
             command_preview_max_bytes: config.audit.command_preview_max_bytes,
-            secrets,
-            secret_patterns,
+            redactor,
         };
         logger.write_event(&json!({
             "schema_version": SCHEMA_VERSION,
@@ -194,28 +187,17 @@ impl AuditLogger {
     }
 
     fn redact_command(&self, command: &str) -> String {
-        let mut redacted = command.to_string();
-        for secret in self.secrets.iter() {
-            redacted = redacted.replace(secret, "[REDACTED]");
-        }
-        for (pattern, replacement) in &self.secret_patterns {
-            redacted = pattern.replace_all(&redacted, *replacement).into_owned();
-        }
-        redacted
+        self.redactor
+            .as_ref()
+            .expect("command previews require a redactor")
+            .redact_text(command)
     }
 
     fn redact_argv(&self, argv: &[String]) -> Vec<String> {
-        let mut redact_next = false;
-        argv.iter()
-            .map(|argument| {
-                if redact_next {
-                    redact_next = false;
-                    return "[REDACTED]".to_string();
-                }
-                redact_next = secret_flag_takes_next(argument);
-                self.redact_command(&argument.replace('\0', "\u{fffd}"))
-            })
-            .collect()
+        self.redactor
+            .as_ref()
+            .expect("command previews require a redactor")
+            .redact_argv(argv)
     }
 
     fn record(&self, event: Value) {
@@ -500,116 +482,6 @@ fn random_id() -> anyhow::Result<String> {
 
 fn timestamp() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
-}
-
-fn collect_secret_values(config: &AppConfig) -> Zeroizing<Vec<String>> {
-    let mut values = Vec::new();
-    if let Some(api_key) = config.api_key.as_deref() {
-        push_secret(&mut values, api_key, false);
-    }
-    if let Some(token) = config.conversation_auth_token.as_deref() {
-        push_secret(&mut values, token, false);
-    }
-    for server in config.mcp_servers.values() {
-        for value in server.env.values() {
-            push_secret(&mut values, value, false);
-        }
-    }
-    for name in &config.audit.redact_env {
-        if let Ok(value) = std::env::var(name) {
-            push_secret(&mut values, &value, false);
-        }
-    }
-    for (name, value) in std::env::vars_os() {
-        if let (Some(name), Some(value)) = (name.to_str(), value.to_str())
-            && secret_env_name(name)
-        {
-            push_secret(&mut values, value, true);
-        }
-    }
-    if let Some(tunnel) = config.openai_tunnel.as_ref() {
-        if let Some(name) = tunnel.api_key_ref.strip_prefix("env:") {
-            if let Ok(value) = std::env::var(name) {
-                push_secret(&mut values, &value, false);
-            }
-        } else if let Some(path) = tunnel.api_key_ref.strip_prefix("file:") {
-            let path = Path::new(path);
-            if std::fs::metadata(path).is_ok_and(|metadata| {
-                metadata.is_file() && metadata.len() <= MAX_REFERENCED_SECRET_BYTES
-            }) && let Ok(value) = std::fs::read_to_string(path)
-            {
-                push_secret(&mut values, value.trim(), false);
-            }
-        }
-    }
-    values.sort_by(|left, right| right.len().cmp(&left.len()).then_with(|| left.cmp(right)));
-    values.dedup();
-    Zeroizing::new(values)
-}
-
-fn push_secret(values: &mut Vec<String>, value: &str, automatic: bool) {
-    if !value.is_empty() && (!automatic || value.len() >= 8) {
-        values.push(value.to_string());
-    }
-}
-
-fn secret_env_name(name: &str) -> bool {
-    let normalized = name.to_ascii_lowercase();
-    [
-        "secret",
-        "token",
-        "password",
-        "passphrase",
-        "credential",
-        "authorization",
-        "cookie",
-        "api_key",
-        "apikey",
-        "private_key",
-    ]
-    .iter()
-    .any(|fragment| normalized.contains(fragment))
-}
-
-fn secret_flag_takes_next(argument: &str) -> bool {
-    if !argument.starts_with('-') || argument.contains('=') {
-        return false;
-    }
-    let name = argument.trim_start_matches('-').to_ascii_lowercase();
-    matches!(name.as_str(), "u" | "user" | "proxy-user") || secret_env_name(&name)
-}
-
-fn secret_patterns() -> Vec<(Regex, &'static str)> {
-    [
-        (
-            r#"(?i)([\"']?(?:authorization|proxy-authorization)[\"']?\s*:\s*[\"']?(?:bearer|basic)\s+)[^\s'\";]+"#,
-            "$1[REDACTED]",
-        ),
-        (
-            r#"(?i)(\bbearer\s+)[A-Za-z0-9._~+/-]+=*"#,
-            "$1[REDACTED]",
-        ),
-        (
-            r#"(?i)((?:^|\s)--?[A-Za-z0-9_-]*(?:api[-_]?key|token|secret|password|passphrase|authorization|credential)[A-Za-z0-9_-]*(?:=|\s+))(?:\"[^\"]*\"|'[^']*'|[^\s;]+)"#,
-            "$1[REDACTED]",
-        ),
-        (
-            r#"(?i)(\b[A-Za-z0-9_]*(?:api[_-]?key|token|secret|password|passphrase|authorization|credential)[A-Za-z0-9_]*\s*=\s*)(?:\"[^\"]*\"|'[^']*'|[^\s;]+)"#,
-            "$1[REDACTED]",
-        ),
-        (
-            r#"(?i)([\"']?[A-Za-z0-9_-]*(?:api[-_]?key|token|secret|password|passphrase|credential)[A-Za-z0-9_-]*[\"']?\s*:\s*)(?:\"[^\"]*\"|'[^']*'|[^\s,;}]+)"#,
-            "$1[REDACTED]",
-        ),
-    ]
-    .into_iter()
-    .map(|(pattern, replacement)| {
-        (
-            Regex::new(pattern).expect("static audit redaction regex"),
-            replacement,
-        )
-    })
-    .collect()
 }
 
 fn bound_utf8(value: &str, max_bytes: usize) -> String {
