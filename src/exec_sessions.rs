@@ -16,6 +16,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::{ChildStdin, Command};
 use tokio::sync::{Mutex as TokioMutex, Notify};
 
+use crate::diff::TransportDiffState;
 use crate::output_budget::{
     approx_token_count as count_output_tokens, truncate_text as truncate_model_text,
 };
@@ -25,7 +26,6 @@ use crate::project_bindings::{
     project_reference_matches,
 };
 use crate::project_clone::ProjectReference;
-use crate::review::TransportReviewState;
 use crate::types::{AppConfig, PlanState, WorktreeMode};
 use crate::worktrees::{create_managed_worktree_at, load_metadata, metadata_path_for_worktree};
 
@@ -691,7 +691,7 @@ pub struct SessionState {
     /// Serializes concurrent `set_project_root` calls on this transport session
     /// so a managed worktree is created at most once. Shared with derived views.
     project_selection_lock: Arc<TokioMutex<()>>,
-    review: TransportReviewState,
+    diff: TransportDiffState,
     /// Stable per-transport identifier stamped into audit-log events. Shared by
     /// any conversation-scoped view derived from this transport session.
     audit_id: u64,
@@ -738,7 +738,7 @@ impl Default for SessionState {
             plan: Arc::new(StdMutex::new(None)),
             project_binding: Arc::new(StdMutex::new(None)),
             project_selection_lock: Arc::new(TokioMutex::new(())),
-            review: TransportReviewState::new(),
+            diff: TransportDiffState::new(),
             audit_id: TRANSPORT_SESSION_COUNTER.fetch_add(1, Ordering::Relaxed),
         }
     }
@@ -756,7 +756,7 @@ impl SessionState {
             plan: self.plan.clone(),
             project_binding: self.project_binding.clone(),
             project_selection_lock: self.project_selection_lock.clone(),
-            review: self.review.clone(),
+            diff: self.diff.clone(),
             audit_id: self.audit_id,
         }
     }
@@ -1062,8 +1062,8 @@ impl SessionState {
             .map(|binding| binding.project_root.clone())
     }
 
-    pub fn review_state(&self) -> TransportReviewState {
-        self.review.clone()
+    pub fn diff_state(&self) -> TransportDiffState {
+        self.diff.clone()
     }
 }
 

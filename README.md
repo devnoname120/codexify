@@ -8,7 +8,7 @@ A local MCP bridge server that lets ChatGPT Web Pro call tools on your machine: 
 
 In native-tunnel mode, Codexify listens only on `127.0.0.1`, protects the MCP endpoint with a random per-process bearer token, starts OpenAI's official runtime-only tunnel client, and supervises it for the lifetime of the server. The tunnel client makes outbound HTTPS requests to OpenAI and forwards tunnel traffic to the authenticated loopback MCP endpoint. Externally managed tunnels are also supported.
 
-The tool set follows [Codex](https://github.com/openai/codex) agent contracts for `apply_patch`, `exec_command`/`write_stdin`, `view_image`, `update_plan`, `clock_curr_time`/`clock_sleep`, project instructions, and skills. Codexify also bridges ChatGPT-native attachments and generated files into the active local project, returns project files as downloadable MCP resources, bounds model-visible tool output, persists task notes and plans, and records project-scoped review checkpoints.
+The tool set follows [Codex](https://github.com/openai/codex) agent contracts for `apply_patch`, `exec_command`/`write_stdin`, `view_image`, `update_plan`, `clock_curr_time`/`clock_sleep`, project instructions, and skills. Codexify also bridges ChatGPT-native attachments and generated files into the active local project, returns project files as downloadable MCP resources, bounds model-visible tool output, persists task notes and plans, and records project-scoped diff checkpoints.
 
 Codexify can also **aggregate other MCP servers**. It connects to local stdio servers or remote Streamable HTTP endpoints, keeps automatically imported Codex/plugin tool catalogues private by default, and gives the ChatGPT-side agent a fixed ranked discovery/schema/call surface. Direct exposure and single-dispatcher gateway modes are configurable per upstream.
 
@@ -27,7 +27,7 @@ flowchart LR
     Egress["export_host_file"]
     Search["glob\ngrep"]
     Shell["run_command"]
-    Git["git_status\nshow_changes\ngit_push\ngit_commit\ngit_log"]
+    Git["git_status\nshow_diff\ngit_push\ngit_commit\ngit_log"]
     Edit["apply_patch"]
     Exec["exec_command\nwrite_stdin"]
     Agent["view_image\nupdate_plan\nclock_curr_time\nclock_sleep"]
@@ -44,8 +44,8 @@ flowchart LR
     Bindings[("~/.codexify\nconversation-projects")]
     Worktree[("Managed Git worktree\nper-conversation checkout,\nswept on startup")]
     ExecSessions[("Conversation exec sessions\n(in memory, idle-reaped)")]
-    ReviewRefs[("Git refs/codexify/review\nproject-open + last-review")]
-    ReviewUI["MCP App review card\nui://codexify/review/v3/mcp-app.html"]
+    DiffRefs[("Git refs/codexify/diff\nproject-open + last-diff")]
+    DiffUI["MCP App diff card\nui://codexify/diff/v3/mcp-app.html"]
     SkillDirs[(".agents/skills\n.codex/skills\n.claude/skills")]
     CodexCfg[("$CODEX_HOME\nconfig.toml")]
     CodexCli["optional Codex CLI\nmcp list/get --json"]
@@ -91,8 +91,8 @@ flowchart LR
     SetRoot -.->|"worktree mode"| Worktree
     Worktree -.->|"active checkout"| WorkDir
     Exec --> ExecSessions
-    Git --> ReviewRefs
-    Git -.-> ReviewUI
+    Git --> DiffRefs
+    Git -.-> DiffUI
     SetRoot -.->|"selects"| WorkDir
     CodexCfg -.->|"project candidates"| ListProjects
     CodexCfg -.->|"auto-import"| Bridge
@@ -391,7 +391,7 @@ Structured primitives — cheaper and safer than shelling out for the same job, 
 | `export_host_file` | Snapshot one project-relative file and return a short-lived, opaque MCP resource that ChatGPT can download without receiving a local path or base64 text |
 | `run_command` | Execute a command in the work directory (allowlist-restricted) |
 | `git_status` | Show git status, parsed into changed files with status codes |
-| `show_changes` | Present the scoped working-tree diff from the project-open or last-review checkpoint and, by default, record the emitted snapshot as the next incremental baseline; compatible hosts receive the bounded diff in an interactive component-only review card |
+| `show_diff` | Present the scoped working-tree diff from the project-open or last-diff checkpoint and, by default, record the emitted snapshot as the next incremental baseline; compatible hosts receive the bounded diff in an interactive component-only diff card |
 | `git_push` | Push one existing local branch to the same branch name on a configured remote; arbitrary refspecs, force syntax, and deletion syntax are rejected |
 | `git_commit` | Create a commit, optionally staging all tracked changes |
 | `git_log` | Show recent commit history |
@@ -460,7 +460,7 @@ survive a Codexify restart, and `exec.idleTimeoutMs` expires abandoned sessions.
 
 `clock_sleep` caps at 5 minutes because a longer wait would outlive the HTTP request through the tunnel.
 
-Every native fixed-shape input schema is closed and compiled at startup. Calls are validated before dispatch, including integer bounds and nested objects; validation diagnostics mask `writeOnly` values. Native tools and fixed dispatchers that advertise an `outputSchema` must return matching `structuredContent`, and successful results are validated before they leave the server. Directly bridged upstream tools preserve the upstream convention that structured content may be absent, while any structured content they do return is checked against the advertised upstream schema. `exec_command` and `write_stdin` return Codex's unified-exec object, `import_host_file` returns its destination, byte count and SHA-256 receipt, `export_host_file` returns its immutable-snapshot receipt and a standard MCP `resource_link`, `clock_curr_time` returns `{ current_time }`, `get_environment` returns the environment object, `get_project_doc` returns `{ files, content }` and `skills_list` returns `{ skills, content }`; the rest return the exact `{ content: <text> }` object, which the server derives from text blocks so handlers do not repeat it. `show_changes` deliberately advertises no output schema: its model-visible result is concise text, while its complete review payload is attached as component-only result `_meta` for the MCP App. Catalog discovery records have static exact wrapper schemas even though their source and tool values are discovered at runtime; `mcp_call_tool` has no output schema because the selected upstream tool determines that result shape.
+Every native fixed-shape input schema is closed and compiled at startup. Calls are validated before dispatch, including integer bounds and nested objects; validation diagnostics mask `writeOnly` values. Native tools and fixed dispatchers that advertise an `outputSchema` must return matching `structuredContent`, and successful results are validated before they leave the server. Directly bridged upstream tools preserve the upstream convention that structured content may be absent, while any structured content they do return is checked against the advertised upstream schema. `exec_command` and `write_stdin` return Codex's unified-exec object, `import_host_file` returns its destination, byte count and SHA-256 receipt, `export_host_file` returns its immutable-snapshot receipt and a standard MCP `resource_link`, `clock_curr_time` returns `{ current_time }`, `get_environment` returns the environment object, `get_project_doc` returns `{ files, content }` and `skills_list` returns `{ skills, content }`; the rest return the exact `{ content: <text> }` object, which the server derives from text blocks so handlers do not repeat it. `show_diff` deliberately advertises no output schema: its model-visible result is concise text, while its complete diff payload is attached as component-only result `_meta` for the MCP App. Catalog discovery records have static exact wrapper schemas even though their source and tool values are discovered at runtime; `mcp_call_tool` has no output schema because the selected upstream tool determines that result shape.
 
 All project-scoped paths are resolved relative to the active project root: `--work-dir` in single-project mode, or the root selected for the current ChatGPT conversation in multi-project mode. Non-ChatGPT clients use the root selected for their current MCP transport session.
 
@@ -530,7 +530,7 @@ optional and uses camelCase names.
     "maxEntries": 500,
     "maxTreeNodes": 1000
   },
-  "review": {
+  "diff": {
     "maxPatchBytes": 4194304
   },
   "toolLogging": {
@@ -775,11 +775,11 @@ The `output` block bounds what a single tool call may return. See [Context and m
 | `maxEntries` | `500` | Results per `glob`, `grep`, or `list_directory` call |
 | `maxTreeNodes` | `1000` | Nodes in one `tree` walk, counted across the whole tree rather than per directory |
 
-The `review` block bounds presentation without changing checkpoint semantics:
+The `diff` block bounds presentation without changing checkpoint semantics. The former `review` key remains accepted as a compatibility alias:
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `maxPatchBytes` | `4194304` | Largest complete binary-capable patch attached to the review widget's component-only result metadata. The 4 MiB default is regression-tested with 10,000 changed code lines of roughly 300 bytes each; unusually long lines and large binary patches can still exceed it. A larger patch is omitted rather than cut mid-hunk, while file metadata and aggregate statistics remain available. `0` disables patch bodies |
+| `maxPatchBytes` | `4194304` | Largest complete binary-capable patch attached to the diff widget's component-only result metadata. The 4 MiB default is regression-tested with 10,000 changed code lines of roughly 300 bytes each; unusually long lines and large binary patches can still exceed it. A larger patch is omitted rather than cut mid-hunk, while file metadata and aggregate statistics remain available. `0` disables patch bodies |
 
 The `artifactIngress` block governs [native host-file ingress](#native-host-file-ingress):
 
@@ -897,7 +897,7 @@ Source and destination authority are deliberately narrow:
 - bytes are written to a private same-directory partial, hashed with SHA-256, synchronized, and atomically published through a no-overwrite hard link;
 - archive extraction, execution, arbitrary URL fetching and arbitrary local-source paths are outside this tool's contract.
 
-After publication, the result is an ordinary project file. Git, `glob`, `tree`, review tools and normal deletion provide its catalogue and lifecycle; Codexify does not maintain a second artifact database or TTL.
+After publication, the result is an ordinary project file. Git, `glob`, `tree`, diff tools and normal deletion provide its catalogue and lifecycle; Codexify does not maintain a second artifact database or TTL.
 
 ## Native host-file egress
 
@@ -959,27 +959,27 @@ Per-conversation separation extends to saved state: with an explicit `memory.dir
 
 To clear a stray binding, delete its file under `~/.codexify/conversation-projects/`; there is no tool to re-point an already-bound conversation. A managed worktree remains referenced while that binding exists. Startup cleanup skips referenced or dirty worktrees and only removes older clean, unreferenced entries beyond `keepCount`.
 
-## Review checkpoints and ChatGPT UI
+## Diff checkpoints and ChatGPT UI
 
-Review state is initialized immediately before the first project-scoped tool call for a conversation or generic MCP transport. That timing captures the checkout as the agent first sees it, before a write, formatter, generator, or shell command can change it. Mutating tool calls and `show_changes` are serialized for the same owner and project through tool completion, so the incremental cursor cannot advance over a partially completed write. A resident `exec_command` process may continue changing files after its initiating call returns, so every review remains a point-in-time snapshot. Non-Git projects remain usable; inside a Git worktree, a snapshot failure blocks mutating tools rather than silently losing the baseline. Two baselines are maintained:
+Diff state is initialized immediately before the first project-scoped tool call for a conversation or generic MCP transport. That timing captures the checkout as the agent first sees it, before a write, formatter, generator, or shell command can change it. Mutating tool calls and `show_diff` are serialized for the same owner and project through tool completion, so the incremental cursor cannot advance over a partially completed write. A resident `exec_command` process may continue changing files after its initiating call returns, so every diff remains a point-in-time snapshot. Non-Git projects remain usable; inside a Git worktree, a snapshot failure blocks mutating tools rather than silently losing the baseline. Two baselines are maintained:
 
 - **project open** is immutable and shows the complete task diff;
-- **last review** records the most recent snapshot emitted by `show_changes`, so the next default review is incremental.
+- **last diff** records the most recent snapshot emitted by `show_diff`, so the next default diff is incremental.
 
-`show_changes` accepts `since: "last_review" | "project_open"`, `advance`, and `include_patch`. By default it records the emitted snapshot as the next incremental baseline; `advance=false` leaves that cursor unchanged. This bookkeeping is connector-private: the tool remains annotated read-only because it does not modify project files, Git history, user-owned data, or external systems. The ordinary model-visible review result is a concise aggregate summary and deliberately has no `structuredContent`. Compatible MCP Apps receive bounded file records, rename sources, binary markers, warnings, and the complete unified binary patch through namespaced result `_meta`, which ChatGPT forwards to the component without adding it to model context. Oversized patches are omitted explicitly rather than returned as invalid partial hunks.
+`show_diff` accepts `since: "last_diff" | "project_open"`, `advance`, and `include_patch`. By default it records the emitted snapshot as the next incremental baseline; `advance=false` leaves that cursor unchanged. This bookkeeping is connector-private: the tool remains annotated read-only because it does not modify project files, Git history, user-owned data, or external systems. The ordinary model-visible diff result is a concise aggregate summary and deliberately has no `structuredContent`. Compatible MCP Apps receive bounded file records, rename sources, binary markers, warnings, and the complete unified binary patch through namespaced result `_meta`, which ChatGPT forwards to the component without adding it to model context. Oversized patches are omitted explicitly rather than returned as invalid partial hunks.
 
-Snapshots use Git objects, but they do **not** touch the real index or working tree. Codexify builds a private temporary index containing only the logical project root, then carries the same literal pathspec through every comparison. If the selected project is `packages/app` inside a monorepo, sibling changes under `packages/other` cannot enter its checkpoint or diff. Paths in the component-only review payload are relative to the selected project, not the repository root.
+Snapshots use Git objects, but they do **not** touch the real index or working tree. Codexify builds a private temporary index containing only the logical project root, then carries the same literal pathspec through every comparison. If the selected project is `packages/app` inside a monorepo, sibling changes under `packages/other` cannot enter its checkpoint or diff. Paths in the component-only diff payload are relative to the selected project, not the repository root.
 
 With ChatGPT's stable `_meta["openai/session"]`, each conversation/project scope stores exactly two namespaced refs under:
 
 ```text
-refs/codexify/review/<project-hash>/<conversation-hash>/project-open
-refs/codexify/review/<project-hash>/<conversation-hash>/last-review
+refs/codexify/diff/<project-hash>/<conversation-hash>/project-open
+refs/codexify/diff/<project-hash>/<conversation-hash>/last-diff
 ```
 
-The raw conversation identifier is never written. The refs survive MCP reconnects and Codexify restarts. Generic MCP clients receive transport-local in-memory checkpoints instead. Each conversation/project pair retains only its current two referenced snapshots; unreferenced synthetic commits are ordinary Git-GC candidates. To inspect or remove conversation refs manually, use `git for-each-ref refs/codexify/review/` and `git update-ref -d <ref>`. Removing both refs resets that owner to the current scoped state on its next project call.
+The raw conversation identifier is never written. The refs survive MCP reconnects and Codexify restarts. Generic MCP clients receive transport-local in-memory checkpoints instead. Each conversation/project pair retains only its current two referenced snapshots; unreferenced synthetic commits are ordinary Git-GC candidates. To inspect or remove current refs manually, use `git for-each-ref refs/codexify/diff/` and `git update-ref -d <ref>`. Removing both refs resets that owner to the current scoped state on its next project call. Existing `refs/codexify/review/.../project-open` and `.../last-review` refs are copied lazily into the diff namespace and retained so installations from the current review-named surface keep their checkpoints.
 
-Codexify advertises the standard MCP Apps extension and serves a self-contained review resource at `ui://codexify/review/v3/mcp-app.html`. Compatible ChatGPT developer connectors render `show_changes` as an interactive GitHub-style file/statistic/patch card from component-only result metadata; the component is model-visible but is not granted app-side tool access. Other clients receive the concise text result. Expansion state is persisted as private widget state. Cursor advancement completes before the result is returned and never waits for widget interaction, and the card updates at the `show_changes` tool-call boundary rather than continuously watching the filesystem.
+Codexify advertises the standard MCP Apps extension and serves a self-contained diff resource at `ui://codexify/diff/v3/mcp-app.html`. Compatible ChatGPT developer connectors render `show_diff` as the interactive GitHub-style file/statistic/patch card from component-only result metadata; the component is model-visible but is not granted app-side tool access. Other clients receive the concise text result. Existing review metadata and the v3, v2, and unversioned `ui://codexify/review/...` resources remain readable so existing cards can remount, while current `show_diff` results emit only the diff-named metadata. Expansion state is persisted as private widget state, including migration of `reviewOpen` to `diffOpen`. Cursor advancement completes before the result is returned and never waits for widget interaction, and the card updates at the `show_diff` tool-call boundary rather than continuously watching the filesystem.
 
 ## Context and memory
 
@@ -1393,7 +1393,7 @@ Native tunnel mode ignores `allowedHosts` and forces the accepted authorities to
 - **Host-authorized native-file ingress**: `import_host_file` accepts only ChatGPT's declared native-file object, rejects local source paths, constrains the download URL and every redirect hop to the configurable `artifactIngress.allowedHosts` allowlist (default `"*"`, which admits any public HTTPS host but never a loopback, private, link-local, unique-local, CGNAT, `localhost`, or metadata address), ignores ambient proxy credentials, and enforces whole-request, idle, size and concurrency limits. Its signed URL and file ID are never logged or returned: RMCP debug/trace payload logging is unconditionally suppressed even when `RUST_LOG` requests it. Destination publication uses a capability-confined directory handle, canonical-path and file-identity revalidation, a private partial file, SHA-256, and atomic no-overwrite linking so traversal, moved roots, symlink escapes, partial visibility and replacement races fail closed.
 - **Bounded native-file egress**: `export_host_file` accepts only a relative regular-file path inside the active project, opens it through a capability-confined directory handle, rejects traversal and symlink escapes, enforces `artifactEgress.maxFileBytes` before and during the read, and returns a SHA-256 receipt plus a standard MCP resource link. The link carries a random 256-bit opaque capability rather than a local path. Its immutable bytes live only in a process-wide memory cache bounded by `maxCachedBytes`, `maxReferences` and `referenceTtlMs`; expired and evicted references fail closed, and audit output records only the number of resource links, never their URIs or filenames.
 - **One bounded exception in single-project mode**: [AGENTS.md](#agentsmd) discovery may read above `--work-dir`, up to the nearest `.git`. It is read-only, opens only `AGENTS.override.md`, `AGENTS.md` and any `projectDoc.fallbackFilenames`, and `get_project_doc` reports the absolute path of every file it used. Set `projectDoc.maxBytes` to `0` to switch it off, or `projectDoc.rootMarkers` to `[]` to keep the search inside the work directory. Multi-project mode does not perform this upward walk; its selected directory is the exact project root.
-- **Namespaced review state inside Git**: ChatGPT review checkpoints are exactly two refs per conversation/project pair under `refs/codexify/review/`. Synthetic snapshots contain only the selected project path, are built through a temporary index, and never modify the real index or working tree. Generic MCP-client checkpoints are in memory only. The namespace grows with the number of distinct persistent conversation/project pairs; the review section documents inspection and manual removal.
+- **Namespaced diff state inside Git**: ChatGPT diff checkpoints are exactly two refs per conversation/project pair under `refs/codexify/diff/`. Synthetic snapshots contain only the selected project path, are built through a temporary index, and never modify the real index or working tree. Generic MCP-client checkpoints are in memory only. Existing `refs/codexify/review/` checkpoints are migrated lazily into the diff namespace. The namespace grows with the number of distinct persistent conversation/project pairs; the diff section documents inspection and manual removal.
 - **Bounded state writes outside the work directory**: `remember` and `update_plan` write `memory.json` under `~/.codexify/projects/`. Multi-project mode also writes one small project-binding record under `~/.codexify/conversation-projects/` for each ChatGPT conversation and access root. Per-conversation authorization writes a small marker under `~/.codexify/conversation-authorizations/`. Binding and authorization filenames are derived from a hash of `openai/session`; the raw identifier is not stored. Authorization namespaces include a one-way digest of the canonical work directory and configured token, while marker contents store only the grant. Set `memory.enabled` to `false` to disable plans and notes; delete the corresponding state directory to forget bindings or authorizations. See [Context and memory](#context-and-memory).
 - **Bounded reads outside the work directory**: [skills](#skills) may live in `~/.agents/skills`, `~/.codex/skills`, `~/.claude/skills` or an installed Claude Code plugin. `skills_read` opens files there, but only inside a skill package that already exists — the `resource` path is checked against the skill's own directory, so it cannot walk out into the rest of your home directory. `skills_list` reports the absolute path of every skill it found. Set `skills.enabled` to `false` to switch it off, or `skills.dirs` to point the user scope somewhere you choose.
 - **Read-only Codex configuration discovery**: MCP import and the project catalogue read the user-level Codex `config.toml` without rewriting it. Project discovery inspects only the top-level `projects` table, does not read candidate project contents, and suppresses rejected absolute paths from MCP output. Set `projectCatalog.codexConfig.enabled` to `false` to disable that provider. Native Codex trust does not override the Codexify access-root boundary.

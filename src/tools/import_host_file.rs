@@ -306,7 +306,7 @@ mod tests {
             conversation_authorizations: Arc::new(
                 crate::conversation_auth::ConversationAuthorizationStore::new(),
             ),
-            review_checkpoints: Arc::new(crate::review::ReviewCheckpointManager::new()),
+            diff_checkpoints: Arc::new(crate::diff::DiffCheckpointManager::new()),
             artifact_egress: Arc::new(crate::artifact_egress::ArtifactEgressStore::new(
                 config.artifact_egress.clone(),
             )),

@@ -183,7 +183,7 @@ Internal symlinks that remain inside the project may resolve. Any symlink resolu
 - observe the MCP request cancellation token at the queue, network, write, synchronization, and publication boundaries;
 - publish and return the integrity receipt.
 
-The file becomes an ordinary project file after publication. Git, `show_changes`, `glob`, `tree`, and other filesystem tools remain the catalogue and lifecycle mechanisms.
+The file becomes an ordinary project file after publication. Git, `show_diff`, `glob`, `tree`, and other filesystem tools remain the catalogue and lifecycle mechanisms.
 
 ## Failure Semantics
 

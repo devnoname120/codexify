@@ -3,10 +3,10 @@ use std::process::Command;
 use std::time::Duration;
 
 use codexify::config::default_config;
-use codexify::project_bindings::ConversationIdentity;
-use codexify::review::{
-    ReviewBaseline, ReviewCheckpointManager, ReviewOwner, ReviewRequest, TransportReviewState,
+use codexify::diff::{
+    DiffBaseline, DiffCheckpointManager, DiffOwner, DiffRequest, TransportDiffState,
 };
+use codexify::project_bindings::ConversationIdentity;
 use tempfile::TempDir;
 
 fn git(dir: &Path, args: &[&str]) -> String {
@@ -38,12 +38,12 @@ fn commit_all(repo: &Path, message: &str) {
     git(repo, &["commit", "--quiet", "-m", message]);
 }
 
-fn conversation(value: &str) -> ReviewOwner {
-    ReviewOwner::conversation(&ConversationIdentity::from_openai_session(value).unwrap())
+fn conversation(value: &str) -> DiffOwner {
+    DiffOwner::conversation(&ConversationIdentity::from_openai_session(value).unwrap())
 }
 
-fn request(since: ReviewBaseline, advance: bool) -> ReviewRequest {
-    ReviewRequest {
+fn request(since: DiffBaseline, advance: bool) -> DiffRequest {
+    DiffRequest {
         since,
         advance,
         include_patch: true,
@@ -73,7 +73,7 @@ async fn nested_project_excludes_sibling_changes_and_preserves_the_real_index() 
     let index_bytes_before = std::fs::read(&index_path).unwrap();
 
     let config = default_config(app.clone());
-    let manager = ReviewCheckpointManager::new();
+    let manager = DiffCheckpointManager::new();
     let owner = conversation("nested-project");
     manager
         .ensure_initialized(&config, owner.clone())
@@ -87,7 +87,7 @@ async fn nested_project_excludes_sibling_changes_and_preserves_the_real_index() 
     std::fs::write(app.join("src/app.txt"), "app changed\n").unwrap();
     std::fs::write(sibling.join("other.txt"), "sibling changed\n").unwrap();
     let result = manager
-        .show_changes(&config, owner, request(ReviewBaseline::ProjectOpen, false))
+        .show_diff(&config, owner, request(DiffBaseline::ProjectOpen, false))
         .await
         .unwrap();
 
@@ -102,15 +102,15 @@ async fn nested_project_excludes_sibling_changes_and_preserves_the_real_index() 
 }
 
 #[tokio::test]
-async fn last_review_advances_while_project_open_remains_immutable() {
+async fn last_diff_advances_while_project_open_remains_immutable() {
     let repo = init_repo();
     let file = repo.path().join("file.txt");
     std::fs::write(&file, "zero\n").unwrap();
     commit_all(repo.path(), "seed");
 
     let config = default_config(repo.path().to_path_buf());
-    let manager = ReviewCheckpointManager::new();
-    let owner = conversation("incremental-review");
+    let manager = DiffCheckpointManager::new();
+    let owner = conversation("incremental-diff");
     manager
         .ensure_initialized(&config, owner.clone())
         .await
@@ -118,10 +118,10 @@ async fn last_review_advances_while_project_open_remains_immutable() {
 
     std::fs::write(&file, "one\n").unwrap();
     let first = manager
-        .show_changes(
+        .show_diff(
             &config,
             owner.clone(),
-            request(ReviewBaseline::LastReview, true),
+            request(DiffBaseline::LastDiff, true),
         )
         .await
         .unwrap();
@@ -130,10 +130,10 @@ async fn last_review_advances_while_project_open_remains_immutable() {
 
     std::fs::write(&file, "two\n").unwrap();
     let incremental = manager
-        .show_changes(
+        .show_diff(
             &config,
             owner.clone(),
-            request(ReviewBaseline::LastReview, false),
+            request(DiffBaseline::LastDiff, false),
         )
         .await
         .unwrap();
@@ -142,7 +142,7 @@ async fn last_review_advances_while_project_open_remains_immutable() {
     assert!(!incremental.patch.contains("-zero"));
 
     let from_open = manager
-        .show_changes(&config, owner, request(ReviewBaseline::ProjectOpen, false))
+        .show_diff(&config, owner, request(DiffBaseline::ProjectOpen, false))
         .await
         .unwrap();
     assert!(from_open.patch.contains("-zero"));
@@ -150,15 +150,15 @@ async fn last_review_advances_while_project_open_remains_immutable() {
 }
 
 #[tokio::test]
-async fn repeating_the_same_review_is_effect_idempotent() {
+async fn repeating_the_same_diff_is_effect_idempotent() {
     let repo = init_repo();
     let file = repo.path().join("file.txt");
     std::fs::write(&file, "zero\n").unwrap();
     commit_all(repo.path(), "seed");
 
     let config = default_config(repo.path().to_path_buf());
-    let manager = ReviewCheckpointManager::new();
-    let owner = conversation("idempotent-review");
+    let manager = DiffCheckpointManager::new();
+    let owner = conversation("idempotent-diff");
     manager
         .ensure_initialized(&config, owner.clone())
         .await
@@ -166,10 +166,10 @@ async fn repeating_the_same_review_is_effect_idempotent() {
 
     std::fs::write(&file, "one\n").unwrap();
     let first = manager
-        .show_changes(
+        .show_diff(
             &config,
             owner.clone(),
-            request(ReviewBaseline::LastReview, true),
+            request(DiffBaseline::LastDiff, true),
         )
         .await
         .unwrap();
@@ -179,16 +179,16 @@ async fn repeating_the_same_review_is_effect_idempotent() {
         &[
             "for-each-ref",
             "--format=%(objectname) %(refname)",
-            "refs/codexify/review/",
+            "refs/codexify/diff/",
         ],
     )
     .lines()
-    .find(|line| line.ends_with("/last-review"))
+    .find(|line| line.ends_with("/last-diff"))
     .unwrap()
     .to_string();
 
     let repeated = manager
-        .show_changes(&config, owner, request(ReviewBaseline::LastReview, true))
+        .show_diff(&config, owner, request(DiffBaseline::LastDiff, true))
         .await
         .unwrap();
     assert!(repeated.checkpoint_advanced);
@@ -198,11 +198,11 @@ async fn repeating_the_same_review_is_effect_idempotent() {
         &[
             "for-each-ref",
             "--format=%(objectname) %(refname)",
-            "refs/codexify/review/",
+            "refs/codexify/diff/",
         ],
     )
     .lines()
-    .find(|line| line.ends_with("/last-review"))
+    .find(|line| line.ends_with("/last-diff"))
     .unwrap()
     .to_string();
     assert_eq!(repeated_ref, first_ref);
@@ -215,19 +215,19 @@ async fn conversation_checkpoints_survive_manager_replacement() {
     std::fs::write(&file, "before\n").unwrap();
     commit_all(repo.path(), "seed");
     let config = default_config(repo.path().to_path_buf());
-    let identity = ConversationIdentity::from_openai_session("persistent-review").unwrap();
+    let identity = ConversationIdentity::from_openai_session("persistent-diff").unwrap();
 
-    ReviewCheckpointManager::new()
-        .ensure_initialized(&config, ReviewOwner::conversation(&identity))
+    DiffCheckpointManager::new()
+        .ensure_initialized(&config, DiffOwner::conversation(&identity))
         .await
         .unwrap();
     std::fs::write(&file, "after\n").unwrap();
 
-    let result = ReviewCheckpointManager::new()
-        .show_changes(
+    let result = DiffCheckpointManager::new()
+        .show_diff(
             &config,
-            ReviewOwner::conversation(&identity),
-            request(ReviewBaseline::ProjectOpen, false),
+            DiffOwner::conversation(&identity),
+            request(DiffBaseline::ProjectOpen, false),
         )
         .await
         .unwrap();
@@ -242,7 +242,7 @@ async fn deleting_persistent_refs_reinitializes_a_live_manager() {
     std::fs::write(&file, "before\n").unwrap();
     commit_all(repo.path(), "seed");
     let config = default_config(repo.path().to_path_buf());
-    let manager = ReviewCheckpointManager::new();
+    let manager = DiffCheckpointManager::new();
     let owner = conversation("live-ref-reset");
 
     manager
@@ -251,11 +251,7 @@ async fn deleting_persistent_refs_reinitializes_a_live_manager() {
         .unwrap();
     let refs = git(
         repo.path(),
-        &[
-            "for-each-ref",
-            "--format=%(refname)",
-            "refs/codexify/review/",
-        ],
+        &["for-each-ref", "--format=%(refname)", "refs/codexify/diff/"],
     );
     assert_eq!(refs.lines().count(), 2);
     for reference in refs.lines() {
@@ -268,17 +264,13 @@ async fn deleting_persistent_refs_reinitializes_a_live_manager() {
         .unwrap();
     let recreated = git(
         repo.path(),
-        &[
-            "for-each-ref",
-            "--format=%(refname)",
-            "refs/codexify/review/",
-        ],
+        &["for-each-ref", "--format=%(refname)", "refs/codexify/diff/"],
     );
     assert_eq!(recreated.lines().count(), 2);
 
     std::fs::write(&file, "after\n").unwrap();
     let result = manager
-        .show_changes(&config, owner, request(ReviewBaseline::ProjectOpen, false))
+        .show_diff(&config, owner, request(DiffBaseline::ProjectOpen, false))
         .await
         .unwrap();
     assert_eq!(result.summary.files, 1);
@@ -286,13 +278,13 @@ async fn deleting_persistent_refs_reinitializes_a_live_manager() {
 }
 
 #[tokio::test]
-async fn mutation_guard_serializes_review_for_the_same_scope() {
+async fn mutation_guard_serializes_diff_for_the_same_scope() {
     let repo = init_repo();
     std::fs::write(repo.path().join("file.txt"), "before\n").unwrap();
     commit_all(repo.path(), "seed");
     let config = default_config(repo.path().to_path_buf());
-    let manager = ReviewCheckpointManager::new();
-    let owner = conversation("serialized-review");
+    let manager = DiffCheckpointManager::new();
+    let owner = conversation("serialized-diff");
 
     let (_, guard) = manager
         .begin_mutation(&config, owner.clone())
@@ -300,10 +292,10 @@ async fn mutation_guard_serializes_review_for_the_same_scope() {
         .unwrap();
     let blocked = tokio::time::timeout(
         Duration::from_millis(50),
-        manager.show_changes(
+        manager.show_diff(
             &config,
             owner.clone(),
-            request(ReviewBaseline::ProjectOpen, false),
+            request(DiffBaseline::ProjectOpen, false),
         ),
     )
     .await;
@@ -312,7 +304,7 @@ async fn mutation_guard_serializes_review_for_the_same_scope() {
     drop(guard);
     let result = tokio::time::timeout(
         Duration::from_secs(5),
-        manager.show_changes(&config, owner, request(ReviewBaseline::ProjectOpen, false)),
+        manager.show_diff(&config, owner, request(DiffBaseline::ProjectOpen, false)),
     )
     .await
     .unwrap()
@@ -327,9 +319,9 @@ async fn transport_checkpoints_survive_aggressive_git_gc() {
     std::fs::write(&file, "before\n").unwrap();
     commit_all(repo.path(), "seed");
     let config = default_config(repo.path().to_path_buf());
-    let manager = ReviewCheckpointManager::new();
-    let state = TransportReviewState::new();
-    let owner = ReviewOwner::transport(state.clone());
+    let manager = DiffCheckpointManager::new();
+    let state = TransportDiffState::new();
+    let owner = DiffOwner::transport(state.clone());
 
     manager
         .ensure_initialized(&config, owner.clone())
@@ -340,7 +332,7 @@ async fn transport_checkpoints_survive_aggressive_git_gc() {
 
     std::fs::write(&file, "after\n").unwrap();
     let result = manager
-        .show_changes(&config, owner, request(ReviewBaseline::ProjectOpen, false))
+        .show_diff(&config, owner, request(DiffBaseline::ProjectOpen, false))
         .await
         .unwrap();
     assert_eq!(result.summary.files, 1);
@@ -354,7 +346,7 @@ async fn conversations_and_transports_have_independent_open_checkpoints() {
     std::fs::write(&file, "zero\n").unwrap();
     commit_all(repo.path(), "seed");
     let config = default_config(repo.path().to_path_buf());
-    let manager = ReviewCheckpointManager::new();
+    let manager = DiffCheckpointManager::new();
 
     let first_conversation = conversation("first");
     manager
@@ -364,45 +356,45 @@ async fn conversations_and_transports_have_independent_open_checkpoints() {
     std::fs::write(&file, "one\n").unwrap();
 
     let second_conversation = manager
-        .show_changes(
+        .show_diff(
             &config,
             conversation("second"),
-            request(ReviewBaseline::ProjectOpen, false),
+            request(DiffBaseline::ProjectOpen, false),
         )
         .await
         .unwrap();
     assert_eq!(second_conversation.summary.files, 0);
 
     let first_result = manager
-        .show_changes(
+        .show_diff(
             &config,
             first_conversation,
-            request(ReviewBaseline::ProjectOpen, false),
+            request(DiffBaseline::ProjectOpen, false),
         )
         .await
         .unwrap();
     assert_eq!(first_result.summary.files, 1);
 
-    let transport_one = ReviewOwner::transport(TransportReviewState::new());
+    let transport_one = DiffOwner::transport(TransportDiffState::new());
     manager
         .ensure_initialized(&config, transport_one.clone())
         .await
         .unwrap();
     std::fs::write(&file, "two\n").unwrap();
     let transport_two = manager
-        .show_changes(
+        .show_diff(
             &config,
-            ReviewOwner::transport(TransportReviewState::new()),
-            request(ReviewBaseline::ProjectOpen, false),
+            DiffOwner::transport(TransportDiffState::new()),
+            request(DiffBaseline::ProjectOpen, false),
         )
         .await
         .unwrap();
     assert_eq!(transport_two.summary.files, 0);
     let transport_one = manager
-        .show_changes(
+        .show_diff(
             &config,
             transport_one,
-            request(ReviewBaseline::ProjectOpen, false),
+            request(DiffBaseline::ProjectOpen, false),
         )
         .await
         .unwrap();
@@ -416,7 +408,7 @@ async fn captures_renames_deletions_untracked_and_binary_files() {
     std::fs::write(repo.path().join("delete-me.txt"), "gone\n").unwrap();
     commit_all(repo.path(), "seed");
     let config = default_config(repo.path().to_path_buf());
-    let manager = ReviewCheckpointManager::new();
+    let manager = DiffCheckpointManager::new();
     let owner = conversation("change-kinds");
     manager
         .ensure_initialized(&config, owner.clone())
@@ -433,7 +425,7 @@ async fn captures_renames_deletions_untracked_and_binary_files() {
     std::fs::write(repo.path().join("binary.bin"), [0_u8, 1, 2, 0, 4]).unwrap();
 
     let result = manager
-        .show_changes(&config, owner, request(ReviewBaseline::ProjectOpen, false))
+        .show_diff(&config, owner, request(DiffBaseline::ProjectOpen, false))
         .await
         .unwrap();
     assert_eq!(result.summary.files, 4);
@@ -451,7 +443,7 @@ async fn supports_unborn_repositories() {
     let file = repo.path().join("file.txt");
     std::fs::write(&file, "before\n").unwrap();
     let config = default_config(repo.path().to_path_buf());
-    let manager = ReviewCheckpointManager::new();
+    let manager = DiffCheckpointManager::new();
     let owner = conversation("unborn");
     manager
         .ensure_initialized(&config, owner.clone())
@@ -460,7 +452,7 @@ async fn supports_unborn_repositories() {
 
     std::fs::write(&file, "after\n").unwrap();
     let result = manager
-        .show_changes(&config, owner, request(ReviewBaseline::ProjectOpen, false))
+        .show_diff(&config, owner, request(DiffBaseline::ProjectOpen, false))
         .await
         .unwrap();
     assert_eq!(result.summary.files, 1);
@@ -474,8 +466,8 @@ async fn omits_instead_of_truncating_an_oversized_patch() {
     std::fs::write(&file, "before\n").unwrap();
     commit_all(repo.path(), "seed");
     let mut config = default_config(repo.path().to_path_buf());
-    config.review.max_patch_bytes = 128;
-    let manager = ReviewCheckpointManager::new();
+    config.diff.max_patch_bytes = 128;
+    let manager = DiffCheckpointManager::new();
     let owner = conversation("patch-budget");
     manager
         .ensure_initialized(&config, owner.clone())
@@ -484,7 +476,7 @@ async fn omits_instead_of_truncating_an_oversized_patch() {
 
     std::fs::write(&file, format!("{}\n", "after".repeat(2_000))).unwrap();
     let result = manager
-        .show_changes(&config, owner, request(ReviewBaseline::ProjectOpen, false))
+        .show_diff(&config, owner, request(DiffBaseline::ProjectOpen, false))
         .await
         .unwrap();
     assert!(!result.patch_included);
@@ -512,8 +504,8 @@ async fn default_widget_budget_includes_ten_thousand_changed_code_lines() {
     std::fs::write(&file, source('a')).unwrap();
     commit_all(repo.path(), "seed");
     let config = default_config(repo.path().to_path_buf());
-    assert_eq!(config.review.max_patch_bytes, 4 * 1024 * 1024);
-    let manager = ReviewCheckpointManager::new();
+    assert_eq!(config.diff.max_patch_bytes, 4 * 1024 * 1024);
+    let manager = DiffCheckpointManager::new();
     let owner = conversation("ten-thousand-lines");
     manager
         .ensure_initialized(&config, owner.clone())
@@ -522,13 +514,13 @@ async fn default_widget_budget_includes_ten_thousand_changed_code_lines() {
 
     std::fs::write(&file, source('b')).unwrap();
     let result = manager
-        .show_changes(&config, owner, request(ReviewBaseline::ProjectOpen, false))
+        .show_diff(&config, owner, request(DiffBaseline::ProjectOpen, false))
         .await
         .unwrap();
 
     assert_eq!(result.summary.additions + result.summary.deletions, 10_000);
     assert!(result.patch_included);
-    assert!(result.patch_bytes.unwrap() < config.review.max_patch_bytes);
+    assert!(result.patch_bytes.unwrap() < config.diff.max_patch_bytes);
     assert!(result.patch.contains("const VALUE_4999"));
 }
 
@@ -536,11 +528,11 @@ async fn default_widget_budget_includes_ten_thousand_changed_code_lines() {
 async fn non_git_project_reports_a_clear_error() {
     let root = TempDir::new().unwrap();
     let config = default_config(PathBuf::from(root.path()));
-    let error = ReviewCheckpointManager::new()
-        .show_changes(
+    let error = DiffCheckpointManager::new()
+        .show_diff(
             &config,
             conversation("not-git"),
-            request(ReviewBaseline::ProjectOpen, false),
+            request(DiffBaseline::ProjectOpen, false),
         )
         .await
         .unwrap_err();
@@ -562,7 +554,7 @@ async fn captures_executable_and_symlink_changes() {
     commit_all(repo.path(), "seed");
 
     let config = default_config(repo.path().to_path_buf());
-    let manager = ReviewCheckpointManager::new();
+    let manager = DiffCheckpointManager::new();
     let owner = conversation("modes-and-links");
     manager
         .ensure_initialized(&config, owner.clone())
@@ -576,7 +568,7 @@ async fn captures_executable_and_symlink_changes() {
     symlink("second.txt", &link).unwrap();
 
     let result = manager
-        .show_changes(&config, owner, request(ReviewBaseline::ProjectOpen, false))
+        .show_diff(&config, owner, request(DiffBaseline::ProjectOpen, false))
         .await
         .unwrap();
     assert_eq!(result.summary.files, 2);
@@ -596,25 +588,25 @@ async fn concurrent_advancement_uses_compare_and_swap() {
     commit_all(repo.path(), "seed");
 
     let config = default_config(repo.path().to_path_buf());
-    let identity = ConversationIdentity::from_openai_session("concurrent-review").unwrap();
-    ReviewCheckpointManager::new()
-        .ensure_initialized(&config, ReviewOwner::conversation(&identity))
+    let identity = ConversationIdentity::from_openai_session("concurrent-diff").unwrap();
+    DiffCheckpointManager::new()
+        .ensure_initialized(&config, DiffOwner::conversation(&identity))
         .await
         .unwrap();
     std::fs::write(&file, "after\n").unwrap();
 
-    let first = ReviewCheckpointManager::new();
-    let second = ReviewCheckpointManager::new();
+    let first = DiffCheckpointManager::new();
+    let second = DiffCheckpointManager::new();
     let (left, right) = tokio::join!(
-        first.show_changes(
+        first.show_diff(
             &config,
-            ReviewOwner::conversation(&identity),
-            request(ReviewBaseline::LastReview, true),
+            DiffOwner::conversation(&identity),
+            request(DiffBaseline::LastDiff, true),
         ),
-        second.show_changes(
+        second.show_diff(
             &config,
-            ReviewOwner::conversation(&identity),
-            request(ReviewBaseline::LastReview, true),
+            DiffOwner::conversation(&identity),
+            request(DiffBaseline::LastDiff, true),
         )
     );
     let left = left.unwrap();
@@ -640,13 +632,13 @@ async fn concurrent_advancement_uses_compare_and_swap() {
 async fn non_git_initialization_is_explicitly_unavailable() {
     let root = TempDir::new().unwrap();
     let config = default_config(root.path().to_path_buf());
-    let availability = ReviewCheckpointManager::new()
+    let availability = DiffCheckpointManager::new()
         .ensure_initialized(&config, conversation("not-git-initialization"))
         .await
         .unwrap();
     assert!(matches!(
         availability,
-        codexify::review::ReviewAvailability::Unavailable(_)
+        codexify::diff::DiffAvailability::Unavailable(_)
     ));
 }
 
@@ -656,7 +648,7 @@ async fn malformed_git_configuration_is_a_checkpoint_error() {
     std::fs::write(repo.path().join(".git/config"), "[broken\n").unwrap();
     let config = default_config(repo.path().to_path_buf());
 
-    let error = ReviewCheckpointManager::new()
+    let error = DiffCheckpointManager::new()
         .ensure_initialized(&config, conversation("malformed-git-config"))
         .await
         .unwrap_err();
@@ -670,20 +662,20 @@ async fn git_snapshot_failures_are_not_treated_as_non_git_projects() {
     commit_all(repo.path(), "seed");
     std::fs::write(
         repo.path().join(".gitattributes"),
-        "broken.txt filter=review-test-failure\n",
+        "broken.txt filter=diff-test-failure\n",
     )
     .unwrap();
     git(
         repo.path(),
-        &["config", "filter.review-test-failure.clean", "false"],
+        &["config", "filter.diff-test-failure.clean", "false"],
     );
     git(
         repo.path(),
-        &["config", "filter.review-test-failure.required", "true"],
+        &["config", "filter.diff-test-failure.required", "true"],
     );
 
     let config = default_config(repo.path().to_path_buf());
-    let error = ReviewCheckpointManager::new()
+    let error = DiffCheckpointManager::new()
         .ensure_initialized(&config, conversation("snapshot-failure"))
         .await
         .unwrap_err();

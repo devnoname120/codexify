@@ -1,4 +1,4 @@
-//! Project-scoped Git review checkpoints.
+//! Project-scoped Git diff checkpoints.
 
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -17,50 +17,52 @@ use crate::process_env::scrub_untrusted_child_env;
 use crate::project_bindings::ConversationIdentity;
 use crate::types::AppConfig;
 
-const REVIEW_REF_ROOT: &str = "refs/codexify/review";
-const SYNTHETIC_IDENTITY_NAME: &str = "Codexify Review";
-const SYNTHETIC_IDENTITY_EMAIL: &str = "review@codexify.local";
+const DIFF_REF_ROOT: &str = "refs/codexify/diff";
+const LEGACY_REVIEW_REF_ROOT: &str = "refs/codexify/review";
+const LEGACY_PROJECT_SCOPE_HASH_DOMAIN: &[u8] = b"codexify/review-project/v1\0";
+const SYNTHETIC_IDENTITY_NAME: &str = "Codexify Diff";
+const SYNTHETIC_IDENTITY_EMAIL: &str = "diff@codexify.local";
 const MAX_GIT_ERROR_BYTES: usize = 64 * 1024;
-const REVIEW_DIFF_ALGORITHM: &str = "--diff-algorithm=histogram";
+const DIFF_ALGORITHM: &str = "--diff-algorithm=histogram";
 
-static TRANSPORT_REVIEW_COUNTER: AtomicU64 = AtomicU64::new(1);
+static TRANSPORT_DIFF_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ReviewBaseline {
-    LastReview,
+pub enum DiffBaseline {
+    LastDiff,
     ProjectOpen,
 }
 
-impl ReviewBaseline {
+impl DiffBaseline {
     pub fn parse(value: Option<&str>) -> Result<Self, String> {
-        match value.unwrap_or("last_review") {
-            "last_review" => Ok(Self::LastReview),
+        match value.unwrap_or("last_diff") {
+            "last_diff" => Ok(Self::LastDiff),
             "project_open" => Ok(Self::ProjectOpen),
             other => Err(format!(
-                "since must be `last_review` or `project_open`, got {other:?}"
+                "since must be `last_diff` or `project_open`, got {other:?}"
             )),
         }
     }
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::LastReview => "last review",
+            Self::LastDiff => "last diff",
             Self::ProjectOpen => "project open",
         }
     }
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct ReviewRequest {
-    pub since: ReviewBaseline,
+pub struct DiffRequest {
+    pub since: DiffBaseline,
     pub advance: bool,
     pub include_patch: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
-pub struct ReviewSummary {
+pub struct DiffSummary {
     pub files: usize,
     pub additions: u64,
     pub deletions: u64,
@@ -69,7 +71,7 @@ pub struct ReviewSummary {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ReviewFile {
+pub struct DiffFile {
     pub path: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub previous_path: Option<String>,
@@ -83,13 +85,13 @@ pub struct ReviewFile {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ReviewResult {
-    pub since: ReviewBaseline,
+pub struct DiffResult {
+    pub since: DiffBaseline,
     pub advance_requested: bool,
     pub checkpoint_advanced: bool,
     pub scope: String,
-    pub summary: ReviewSummary,
-    pub files: Vec<ReviewFile>,
+    pub summary: DiffSummary,
+    pub files: Vec<DiffFile>,
     pub files_omitted: usize,
     pub patch: String,
     pub patch_included: bool,
@@ -100,7 +102,7 @@ pub struct ReviewResult {
     pub warnings: Vec<String>,
 }
 
-impl ReviewResult {
+impl DiffResult {
     pub fn render_text(&self) -> String {
         let mut lines = Vec::new();
         if self.summary.files == 0 {
@@ -128,9 +130,9 @@ impl ReviewResult {
 
         if self.advance_requested {
             lines.push(if self.checkpoint_advanced {
-                "Last-review checkpoint advanced.".to_string()
+                "Last-diff checkpoint advanced.".to_string()
             } else {
-                "Last-review checkpoint was not advanced.".to_string()
+                "Last-diff checkpoint was not advanced.".to_string()
             });
         }
         lines.extend(
@@ -155,7 +157,7 @@ impl ReviewResult {
 #[derive(Debug, Clone)]
 struct CheckpointPair {
     project_open: String,
-    last_review: String,
+    last_diff: String,
 }
 
 struct TransportCheckpoint {
@@ -185,14 +187,14 @@ impl TransportObjectStore {
 }
 
 #[derive(Clone)]
-pub struct TransportReviewState {
+pub struct TransportDiffState {
     id: String,
     checkpoints: Arc<AsyncMutex<HashMap<String, TransportCheckpoint>>>,
 }
 
-impl TransportReviewState {
+impl TransportDiffState {
     pub fn new() -> Self {
-        let number = TRANSPORT_REVIEW_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let number = TRANSPORT_DIFF_COUNTER.fetch_add(1, Ordering::SeqCst);
         Self {
             id: format!("transport-{}-{number}", std::process::id()),
             checkpoints: Arc::new(AsyncMutex::new(HashMap::new())),
@@ -200,24 +202,24 @@ impl TransportReviewState {
     }
 }
 
-impl Default for TransportReviewState {
+impl Default for TransportDiffState {
     fn default() -> Self {
         Self::new()
     }
 }
 
 #[derive(Clone)]
-pub enum ReviewOwner {
+pub enum DiffOwner {
     Conversation(String),
-    Transport(TransportReviewState),
+    Transport(TransportDiffState),
 }
 
-impl ReviewOwner {
+impl DiffOwner {
     pub fn conversation(identity: &ConversationIdentity) -> Self {
         Self::Conversation(identity.stable_key().to_string())
     }
 
-    pub fn transport(state: TransportReviewState) -> Self {
+    pub fn transport(state: TransportDiffState) -> Self {
         Self::Transport(state)
     }
 
@@ -230,21 +232,21 @@ impl ReviewOwner {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ReviewAvailability {
+pub enum DiffAvailability {
     Ready,
     Unavailable(String),
 }
 
-pub struct ReviewMutationGuard {
+pub struct DiffMutationGuard {
     _guard: OwnedMutexGuard<()>,
 }
 
 #[derive(Default)]
-pub struct ReviewCheckpointManager {
+pub struct DiffCheckpointManager {
     locks: StdMutex<HashMap<String, Weak<AsyncMutex<()>>>>,
 }
 
-impl ReviewCheckpointManager {
+impl DiffCheckpointManager {
     pub fn new() -> Self {
         Self::default()
     }
@@ -252,8 +254,8 @@ impl ReviewCheckpointManager {
     pub async fn ensure_initialized(
         &self,
         config: &AppConfig,
-        owner: ReviewOwner,
-    ) -> Result<ReviewAvailability, String> {
+        owner: DiffOwner,
+    ) -> Result<DiffAvailability, String> {
         let project_root = canonical_project_root(&config.work_dir)?;
         let workspace_key = hash_path(&project_root);
         let lock = self.scope_lock(&owner.lock_key(&workspace_key));
@@ -264,33 +266,33 @@ impl ReviewCheckpointManager {
     pub async fn begin_mutation(
         &self,
         config: &AppConfig,
-        owner: ReviewOwner,
-    ) -> Result<(ReviewAvailability, ReviewMutationGuard), String> {
+        owner: DiffOwner,
+    ) -> Result<(DiffAvailability, DiffMutationGuard), String> {
         let project_root = canonical_project_root(&config.work_dir)?;
         let workspace_key = hash_path(&project_root);
         let lock = self.scope_lock(&owner.lock_key(&workspace_key));
         let guard = lock.lock_owned().await;
         let availability = Self::ensure_initialized_locked(config, &owner, project_root).await?;
-        Ok((availability, ReviewMutationGuard { _guard: guard }))
+        Ok((availability, DiffMutationGuard { _guard: guard }))
     }
 
     async fn ensure_initialized_locked(
         config: &AppConfig,
-        owner: &ReviewOwner,
+        owner: &DiffOwner,
         project_root: PathBuf,
-    ) -> Result<ReviewAvailability, String> {
+    ) -> Result<DiffAvailability, String> {
         let workspace = match resolve_workspace(config, project_root).await {
             Ok(workspace) => workspace,
             Err(WorkspaceResolutionError::Unavailable(reason)) => {
-                return Ok(ReviewAvailability::Unavailable(reason));
+                return Ok(DiffAvailability::Unavailable(reason));
             }
             Err(WorkspaceResolutionError::Failed(error)) => return Err(error),
         };
         match owner {
-            ReviewOwner::Conversation(owner_key) => {
+            DiffOwner::Conversation(owner_key) => {
                 load_or_initialize_persistent(config, &workspace, owner_key).await?;
             }
-            ReviewOwner::Transport(state) => {
+            DiffOwner::Transport(state) => {
                 let mut checkpoints = state.checkpoints.lock().await;
                 if !checkpoints.contains_key(&workspace.key) {
                     let checkpoint = create_transport_checkpoint(config, &workspace).await?;
@@ -298,15 +300,15 @@ impl ReviewCheckpointManager {
                 }
             }
         }
-        Ok(ReviewAvailability::Ready)
+        Ok(DiffAvailability::Ready)
     }
 
-    pub async fn show_changes(
+    pub async fn show_diff(
         &self,
         config: &AppConfig,
-        owner: ReviewOwner,
-        request: ReviewRequest,
-    ) -> Result<ReviewResult, String> {
+        owner: DiffOwner,
+        request: DiffRequest,
+    ) -> Result<DiffResult, String> {
         let project_root = canonical_project_root(&config.work_dir)?;
         let workspace = resolve_workspace(config, project_root)
             .await
@@ -315,7 +317,7 @@ impl ReviewCheckpointManager {
         let _guard = lock.lock().await;
 
         match owner {
-            ReviewOwner::Conversation(owner_key) => {
+            DiffOwner::Conversation(owner_key) => {
                 let pair = load_or_initialize_persistent(config, &workspace, &owner_key).await?;
                 let current = create_snapshot(config, &workspace, &[]).await?;
                 let mut result = compare(config, &workspace, &pair, &current, request, &[]).await?;
@@ -324,23 +326,23 @@ impl ReviewCheckpointManager {
                     if update_ref_compare_and_swap(
                         config,
                         &workspace.git_root,
-                        &refs.last_review,
+                        &refs.last_diff,
                         &current,
-                        &pair.last_review,
+                        &pair.last_diff,
                     )
                     .await?
                     {
                         result.checkpoint_advanced = true;
                     } else {
                         result.warnings.push(
-                            "the last-review checkpoint changed concurrently; call show_changes again to refresh the incremental diff"
+                            "the last-diff checkpoint changed concurrently; call show_diff again to refresh the incremental diff"
                                 .to_string(),
                         );
                     }
                 }
                 Ok(result)
             }
-            ReviewOwner::Transport(state) => {
+            DiffOwner::Transport(state) => {
                 let mut checkpoints = state.checkpoints.lock().await;
                 if !checkpoints.contains_key(&workspace.key) {
                     let checkpoint = create_transport_checkpoint(config, &workspace).await?;
@@ -348,7 +350,7 @@ impl ReviewCheckpointManager {
                 }
                 let checkpoint = checkpoints
                     .get(&workspace.key)
-                    .ok_or_else(|| "transport review checkpoint disappeared".to_string())?;
+                    .ok_or_else(|| "transport diff checkpoint disappeared".to_string())?;
                 let pair = checkpoint.pair.clone();
                 let environment = checkpoint.objects.environment();
                 let current = create_snapshot(config, &workspace, &environment).await?;
@@ -357,7 +359,7 @@ impl ReviewCheckpointManager {
                 if request.advance
                     && let Some(stored) = checkpoints.get_mut(&workspace.key)
                 {
-                    stored.pair.last_review = current;
+                    stored.pair.last_diff = current;
                     result.checkpoint_advanced = true;
                 }
                 Ok(result)
@@ -377,7 +379,7 @@ impl ReviewCheckpointManager {
     }
 }
 
-struct ReviewWorkspace {
+struct DiffWorkspace {
     git_root: PathBuf,
     pathspec: PathBuf,
     scope: String,
@@ -386,7 +388,7 @@ struct ReviewWorkspace {
 
 struct CheckpointRefs {
     project_open: String,
-    last_review: String,
+    last_diff: String,
 }
 
 #[derive(Debug)]
@@ -417,10 +419,18 @@ fn is_not_git_worktree(stderr: &[u8]) -> bool {
 }
 
 fn checkpoint_refs(workspace_key: &str, owner_key: &str) -> CheckpointRefs {
-    let prefix = format!("{REVIEW_REF_ROOT}/{workspace_key}/{owner_key}");
+    let prefix = format!("{DIFF_REF_ROOT}/{workspace_key}/{owner_key}");
     CheckpointRefs {
         project_open: format!("{prefix}/project-open"),
-        last_review: format!("{prefix}/last-review"),
+        last_diff: format!("{prefix}/last-diff"),
+    }
+}
+
+fn legacy_checkpoint_refs(workspace_key: &str, owner_key: &str) -> CheckpointRefs {
+    let prefix = format!("{LEGACY_REVIEW_REF_ROOT}/{workspace_key}/{owner_key}");
+    CheckpointRefs {
+        project_open: format!("{prefix}/project-open"),
+        last_diff: format!("{prefix}/last-review"),
     }
 }
 
@@ -439,7 +449,7 @@ fn canonical_project_root(path: &Path) -> Result<PathBuf, String> {
 async fn resolve_workspace(
     config: &AppConfig,
     project_root: PathBuf,
-) -> Result<ReviewWorkspace, WorkspaceResolutionError> {
+) -> Result<DiffWorkspace, WorkspaceResolutionError> {
     let args = strings(&["rev-parse", "--show-toplevel"]);
     let output = git_output(config, &project_root, &args, &[])
         .await
@@ -448,7 +458,7 @@ async fn resolve_workspace(
         let error = git_failure("git rev-parse", &output.stderr, output.status.code());
         if is_not_git_worktree(&output.stderr) {
             return Err(WorkspaceResolutionError::Unavailable(format!(
-                "show_changes requires a Git worktree: {error}"
+                "show_diff requires a Git worktree: {error}"
             )));
         }
         return Err(WorkspaceResolutionError::Failed(error));
@@ -474,7 +484,7 @@ async fn resolve_workspace(
     } else {
         relative.to_string_lossy().replace('\\', "/")
     };
-    Ok(ReviewWorkspace {
+    Ok(DiffWorkspace {
         key: hash_path(&project_root),
         git_root,
         pathspec,
@@ -484,7 +494,9 @@ async fn resolve_workspace(
 
 fn hash_path(path: &Path) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(b"codexify/review-project/v1\0");
+    // Keep the project key stable so current review refs can be copied lazily
+    // into the diff namespace without scanning or exposing project paths.
+    hasher.update(LEGACY_PROJECT_SCOPE_HASH_DOMAIN);
     hasher.update(path.to_string_lossy().as_bytes());
     hex(&hasher.finalize())
 }
@@ -501,36 +513,32 @@ fn hex(bytes: &[u8]) -> String {
 
 async fn load_or_initialize_persistent(
     config: &AppConfig,
-    workspace: &ReviewWorkspace,
+    workspace: &DiffWorkspace,
     owner_key: &str,
 ) -> Result<CheckpointPair, String> {
     let refs = checkpoint_refs(&workspace.key, owner_key);
+    migrate_legacy_checkpoint_refs(config, workspace, owner_key, &refs).await?;
     let project_open = read_ref(config, &workspace.git_root, &refs.project_open).await?;
-    let last_review = read_ref(config, &workspace.git_root, &refs.last_review).await?;
+    let last_diff = read_ref(config, &workspace.git_root, &refs.last_diff).await?;
 
-    match (project_open, last_review) {
-        (Some(project_open), Some(last_review)) => Ok(CheckpointPair {
+    match (project_open, last_diff) {
+        (Some(project_open), Some(last_diff)) => Ok(CheckpointPair {
             project_open,
-            last_review,
+            last_diff,
         }),
         (Some(project_open), None) => {
-            create_ref_if_absent(
-                config,
-                &workspace.git_root,
-                &refs.last_review,
-                &project_open,
-            )
-            .await?;
-            let last_review = read_ref(config, &workspace.git_root, &refs.last_review)
+            create_ref_if_absent(config, &workspace.git_root, &refs.last_diff, &project_open)
+                .await?;
+            let last_diff = read_ref(config, &workspace.git_root, &refs.last_diff)
                 .await?
-                .ok_or_else(|| "could not initialise the last-review checkpoint".to_string())?;
+                .ok_or_else(|| "could not initialise the last-diff checkpoint".to_string())?;
             Ok(CheckpointPair {
                 project_open,
-                last_review,
+                last_diff,
             })
         }
         (None, Some(_)) => Err(
-            "review checkpoint state is inconsistent: last-review exists without project-open"
+            "diff checkpoint state is inconsistent: last-diff exists without project-open"
                 .to_string(),
         ),
         (None, None) => {
@@ -540,27 +548,44 @@ async fn load_or_initialize_persistent(
             let project_open = read_ref(config, &workspace.git_root, &refs.project_open)
                 .await?
                 .ok_or_else(|| "could not initialise the project-open checkpoint".to_string())?;
-            create_ref_if_absent(
-                config,
-                &workspace.git_root,
-                &refs.last_review,
-                &project_open,
-            )
-            .await?;
-            let last_review = read_ref(config, &workspace.git_root, &refs.last_review)
+            create_ref_if_absent(config, &workspace.git_root, &refs.last_diff, &project_open)
+                .await?;
+            let last_diff = read_ref(config, &workspace.git_root, &refs.last_diff)
                 .await?
-                .ok_or_else(|| "could not initialise the last-review checkpoint".to_string())?;
+                .ok_or_else(|| "could not initialise the last-diff checkpoint".to_string())?;
             Ok(CheckpointPair {
                 project_open,
-                last_review,
+                last_diff,
             })
         }
     }
 }
 
+async fn migrate_legacy_checkpoint_refs(
+    config: &AppConfig,
+    workspace: &DiffWorkspace,
+    owner_key: &str,
+    refs: &CheckpointRefs,
+) -> Result<(), String> {
+    let legacy = legacy_checkpoint_refs(&workspace.key, owner_key);
+    for (current, previous) in [
+        (&refs.project_open, &legacy.project_open),
+        (&refs.last_diff, &legacy.last_diff),
+    ] {
+        if read_ref(config, &workspace.git_root, current)
+            .await?
+            .is_none()
+            && let Some(value) = read_ref(config, &workspace.git_root, previous).await?
+        {
+            create_ref_if_absent(config, &workspace.git_root, current, &value).await?;
+        }
+    }
+    Ok(())
+}
+
 async fn create_transport_checkpoint(
     config: &AppConfig,
-    workspace: &ReviewWorkspace,
+    workspace: &DiffWorkspace,
 ) -> Result<TransportCheckpoint, String> {
     let alternate = git_checked(
         config,
@@ -582,10 +607,10 @@ async fn create_transport_checkpoint(
         )
     })?;
     let temp = tempfile::tempdir()
-        .map_err(|error| format!("could not create transport review object store: {error}"))?;
+        .map_err(|error| format!("could not create transport diff object store: {error}"))?;
     let objects = temp.path().join("objects");
     std::fs::create_dir(&objects)
-        .map_err(|error| format!("could not create transport review object directory: {error}"))?;
+        .map_err(|error| format!("could not create transport diff object directory: {error}"))?;
     let store = TransportObjectStore {
         _temp: temp,
         objects,
@@ -596,7 +621,7 @@ async fn create_transport_checkpoint(
     Ok(TransportCheckpoint {
         pair: CheckpointPair {
             project_open: snapshot.clone(),
-            last_review: snapshot,
+            last_diff: snapshot,
         },
         objects: store,
     })
@@ -604,11 +629,11 @@ async fn create_transport_checkpoint(
 
 async fn create_snapshot(
     config: &AppConfig,
-    workspace: &ReviewWorkspace,
+    workspace: &DiffWorkspace,
     object_environment: &[(OsString, OsString)],
 ) -> Result<String, String> {
     let temp = tempfile::tempdir()
-        .map_err(|error| format!("could not create temporary review index: {error}"))?;
+        .map_err(|error| format!("could not create temporary diff index: {error}"))?;
     let index = temp.path().join("index");
     let environment = snapshot_environment(&index, object_environment);
 
@@ -681,14 +706,14 @@ async fn create_snapshot(
             OsString::from("commit-tree"),
             OsString::from(tree),
             OsString::from("-m"),
-            OsString::from("Codexify review snapshot"),
+            OsString::from("Codexify diff snapshot"),
         ],
         &environment,
     )
     .await?;
     let commit = String::from_utf8_lossy(&commit).trim().to_string();
     if commit.is_empty() {
-        return Err("Git returned an empty review snapshot id".to_string());
+        return Err("Git returned an empty diff snapshot id".to_string());
     }
     Ok(commit)
 }
@@ -733,15 +758,15 @@ fn snapshot_environment(
 
 async fn compare(
     config: &AppConfig,
-    workspace: &ReviewWorkspace,
+    workspace: &DiffWorkspace,
     pair: &CheckpointPair,
     current: &str,
-    request: ReviewRequest,
+    request: DiffRequest,
     object_environment: &[(OsString, OsString)],
-) -> Result<ReviewResult, String> {
+) -> Result<DiffResult, String> {
     let baseline = match request.since {
-        ReviewBaseline::LastReview => &pair.last_review,
-        ReviewBaseline::ProjectOpen => &pair.project_open,
+        DiffBaseline::LastDiff => &pair.last_diff,
+        DiffBaseline::ProjectOpen => &pair.project_open,
     };
     let name_status = git_checked(
         config,
@@ -772,22 +797,22 @@ async fn compare(
     }
 
     let patch_result = if !request.include_patch {
-        PatchResult::omitted("disabled by the show_changes request")
-    } else if config.review.max_patch_bytes == 0 {
-        PatchResult::omitted("disabled by review.maxPatchBytes=0")
+        PatchResult::omitted("disabled by the show_diff request")
+    } else if config.diff.max_patch_bytes == 0 {
+        PatchResult::omitted("disabled by diff.maxPatchBytes=0")
     } else {
         git_patch_bounded(
             config,
             workspace,
             baseline,
             current,
-            config.review.max_patch_bytes,
+            config.diff.max_patch_bytes,
             object_environment,
         )
         .await?
     };
 
-    Ok(ReviewResult {
+    Ok(DiffResult {
         since: request.since,
         advance_requested: request.advance,
         checkpoint_advanced: false,
@@ -809,7 +834,7 @@ fn diff_args(kind: &str, baseline: &str, current: &str, pathspec: &Path) -> Vec<
         OsString::from("diff"),
         OsString::from("--no-ext-diff"),
         OsString::from("--no-textconv"),
-        OsString::from(REVIEW_DIFF_ALGORITHM),
+        OsString::from(DIFF_ALGORITHM),
         OsString::from("--find-renames"),
         OsString::from(kind),
         OsString::from("-z"),
@@ -955,10 +980,10 @@ fn token_string(value: &[u8]) -> String {
 }
 
 fn merge_records(
-    workspace: &ReviewWorkspace,
+    workspace: &DiffWorkspace,
     names: Vec<NameRecord>,
     stats: Vec<StatRecord>,
-) -> Result<Vec<ReviewFile>, String> {
+) -> Result<Vec<DiffFile>, String> {
     if names.len() != stats.len() {
         return Err(format!(
             "Git returned {} name records but {} stat records",
@@ -974,7 +999,7 @@ fn merge_records(
                 return Err("Git name-status and numstat records do not align".to_string());
             }
             let binary = stat.additions.is_none() || stat.deletions.is_none();
-            Ok(ReviewFile {
+            Ok(DiffFile {
                 path: project_relative_path(workspace, &name.path)?,
                 previous_path: name
                     .previous_path
@@ -991,7 +1016,7 @@ fn merge_records(
 }
 
 fn project_relative_path(
-    workspace: &ReviewWorkspace,
+    workspace: &DiffWorkspace,
     repository_path: &str,
 ) -> Result<String, String> {
     if workspace.scope == "." {
@@ -1002,7 +1027,7 @@ fn project_relative_path(
         .strip_prefix(&prefix)
         .map(String::from)
         .ok_or_else(|| {
-            format!("Git returned a path outside the logical review scope: {repository_path}")
+            format!("Git returned a path outside the logical diff scope: {repository_path}")
         })
 }
 
@@ -1021,10 +1046,10 @@ fn status_name(status: &str) -> &'static str {
     }
 }
 
-fn summarize(files: &[ReviewFile]) -> ReviewSummary {
+fn summarize(files: &[DiffFile]) -> DiffSummary {
     files
         .iter()
-        .fold(ReviewSummary::default(), |mut summary, file| {
+        .fold(DiffSummary::default(), |mut summary, file| {
             summary.files += 1;
             summary.additions += file.additions.unwrap_or(0);
             summary.deletions += file.deletions.unwrap_or(0);
@@ -1051,13 +1076,13 @@ impl PatchResult {
     }
 }
 
-fn patch_args(workspace: &ReviewWorkspace, baseline: &str, current: &str) -> Vec<OsString> {
+fn patch_args(workspace: &DiffWorkspace, baseline: &str, current: &str) -> Vec<OsString> {
     let mut args = vec![
         OsString::from("--literal-pathspecs"),
         OsString::from("diff"),
         OsString::from("--no-ext-diff"),
         OsString::from("--no-textconv"),
-        OsString::from(REVIEW_DIFF_ALGORITHM),
+        OsString::from(DIFF_ALGORITHM),
         OsString::from("--find-renames"),
         OsString::from("--binary"),
         OsString::from("--full-index"),
@@ -1077,7 +1102,7 @@ fn patch_args(workspace: &ReviewWorkspace, baseline: &str, current: &str) -> Vec
 
 async fn git_patch_bounded(
     config: &AppConfig,
-    workspace: &ReviewWorkspace,
+    workspace: &DiffWorkspace,
     baseline: &str,
     current: &str,
     max_bytes: usize,
@@ -1124,7 +1149,7 @@ async fn git_patch_bounded(
 
     if oversized {
         return Ok(PatchResult::omitted(format!(
-            "exceeds review.maxPatchBytes ({max_bytes} bytes)"
+            "exceeds diff.maxPatchBytes ({max_bytes} bytes)"
         )));
     }
     if !status.success() {
@@ -1333,7 +1358,24 @@ fn git_failure(command: &str, stderr: &[u8], code: Option<i32>) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::process::Command as StdCommand;
+
     use super::*;
+
+    fn run_git(dir: &Path, args: &[&str]) -> String {
+        let output = StdCommand::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("git must be installed");
+        assert!(
+            output.status.success(),
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
 
     fn rendered_args(args: Vec<OsString>) -> Vec<String> {
         args.into_iter()
@@ -1342,14 +1384,14 @@ mod tests {
     }
 
     #[test]
-    fn every_review_diff_uses_histogram_and_rename_detection() {
+    fn every_generated_diff_uses_histogram_and_rename_detection() {
         let summary_args = rendered_args(diff_args(
             "--name-status",
             "baseline",
             "current",
             Path::new("."),
         ));
-        let workspace = ReviewWorkspace {
+        let workspace = DiffWorkspace {
             git_root: PathBuf::from("."),
             pathspec: PathBuf::from("."),
             scope: ".".to_string(),
@@ -1358,8 +1400,72 @@ mod tests {
         let patch_args = rendered_args(patch_args(&workspace, "baseline", "current"));
 
         for args in [&summary_args, &patch_args] {
-            assert!(args.iter().any(|arg| arg == REVIEW_DIFF_ALGORITHM));
+            assert!(args.iter().any(|arg| arg == DIFF_ALGORITHM));
             assert!(args.iter().any(|arg| arg == "--find-renames"));
         }
+    }
+
+    #[tokio::test]
+    async fn legacy_review_refs_are_copied_into_the_diff_namespace() {
+        let repo = tempfile::tempdir().unwrap();
+        run_git(repo.path(), &["init", "--quiet"]);
+        run_git(repo.path(), &["config", "user.name", "Test"]);
+        run_git(repo.path(), &["config", "user.email", "test@example.com"]);
+        run_git(repo.path(), &["config", "commit.gpgsign", "false"]);
+        std::fs::write(repo.path().join("file.txt"), "before\n").unwrap();
+        run_git(repo.path(), &["add", "file.txt"]);
+        run_git(repo.path(), &["commit", "--quiet", "-m", "seed"]);
+
+        let config = crate::config::default_config(repo.path().to_path_buf());
+        let identity = ConversationIdentity::from_openai_session("legacy-diff-migration").unwrap();
+        let project_root = canonical_project_root(repo.path()).unwrap();
+        let workspace = resolve_workspace(&config, project_root).await.unwrap();
+        let legacy = legacy_checkpoint_refs(&workspace.key, identity.stable_key());
+        let head = run_git(repo.path(), &["rev-parse", "HEAD"]);
+        create_ref_if_absent(&config, &workspace.git_root, &legacy.project_open, &head)
+            .await
+            .unwrap();
+        create_ref_if_absent(&config, &workspace.git_root, &legacy.last_diff, &head)
+            .await
+            .unwrap();
+
+        std::fs::write(repo.path().join("file.txt"), "after\n").unwrap();
+        let result = DiffCheckpointManager::new()
+            .show_diff(
+                &config,
+                DiffOwner::conversation(&identity),
+                DiffRequest {
+                    since: DiffBaseline::LastDiff,
+                    advance: false,
+                    include_patch: true,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(result.patch.contains("-before"));
+        assert!(result.patch.contains("+after"));
+
+        let current = checkpoint_refs(&workspace.key, identity.stable_key());
+        assert_eq!(
+            read_ref(&config, &workspace.git_root, &current.project_open)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some(head.as_str())
+        );
+        assert_eq!(
+            read_ref(&config, &workspace.git_root, &current.last_diff)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some(head.as_str())
+        );
+        assert_eq!(
+            read_ref(&config, &workspace.git_root, &legacy.last_diff)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some(head.as_str())
+        );
     }
 }

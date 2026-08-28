@@ -1,73 +1,79 @@
 use rmcp::model::{MetaObject, Resource, ResourceContents};
 use serde_json::json;
 
-use crate::review::ReviewResult;
+use crate::diff::DiffResult;
 
-pub const REVIEW_UI_URI: &str = "ui://codexify/review/v3/mcp-app.html";
-pub const PREVIOUS_REVIEW_UI_URI: &str = "ui://codexify/review/v2/mcp-app.html";
+pub const DIFF_UI_URI: &str = "ui://codexify/diff/v3/mcp-app.html";
+pub const LEGACY_REVIEW_UI_URI_V3: &str = "ui://codexify/review/v3/mcp-app.html";
+pub const LEGACY_REVIEW_UI_URI_V2: &str = "ui://codexify/review/v2/mcp-app.html";
 pub const LEGACY_REVIEW_UI_URI: &str = "ui://codexify/review/mcp-app.html";
-pub const REVIEW_UI_MIME_TYPE: &str = "text/html;profile=mcp-app";
+pub const DIFF_UI_MIME_TYPE: &str = "text/html;profile=mcp-app";
 pub const MCP_APPS_EXTENSION_ID: &str = "io.modelcontextprotocol/ui";
-pub const REVIEW_RESULT_META_KEY: &str = "io.github.devnoname120/codexify/review";
+pub const DIFF_RESULT_META_KEY: &str = "io.github.devnoname120/codexify/diff";
+pub const LEGACY_REVIEW_RESULT_META_KEY: &str = "io.github.devnoname120/codexify/review";
 
 pub fn tool_meta() -> MetaObject {
     serde_json::from_value(json!({
         "ui": {
-            "resourceUri": REVIEW_UI_URI,
+            "resourceUri": DIFF_UI_URI,
             "visibility": ["model"]
         },
-        "ui/resourceUri": REVIEW_UI_URI
+        "ui/resourceUri": DIFF_UI_URI
     }))
-    .expect("static review tool metadata must be an object")
+    .expect("static diff tool metadata must be an object")
 }
 
 pub fn resource_meta() -> MetaObject {
     serde_json::from_value(json!({
         "ui": { "prefersBorder": false }
     }))
-    .expect("static review resource metadata must be an object")
+    .expect("static diff resource metadata must be an object")
 }
 
-pub fn result_meta(result: &ReviewResult) -> MetaObject {
+pub fn result_meta(result: &DiffResult) -> MetaObject {
     let mut meta = MetaObject::new();
     meta.0.insert(
-        REVIEW_RESULT_META_KEY.to_string(),
-        serde_json::to_value(result).expect("review result must serialize"),
+        DIFF_RESULT_META_KEY.to_string(),
+        serde_json::to_value(result).expect("diff result must serialize"),
     );
     meta
 }
 
 pub fn resource() -> Resource {
-    Resource::new(REVIEW_UI_URI, "codexify-review")
-        .with_title("Code review")
-        .with_description("Interactive rendering of Codexify review checkpoints")
-        .with_mime_type(REVIEW_UI_MIME_TYPE)
-        .with_size(REVIEW_UI_HTML.len() as u64)
+    Resource::new(DIFF_UI_URI, "codexify-diff")
+        .with_title("Code diff")
+        .with_description("Interactive rendering of Codexify diff checkpoints")
+        .with_mime_type(DIFF_UI_MIME_TYPE)
+        .with_size(DIFF_UI_HTML.len() as u64)
         .with_meta(resource_meta())
 }
 
 pub fn contents() -> ResourceContents {
-    contents_for_uri(REVIEW_UI_URI).expect("current review UI URI must be supported")
+    contents_for_uri(DIFF_UI_URI).expect("current diff UI URI must be supported")
 }
 
 pub fn contents_for_uri(uri: &str) -> Option<ResourceContents> {
-    if uri != REVIEW_UI_URI && uri != PREVIOUS_REVIEW_UI_URI && uri != LEGACY_REVIEW_UI_URI {
+    if uri != DIFF_UI_URI
+        && uri != LEGACY_REVIEW_UI_URI_V3
+        && uri != LEGACY_REVIEW_UI_URI_V2
+        && uri != LEGACY_REVIEW_UI_URI
+    {
         return None;
     }
     Some(
-        ResourceContents::text(REVIEW_UI_HTML, uri)
-            .with_mime_type(REVIEW_UI_MIME_TYPE)
+        ResourceContents::text(DIFF_UI_HTML, uri)
+            .with_mime_type(DIFF_UI_MIME_TYPE)
             .with_meta(resource_meta()),
     )
 }
 
-pub const REVIEW_UI_HTML: &str = concat!(
+pub const DIFF_UI_HTML: &str = concat!(
     r##"<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Code review</title>
+<title>Code diff</title>
 <style>
 :root {
   color-scheme: light dark;
@@ -108,13 +114,13 @@ html, body { width: 100%; max-width: 100%; overflow-x: hidden; background: trans
 body { margin: 0; color: var(--text); }
 button, summary { color: inherit; font: inherit; }
 main { display: grid; width: 100%; min-width: 0; gap: 6px; padding: 6px; }
-.review { width: 100%; min-width: 0; max-width: 100%; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: var(--bg); }
-.review-summary, .file-summary { cursor: pointer; list-style: none; -webkit-tap-highlight-color: transparent; }
-.review-summary::-webkit-details-marker, .file-summary::-webkit-details-marker { display: none; }
-.review-summary { display: grid; grid-template-columns: minmax(0, 1fr) auto 9px; align-items: center; gap: 8px; min-height: 32px; padding: 6px 9px; background: var(--panel); font-size: 11px; font-weight: 650; }
-.review-summary::after, .file-summary::after { content: ""; width: 7px; height: 7px; border-right: 1.5px solid var(--muted); border-bottom: 1.5px solid var(--muted); transform: rotate(-45deg); transition: transform 120ms ease; }
-.review[open] > .review-summary::after, .file-entry[open] > .file-summary::after { transform: rotate(45deg); }
-.review-summary:focus-visible, .file-summary:focus-visible, .show-more:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.diff { width: 100%; min-width: 0; max-width: 100%; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: var(--bg); }
+.diff-summary, .file-summary { cursor: pointer; list-style: none; -webkit-tap-highlight-color: transparent; }
+.diff-summary::-webkit-details-marker, .file-summary::-webkit-details-marker { display: none; }
+.diff-summary { display: grid; grid-template-columns: minmax(0, 1fr) auto 9px; align-items: center; gap: 8px; min-height: 32px; padding: 6px 9px; background: var(--panel); font-size: 11px; font-weight: 650; }
+.diff-summary::after, .file-summary::after { content: ""; width: 7px; height: 7px; border-right: 1.5px solid var(--muted); border-bottom: 1.5px solid var(--muted); transform: rotate(-45deg); transition: transform 120ms ease; }
+.diff[open] > .diff-summary::after, .file-entry[open] > .file-summary::after { transform: rotate(45deg); }
+.diff-summary:focus-visible, .file-summary:focus-visible, .show-more:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .summary-stats { display: flex; align-items: baseline; gap: 6px; font-size: 10px; font-weight: 500; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .binary-count { color: var(--muted); }
 .files { display: grid; width: 100%; min-width: 0; max-width: 100%; }
@@ -162,7 +168,7 @@ main { display: grid; width: 100%; min-width: 0; gap: 6px; padding: 6px; }
 @media (max-width: 520px) {
   :root { --file-row-height: 26px; --diff-font-size: 9px; }
   main { gap: 4px; padding: 4px; }
-  .review-summary { min-height: 30px; padding: 5px 7px; }
+  .diff-summary { min-height: 30px; padding: 5px 7px; }
   .file-summary, .file-row { padding: 2px 7px; font-size: 10px; }
   .show-more { padding: 3px 7px; }
   .diff-table { grid-template-columns: minmax(3.25em, auto) minmax(3.25em, auto) minmax(0, 1fr); }
@@ -170,18 +176,18 @@ main { display: grid; width: 100%; min-width: 0; gap: 6px; padding: 6px; }
   .code { padding-left: 0.45em; padding-right: 6px; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .review-summary::after, .file-summary::after { transition: none; }
+  .diff-summary::after, .file-summary::after { transition: none; }
 }
 </style>
 </head>
 <body>
 <main id="root" aria-live="polite">
-  <div class="notice">Preparing review…</div>
+  <div class="notice">Preparing diff…</div>
 </main>
 <script>
 window.Prism = { manual: true };
 "##,
-    include_str!("review_prism.js"),
+    include_str!("diff_prism.js"),
     r##"
 (() => {
   "use strict";
@@ -249,7 +255,8 @@ window.Prism = { manual: true };
     lua: "lua",
     sql: "sql"
   });
-  const REVIEW_META_KEY = "io.github.devnoname120/codexify/review";
+  const DIFF_META_KEY = "io.github.devnoname120/codexify/diff";
+  const LEGACY_REVIEW_META_KEY = "io.github.devnoname120/codexify/review";
   const WIDGET_STATE_VERSION = 1;
   let nextId = 1;
   const pending = new Map();
@@ -285,15 +292,18 @@ window.Prism = { manual: true };
     const expandedFiles = source && Array.isArray(source.expandedFiles)
       ? source.expandedFiles.filter(item => typeof item === "string")
       : [];
+    const disclosure = source && Object.prototype.hasOwnProperty.call(source, "diffOpen")
+      ? source.diffOpen
+      : source && source.reviewOpen;
     return {
-      reviewOpen: !(source && source.reviewOpen === false),
+      diffOpen: disclosure !== false,
       showAllFiles: Boolean(source && source.showAllFiles),
       expandedFiles: new Set(expandedFiles)
     };
   }
 
   function widgetStatesEqual(left, right) {
-    if (left.reviewOpen !== right.reviewOpen || left.showAllFiles !== right.showAllFiles) return false;
+    if (left.diffOpen !== right.diffOpen || left.showAllFiles !== right.showAllFiles) return false;
     if (left.expandedFiles.size !== right.expandedFiles.size) return false;
     for (const key of left.expandedFiles) {
       if (!right.expandedFiles.has(key)) return false;
@@ -308,7 +318,7 @@ window.Prism = { manual: true };
       api.setWidgetState({
         privateContent: {
           version: WIDGET_STATE_VERSION,
-          reviewOpen: uiState.reviewOpen,
+          diffOpen: uiState.diffOpen,
           showAllFiles: uiState.showAllFiles,
           expandedFiles: Array.from(uiState.expandedFiles)
         }
@@ -316,7 +326,7 @@ window.Prism = { manual: true };
     } catch (_) {}
   }
 
-  function reviewPayloadFromMetadata(value) {
+  function diffPayloadFromMetadata(value) {
     const queue = [value];
     const seen = new Set();
     const nestedKeys = ["_meta", "meta", "call_tool_result", "callToolResult", "mcp_tool_result", "mcpToolResult", "result"];
@@ -324,7 +334,7 @@ window.Prism = { manual: true };
       const candidate = queue.shift();
       if (!candidate || typeof candidate !== "object" || seen.has(candidate)) continue;
       seen.add(candidate);
-      const payload = candidate[REVIEW_META_KEY];
+      const payload = candidate[DIFF_META_KEY] || candidate[LEGACY_REVIEW_META_KEY];
       if (payload && typeof payload === "object") return payload;
       for (const key of nestedKeys) {
         if (candidate[key] && typeof candidate[key] === "object") queue.push(candidate[key]);
@@ -1014,18 +1024,18 @@ window.Prism = { manual: true };
     currentData = data;
     root.replaceChildren();
     const summary = data.summary || {};
-    const review = el("details", "review");
-    review.open = uiState.reviewOpen;
-    review.addEventListener("toggle", () => {
-      if (uiState.reviewOpen === review.open) {
+    const diff = el("details", "diff");
+    diff.open = uiState.diffOpen;
+    diff.addEventListener("toggle", () => {
+      if (uiState.diffOpen === diff.open) {
         scheduleSizeReport();
         return;
       }
-      uiState.reviewOpen = review.open;
+      uiState.diffOpen = diff.open;
       persistWidgetState();
       scheduleSizeReport();
     });
-    const reviewSummary = el("summary", "review-summary");
+    const diffSummary = el("summary", "diff-summary");
     const count = summary.files || 0;
     const summaryStats = el("span", "summary-stats");
     summaryStats.append(
@@ -1035,15 +1045,15 @@ window.Prism = { manual: true };
     if (summary.binaryFiles) {
       summaryStats.append(el("span", "binary-count", `${summary.binaryFiles} binary`));
     }
-    reviewSummary.append(
+    diffSummary.append(
       el("span", "", count ? `${count} file${count === 1 ? "" : "s"} changed` : "No files changed"),
       summaryStats
     );
-    review.append(reviewSummary);
+    diff.append(diffSummary);
     const files = el("div", "files");
     renderFiles(data, files);
-    review.append(files);
-    root.append(review);
+    diff.append(files);
+    root.append(diff);
 
     const patchAvailable = Boolean(data.patchIncluded && typeof data.patch === "string" && data.patch);
     if (!patchAvailable && summary.files) {
@@ -1054,7 +1064,7 @@ window.Prism = { manual: true };
   }
 
   function toolResultPayload(params) {
-    return reviewPayloadFromMetadata(params) || legacyStructuredPayload(params);
+    return diffPayloadFromMetadata(params) || legacyStructuredPayload(params);
   }
 
   window.addEventListener("message", event => {
@@ -1100,7 +1110,7 @@ window.Prism = { manual: true };
   }
 
   const legacy = window.openai && (
-    reviewPayloadFromMetadata(window.openai.toolResponseMetadata)
+    diffPayloadFromMetadata(window.openai.toolResponseMetadata)
     || legacyStructuredPayload(window.openai.toolOutput)
   );
   if (legacy) render(legacy);
@@ -1113,7 +1123,7 @@ window.Prism = { manual: true };
       shouldRender = Boolean(currentData) && !widgetStatesEqual(uiState, nextState);
       uiState = nextState;
     }
-    const output = reviewPayloadFromMetadata(globals.toolResponseMetadata)
+    const output = diffPayloadFromMetadata(globals.toolResponseMetadata)
       || (!currentData ? legacyStructuredPayload(globals.toolOutput) : null);
     if (output && !currentData) {
       currentData = output;
@@ -1124,14 +1134,14 @@ window.Prism = { manual: true };
 
   request("ui/initialize", {
     protocolVersion: "2026-01-26",
-    appInfo: { name: "codexify-review", version: "3.0.0" },
+    appInfo: { name: "codexify-diff", version: "3.0.0" },
     appCapabilities: {}
   }).then(result => {
     applyHostContext(result && result.hostContext);
     notify("ui/notifications/initialized", {});
     startSizeReporting();
   }).catch(error => {
-    if (!currentData) root.replaceChildren(el("div", "notice", `Review UI could not initialize: ${error && error.message ? error.message : String(error)}`));
+    if (!currentData) root.replaceChildren(el("div", "notice", `Diff UI could not initialize: ${error && error.message ? error.message : String(error)}`));
   });
 })();
 </script>
@@ -1143,7 +1153,7 @@ window.Prism = { manual: true };
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::review::{ReviewBaseline, ReviewFile, ReviewSummary};
+    use crate::diff::{DiffBaseline, DiffFile, DiffSummary};
 
     #[test]
     fn tool_metadata_carries_current_and_compatibility_resource_keys() {
@@ -1152,7 +1162,7 @@ mod tests {
             meta.get("ui")
                 .and_then(|value| value.get("resourceUri"))
                 .and_then(serde_json::Value::as_str),
-            Some(REVIEW_UI_URI)
+            Some(DIFF_UI_URI)
         );
         assert_eq!(
             meta.get("ui").and_then(|value| value.get("visibility")),
@@ -1161,15 +1171,15 @@ mod tests {
         assert_eq!(
             meta.get("ui/resourceUri")
                 .and_then(serde_json::Value::as_str),
-            Some(REVIEW_UI_URI)
+            Some(DIFF_UI_URI)
         );
     }
 
     #[test]
     fn resource_uses_the_mcp_apps_mime_type() {
         let resource = resource();
-        assert_eq!(resource.uri, REVIEW_UI_URI);
-        assert_eq!(resource.mime_type.as_deref(), Some(REVIEW_UI_MIME_TYPE));
+        assert_eq!(resource.uri, DIFF_UI_URI);
+        assert_eq!(resource.mime_type.as_deref(), Some(DIFF_UI_MIME_TYPE));
         assert_eq!(
             resource
                 .meta
@@ -1181,30 +1191,33 @@ mod tests {
         );
         let contents = contents();
         let value = serde_json::to_value(contents).unwrap();
-        assert_eq!(value["uri"], REVIEW_UI_URI);
-        assert_eq!(value["mimeType"], REVIEW_UI_MIME_TYPE);
-        let previous =
-            serde_json::to_value(contents_for_uri(PREVIOUS_REVIEW_UI_URI).unwrap()).unwrap();
-        assert_eq!(previous["uri"], PREVIOUS_REVIEW_UI_URI);
-        let legacy = serde_json::to_value(contents_for_uri(LEGACY_REVIEW_UI_URI).unwrap()).unwrap();
-        assert_eq!(legacy["uri"], LEGACY_REVIEW_UI_URI);
-        assert!(contents_for_uri("ui://codexify/review/unknown.html").is_none());
+        assert_eq!(value["uri"], DIFF_UI_URI);
+        assert_eq!(value["mimeType"], DIFF_UI_MIME_TYPE);
+        for uri in [
+            LEGACY_REVIEW_UI_URI_V3,
+            LEGACY_REVIEW_UI_URI_V2,
+            LEGACY_REVIEW_UI_URI,
+        ] {
+            let legacy = serde_json::to_value(contents_for_uri(uri).unwrap()).unwrap();
+            assert_eq!(legacy["uri"], uri);
+        }
+        assert!(contents_for_uri("ui://codexify/diff/unknown.html").is_none());
     }
 
     #[test]
     fn result_metadata_contains_the_complete_widget_payload() {
-        let result = ReviewResult {
-            since: ReviewBaseline::LastReview,
+        let result = DiffResult {
+            since: DiffBaseline::LastDiff,
             advance_requested: true,
             checkpoint_advanced: true,
             scope: ".".to_string(),
-            summary: ReviewSummary {
+            summary: DiffSummary {
                 files: 1,
                 additions: 1,
                 deletions: 0,
                 binary_files: 0,
             },
-            files: vec![ReviewFile {
+            files: vec![DiffFile {
                 path: "src/lib.rs".to_string(),
                 previous_path: None,
                 status: "modified".to_string(),
@@ -1220,7 +1233,8 @@ mod tests {
             warnings: Vec::new(),
         };
         let meta = result_meta(&result);
-        let payload = meta.get(REVIEW_RESULT_META_KEY).unwrap();
+        let payload = meta.get(DIFF_RESULT_META_KEY).unwrap();
+        assert!(meta.get(LEGACY_REVIEW_RESULT_META_KEY).is_none());
         assert_eq!(payload["patch"], result.patch);
         assert_eq!(payload["checkpointAdvanced"], true);
         assert_eq!(payload["files"][0]["path"], "src/lib.rs");
@@ -1228,91 +1242,93 @@ mod tests {
 
     #[test]
     fn embedded_view_implements_the_standard_handshake_and_safe_rendering() {
-        assert!(REVIEW_UI_HTML.contains("ui/initialize"));
-        assert!(REVIEW_UI_HTML.contains("ui/notifications/initialized"));
-        assert!(REVIEW_UI_HTML.contains("ui/notifications/tool-result"));
-        assert!(REVIEW_UI_HTML.contains("ui/notifications/size-changed"));
-        assert!(REVIEW_UI_HTML.contains("event.source !== window.parent"));
-        assert!(REVIEW_UI_HTML.contains("hasOwnProperty.call(message, \"result\")"));
-        assert!(REVIEW_UI_HTML.contains("window.openai.toolResponseMetadata"));
-        assert!(REVIEW_UI_HTML.contains(REVIEW_RESULT_META_KEY));
+        assert!(DIFF_UI_HTML.contains("ui/initialize"));
+        assert!(DIFF_UI_HTML.contains("ui/notifications/initialized"));
+        assert!(DIFF_UI_HTML.contains("ui/notifications/tool-result"));
+        assert!(DIFF_UI_HTML.contains("ui/notifications/size-changed"));
+        assert!(DIFF_UI_HTML.contains("event.source !== window.parent"));
+        assert!(DIFF_UI_HTML.contains("hasOwnProperty.call(message, \"result\")"));
+        assert!(DIFF_UI_HTML.contains("window.openai.toolResponseMetadata"));
+        assert!(DIFF_UI_HTML.contains(DIFF_RESULT_META_KEY));
+        assert!(DIFF_UI_HTML.contains(LEGACY_REVIEW_RESULT_META_KEY));
         assert!(
-            REVIEW_UI_HTML
-                .contains("reviewPayloadFromMetadata(params) || legacyStructuredPayload(params)")
+            DIFF_UI_HTML
+                .contains("diffPayloadFromMetadata(params) || legacyStructuredPayload(params)")
         );
         assert!(
-            REVIEW_UI_HTML.contains("value.summary && Array.isArray(value.files) ? value : null")
+            DIFF_UI_HTML.contains("value.summary && Array.isArray(value.files) ? value : null")
         );
-        assert!(REVIEW_UI_HTML.contains("textContent"));
-        assert!(!REVIEW_UI_HTML.contains("<script src="));
-        let initialized = REVIEW_UI_HTML
+        assert!(DIFF_UI_HTML.contains("textContent"));
+        assert!(!DIFF_UI_HTML.contains("<script src="));
+        let initialized = DIFF_UI_HTML
             .find("notify(\"ui/notifications/initialized\", {});")
             .unwrap();
-        let size_reporting = REVIEW_UI_HTML.find("startSizeReporting();").unwrap();
+        let size_reporting = DIFF_UI_HTML.find("startSizeReporting();").unwrap();
         assert!(initialized < size_reporting);
     }
 
     #[test]
     fn embedded_view_is_compact_and_collapses_file_diffs_lazily() {
-        assert!(REVIEW_UI_HTML.contains("--file-row-height: 28px"));
-        assert!(REVIEW_UI_HTML.contains("--diff-font-size: 9.5px"));
-        assert!(REVIEW_UI_HTML.contains("text-size-adjust: 100%"));
-        assert!(REVIEW_UI_HTML.contains("const INITIAL_VISIBLE_FILES = 3"));
-        assert!(REVIEW_UI_HTML.contains("el(\"details\", \"file-entry\")"));
-        assert!(REVIEW_UI_HTML.contains("details.open = uiState.expandedFiles.has(stateKey)"));
-        assert!(REVIEW_UI_HTML.contains("details.addEventListener(\"toggle\""));
-        assert!(REVIEW_UI_HTML.contains("renderDiffLines(chunk.lines, body, file)"));
-        assert!(REVIEW_UI_HTML.contains("document.documentElement.clientWidth"));
-        assert!(!REVIEW_UI_HTML.contains("document.documentElement.scrollWidth"));
-        assert!(!REVIEW_UI_HTML.contains("font: 11px/1.55"));
+        assert!(DIFF_UI_HTML.contains("--file-row-height: 28px"));
+        assert!(DIFF_UI_HTML.contains("--diff-font-size: 9.5px"));
+        assert!(DIFF_UI_HTML.contains("text-size-adjust: 100%"));
+        assert!(DIFF_UI_HTML.contains("const INITIAL_VISIBLE_FILES = 3"));
+        assert!(DIFF_UI_HTML.contains("el(\"details\", \"file-entry\")"));
+        assert!(DIFF_UI_HTML.contains("details.open = uiState.expandedFiles.has(stateKey)"));
+        assert!(DIFF_UI_HTML.contains("details.addEventListener(\"toggle\""));
+        assert!(DIFF_UI_HTML.contains("renderDiffLines(chunk.lines, body, file)"));
+        assert!(DIFF_UI_HTML.contains("document.documentElement.clientWidth"));
+        assert!(!DIFF_UI_HTML.contains("document.documentElement.scrollWidth"));
+        assert!(!DIFF_UI_HTML.contains("font: 11px/1.55"));
     }
 
     #[test]
     fn embedded_view_renders_github_style_wrapped_diff_rows() {
-        assert!(REVIEW_UI_HTML.contains("--diff-addition-line: light-dark(#e6ffec"));
-        assert!(REVIEW_UI_HTML.contains("--diff-addition-number: light-dark(#ccffd8"));
-        assert!(REVIEW_UI_HTML.contains("--diff-addition-word: light-dark(#abf2bc"));
-        assert!(REVIEW_UI_HTML.contains("--diff-deletion-line: light-dark(#ffebe9"));
-        assert!(REVIEW_UI_HTML.contains("--diff-deletion-number: light-dark(#ffd7d5"));
-        assert!(REVIEW_UI_HTML.contains("--diff-deletion-word: light-dark(#ffcecb"));
-        assert!(REVIEW_UI_HTML.contains("--diff-hunk-line: light-dark(#ddf4ff"));
-        assert!(REVIEW_UI_HTML.contains("--diff-hunk-number: light-dark(#b6e3ff"));
-        assert!(REVIEW_UI_HTML.contains(":root[data-theme=\"dark\"] { color-scheme: dark; }"));
-        assert!(REVIEW_UI_HTML.contains("grid-template-columns: minmax(3.5em, auto)"));
-        assert!(REVIEW_UI_HTML.contains("white-space: pre-wrap"));
-        assert!(REVIEW_UI_HTML.contains("overflow-wrap: anywhere"));
-        assert!(REVIEW_UI_HTML.contains("background: transparent"));
-        assert!(REVIEW_UI_HTML.contains("background: var(--bg);"));
-        assert!(!REVIEW_UI_HTML.contains("overflow-x: auto"));
-        assert!(REVIEW_UI_HTML.contains("PrismJS 1.30.0"));
-        assert!(REVIEW_UI_HTML.contains("Prism.tokenize(source, Prism.languages[language])"));
-        assert!(REVIEW_UI_HTML.contains("function syntaxLanguageForFile(file)"));
-        assert!(REVIEW_UI_HTML.contains("row.syntaxSegments = lines[index]"));
-        assert!(REVIEW_UI_HTML.contains("function parseHunkHeader(text)"));
-        assert!(REVIEW_UI_HTML.contains("kind: \"deleted\", oldLine"));
-        assert!(REVIEW_UI_HTML.contains("kind: \"added\", oldLine: null, newLine"));
-        assert!(REVIEW_UI_HTML.contains("function alignChangedLines(deletedRows, addedRows)"));
-        assert!(REVIEW_UI_HTML.contains("function intralineSegments(before, after)"));
-        assert!(REVIEW_UI_HTML.contains("const MAX_PAIRING_LINES = 256"));
-        assert!(REVIEW_UI_HTML.contains("const MAX_INTRALINE_PAIRS = 512"));
-        assert!(REVIEW_UI_HTML.contains("if (attemptedPairs >= MAX_INTRALINE_PAIRS) return"));
-        assert!(REVIEW_UI_HTML.contains("classes.push(\"word-change\")"));
-        assert!(REVIEW_UI_HTML.contains("lineNumberCell(row.oldLine, \"Old\")"));
-        assert!(REVIEW_UI_HTML.contains("lineNumberCell(row.newLine, \"New\")"));
-        assert!(!REVIEW_UI_HTML.contains("diff-cell marker"));
-        assert!(REVIEW_UI_HTML.contains("color: var(--text); }"));
-        assert!(!REVIEW_UI_HTML.contains("const header = el(\"header\")"));
+        assert!(DIFF_UI_HTML.contains("--diff-addition-line: light-dark(#e6ffec"));
+        assert!(DIFF_UI_HTML.contains("--diff-addition-number: light-dark(#ccffd8"));
+        assert!(DIFF_UI_HTML.contains("--diff-addition-word: light-dark(#abf2bc"));
+        assert!(DIFF_UI_HTML.contains("--diff-deletion-line: light-dark(#ffebe9"));
+        assert!(DIFF_UI_HTML.contains("--diff-deletion-number: light-dark(#ffd7d5"));
+        assert!(DIFF_UI_HTML.contains("--diff-deletion-word: light-dark(#ffcecb"));
+        assert!(DIFF_UI_HTML.contains("--diff-hunk-line: light-dark(#ddf4ff"));
+        assert!(DIFF_UI_HTML.contains("--diff-hunk-number: light-dark(#b6e3ff"));
+        assert!(DIFF_UI_HTML.contains(":root[data-theme=\"dark\"] { color-scheme: dark; }"));
+        assert!(DIFF_UI_HTML.contains("grid-template-columns: minmax(3.5em, auto)"));
+        assert!(DIFF_UI_HTML.contains("white-space: pre-wrap"));
+        assert!(DIFF_UI_HTML.contains("overflow-wrap: anywhere"));
+        assert!(DIFF_UI_HTML.contains("background: transparent"));
+        assert!(DIFF_UI_HTML.contains("background: var(--bg);"));
+        assert!(!DIFF_UI_HTML.contains("overflow-x: auto"));
+        assert!(DIFF_UI_HTML.contains("PrismJS 1.30.0"));
+        assert!(DIFF_UI_HTML.contains("Prism.tokenize(source, Prism.languages[language])"));
+        assert!(DIFF_UI_HTML.contains("function syntaxLanguageForFile(file)"));
+        assert!(DIFF_UI_HTML.contains("row.syntaxSegments = lines[index]"));
+        assert!(DIFF_UI_HTML.contains("function parseHunkHeader(text)"));
+        assert!(DIFF_UI_HTML.contains("kind: \"deleted\", oldLine"));
+        assert!(DIFF_UI_HTML.contains("kind: \"added\", oldLine: null, newLine"));
+        assert!(DIFF_UI_HTML.contains("function alignChangedLines(deletedRows, addedRows)"));
+        assert!(DIFF_UI_HTML.contains("function intralineSegments(before, after)"));
+        assert!(DIFF_UI_HTML.contains("const MAX_PAIRING_LINES = 256"));
+        assert!(DIFF_UI_HTML.contains("const MAX_INTRALINE_PAIRS = 512"));
+        assert!(DIFF_UI_HTML.contains("if (attemptedPairs >= MAX_INTRALINE_PAIRS) return"));
+        assert!(DIFF_UI_HTML.contains("classes.push(\"word-change\")"));
+        assert!(DIFF_UI_HTML.contains("lineNumberCell(row.oldLine, \"Old\")"));
+        assert!(DIFF_UI_HTML.contains("lineNumberCell(row.newLine, \"New\")"));
+        assert!(!DIFF_UI_HTML.contains("diff-cell marker"));
+        assert!(DIFF_UI_HTML.contains("color: var(--text); }"));
+        assert!(!DIFF_UI_HTML.contains("const header = el(\"header\")"));
     }
 
     #[test]
     fn embedded_view_persists_private_interaction_state() {
-        assert!(REVIEW_UI_HTML.contains("window.openai.widgetState"));
-        assert!(REVIEW_UI_HTML.contains("api.setWidgetState"));
-        assert!(REVIEW_UI_HTML.contains("privateContent"));
-        assert!(REVIEW_UI_HTML.contains("uiState.reviewOpen = review.open"));
-        assert!(REVIEW_UI_HTML.contains("uiState.showAllFiles = expanded"));
-        assert!(REVIEW_UI_HTML.contains("uiState.expandedFiles.add(stateKey)"));
-        assert!(REVIEW_UI_HTML.contains("hasOwnProperty.call(globals, \"widgetState\")"));
-        assert!(REVIEW_UI_HTML.contains("output && !currentData"));
+        assert!(DIFF_UI_HTML.contains("window.openai.widgetState"));
+        assert!(DIFF_UI_HTML.contains("api.setWidgetState"));
+        assert!(DIFF_UI_HTML.contains("privateContent"));
+        assert!(DIFF_UI_HTML.contains("uiState.diffOpen = diff.open"));
+        assert!(DIFF_UI_HTML.contains("source.reviewOpen"));
+        assert!(DIFF_UI_HTML.contains("uiState.showAllFiles = expanded"));
+        assert!(DIFF_UI_HTML.contains("uiState.expandedFiles.add(stateKey)"));
+        assert!(DIFF_UI_HTML.contains("hasOwnProperty.call(globals, \"widgetState\")"));
+        assert!(DIFF_UI_HTML.contains("output && !currentData"));
     }
 }

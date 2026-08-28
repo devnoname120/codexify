@@ -24,7 +24,7 @@ pub mod remember;
 pub mod run_command;
 pub mod set_project_root;
 pub mod setup;
-pub mod show_changes;
+pub mod show_diff;
 pub mod skills_list;
 pub mod skills_read;
 pub mod tree;

@@ -67,7 +67,7 @@ fn load_tools_with_options(
     all.extend([
         Box::new(tools::run_command::RunCommand),
         Box::new(tools::git_status::GitStatus),
-        Box::new(tools::show_changes::ShowChanges),
+        Box::new(tools::show_diff::ShowDiff),
         Box::new(tools::git_push::GitPush),
         Box::new(tools::git_commit::GitCommit),
         Box::new(tools::git_log::GitLog),

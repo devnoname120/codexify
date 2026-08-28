@@ -133,8 +133,8 @@ mod tests {
     use super::*;
     use crate::config::default_config;
     use crate::conversation_auth::ConversationAuthorizationStore;
+    use crate::diff::DiffCheckpointManager;
     use crate::project_bindings::ConversationIdentity;
-    use crate::review::ReviewCheckpointManager;
 
     fn assert_model_facing_setup_vocabulary(text: &str) {
         let text = text.to_ascii_lowercase();
@@ -161,7 +161,7 @@ mod tests {
         ToolRequestContext {
             conversation: identity,
             conversation_authorizations: authorizations,
-            review_checkpoints: Arc::new(ReviewCheckpointManager::new()),
+            diff_checkpoints: Arc::new(DiffCheckpointManager::new()),
             artifact_egress: Arc::new(crate::artifact_egress::ArtifactEgressStore::new(
                 crate::types::ArtifactEgressConfig::default(),
             )),

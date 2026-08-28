@@ -181,7 +181,7 @@ fn assert_nested_object_schemas_are_closed(schema: &Value, tool: &str, path: &st
 }
 
 #[test]
-fn native_tool_annotations_match_the_reviewed_side_effect_matrix() {
+fn native_tool_annotations_match_the_audited_side_effect_matrix() {
     let mut config = default_config(PathBuf::from("/tmp"));
     config.multi_project = true;
     config.conversation_auth_token =
@@ -226,7 +226,7 @@ fn native_tool_annotations_match_the_reviewed_side_effect_matrix() {
         ("run_command", (false, true, false, true)),
         ("set_project_root", (false, false, true, true)),
         ("setup", (false, false, true, false)),
-        ("show_changes", (true, false, true, false)),
+        ("show_diff", (true, false, true, false)),
         ("skills_list", (true, false, true, false)),
         ("skills_read", (true, false, true, false)),
         ("tree", (true, false, true, false)),
@@ -253,7 +253,7 @@ fn includes_expected_tool_names() {
         "export_host_file",
         "run_command",
         "git_status",
-        "show_changes",
+        "show_diff",
         "git_push",
         "git_commit",
         "git_log",
@@ -264,6 +264,7 @@ fn includes_expected_tool_names() {
     ] {
         assert!(names.contains(&expected), "missing tool: {expected}");
     }
+    assert!(!names.contains(&"show_changes"));
 }
 
 #[test]
@@ -326,19 +327,19 @@ fn all_tool_names_are_valid_mcp_names() {
 }
 
 #[test]
-fn show_changes_links_the_review_mcp_app() {
+fn show_diff_links_the_diff_mcp_app() {
     let tools = load_tools();
     let tool = tools
         .iter()
-        .find(|tool| tool.name() == "show_changes")
+        .find(|tool| tool.name() == "show_diff")
         .unwrap();
-    assert_eq!(tool.title(), "Show changes");
+    assert_eq!(tool.title(), "Show diff");
     let meta = tool.meta().unwrap();
     assert_eq!(
         meta.get("ui")
             .and_then(|value| value.get("resourceUri"))
             .and_then(Value::as_str),
-        Some(codexify::review_ui::REVIEW_UI_URI)
+        Some(codexify::diff_ui::DIFF_UI_URI)
     );
     assert!(tool.output_schema().is_none());
 }

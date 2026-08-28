@@ -16,16 +16,16 @@ use tokio_util::sync::CancellationToken;
 
 use crate::artifact_egress::ArtifactEgressStore;
 use crate::conversation_auth::ConversationAuthorizationStore;
+use crate::diff::DiffCheckpointManager;
 use crate::exec_sessions::SessionState;
 use crate::project_bindings::ConversationIdentity;
-use crate::review::ReviewCheckpointManager;
 use crate::types::{AppConfig, ToolResult};
 
 #[derive(Clone)]
 pub struct ToolRequestContext {
     pub conversation: Option<ConversationIdentity>,
     pub conversation_authorizations: Arc<ConversationAuthorizationStore>,
-    pub review_checkpoints: Arc<ReviewCheckpointManager>,
+    pub diff_checkpoints: Arc<DiffCheckpointManager>,
     pub artifact_egress: Arc<ArtifactEgressStore>,
     /// Cancelled when the transport drops or a per-call deadline (e.g. the
     /// artifact-ingress idle timeout) fires, so long-running tools can abort.
@@ -153,7 +153,7 @@ pub trait Tool: Send + Sync {
     /// Human-readable title for hosts that render tool cards.
     fn title(&self) -> String;
 
-    /// Complete host-facing side-effect classification and its review rationale.
+    /// Complete host-facing side-effect classification and its rationale.
     fn behavior(&self) -> ToolBehavior;
 
     fn annotations(&self) -> Option<ToolAnnotations> {
@@ -239,7 +239,7 @@ pub trait Tool: Send + Sync {
         false
     }
 
-    /// Whether dispatch must fail closed if the initial review checkpoint cannot
+    /// Whether dispatch must fail closed if the initial diff checkpoint cannot
     /// be captured for a Git project.
     fn may_modify_project(&self) -> bool {
         false

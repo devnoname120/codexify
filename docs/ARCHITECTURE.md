@@ -56,8 +56,8 @@ ChatGPT / MCP client
 │    • openai/session hash → resident commands  │
 │    • in-memory ownership + idle cleanup       │
 │                                               │
-│  shared ReviewCheckpointManager               │
-│    • project-open + last-review snapshots     │
+│  shared DiffCheckpointManager                 │
+│    • project-open + last-diff snapshots       │
 │    • scoped Git refs + MCP Apps resource      │
 │                                               │
 │  shared ArtifactEgressStore                   │
@@ -70,7 +70,7 @@ ChatGPT / MCP client
 │                                               │
 │  per-transport SessionState                   │
 │    • fallback root for generic MCP clients    │
-│    • auth + exec + plan + review fallback     │
+│    • auth + exec + plan + diff fallback       │
 └──────────────────────────────────────────────┘
         │ reads/writes           │ stdio / Streamable HTTP
         ▼                        ▼
@@ -88,10 +88,10 @@ Five integration surfaces are exposed to the client:
 - **Conversation authorization** — an optional authentication-token gate whose
   durable grant is keyed by ChatGPT's stable conversation metadata rather than
   by the replaceable MCP transport.
-- **Resources / MCP App** — the self-contained review resource linked from
-  `show_changes`, whose complete diff arrives through component-only result
+- **Resources / MCP App** — the self-contained diff resource linked from
+  `show_diff`, whose complete diff arrives through component-only result
   metadata, plus opaque exported-file resources linked from `export_host_file`
-  and resolved through `resources/read`. Unsupported clients ignore review UI
+  and resolved through `resources/read`. Unsupported clients ignore diff UI
   metadata and keep the concise ordinary text result; a client must support
   resource links to retrieve exported file bytes.
 
@@ -115,7 +115,7 @@ Five integration surfaces are exposed to the client:
    icons, input/output schemas, OpenAI file-parameter metadata, and MCP Apps
    resource metadata. Transitive definitions held by the private MCP catalog are
    deliberately absent from this registry. `resources/list` exposes only the
-   embedded review HTML. `resources/read` serves that static resource and also
+   embedded diff HTML. `resources/read` serves that static resource and also
    resolves opaque exported-file capabilities returned by `export_host_file`;
    those dynamic references are intentionally not enumerable.
 4. `tools/call` → `CodexHandler::call_tool` reads `openai/session` from rmcp's
@@ -152,8 +152,8 @@ Five integration surfaces are exposed to the client:
 8. Other project-scoped calls resolve the durable conversation binding first, or
    the transport-session fallback when no conversation identity exists, then
    receive an effective clone of `AppConfig` whose `work_dir` is that root. Before
-   the first such call, the review manager captures the scoped project-open snapshot.
-   Non-Git projects report review as unavailable; a Git snapshot failure blocks
+   the first such call, the diff manager captures the scoped project-open snapshot.
+   Non-Git projects report diff capture as unavailable; a Git snapshot failure blocks
    mutating tools before dispatch.
 9. Tool dispatch first validates arguments against the cached JSON Schema compiled
    when the registry was built. Native fixed-shape argument objects are closed;
@@ -163,7 +163,7 @@ Five integration surfaces are exposed to the client:
    downstream name; direct, gateway, and catalog MCP proxies map the call to the
    raw configured upstream server/tool before execution. Dispatch then supplies a
    request context containing the stable conversation identity, shared
-   authorization store, and shared review manager; tools that do not need it use
+   authorization store, and shared diff manager; tools that do not need it use
    the default context-free implementation. The server applies the model-output
    policy to textual `content` and explicit `structuredContent`, then fills default
    structured text mirrors within the same ceiling. A successful result is checked
@@ -187,7 +187,7 @@ Five integration surfaces are exposed to the client:
     trees. Conversation-owned process state remains in the server for later
     connector calls, subject to idle cleanup; server shutdown drops the shared
     store and kills anything still running. Project bindings, conversation
-    authorizations, and ChatGPT review refs are independently durable on disk across server
+    authorizations, and ChatGPT diff refs are independently durable on disk across server
     restarts, but process handles are not.
 
 Cross-cutting HTTP concerns live in the axum layer: a `/health` route, a
@@ -223,14 +223,14 @@ trait Tool: Send + Sync {
     fn manages_model_output_budget(&self) -> bool;      // false by default
     fn requires_project_root(&self) -> bool;            // true by default
     fn uses_exec_session_state(&self) -> bool;          // false by default
-    fn may_modify_project(&self) -> bool;               // fail closed on review errors
+    fn may_modify_project(&self) -> bool;               // fail closed on diff-capture errors
     async fn call(&self, args: Value, cfg: &AppConfig, session: &SessionState) -> ToolResult;
     async fn call_with_context(&self, args: Value, cfg: &AppConfig, session: &SessionState, context: &ToolRequestContext) -> ToolResult;
 }
 ```
 
 `ToolBehavior` makes `readOnlyHint`, `destructiveHint`, `idempotentHint`, and
-`openWorldHint` explicit for every tool and keeps a non-empty review justification
+`openWorldHint` explicit for every tool and keeps a non-empty classification rationale
 beside the implementation. `ValidatedTool` compiles Draft 2020-12 input/output
 validators once, rejects malformed native descriptors at startup, and enforces the
 same contract at the dispatch boundary. Invalid third-party direct descriptors are
@@ -344,7 +344,7 @@ the source repository's local Git config and the script runs outside the
 ### `ConversationExecSessionStore` and `SessionState` (`exec_sessions.rs`)
 `SessionState` is the per-MCP-transport view: it owns the optional fallback
 project root and authorization flag for generic clients, the current plan, a
-transport-owned exec state, and the generic-client review fallback. The exec state is
+transport-owned exec state, and the generic-client diff fallback. The exec state is
 reference-counted and kills running process trees when its last owner disappears.
 
 `ConversationExecSessionStore` is shared by all handlers in the server process.
@@ -354,19 +354,21 @@ view. That state survives replacement transports, is isolated from other
 conversations, and is removed after its sessions finish or expire. It is not
 written to disk and therefore does not survive server restart.
 
-### `ReviewCheckpointManager` (`review.rs`)
-Shared project-review state. ChatGPT owners are keyed by the existing hashed
-conversation identity and persist two refs under `refs/codexify/review/`; generic
+### `DiffCheckpointManager` (`diff.rs`)
+Shared project-diff state. ChatGPT owners are keyed by the existing hashed
+conversation identity and persist two refs under `refs/codexify/diff/`; generic
 clients use the transport state above. Snapshots seed a private index with only
 tracked entries beneath the logical project path, refresh that scope from the
 working tree, and create root commits without touching the user's index. Comparisons
 repeat the same literal pathspec, return project-relative file records and patch
-headers, and bound file and patch results. By default `show_changes` records the
+headers, and bound file and patch results. By default `show_diff` records the
 emitted snapshot as the next incremental baseline through `git update-ref`
 compare-and-swap. That cursor is connector-private bookkeeping, so the tool remains
 annotated read-only: it does not modify project files, Git history, user-owned data,
 or external systems. The same per-owner/project lock spans mutating tool calls through
-completion so a review cannot capture an in-process write halfway through.
+completion so a diff cannot capture an in-process write halfway through. Existing
+`refs/codexify/review/.../project-open` and `.../last-review` refs are copied lazily
+into the diff namespace and retained for rollback compatibility.
 
 ### `AppConfig` (`types.rs`)
 The fully-resolved config handed to every tool. `config.rs` selects one JSON file
@@ -377,9 +379,11 @@ config's absolute `workDir`. It imports user-level Codex MCP definitions through
 `codex_mcp.rs`, opportunistically adds
 plugin-provided entries from the Codex CLI's effective catalogue, then applies
 explicit `mcpServers` entries as field overlays. Optional sub-configs (`projectDoc`,
-`projectCatalog`, `output`, `review`, `artifactIngress`, `artifactEgress`, `worktrees`,
+`projectCatalog`, `output`, `diff`, `artifactIngress`, `artifactEgress`, `worktrees`,
 `memory`, `skills`, `ignore`, `audit`) fall back to per-module defaults, as does `codexMcp`
-(Codex MCP import and CLI enrichment). In multi-project mode, dispatch clones this
+(Codex MCP import and CLI enrichment). The former top-level `review` key remains a
+deserialization alias for `diff`, but resolved runtime configuration uses only the
+diff-named field. In multi-project mode, dispatch clones this
 config per call and substitutes the conversation's selected root—or the transport
 fallback—for `work_dir`; the static server policy, catalogue overlay, and bridge
 configuration remain shared. Native Codex project entries are intentionally re-read
@@ -456,7 +460,7 @@ or its descendants.
   and the tool registry are shared (`Arc`) across transports.
 - **`get_info`** advertises server name `codexify` (wire-compatible identity),
   version, tools/resources capabilities, the `io.modelcontextprotocol/ui` extension,
-  and the `instructions`. The review resource is embedded in the binary and has no
+  and the `instructions`. The diff resource is embedded in the binary and has no
   external network or asset dependency.
 - **Tool descriptors and results** preserve generic titles, MCP annotations and
   `_meta` extensions. `import_host_file` uses the descriptor path for
@@ -509,7 +513,7 @@ a private per-run temporary directory and are removed after shutdown.
 |-------|-------|
 | File / code | `read_file`, `write_file`, `import_host_file`, `export_host_file`, `apply_patch`, `glob`, `grep`, `list_directory`, `tree`, `view_image` |
 | Commands | `run_command` (allowlisted argv), `exec_command` / `write_stdin` (resident shell sessions) |
-| Git / review | `git_status`, `show_changes`, `git_push`, `git_commit`, `git_log` |
+| Git / diff | `git_status`, `show_diff`, `git_push`, `git_commit`, `git_log` |
 | Environment / project | `get_environment`, `get_project_doc`, `get_agent_brief` |
 | Task state | `update_plan`, `remember`, `update_memory_note`, `forget_memory_note`, `recall` |
 | Skills | `skills_list`, `skills_read` |
@@ -551,9 +555,9 @@ the original order and rejects duplicate names.
 | `project_clone.rs` | Strict GitHub repository/branch/PR/commit URL parsing, normalized remote matching, existing-checkout discovery, exact target-ref or object-ID fetching, bounded non-interactive cloning below `projectCloneDir`, cross-process repository locks, collision refusal, and post-clone verification. |
 | `worktrees.rs` | Per-conversation managed Git worktree lifecycle: create a detached checkout under `worktrees.root` via `git worktree add`, optionally at an exact fetched commit, dual source/worktree root tracking, startup sweep bounded by `keepCount`, Windows `\\?\`-prefix handling, and the opt-in `allowSetupScript` gate for per-worktree environment setup. |
 | `project_catalog.rs` | Live, read-only project discovery from native Codex plus explicit metadata; canonical access-root filtering, deduplication, deterministic query ranking, sanitized MCP warnings, and local diagnostics. |
-| `exec_sessions.rs` | Generic-client transport fallback plus conversation-owned unified-exec sessions and transport-local review state: trusted configured-shell resolution, Codex-compatible model shell-type selection by basename, PowerShell exit-code wrapping, background stdout/stderr drain tasks, process-group kill, idle cleanup, and output truncation (UTF-16 units to match the TS). |
-| `review.rs` | Project-scoped Git snapshots, persistent conversation refs, transport-local fallbacks, incremental comparisons whose emitted snapshot can advance the private review cursor through compare-and-swap, diff parsing and component-payload budgets. |
-| `review_ui.rs` | Embedded MCP Apps resource, component-only review-result metadata, and persisted private interaction state for the interactive `show_changes` card. |
+| `exec_sessions.rs` | Generic-client transport fallback plus conversation-owned unified-exec sessions and transport-local diff state: trusted configured-shell resolution, Codex-compatible model shell-type selection by basename, PowerShell exit-code wrapping, background stdout/stderr drain tasks, process-group kill, idle cleanup, and output truncation (UTF-16 units to match the TS). |
+| `diff.rs` | Project-scoped Git snapshots, persistent conversation refs, transport-local fallbacks, incremental comparisons whose emitted snapshot can advance the private diff cursor through compare-and-swap, legacy review-ref migration, diff parsing and component-payload budgets. |
+| `diff_ui.rs` | Embedded MCP Apps resource, component-only diff-result metadata, legacy review-card compatibility, and persisted private interaction state for the interactive `show_diff` card. |
 | `apply_patch.rs` | The Codex patch format: verify the whole patch, then apply file operations sequentially with Codex-compatible partial-failure behavior, fuzzy context matching and CRLF preservation. |
 | `tool.rs` | Mandatory titles and `ToolBehavior`, typed-schema helpers, startup descriptor checks, cached dialect-aware JSON Schema validators, masked input diagnostics, and successful structured-output validation. |
 | `memory.rs` | Working memory outside the repo, keyed by a hash of the normalized active root, with `O_EXCL` locking and atomic writes. In multi-project mode, a configured `memory.dir` is a base containing one hashed child per project. |
@@ -788,7 +792,7 @@ latter.
               "defaultShell": "…" },
   "ignore": { "useGitignore": true, "useDefaultPatterns": true, "customPatterns": [] },
   "output": { "maxToolOutputTokens": 10000, "maxFileLines": 1000, "maxFileBytes": 131072, "maxEntries": 500, "maxTreeNodes": 1000 },
-  "review": { "maxPatchBytes": 4194304 },
+  "diff": { "maxPatchBytes": 4194304 },
   "toolLogging": { "mode": "off",       // off | requests | responses | all
                    "level": "info",      // trace | debug | info | warn | error
                    "maxRequestBytes": 2048, "maxResponseBytes": 4096,
@@ -912,9 +916,9 @@ units to match the TS `text.length` / `text.slice`.
   bindings, concurrent session isolation, traversal and symlink escapes,
   project-keyed persistent state, deferred project instructions, and CLI/config
   activation.
-- `tests/review_checkpoints.rs` uses real repositories to cover monorepo scoping,
+- `tests/diff_checkpoints.rs` uses real repositories to cover monorepo scoping,
   byte-for-byte real-index preservation, persistent and transport owners, live ref
-  reset, mutation/review serialization, incremental baselines, unborn repositories,
+  reset, mutation/diff serialization, legacy-ref migration, incremental baselines, unborn repositories,
   malformed Git state, renames, deletions, binaries, relative patches, and patch-budget omission.
 - `artifact_ingress` unit tests use scripted response bodies and capability-rooted
   temporary directories to cover provider-host validation, redirects, declared

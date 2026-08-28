@@ -36,6 +36,17 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Breaking connector-schema rename:** the Codexify diff-display tool is now
+  `show_diff` instead of `show_changes`, and its incremental baseline value is
+  `last_diff` instead of `last_review`. Refresh the ChatGPT connector after
+  upgrading so the new tool schema is registered. The public configuration block
+  is now `diff`; the former `review` key remains accepted as a compatibility alias.
+  New persistent checkpoints live under `refs/codexify/diff/` with a
+  `last-diff` ref, while existing `refs/codexify/review/.../last-review` state is
+  copied lazily and retained for rollback compatibility. The MCP App now emits a
+  diff-named resource URI and result-metadata key, while historical review-named
+  cards and widget state remain readable.
+
 - `exec_command` and `write_stdin` now clamp caller-requested output budgets to
   server policy. `grep` caps match count, context and individual long lines while
   keeping the actual match visible, and `run_command` returns bounded partial

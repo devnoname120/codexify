@@ -5,8 +5,8 @@
 //! MCP session lifecycle: the service factory runs once per transport session.
 //! Generic clients keep resident commands in their transport [`SessionState`],
 //! while ChatGPT's stable conversation metadata selects server-owned command
-//! state and review checkpoints that survive transport replacement. The embedded
-//! review resource remains presentation-only.
+//! state and diff checkpoints that survive transport replacement. The embedded
+//! diff resource remains presentation-only.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -38,6 +38,8 @@ use crate::audit::{
 };
 use crate::auth::{generate_internal_bearer_token, require_auth};
 use crate::conversation_auth::{AUTHORIZATION_TOOL_WIRE_NAME, ConversationAuthorizationStore};
+use crate::diff::{DiffAvailability, DiffCheckpointManager, DiffOwner};
+use crate::diff_ui;
 use crate::exec_sessions::{ConversationExecSessionStore, SessionState};
 use crate::instructions::build_initial_instructions;
 use crate::openai_tunnel::TunnelHealth;
@@ -46,8 +48,6 @@ use crate::output_budget::{
 };
 use crate::project_bindings::{ConversationIdentity, ProjectBindingStore};
 use crate::registry::load_tools_for_config;
-use crate::review::{ReviewAvailability, ReviewCheckpointManager, ReviewOwner};
-use crate::review_ui;
 use crate::tool::{
     Tool, ToolCallIdentity, ToolRequestContext, validate_and_wrap_tool, validate_and_wrap_tools,
 };
@@ -82,7 +82,7 @@ pub struct CodexHandler {
     project_bindings: Arc<ProjectBindingStore>,
     conversation_authorizations: Arc<ConversationAuthorizationStore>,
     conversation_exec_sessions: Arc<ConversationExecSessionStore>,
-    review_checkpoints: Arc<ReviewCheckpointManager>,
+    diff_checkpoints: Arc<DiffCheckpointManager>,
     artifact_egress: Arc<ArtifactEgressStore>,
     audit: Option<Arc<AuditLogger>>,
     tool_logging: Option<Arc<ToolCallLogger>>,
@@ -223,8 +223,8 @@ impl ServerHandler for CodexHandler {
             .build();
         let mut extensions = ExtensionCapabilities::new();
         extensions.insert(
-            review_ui::MCP_APPS_EXTENSION_ID.to_string(),
-            json!({ "mimeTypes": [review_ui::REVIEW_UI_MIME_TYPE] })
+            diff_ui::MCP_APPS_EXTENSION_ID.to_string(),
+            json!({ "mimeTypes": [diff_ui::DIFF_UI_MIME_TYPE] })
                 .as_object()
                 .cloned()
                 .expect("static MCP Apps capability must be an object"),
@@ -254,7 +254,7 @@ impl ServerHandler for CodexHandler {
         _context: RequestContext<RoleServer>,
     ) -> Result<ListResourcesResult, McpError> {
         Ok(ListResourcesResult::with_all_items(vec![
-            review_ui::resource(),
+            diff_ui::resource(),
         ]))
     }
 
@@ -282,7 +282,7 @@ impl ServerHandler for CodexHandler {
                 None,
             ));
         }
-        let Some(contents) = review_ui::contents_for_uri(&request.uri) else {
+        let Some(contents) = diff_ui::contents_for_uri(&request.uri) else {
             return Err(McpError::resource_not_found(
                 format!("Unknown resource: {}", request.uri),
                 None,
@@ -311,7 +311,7 @@ impl ServerHandler for CodexHandler {
         let tool_context = ToolRequestContext {
             conversation: conversation.clone(),
             conversation_authorizations: self.conversation_authorizations.clone(),
-            review_checkpoints: self.review_checkpoints.clone(),
+            diff_checkpoints: self.diff_checkpoints.clone(),
             artifact_egress: self.artifact_egress.clone(),
             cancellation: context.ct.clone(),
         };
@@ -420,25 +420,24 @@ impl ServerHandler for CodexHandler {
                         Err(error) => ToolResult::error(error),
                         Ok(effective_config) => {
                             let owner = match conversation.as_ref() {
-                                Some(identity) => ReviewOwner::conversation(identity),
-                                None => ReviewOwner::transport(self.session.review_state()),
+                                Some(identity) => DiffOwner::conversation(identity),
+                                None => DiffOwner::transport(self.session.diff_state()),
                             };
                             if tool.may_modify_project() {
-                                // Fail closed: refuse a mutating tool when the review
+                                // Fail closed: refuse a mutating tool when the diff
                                 // checkpoint cannot be captured. The refusal is returned
                                 // as a value (not an early return) so the audit
                                 // finish_tool below still pairs with begin_tool.
                                 match self
-                                    .review_checkpoints
+                                    .diff_checkpoints
                                     .begin_mutation(&effective_config, owner)
                                     .await
                                 {
                                     Ok((availability, guard)) => {
-                                        if let ReviewAvailability::Unavailable(reason) =
-                                            &availability
+                                        if let DiffAvailability::Unavailable(reason) = &availability
                                         {
                                             tracing::debug!(
-                                                "review checkpoints unavailable for {name}: {reason}"
+                                                "diff checkpoints unavailable for {name}: {reason}"
                                             );
                                         }
                                         let result = tool
@@ -453,24 +452,24 @@ impl ServerHandler for CodexHandler {
                                         result
                                     }
                                     Err(error) => ToolResult::error(format!(
-                                        "Refusing to run mutating tool `{name}` because the project review checkpoint could not be captured: {error}"
+                                        "Refusing to run mutating tool `{name}` because the project diff checkpoint could not be captured: {error}"
                                     )),
                                 }
                             } else {
                                 match self
-                                    .review_checkpoints
+                                    .diff_checkpoints
                                     .ensure_initialized(&effective_config, owner)
                                     .await
                                 {
-                                    Ok(ReviewAvailability::Ready) => {}
-                                    Ok(ReviewAvailability::Unavailable(reason)) => {
+                                    Ok(DiffAvailability::Ready) => {}
+                                    Ok(DiffAvailability::Unavailable(reason)) => {
                                         tracing::debug!(
-                                            "review checkpoints unavailable for {name}: {reason}"
+                                            "diff checkpoints unavailable for {name}: {reason}"
                                         );
                                     }
                                     Err(error) => {
                                         tracing::debug!(
-                                            "review checkpoint initialization skipped for {name}: {error}"
+                                            "diff checkpoint initialization skipped for {name}: {error}"
                                         );
                                     }
                                 }
@@ -576,7 +575,7 @@ pub async fn start_http_server(mut config: AppConfig) -> anyhow::Result<()> {
     let conversation_exec_sessions = Arc::new(ConversationExecSessionStore::new());
     conversation_exec_sessions
         .spawn_idle_reaper(Duration::from_millis(config.exec.idle_timeout_ms));
-    let review_checkpoints = Arc::new(ReviewCheckpointManager::new());
+    let diff_checkpoints = Arc::new(DiffCheckpointManager::new());
     let artifact_egress = Arc::new(ArtifactEgressStore::new(config.artifact_egress.clone()));
     let conversation_authorizations =
         Arc::new(ConversationAuthorizationStore::for_current_user(&config));
@@ -655,7 +654,7 @@ pub async fn start_http_server(mut config: AppConfig) -> anyhow::Result<()> {
     let factory_project_bindings = project_bindings.clone();
     let factory_conversation_authorizations = conversation_authorizations.clone();
     let factory_conversation_exec_sessions = conversation_exec_sessions.clone();
-    let factory_review_checkpoints = review_checkpoints.clone();
+    let factory_diff_checkpoints = diff_checkpoints.clone();
     let factory_artifact_egress = artifact_egress.clone();
     let factory_audit = audit.clone();
     let factory_tool_logging = tool_logging.clone();
@@ -670,7 +669,7 @@ pub async fn start_http_server(mut config: AppConfig) -> anyhow::Result<()> {
                 project_bindings: factory_project_bindings.clone(),
                 conversation_authorizations: factory_conversation_authorizations.clone(),
                 conversation_exec_sessions: factory_conversation_exec_sessions.clone(),
-                review_checkpoints: factory_review_checkpoints.clone(),
+                diff_checkpoints: factory_diff_checkpoints.clone(),
                 artifact_egress: factory_artifact_egress.clone(),
                 audit: factory_audit.clone(),
                 tool_logging: factory_tool_logging.clone(),
@@ -1330,7 +1329,7 @@ mod tests {
             project_bindings: Arc::new(ProjectBindingStore::new(root.join("bindings"))),
             conversation_authorizations: Arc::new(ConversationAuthorizationStore::new()),
             conversation_exec_sessions: Arc::new(ConversationExecSessionStore::new()),
-            review_checkpoints: Arc::new(ReviewCheckpointManager::new()),
+            diff_checkpoints: Arc::new(DiffCheckpointManager::new()),
             artifact_egress: Arc::new(ArtifactEgressStore::new(
                 crate::types::ArtifactEgressConfig::default(),
             )),
@@ -1580,7 +1579,7 @@ mod tests {
     }
 
     #[test]
-    fn advertises_review_resources_and_mcp_apps_extension() {
+    fn advertises_diff_resources_and_mcp_apps_extension() {
         let root = tempfile::tempdir().unwrap();
         let handler = CodexHandler {
             config: Arc::new(crate::config::default_config(root.path().to_path_buf())),
@@ -1588,7 +1587,7 @@ mod tests {
             project_bindings: Arc::new(ProjectBindingStore::new(root.path().join("bindings"))),
             conversation_authorizations: Arc::new(ConversationAuthorizationStore::new()),
             conversation_exec_sessions: Arc::new(ConversationExecSessionStore::new()),
-            review_checkpoints: Arc::new(ReviewCheckpointManager::new()),
+            diff_checkpoints: Arc::new(DiffCheckpointManager::new()),
             artifact_egress: Arc::new(ArtifactEgressStore::new(
                 crate::types::ArtifactEgressConfig::default(),
             )),
@@ -1605,7 +1604,7 @@ mod tests {
                 .extensions
                 .as_ref()
                 .is_some_and(|extensions| {
-                    extensions.contains_key(review_ui::MCP_APPS_EXTENSION_ID)
+                    extensions.contains_key(diff_ui::MCP_APPS_EXTENSION_ID)
                 })
         );
     }
@@ -1624,7 +1623,7 @@ mod tests {
             project_bindings: Arc::new(ProjectBindingStore::new(root.path().join("bindings"))),
             conversation_authorizations: authorizations.clone(),
             conversation_exec_sessions: Arc::new(ConversationExecSessionStore::new()),
-            review_checkpoints: Arc::new(ReviewCheckpointManager::new()),
+            diff_checkpoints: Arc::new(DiffCheckpointManager::new()),
             artifact_egress: Arc::new(ArtifactEgressStore::new(
                 crate::types::ArtifactEgressConfig::default(),
             )),
