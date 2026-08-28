@@ -3,7 +3,8 @@ use serde_json::json;
 
 use crate::review::ReviewResult;
 
-pub const REVIEW_UI_URI: &str = "ui://codexify/review/v2/mcp-app.html";
+pub const REVIEW_UI_URI: &str = "ui://codexify/review/v3/mcp-app.html";
+pub const PREVIOUS_REVIEW_UI_URI: &str = "ui://codexify/review/v2/mcp-app.html";
 pub const LEGACY_REVIEW_UI_URI: &str = "ui://codexify/review/mcp-app.html";
 pub const REVIEW_UI_MIME_TYPE: &str = "text/html;profile=mcp-app";
 pub const MCP_APPS_EXTENSION_ID: &str = "io.modelcontextprotocol/ui";
@@ -19,7 +20,7 @@ pub fn tool_meta() -> MetaObject {
 
 pub fn resource_meta() -> MetaObject {
     serde_json::from_value(json!({
-        "ui": { "prefersBorder": true }
+        "ui": { "prefersBorder": false }
     }))
     .expect("static review resource metadata must be an object")
 }
@@ -47,7 +48,7 @@ pub fn contents() -> ResourceContents {
 }
 
 pub fn contents_for_uri(uri: &str) -> Option<ResourceContents> {
-    if uri != REVIEW_UI_URI && uri != LEGACY_REVIEW_UI_URI {
+    if uri != REVIEW_UI_URI && uri != PREVIOUS_REVIEW_UI_URI && uri != LEGACY_REVIEW_UI_URI {
         return None;
     }
     Some(
@@ -57,7 +58,8 @@ pub fn contents_for_uri(uri: &str) -> Option<ResourceContents> {
     )
 }
 
-pub const REVIEW_UI_HTML: &str = r##"<!doctype html>
+pub const REVIEW_UI_HTML: &str = concat!(
+    r##"<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -72,25 +74,38 @@ pub const REVIEW_UI_HTML: &str = r##"<!doctype html>
   --text: var(--color-text-primary, light-dark(#171717, #f4f4f4));
   --muted: var(--color-text-secondary, light-dark(#62666d, #a7a7a7));
   --border: var(--color-border-primary, light-dark(#d9dce1, #3a3a3a));
-  --added-bg: light-dark(#e7f7ed, #163321);
-  --added-text: light-dark(#145c2e, #8ee4aa);
-  --deleted-bg: light-dark(#fceaea, #421d1d);
-  --deleted-text: light-dark(#8a1f1f, #f2a0a0);
+  --added-text: light-dark(#1a7f37, #3fb950);
+  --deleted-text: light-dark(#cf222e, #f85149);
+  --diff-line-number: light-dark(#57606a, #8c959f);
+  --diff-addition-line: light-dark(#e6ffec, rgba(46, 160, 67, 0.15));
+  --diff-addition-number: light-dark(#ccffd8, rgba(46, 160, 67, 0.30));
+  --diff-addition-word: light-dark(#abf2bc, rgba(46, 160, 67, 0.40));
+  --diff-deletion-line: light-dark(#ffebe9, rgba(248, 81, 73, 0.15));
+  --diff-deletion-number: light-dark(#ffd7d5, rgba(248, 81, 73, 0.30));
+  --diff-deletion-word: light-dark(#ffcecb, rgba(248, 81, 73, 0.40));
+  --diff-hunk-line: light-dark(#ddf4ff, rgba(56, 139, 253, 0.15));
+  --diff-hunk-number: light-dark(#b6e3ff, rgba(56, 139, 253, 0.40));
+  --diff-hunk-text: light-dark(#0550ae, #58a6ff);
+  --syntax-comment: light-dark(#6e7781, #8b949e);
+  --syntax-keyword: light-dark(#cf222e, #ff7b72);
+  --syntax-string: light-dark(#0a3069, #a5d6ff);
+  --syntax-number: light-dark(#0550ae, #79c0ff);
+  --syntax-function: light-dark(#8250df, #d2a8ff);
+  --syntax-variable: light-dark(#953800, #ffa657);
+  --syntax-type: light-dark(#116329, #7ee787);
   --accent: light-dark(#2457c5, #8db4ff);
   --file-row-height: 28px;
   --diff-font-size: 9.5px;
   font-family: var(--font-sans, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
 }
+:root[data-theme="light"] { color-scheme: light; }
+:root[data-theme="dark"] { color-scheme: dark; }
 * { box-sizing: border-box; }
-html, body { width: 100%; max-width: 100%; overflow-x: hidden; -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
-body { margin: 0; background: var(--bg); color: var(--text); }
+html, body { width: 100%; max-width: 100%; overflow-x: hidden; background: transparent; -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+body { margin: 0; color: var(--text); }
 button, summary { color: inherit; font: inherit; }
-main { display: grid; width: 100%; min-width: 0; gap: 8px; padding: 10px; }
-header { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 6px 12px; }
-h1 { margin: 0; font-size: 14px; line-height: 1.25; }
-.subhead { margin-top: 2px; color: var(--muted); font-size: 10px; line-height: 1.35; overflow-wrap: anywhere; }
-.badge { border: 1px solid var(--border); border-radius: 999px; padding: 3px 7px; color: var(--muted); font-size: 9px; line-height: 1.25; white-space: nowrap; }
-.review { width: 100%; min-width: 0; max-width: 100%; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+main { display: grid; width: 100%; min-width: 0; gap: 6px; padding: 6px; }
+.review { width: 100%; min-width: 0; max-width: 100%; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: var(--bg); }
 .review-summary, .file-summary { cursor: pointer; list-style: none; -webkit-tap-highlight-color: transparent; }
 .review-summary::-webkit-details-marker, .file-summary::-webkit-details-marker { display: none; }
 .review-summary { display: grid; grid-template-columns: minmax(0, 1fr) auto 9px; align-items: center; gap: 8px; min-height: 32px; padding: 6px 9px; background: var(--panel); font-size: 11px; font-weight: 650; }
@@ -114,23 +129,42 @@ h1 { margin: 0; font-size: 14px; line-height: 1.25; }
 .omitted { border-top: 1px solid var(--border); }
 .warning { border: 1px solid var(--border); border-radius: 9px; padding: 7px 9px; color: var(--muted); font-size: 10px; line-height: 1.35; }
 .diff-body { width: 100%; min-width: 0; max-width: 100%; overflow: hidden; border-top: 1px solid var(--border); }
-pre { width: 100%; min-width: 0; max-width: 100%; margin: 0; overflow-x: auto; overflow-y: hidden; overscroll-behavior-x: contain; -webkit-overflow-scrolling: touch; font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace); font-size: var(--diff-font-size); font-variant-ligatures: none; line-height: 1.4; tab-size: 4; }
-.line { display: block; width: max-content; min-width: 100%; padding: 0 8px; white-space: pre; }
-.line.added { background: var(--added-bg); color: var(--added-text); }
-.line.deleted { background: var(--deleted-bg); color: var(--deleted-text); }
-.line.hunk { color: var(--accent); background: var(--panel); }
-.line.meta { color: var(--muted); }
+.diff-table { display: grid; width: 100%; min-width: 0; max-width: 100%; grid-template-columns: minmax(3.5em, auto) minmax(3.5em, auto) minmax(0, 1fr); font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace); font-size: var(--diff-font-size); font-variant-ligatures: none; line-height: 1.4; tab-size: 4; }
+.diff-row { display: contents; }
+.diff-cell { min-width: 0; min-height: 1.4em; padding-block: 1px; }
+.line-number { padding-inline: 4px; border-right: 1px solid var(--border); color: var(--diff-line-number); font-variant-numeric: tabular-nums; text-align: right; user-select: none; white-space: nowrap; }
+.code { padding-left: 0.55em; padding-right: 8px; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; }
+.diff-row.added > .line-number { background: var(--diff-addition-number); color: var(--text); }
+.diff-row.added > .code { background: var(--diff-addition-line); }
+.diff-row.deleted > .line-number { background: var(--diff-deletion-number); color: var(--text); }
+.diff-row.deleted > .code { background: var(--diff-deletion-line); }
+.diff-row.hunk > .line-number { background: var(--diff-hunk-number); border-right-color: transparent; }
+.diff-row.hunk > .code { background: var(--diff-hunk-line); color: var(--diff-hunk-text); }
+.diff-row.hunk > .diff-cell { padding-block: 4px; }
+.diff-row.meta > .line-number, .diff-row.meta > .code,
+.diff-row.no-newline > .line-number, .diff-row.no-newline > .code { background: var(--panel); color: var(--muted); }
+.diff-row.meta > .code, .diff-row.no-newline > .code { padding-block: 3px; }
+.diff-row.no-newline > .code { font-style: italic; }
+.word-change { border-radius: 2px; box-decoration-break: clone; -webkit-box-decoration-break: clone; }
+.diff-row.added .word-change { background: var(--diff-addition-word); }
+.diff-row.deleted .word-change { background: var(--diff-deletion-word); }
+.syntax-comment, .syntax-prolog, .syntax-doctype, .syntax-cdata { color: var(--syntax-comment); }
+.syntax-keyword, .syntax-atrule, .syntax-important { color: var(--syntax-keyword); }
+.syntax-string, .syntax-char, .syntax-attr-value, .syntax-regex, .syntax-inserted { color: var(--syntax-string); }
+.syntax-number, .syntax-boolean, .syntax-constant, .syntax-symbol, .syntax-property { color: var(--syntax-number); }
+.syntax-function, .syntax-class-name { color: var(--syntax-function); }
+.syntax-variable { color: var(--syntax-variable); }
+.syntax-builtin, .syntax-tag, .syntax-selector, .syntax-attr-name { color: var(--syntax-type); }
+.binary-diff { padding: 14px 10px; background: var(--panel); color: var(--muted); font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace); font-size: var(--diff-font-size); line-height: 1.4; text-align: center; }
 @media (max-width: 520px) {
   :root { --file-row-height: 26px; --diff-font-size: 9px; }
-  main { gap: 6px; padding: 6px; }
-  header { gap: 4px 8px; }
-  h1 { font-size: 13px; }
-  .subhead { font-size: 9.5px; }
-  .badge { padding: 2px 6px; font-size: 8.5px; }
+  main { gap: 4px; padding: 4px; }
   .review-summary { min-height: 30px; padding: 5px 7px; }
   .file-summary, .file-row { padding: 2px 7px; font-size: 10px; }
   .show-more { padding: 3px 7px; }
-  .line { padding: 0 6px; }
+  .diff-table { grid-template-columns: minmax(3.25em, auto) minmax(3.25em, auto) minmax(0, 1fr); }
+  .line-number { padding-inline: 3px; }
+  .code { padding-left: 0.45em; padding-right: 6px; }
 }
 @media (prefers-reduced-motion: reduce) {
   .review-summary::after, .file-summary::after { transition: none; }
@@ -142,10 +176,76 @@ pre { width: 100%; min-width: 0; max-width: 100%; margin: 0; overflow-x: auto; o
   <div class="notice">Preparing review…</div>
 </main>
 <script>
+window.Prism = { manual: true };
+"##,
+    include_str!("review_prism.js"),
+    r##"
 (() => {
   "use strict";
   const root = document.getElementById("root");
   const INITIAL_VISIBLE_FILES = 3;
+  const MAX_PAIRING_CELLS = 4096;
+  const MAX_PAIRING_LINES = 256;
+  const MAX_SIMILARITY_CHARS = 4096;
+  const MAX_INTRALINE_CHARS = 8192;
+  const MAX_INTRALINE_TOKENS = 180;
+  const MAX_INTRALINE_CELLS = 20000;
+  const MAX_INTRALINE_PAIRS = 512;
+  const MAX_SYNTAX_CHARS = 256000;
+  const MAX_SYNTAX_LINES = 4000;
+  const LANGUAGE_BY_EXTENSION = Object.freeze({
+    c: "c",
+    h: "c",
+    cc: "cpp",
+    cp: "cpp",
+    cpp: "cpp",
+    cxx: "cpp",
+    hh: "cpp",
+    hpp: "cpp",
+    hxx: "cpp",
+    m: "objectivec",
+    mm: "cpp",
+    rs: "rust",
+    json: "json",
+    jsonc: "javascript",
+    js: "javascript",
+    mjs: "javascript",
+    cjs: "javascript",
+    jsx: "jsx",
+    ts: "typescript",
+    mts: "typescript",
+    cts: "typescript",
+    tsx: "tsx",
+    py: "python",
+    pyw: "python",
+    sh: "bash",
+    bash: "bash",
+    zsh: "bash",
+    fish: "bash",
+    ps1: "powershell",
+    psm1: "powershell",
+    psd1: "powershell",
+    yaml: "yaml",
+    yml: "yaml",
+    toml: "toml",
+    md: "markdown",
+    markdown: "markdown",
+    html: "markup",
+    htm: "markup",
+    xml: "markup",
+    svg: "markup",
+    css: "css",
+    scss: "scss",
+    java: "java",
+    kt: "kotlin",
+    kts: "kotlin",
+    go: "go",
+    rb: "ruby",
+    cs: "csharp",
+    swift: "swift",
+    lua: "lua",
+    sql: "sql"
+  });
   const REVIEW_META_KEY = "io.github.devnoname120/codexify/review";
   const WIDGET_STATE_VERSION = 1;
   let nextId = 1;
@@ -303,17 +403,511 @@ pre { width: 100%; min-width: 0; max-width: 100%; margin: 0; overflow-x: auto; o
     return stats;
   }
 
-  function renderDiffLines(lines, container) {
-    const pre = el("pre");
-    for (const text of lines) {
-      let className = "line";
-      if (text.startsWith("+") && !text.startsWith("+++")) className += " added";
-      else if (text.startsWith("-") && !text.startsWith("---")) className += " deleted";
-      else if (text.startsWith("@@")) className += " hunk";
-      else if (/^(diff --git|index |--- |\+\+\+ |new file|deleted file|similarity|rename )/.test(text)) className += " meta";
-      pre.append(el("span", className, text + "\n"));
+  function parseHunkHeader(text) {
+    const match = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(?: ?(.*))?$/.exec(text);
+    if (!match) return null;
+    return { oldLine: Number(match[1]), newLine: Number(match[3]) };
+  }
+
+  function isStructuralMetadata(text) {
+    return /^(diff --git |index |--- |\+\+\+ )/.test(text);
+  }
+
+  function parseDiffRows(lines, file) {
+    const rows = [];
+    let oldLine = null;
+    let newLine = null;
+    let insideHunk = false;
+
+    lines.forEach((rawText, index) => {
+      if (rawText === "" && index === lines.length - 1) return;
+      const hunk = parseHunkHeader(rawText);
+      if (hunk) {
+        oldLine = hunk.oldLine;
+        newLine = hunk.newLine;
+        insideHunk = true;
+        rows.push({ kind: "hunk", oldLine: null, newLine: null, text: rawText });
+        return;
+      }
+
+      if (!insideHunk) {
+        if (!rawText || isStructuralMetadata(rawText)) return;
+        rows.push({ kind: "meta", oldLine: null, newLine: null, text: rawText });
+        return;
+      }
+
+      if (rawText.startsWith("\\ No newline at end of file")) {
+        rows.push({ kind: "no-newline", oldLine: null, newLine: null, text: rawText });
+        return;
+      }
+
+      const marker = rawText.charAt(0);
+      const text = rawText.slice(1);
+      if (marker === " ") {
+        rows.push({ kind: "context", oldLine, newLine, text });
+        oldLine += 1;
+        newLine += 1;
+      } else if (marker === "-") {
+        rows.push({ kind: "deleted", oldLine, newLine: null, text });
+        oldLine += 1;
+      } else if (marker === "+") {
+        rows.push({ kind: "added", oldLine: null, newLine, text });
+        newLine += 1;
+      } else if (rawText) {
+        rows.push({ kind: "meta", oldLine: null, newLine: null, text: rawText });
+      }
+    });
+
+    annotateSyntax(rows, file);
+    annotateIntraline(rows);
+    return rows;
+  }
+
+  function syntaxLanguageForFile(file) {
+    if (!file || typeof file.path !== "string" || typeof Prism !== "object") return null;
+    const basename = file.path.split(/[\\/]/).pop().toLowerCase();
+    if (basename === "makefile" || basename.startsWith("makefile.")) return "makefile";
+    if (basename === "dockerfile" || basename.startsWith("dockerfile.")) return "docker";
+    if (basename === "cargo.lock") return "toml";
+    if (basename === ".env" || basename.startsWith(".env.")) return "bash";
+    const dot = basename.lastIndexOf(".");
+    const extension = dot >= 0 ? basename.slice(dot + 1) : "";
+    const language = LANGUAGE_BY_EXTENSION[extension];
+    return language && Prism.languages[language] ? language : null;
+  }
+
+  function normalizedSyntaxClasses(type, alias, inherited) {
+    const classes = inherited.slice();
+    const append = value => {
+      if (typeof value === "string" && /^[A-Za-z0-9_-]+$/.test(value) && !classes.includes(value)) {
+        classes.push(value);
+      }
+    };
+    append(type);
+    if (Array.isArray(alias)) alias.forEach(append);
+    else append(alias);
+    return classes;
+  }
+
+  function pushSyntaxSegment(output, text, classes) {
+    if (!text) return;
+    const key = classes.join(" ");
+    const previous = output[output.length - 1];
+    if (previous && previous.key === key) previous.text += text;
+    else output.push({ text, classes, key });
+  }
+
+  function flattenPrismTokens(value, inherited, output) {
+    if (typeof value === "string") {
+      pushSyntaxSegment(output, value, inherited);
+      return;
     }
-    container.append(pre);
+    if (Array.isArray(value)) {
+      for (const child of value) flattenPrismTokens(child, inherited, output);
+      return;
+    }
+    if (!value || typeof value !== "object") return;
+    const classes = normalizedSyntaxClasses(value.type, value.alias, inherited);
+    flattenPrismTokens(value.content, classes, output);
+  }
+
+  function splitSyntaxLines(segments) {
+    const lines = [[]];
+    for (const segment of segments) {
+      let start = 0;
+      while (start <= segment.text.length) {
+        const newline = segment.text.indexOf("\n", start);
+        const end = newline < 0 ? segment.text.length : newline;
+        pushSyntaxSegment(lines[lines.length - 1], segment.text.slice(start, end), segment.classes);
+        if (newline < 0) break;
+        lines.push([]);
+        start = newline + 1;
+      }
+    }
+    return lines;
+  }
+
+  function tokenizeSyntaxRows(rows, language) {
+    if (!rows.length || rows.length > MAX_SYNTAX_LINES) return;
+    const source = rows.map(row => row.text).join("\n");
+    if (source.length > MAX_SYNTAX_CHARS) return;
+    try {
+      const flattened = [];
+      flattenPrismTokens(Prism.tokenize(source, Prism.languages[language]), [], flattened);
+      const lines = splitSyntaxLines(flattened);
+      if (lines.length !== rows.length) return;
+      rows.forEach((row, index) => {
+        row.syntaxSegments = lines[index];
+      });
+    } catch (_) {}
+  }
+
+  function annotateSyntax(rows, file) {
+    const language = syntaxLanguageForFile(file);
+    if (!language) return;
+    let cursor = 0;
+    while (cursor < rows.length) {
+      if (rows[cursor].kind !== "hunk") {
+        cursor += 1;
+        continue;
+      }
+      let end = cursor + 1;
+      while (end < rows.length && rows[end].kind !== "hunk") end += 1;
+      const hunkRows = rows.slice(cursor + 1, end);
+      tokenizeSyntaxRows(
+        hunkRows.filter(row => row.kind === "context" || row.kind === "deleted"),
+        language
+      );
+      tokenizeSyntaxRows(
+        hunkRows.filter(row => row.kind === "context" || row.kind === "added"),
+        language
+      );
+      cursor = end;
+    }
+  }
+
+  function similarityTokens(text) {
+    return text.match(/[A-Za-z0-9_$]+|[^A-Za-z0-9_$\s]/g) || [];
+  }
+
+  function tokenWeight(token) {
+    return /^[A-Za-z0-9_$]+$/.test(token) ? Math.min(8, token.length) : 0.35;
+  }
+
+  function lineSimilarity(left, right) {
+    if (left === right) return 1;
+    if (!left.trim() && !right.trim()) {
+      const longest = Math.max(left.length, right.length);
+      return longest ? Math.min(left.length, right.length) / longest : 1;
+    }
+
+    if (left.length > MAX_SIMILARITY_CHARS || right.length > MAX_SIMILARITY_CHARS) {
+      const longest = Math.max(left.length, right.length);
+      const lengthRatio = longest ? Math.min(left.length, right.length) / longest : 1;
+      const edgeLimit = Math.min(128, left.length, right.length);
+      let prefix = 0;
+      while (prefix < edgeLimit && left.charAt(prefix) === right.charAt(prefix)) prefix += 1;
+      let suffix = 0;
+      while (
+        suffix < edgeLimit - prefix
+        && left.charAt(left.length - suffix - 1) === right.charAt(right.length - suffix - 1)
+      ) suffix += 1;
+      const edgeSimilarity = Math.min(1, (prefix + suffix) / 64);
+      return edgeSimilarity * 0.7 + lengthRatio * 0.3;
+    }
+
+    const leftTokens = similarityTokens(left);
+    const rightTokens = similarityTokens(right);
+    const counts = new Map();
+    let leftWeight = 0;
+    let rightWeight = 0;
+    let overlapWeight = 0;
+
+    for (const token of leftTokens) {
+      leftWeight += tokenWeight(token);
+      counts.set(token, (counts.get(token) || 0) + 1);
+    }
+    for (const token of rightTokens) {
+      const weight = tokenWeight(token);
+      rightWeight += weight;
+      const remaining = counts.get(token) || 0;
+      if (remaining > 0) {
+        overlapWeight += weight;
+        counts.set(token, remaining - 1);
+      }
+    }
+
+    const overlap = leftWeight + rightWeight
+      ? (2 * overlapWeight) / (leftWeight + rightWeight)
+      : 0;
+    const longest = Math.max(left.length, right.length);
+    const lengthRatio = longest ? Math.min(left.length, right.length) / longest : 1;
+    return overlap * 0.7 + lengthRatio * 0.3;
+  }
+
+  function alignChangedLines(deletedRows, addedRows) {
+    const deletedCount = deletedRows.length;
+    const addedCount = addedRows.length;
+    if (!deletedCount || !addedCount) return [];
+
+    if (
+      deletedCount * addedCount > MAX_PAIRING_CELLS
+      || deletedCount + addedCount > MAX_PAIRING_LINES
+    ) {
+      const pairs = [];
+      let nextAdded = 0;
+      for (const deleted of deletedRows) {
+        let bestIndex = -1;
+        let bestScore = 0.28;
+        const searchEnd = Math.min(addedCount, nextAdded + 8);
+        for (let index = nextAdded; index < searchEnd; index += 1) {
+          const score = lineSimilarity(deleted.text, addedRows[index].text);
+          if (score > bestScore) {
+            bestScore = score;
+            bestIndex = index;
+          }
+        }
+        if (bestIndex >= 0) {
+          pairs.push([deleted, addedRows[bestIndex]]);
+          nextAdded = bestIndex + 1;
+        }
+      }
+      return pairs;
+    }
+
+    const scores = Array.from({ length: deletedCount + 1 }, () => new Float32Array(addedCount + 1));
+    const directions = Array.from({ length: deletedCount + 1 }, () => new Uint8Array(addedCount + 1));
+    for (let deletedIndex = 1; deletedIndex <= deletedCount; deletedIndex += 1) {
+      for (let addedIndex = 1; addedIndex <= addedCount; addedIndex += 1) {
+        let best = scores[deletedIndex - 1][addedIndex];
+        let direction = 1;
+        if (scores[deletedIndex][addedIndex - 1] > best) {
+          best = scores[deletedIndex][addedIndex - 1];
+          direction = 2;
+        }
+        const similarity = lineSimilarity(
+          deletedRows[deletedIndex - 1].text,
+          addedRows[addedIndex - 1].text
+        );
+        const paired = similarity >= 0.28
+          ? scores[deletedIndex - 1][addedIndex - 1] + similarity
+          : -1;
+        if (paired > best + 0.0001) {
+          best = paired;
+          direction = 3;
+        }
+        scores[deletedIndex][addedIndex] = best;
+        directions[deletedIndex][addedIndex] = direction;
+      }
+    }
+
+    const pairs = [];
+    let deletedIndex = deletedCount;
+    let addedIndex = addedCount;
+    while (deletedIndex > 0 && addedIndex > 0) {
+      const direction = directions[deletedIndex][addedIndex];
+      if (direction === 3) {
+        pairs.push([deletedRows[deletedIndex - 1], addedRows[addedIndex - 1]]);
+        deletedIndex -= 1;
+        addedIndex -= 1;
+      } else if (direction === 1) deletedIndex -= 1;
+      else addedIndex -= 1;
+    }
+    pairs.reverse();
+    return pairs;
+  }
+
+  function intralineTokens(text) {
+    return text.match(/\s+|[A-Za-z0-9_$]+|[^A-Za-z0-9_$\s]+/g) || [];
+  }
+
+  function edgeDiffSegments(before, after) {
+    let prefix = 0;
+    const prefixLimit = Math.min(before.length, after.length);
+    while (prefix < prefixLimit && before.charAt(prefix) === after.charAt(prefix)) prefix += 1;
+
+    let suffix = 0;
+    const suffixLimit = Math.min(before.length - prefix, after.length - prefix);
+    while (
+      suffix < suffixLimit
+      && before.charAt(before.length - suffix - 1) === after.charAt(after.length - suffix - 1)
+    ) suffix += 1;
+
+    const build = text => {
+      const segments = [];
+      if (prefix) segments.push({ text: text.slice(0, prefix), changed: false });
+      const changedEnd = suffix ? text.length - suffix : text.length;
+      if (changedEnd > prefix) segments.push({ text: text.slice(prefix, changedEnd), changed: true });
+      if (suffix) segments.push({ text: text.slice(text.length - suffix), changed: false });
+      return segments;
+    };
+    return { before: build(before), after: build(after) };
+  }
+
+  function mergeTokenSegments(tokens, changed) {
+    const segments = [];
+    tokens.forEach((text, index) => {
+      const isChanged = Boolean(changed[index]);
+      const previous = segments[segments.length - 1];
+      if (previous && previous.changed === isChanged) previous.text += text;
+      else segments.push({ text, changed: isChanged });
+    });
+    return segments;
+  }
+
+  function intralineSegments(before, after) {
+    if (before === after) return null;
+    if (before.length > MAX_INTRALINE_CHARS || after.length > MAX_INTRALINE_CHARS) {
+      return edgeDiffSegments(before, after);
+    }
+    const beforeTokens = intralineTokens(before);
+    const afterTokens = intralineTokens(after);
+    if (
+      beforeTokens.length > MAX_INTRALINE_TOKENS
+      || afterTokens.length > MAX_INTRALINE_TOKENS
+      || beforeTokens.length * afterTokens.length > MAX_INTRALINE_CELLS
+    ) return edgeDiffSegments(before, after);
+
+    const matrix = Array.from(
+      { length: beforeTokens.length + 1 },
+      () => new Uint16Array(afterTokens.length + 1)
+    );
+    for (let beforeIndex = 1; beforeIndex <= beforeTokens.length; beforeIndex += 1) {
+      for (let afterIndex = 1; afterIndex <= afterTokens.length; afterIndex += 1) {
+        matrix[beforeIndex][afterIndex] = beforeTokens[beforeIndex - 1] === afterTokens[afterIndex - 1]
+          ? matrix[beforeIndex - 1][afterIndex - 1] + 1
+          : Math.max(matrix[beforeIndex - 1][afterIndex], matrix[beforeIndex][afterIndex - 1]);
+      }
+    }
+
+    const beforeChanged = new Array(beforeTokens.length).fill(true);
+    const afterChanged = new Array(afterTokens.length).fill(true);
+    let beforeIndex = beforeTokens.length;
+    let afterIndex = afterTokens.length;
+    while (beforeIndex > 0 && afterIndex > 0) {
+      if (beforeTokens[beforeIndex - 1] === afterTokens[afterIndex - 1]) {
+        beforeChanged[beforeIndex - 1] = false;
+        afterChanged[afterIndex - 1] = false;
+        beforeIndex -= 1;
+        afterIndex -= 1;
+      } else if (matrix[beforeIndex - 1][afterIndex] >= matrix[beforeIndex][afterIndex - 1]) {
+        beforeIndex -= 1;
+      } else afterIndex -= 1;
+    }
+
+    return {
+      before: mergeTokenSegments(beforeTokens, beforeChanged),
+      after: mergeTokenSegments(afterTokens, afterChanged)
+    };
+  }
+
+  function annotateIntraline(rows) {
+    let index = 0;
+    let attemptedPairs = 0;
+    while (index < rows.length) {
+      if (rows[index].kind !== "deleted" && rows[index].kind !== "added") {
+        index += 1;
+        continue;
+      }
+      const changedRows = [];
+      while (
+        index < rows.length
+        && (rows[index].kind === "deleted" || rows[index].kind === "added" || rows[index].kind === "no-newline")
+      ) {
+        if (rows[index].kind !== "no-newline") changedRows.push(rows[index]);
+        index += 1;
+      }
+      const deletedRows = changedRows.filter(row => row.kind === "deleted");
+      const addedRows = changedRows.filter(row => row.kind === "added");
+      for (const [deleted, added] of alignChangedLines(deletedRows, addedRows)) {
+        if (attemptedPairs >= MAX_INTRALINE_PAIRS) return;
+        attemptedPairs += 1;
+        const segments = intralineSegments(deleted.text, added.text);
+        if (!segments) continue;
+        deleted.segments = segments.before;
+        added.segments = segments.after;
+      }
+    }
+  }
+
+  function segmentsCoverText(segments, text) {
+    return segments.reduce((length, segment) => length + segment.text.length, 0) === text.length;
+  }
+
+  function appendCodeSegments(node, row) {
+    let syntax = row.syntaxSegments && segmentsCoverText(row.syntaxSegments, row.text)
+      ? row.syntaxSegments
+      : [{ text: row.text, classes: [] }];
+    let changes = row.segments && segmentsCoverText(row.segments, row.text)
+      ? row.segments
+      : [{ text: row.text, changed: false }];
+    let syntaxIndex = 0;
+    let changeIndex = 0;
+    let syntaxOffset = 0;
+    let changeOffset = 0;
+
+    while (syntaxIndex < syntax.length && changeIndex < changes.length) {
+      const syntaxSegment = syntax[syntaxIndex];
+      const changeSegment = changes[changeIndex];
+      const length = Math.min(
+        syntaxSegment.text.length - syntaxOffset,
+        changeSegment.text.length - changeOffset
+      );
+      const text = syntaxSegment.text.slice(syntaxOffset, syntaxOffset + length);
+      const classes = (syntaxSegment.classes || []).map(name => `syntax-${name}`);
+      if (changeSegment.changed) classes.push("word-change");
+      if (classes.length) node.append(el("span", classes.join(" "), text));
+      else node.append(document.createTextNode(text));
+
+      syntaxOffset += length;
+      changeOffset += length;
+      if (syntaxOffset === syntaxSegment.text.length) {
+        syntaxIndex += 1;
+        syntaxOffset = 0;
+      }
+      if (changeOffset === changeSegment.text.length) {
+        changeIndex += 1;
+        changeOffset = 0;
+      }
+    }
+  }
+
+  function lineNumberCell(value, side) {
+    const node = el("span", "diff-cell line-number", value == null ? "" : value);
+    node.setAttribute("aria-hidden", "true");
+    if (value != null) node.title = `${side} line ${value}`;
+    return node;
+  }
+
+  function rowLabel(row) {
+    if (row.kind === "added") return `Added line ${row.newLine}`;
+    if (row.kind === "deleted") return `Deleted line ${row.oldLine}`;
+    if (row.kind === "context") return `Old line ${row.oldLine}, new line ${row.newLine}`;
+    if (row.kind === "hunk") return "Diff hunk header";
+    return "Diff metadata";
+  }
+
+  function binaryDiffLabel(file) {
+    if (!file) return "Binary file changed.";
+    if (file.status === "added") return "Binary file added.";
+    if (file.status === "deleted") return "Binary file deleted.";
+    if (file.status === "renamed") return "Binary file renamed.";
+    return "Binary file changed.";
+  }
+
+  function renderDiffLines(lines, container, file) {
+    const binary = Boolean(file && file.binary)
+      || lines.some(text => text === "GIT binary patch" || /^Binary files .* differ$/.test(text));
+    if (binary) {
+      container.append(el("div", "binary-diff", binaryDiffLabel(file)));
+      return;
+    }
+
+    const rows = parseDiffRows(lines, file);
+    if (!rows.length) {
+      const message = file && file.status === "renamed"
+        ? "File renamed without textual changes."
+        : "No textual changes.";
+      container.append(el("div", "empty", message));
+      return;
+    }
+
+    const table = el("div", "diff-table");
+    table.setAttribute("role", "table");
+    for (const row of rows) {
+      const rowNode = el("div", `diff-row ${row.kind}`);
+      rowNode.setAttribute("role", "row");
+      rowNode.setAttribute("aria-label", rowLabel(row));
+      const code = el("span", "diff-cell code");
+      appendCodeSegments(code, row);
+      rowNode.append(
+        lineNumberCell(row.oldLine, "Old"),
+        lineNumberCell(row.newLine, "New"),
+        code
+      );
+      table.append(rowNode);
+    }
+    container.append(table);
   }
 
   function scheduleSizeReport() {
@@ -332,7 +926,7 @@ pre { width: 100%; min-width: 0; max-width: 100%; margin: 0; overflow-x: auto; o
       if (rendered) return;
       rendered = true;
       const body = el("div", "diff-body");
-      if (chunk) renderDiffLines(chunk.lines, body);
+      if (chunk) renderDiffLines(chunk.lines, body, file);
       else body.append(el("div", "empty", unavailableReason || "No textual diff is available for this file."));
       details.append(body);
     };
@@ -417,18 +1011,6 @@ pre { width: 100%; min-width: 0; max-width: 100%; margin: 0; overflow-x: auto; o
     currentData = data;
     root.replaceChildren();
     const summary = data.summary || {};
-    const header = el("header");
-    const heading = el("div");
-    heading.append(
-      el("h1", "", "Code review"),
-      el("div", "subhead", `Since ${String(data.since || "last_review").replaceAll("_", " ")} · scope ${data.scope || "."}`)
-    );
-    const badgeText = data.advanceRequested
-      ? (data.checkpointAdvanced ? "Checkpoint advanced" : "Checkpoint unchanged")
-      : "Read-only review";
-    header.append(heading, el("div", "badge", badgeText));
-    root.append(header);
-
     const review = el("details", "review");
     review.open = uiState.reviewOpen;
     review.addEventListener("toggle", () => {
@@ -539,7 +1121,7 @@ pre { width: 100%; min-width: 0; max-width: 100%; margin: 0; overflow-x: auto; o
 
   request("ui/initialize", {
     protocolVersion: "2026-01-26",
-    appInfo: { name: "codexify-review", version: "2.0.0" },
+    appInfo: { name: "codexify-review", version: "3.0.0" },
     appCapabilities: {}
   }).then(result => {
     applyHostContext(result && result.hostContext);
@@ -552,7 +1134,8 @@ pre { width: 100%; min-width: 0; max-width: 100%; margin: 0; overflow-x: auto; o
 </script>
 </body>
 </html>
-"##;
+"##
+);
 
 #[cfg(test)]
 mod tests {
@@ -580,10 +1163,22 @@ mod tests {
         let resource = resource();
         assert_eq!(resource.uri, REVIEW_UI_URI);
         assert_eq!(resource.mime_type.as_deref(), Some(REVIEW_UI_MIME_TYPE));
+        assert_eq!(
+            resource
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.get("ui"))
+                .and_then(|value| value.get("prefersBorder"))
+                .and_then(serde_json::Value::as_bool),
+            Some(false)
+        );
         let contents = contents();
         let value = serde_json::to_value(contents).unwrap();
         assert_eq!(value["uri"], REVIEW_UI_URI);
         assert_eq!(value["mimeType"], REVIEW_UI_MIME_TYPE);
+        let previous =
+            serde_json::to_value(contents_for_uri(PREVIOUS_REVIEW_UI_URI).unwrap()).unwrap();
+        assert_eq!(previous["uri"], PREVIOUS_REVIEW_UI_URI);
         let legacy = serde_json::to_value(contents_for_uri(LEGACY_REVIEW_UI_URI).unwrap()).unwrap();
         assert_eq!(legacy["uri"], LEGACY_REVIEW_UI_URI);
         assert!(contents_for_uri("ui://codexify/review/unknown.html").is_none());
@@ -659,10 +1254,47 @@ mod tests {
         assert!(REVIEW_UI_HTML.contains("el(\"details\", \"file-entry\")"));
         assert!(REVIEW_UI_HTML.contains("details.open = uiState.expandedFiles.has(stateKey)"));
         assert!(REVIEW_UI_HTML.contains("details.addEventListener(\"toggle\""));
-        assert!(REVIEW_UI_HTML.contains("renderDiffLines(chunk.lines, body)"));
+        assert!(REVIEW_UI_HTML.contains("renderDiffLines(chunk.lines, body, file)"));
         assert!(REVIEW_UI_HTML.contains("document.documentElement.clientWidth"));
         assert!(!REVIEW_UI_HTML.contains("document.documentElement.scrollWidth"));
         assert!(!REVIEW_UI_HTML.contains("font: 11px/1.55"));
+    }
+
+    #[test]
+    fn embedded_view_renders_github_style_wrapped_diff_rows() {
+        assert!(REVIEW_UI_HTML.contains("--diff-addition-line: light-dark(#e6ffec"));
+        assert!(REVIEW_UI_HTML.contains("--diff-addition-number: light-dark(#ccffd8"));
+        assert!(REVIEW_UI_HTML.contains("--diff-addition-word: light-dark(#abf2bc"));
+        assert!(REVIEW_UI_HTML.contains("--diff-deletion-line: light-dark(#ffebe9"));
+        assert!(REVIEW_UI_HTML.contains("--diff-deletion-number: light-dark(#ffd7d5"));
+        assert!(REVIEW_UI_HTML.contains("--diff-deletion-word: light-dark(#ffcecb"));
+        assert!(REVIEW_UI_HTML.contains("--diff-hunk-line: light-dark(#ddf4ff"));
+        assert!(REVIEW_UI_HTML.contains("--diff-hunk-number: light-dark(#b6e3ff"));
+        assert!(REVIEW_UI_HTML.contains(":root[data-theme=\"dark\"] { color-scheme: dark; }"));
+        assert!(REVIEW_UI_HTML.contains("grid-template-columns: minmax(3.5em, auto)"));
+        assert!(REVIEW_UI_HTML.contains("white-space: pre-wrap"));
+        assert!(REVIEW_UI_HTML.contains("overflow-wrap: anywhere"));
+        assert!(REVIEW_UI_HTML.contains("background: transparent"));
+        assert!(REVIEW_UI_HTML.contains("background: var(--bg);"));
+        assert!(!REVIEW_UI_HTML.contains("overflow-x: auto"));
+        assert!(REVIEW_UI_HTML.contains("PrismJS 1.30.0"));
+        assert!(REVIEW_UI_HTML.contains("Prism.tokenize(source, Prism.languages[language])"));
+        assert!(REVIEW_UI_HTML.contains("function syntaxLanguageForFile(file)"));
+        assert!(REVIEW_UI_HTML.contains("row.syntaxSegments = lines[index]"));
+        assert!(REVIEW_UI_HTML.contains("function parseHunkHeader(text)"));
+        assert!(REVIEW_UI_HTML.contains("kind: \"deleted\", oldLine"));
+        assert!(REVIEW_UI_HTML.contains("kind: \"added\", oldLine: null, newLine"));
+        assert!(REVIEW_UI_HTML.contains("function alignChangedLines(deletedRows, addedRows)"));
+        assert!(REVIEW_UI_HTML.contains("function intralineSegments(before, after)"));
+        assert!(REVIEW_UI_HTML.contains("const MAX_PAIRING_LINES = 256"));
+        assert!(REVIEW_UI_HTML.contains("const MAX_INTRALINE_PAIRS = 512"));
+        assert!(REVIEW_UI_HTML.contains("if (attemptedPairs >= MAX_INTRALINE_PAIRS) return"));
+        assert!(REVIEW_UI_HTML.contains("classes.push(\"word-change\")"));
+        assert!(REVIEW_UI_HTML.contains("lineNumberCell(row.oldLine, \"Old\")"));
+        assert!(REVIEW_UI_HTML.contains("lineNumberCell(row.newLine, \"New\")"));
+        assert!(!REVIEW_UI_HTML.contains("diff-cell marker"));
+        assert!(REVIEW_UI_HTML.contains("color: var(--text); }"));
+        assert!(!REVIEW_UI_HTML.contains("const header = el(\"header\")"));
     }
 
     #[test]

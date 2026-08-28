@@ -28,6 +28,15 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   server policy. `grep` caps match count, context and individual long lines while
   keeping the actual match visible, and `run_command` returns bounded partial
   output on timeout.
+- The `show_changes` MCP App now renders GitHub-style wrapped diffs with old/new
+  line-number gutters, full-width addition and deletion colors, blue hunk headers,
+  bundled syntax highlighting, bounded intraline highlighting, and compact
+  binary-change summaries. Redundant review/checkpoint chrome and per-line `+`/`-`
+  markers were removed, the app no longer requests an additional host border, and
+  only the review panel is opaque so its surrounding iframe canvas can composite
+  transparently with the host conversation.
+  Its current resource URI is versioned at `v3`; the v2 and unversioned URIs remain
+  readable.
 
 ### Security
 
