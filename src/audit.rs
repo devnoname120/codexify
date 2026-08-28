@@ -168,38 +168,31 @@ impl AuditLogger {
         }
         match tool {
             "exec_command" => {
-                let raw = arguments.get("cmd")?.as_str()?.replace('\0', "\u{fffd}");
+                let raw = arguments.get("cmd")?.as_str()?;
                 Some(bound_utf8(
-                    &self.redact_command(&raw),
+                    &self
+                        .redactor
+                        .as_ref()?
+                        .redact_text_preview(raw, self.command_preview_max_bytes),
                     self.command_preview_max_bytes,
                 ))
             }
             "run_command" => {
                 let command = arguments.get("command")?.as_str()?;
-                let mut argv = vec![command.to_string()];
-                if let Some(values) = arguments.get("args").and_then(Value::as_array) {
-                    argv.extend(values.iter().filter_map(Value::as_str).map(str::to_string));
-                }
-                let redacted = self.redact_argv(&argv);
-                let preview = serde_json::to_string(&redacted).ok()?;
+                let additional = arguments
+                    .get("args")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str);
+                let preview = self.redactor.as_ref()?.redact_argv_preview(
+                    std::iter::once(command).chain(additional),
+                    self.command_preview_max_bytes,
+                );
                 Some(bound_utf8(&preview, self.command_preview_max_bytes))
             }
             _ => None,
         }
-    }
-
-    fn redact_command(&self, command: &str) -> String {
-        self.redactor
-            .as_ref()
-            .expect("command previews require a redactor")
-            .redact_text(command)
-    }
-
-    fn redact_argv(&self, argv: &[String]) -> Vec<String> {
-        self.redactor
-            .as_ref()
-            .expect("command previews require a redactor")
-            .redact_argv(argv)
     }
 
     fn record(&self, event: Value) {
@@ -667,7 +660,11 @@ mod tests {
         config.conversation_auth_token =
             Some("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into());
         let logger = AuditLogger::open(&config).unwrap().unwrap();
-        let redacted = logger.redact_command(
+        let redacted = logger
+            .redactor
+            .as_ref()
+            .unwrap()
+            .redact_text(
             "tool --github-token prefixed-token OPENAI_API_KEY=assigned-key literal-known-secret 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \"api_key\": \"json-secret\" Authorization: Basic basic-token Bearer abc.def",
         );
         assert!(!redacted.contains("prefixed-token"));

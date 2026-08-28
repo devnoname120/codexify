@@ -75,18 +75,55 @@ impl SecretRedactor {
         redacted
     }
 
-    pub(crate) fn redact_argv(&self, argv: &[String]) -> Vec<String> {
+    pub(crate) fn redact_text_preview(&self, text: &str, max_payload_bytes: usize) -> String {
+        let traversal_truncated = Cell::new(false);
+        self.redact_text_bounded(
+            text,
+            self.max_text_bytes(max_payload_bytes),
+            &traversal_truncated,
+        )
+    }
+
+    pub(crate) fn redact_argv_preview<'a>(
+        &self,
+        argv: impl IntoIterator<Item = &'a str>,
+        max_payload_bytes: usize,
+    ) -> String {
+        let traversal_truncated = Cell::new(false);
+        let mut output = String::from("[");
         let mut redact_next = false;
-        argv.iter()
-            .map(|argument| {
-                if redact_next {
-                    redact_next = false;
-                    return REDACTED.to_string();
-                }
+        let mut first = true;
+        for argument in argv {
+            let remaining = max_payload_bytes.saturating_sub(output.len());
+            if remaining == 0 {
+                output.push_str(VALUE_TRUNCATED);
+                break;
+            }
+            let redacted = if redact_next {
+                redact_next = false;
+                REDACTED.to_string()
+            } else {
                 redact_next = secret_flag_takes_next(argument);
-                self.redact_text(argument)
-            })
-            .collect()
+                self.redact_text_bounded(
+                    argument,
+                    self.max_text_bytes(remaining),
+                    &traversal_truncated,
+                )
+            };
+            let encoded =
+                serde_json::to_string(&redacted).unwrap_or_else(|_| format!("\"{REDACTED}\""));
+            if !first {
+                output.push(',');
+            }
+            output.push_str(&encoded);
+            first = false;
+            if output.len() >= max_payload_bytes {
+                output.push_str(VALUE_TRUNCATED);
+                break;
+            }
+        }
+        output.push(']');
+        output
     }
 
     pub(crate) fn redacted_json<'a>(
@@ -467,6 +504,13 @@ fn sensitive_json_key(key: &str) -> bool {
             | "sha256"
             | "sha384"
             | "sha512"
+            | "crc32"
+            | "hash"
+            | "etag"
+            | "fingerprint"
+            | "base64"
+            | "binary"
+            | "blob"
     ) || normalized.ends_with("token")
         || normalized.contains("secret")
         || normalized.ends_with("cookie")
@@ -478,6 +522,11 @@ fn sensitive_json_key(key: &str) -> bool {
         || normalized.contains("apikey")
         || normalized.ends_with("checksum")
         || normalized.ends_with("digest")
+        || normalized.ends_with("hash")
+        || normalized.ends_with("fingerprint")
+        || normalized.ends_with("base64")
+        || normalized.ends_with("blobdata")
+        || normalized.ends_with("binarydata")
 }
 
 fn secret_env_name(name: &str) -> bool {
@@ -493,9 +542,19 @@ fn secret_env_name(name: &str) -> bool {
         "api_key",
         "apikey",
         "private_key",
+        "access_key",
+        "account_key",
+        "signing_key",
+        "database_url",
+        "connection_string",
+        "jwt",
     ]
     .iter()
     .any(|fragment| normalized.contains(fragment))
+        || normalized.ends_with("_key")
+        || normalized.ends_with("_pat")
+        || normalized.ends_with("_auth")
+        || normalized.ends_with("_dsn")
 }
 
 fn secret_flag_takes_next(argument: &str) -> bool {
@@ -515,9 +574,11 @@ fn sensitive_value_name(name: &str) -> bool {
     secret_env_name(name)
         || normalized.contains("checksum")
         || normalized.contains("digest")
+        || normalized.contains("fingerprint")
+        || normalized.ends_with("hash")
         || matches!(
             normalized.as_str(),
-            "md5" | "sha1" | "sha256" | "sha384" | "sha512"
+            "md5" | "sha1" | "sha256" | "sha384" | "sha512" | "crc32" | "etag"
         )
 }
 
@@ -532,15 +593,15 @@ fn secret_patterns() -> Vec<(Regex, &'static str)> {
             "$1[REDACTED]",
         ),
         (
-            r#"(?i)((?:^|\s)--?[A-Za-z0-9_-]*(?:api[-_]?key|token|secret|password|passphrase|authorization|credential|checksum|digest|sha(?:1|256|384|512)|md5)[A-Za-z0-9_-]*(?:=|\s+))(?:\"[^\"]*\"|'[^']*'|[^\s;]+)"#,
+            r#"(?i)((?:^|\s)--?[A-Za-z0-9_-]*(?:api[-_]?key|token|secret|password|passphrase|authorization|credential|checksum|digest|fingerprint|hash|etag|sha(?:1|256|384|512)|md5|crc32)[A-Za-z0-9_-]*(?:=|\s+))(?:\"[^\"]*\"|'[^']*'|[^\s;]+)"#,
             "$1[REDACTED]",
         ),
         (
-            r#"(?i)(\b[A-Za-z0-9_]*(?:api[_-]?key|token|secret|password|passphrase|authorization|credential|checksum|digest|sha(?:1|256|384|512)|md5)[A-Za-z0-9_]*\s*=\s*)(?:\"[^\"]*\"|'[^']*'|[^\s;]+)"#,
+            r#"(?i)(\b[A-Za-z0-9_]*(?:api[_-]?key|token|secret|password|passphrase|authorization|credential|checksum|digest|fingerprint|hash|etag|sha(?:1|256|384|512)|md5|crc32)[A-Za-z0-9_]*\s*=\s*)(?:\"[^\"]*\"|'[^']*'|[^\s;]+)"#,
             "$1[REDACTED]",
         ),
         (
-            r#"(?i)([\"']?[A-Za-z0-9_-]*(?:api[-_]?key|token|secret|password|passphrase|credential|checksum|digest|sha(?:1|256|384|512)|md5)[A-Za-z0-9_-]*[\"']?\s*:\s*)(?:\"[^\"]*\"|'[^']*'|[^\s,;}]+)"#,
+            r#"(?i)([\"']?[A-Za-z0-9_-]*(?:api[-_]?key|token|secret|password|passphrase|credential|checksum|digest|fingerprint|hash|etag|sha(?:1|256|384|512)|md5|crc32)[A-Za-z0-9_-]*[\"']?\s*:\s*)(?:\"[^\"]*\"|'[^']*'|[^\s,;}]+)"#,
             "$1[REDACTED]",
         ),
         (
@@ -578,6 +639,8 @@ mod tests {
             "cmd": "echo known-api-secret",
             "checksum": "known-api-secret",
             "sha256": "0123456789abcdef",
+            "content_hash": "content-hash-value",
+            "image_base64": "raw-binary-text",
             "download_url": "https://files.example/object?signature=capability",
             "file_id": "file_sensitive_identifier",
             "github_token": "github-token-value",
@@ -599,6 +662,8 @@ mod tests {
         assert!(rendered.contains("visible"));
         assert!(!rendered.contains("known-api-secret"));
         assert!(!rendered.contains("0123456789abcdef"));
+        assert!(!rendered.contains("content-hash-value"));
+        assert!(!rendered.contains("raw-binary-text"));
         assert!(!rendered.contains("capability"));
         assert!(!rendered.contains("file_sensitive_identifier"));
         assert!(!rendered.contains("github-token-value"));
@@ -610,15 +675,18 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let config = default_config(root.path().to_path_buf());
         let redactor = SecretRedactor::for_tool_logging(&config);
-        let redacted = redactor.redact_argv(&[
-            "tool".into(),
-            "--github-token".into(),
-            "separate-secret".into(),
-            "--header".into(),
-            "Authorization: Bearer header-secret".into(),
-            "--checksum".into(),
-            "deadbeef-checksum".into(),
-        ]);
+        let redacted = redactor.redact_argv_preview(
+            [
+                "tool",
+                "--github-token",
+                "separate-secret",
+                "--header",
+                "Authorization: Bearer header-secret",
+                "--checksum",
+                "deadbeef-checksum",
+            ],
+            4096,
+        );
         let rendered = serde_json::to_string(&redacted).unwrap();
         assert!(!rendered.contains("separate-secret"));
         assert!(!rendered.contains("header-secret"));
