@@ -352,6 +352,37 @@ async fn targeted_github_urls_use_isolated_worktrees_without_moving_the_source()
     );
     assert_eq!(git(&project_root, &["rev-parse", "HEAD"]), base_commit);
 
+    let commit_url = format!("https://github.com/acme/demo/commit/{branch_commit}");
+    let commit_identity = identity("target-commit");
+    let commit_selection = store
+        .select_project_root(&auto, &commit_identity, &commit_url)
+        .await
+        .unwrap();
+    assert!(commit_selection.managed_worktree);
+    assert_eq!(
+        commit_selection.repository_url.as_deref(),
+        Some(commit_url.as_str())
+    );
+    assert_eq!(
+        git(&commit_selection.project_root, &["rev-parse", "HEAD"]),
+        branch_commit
+    );
+    assert_eq!(git(&project_root, &["rev-parse", "HEAD"]), base_commit);
+
+    let repeated_commit = ProjectBindingStore::new(root.path().join("target-bindings"))
+        .select_project_root(
+            &auto,
+            &commit_identity,
+            &format!(
+                "https://github.com/ACME/DEMO/commit/{}",
+                branch_commit.to_ascii_uppercase()
+            ),
+        )
+        .await
+        .unwrap();
+    assert!(!repeated_commit.newly_selected);
+    assert_eq!(repeated_commit.project_root, commit_selection.project_root);
+
     let mut never = auto.clone();
     never.worktrees.mode = WorktreeMode::Never;
     let error = ProjectBindingStore::new(root.path().join("never-target-bindings"))

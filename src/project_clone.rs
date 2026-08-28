@@ -74,6 +74,7 @@ enum GitHubCheckout {
     DefaultBranch,
     Branch(String),
     PullRequest(u64),
+    Commit(String),
 }
 
 impl GitHubRepository {
@@ -329,9 +330,12 @@ fn repository_from_path(
                 .ok_or_else(|| "GitHub pull-request URL has an invalid PR number".to_string())?;
             GitHubCheckout::PullRequest(number)
         }
+        ["commit", commit] if allow_checkout => {
+            GitHubCheckout::Commit(normalize_commit_id(commit)?)
+        }
         _ => {
             return Err(
-                "Supported GitHub URLs identify a repository root, a branch with /tree/<branch>, or a pull request with /pull/<number>"
+                "Supported GitHub URLs identify a repository root, a branch with /tree/<branch>, a pull request with /pull/<number>, or a commit with /commit/<sha>"
                     .to_string(),
             );
         }
@@ -353,6 +357,9 @@ fn repository_from_path(
         }
         GitHubCheckout::PullRequest(number) => {
             format!("{repository_web_url}/pull/{number}")
+        }
+        GitHubCheckout::Commit(commit) => {
+            format!("{repository_web_url}/commit/{commit}")
         }
     };
     let clone_url = match transport {
@@ -439,6 +446,14 @@ fn validate_branch_name(branch: &str) -> Result<(), String> {
         Ok(())
     } else {
         Err("GitHub branch URL contains an invalid Git branch name".to_string())
+    }
+}
+
+fn normalize_commit_id(commit: &str) -> Result<String, String> {
+    if commit.len() == 40 && commit.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        Ok(commit.to_ascii_lowercase())
+    } else {
+        Err("GitHub commit URL must contain a full 40-character hexadecimal commit ID".to_string())
     }
 }
 
@@ -909,7 +924,7 @@ async fn prepare_cloned_checkout(
             }
             Ok(Some(head))
         }
-        GitHubCheckout::PullRequest(_) => {
+        GitHubCheckout::PullRequest(_) | GitHubCheckout::Commit(_) => {
             let commit = fetch_checkout_commit(config, git_root, repository, clone_source).await?;
             let output = git_output(
                 config,
@@ -925,7 +940,7 @@ async fn prepare_cloned_checkout(
             .await?;
             if !output.status.success() {
                 return Err(format!(
-                    "Could not check out the requested pull request for {}: {}",
+                    "Could not check out the requested GitHub target for {}: {}",
                     repository.web_url(),
                     bounded_output(&output)
                 ));
@@ -941,15 +956,16 @@ async fn fetch_checkout_commit(
     repository: &GitHubRepository,
     fetch_source: &str,
 ) -> Result<String, String> {
-    let source_ref = match &repository.checkout {
+    let source_spec = match &repository.checkout {
         GitHubCheckout::DefaultBranch => {
             return Err("Internal error: default-branch selection has no explicit ref".to_string());
         }
         GitHubCheckout::Branch(branch) => format!("refs/heads/{branch}"),
         GitHubCheckout::PullRequest(number) => format!("refs/pull/{number}/head"),
+        GitHubCheckout::Commit(commit) => commit.clone(),
     };
     let destination_ref = checkout_storage_ref(repository);
-    let refspec = format!("+{source_ref}:{destination_ref}");
+    let refspec = format!("+{source_spec}:{destination_ref}");
     let output = git_output(
         config,
         git_root,
@@ -1387,6 +1403,21 @@ mod tests {
         };
         assert_eq!(pull.web_url(), "https://github.com/OpenAI/codex/pull/886");
         assert!(pull.has_explicit_checkout());
+
+        let commit = ProjectReference::parse(
+            "https://github.com/OpenAI/codex/commit/C8CAE44BF004A6AC6BFC267C5DFE503D57652103/",
+        )
+        .unwrap();
+        let ProjectReference::GitHub(commit) = commit else {
+            panic!("expected GitHub reference");
+        };
+        assert_eq!(
+            commit.web_url(),
+            "https://github.com/OpenAI/codex/commit/c8cae44bf004a6ac6bfc267c5dfe503d57652103"
+        );
+        assert!(commit.has_explicit_checkout());
+        assert!(https.same_identity(&commit));
+        assert!(!https.same_selection(&commit));
     }
 
     #[test]
@@ -1399,6 +1430,9 @@ mod tests {
             "https://github.com/openai/codex/tree/..",
             "https://github.com/openai/codex/pull/0",
             "https://github.com/openai/codex/pull/886/files",
+            "https://github.com/openai/codex/commit/deadbeef",
+            "https://github.com/openai/codex/commit/000000000000000000000000000000000000000g",
+            "https://github.com/openai/codex/commit/c8cae44bf004a6ac6bfc267c5dfe503d57652103/checks",
             "https://github.com/openai/codex/issues/1",
             "https://github.com/openai/codex?tab=readme",
         ] {
@@ -1573,6 +1607,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn clones_fetches_and_checks_out_the_requested_commit() {
+        let root = TempDir::new().unwrap();
+        let access_root = root.path().join("projects");
+        let clone_dir = access_root.join("cloned");
+        let source = root.path().join("source");
+        fs::create_dir_all(&clone_dir).unwrap();
+        initialize_repository(&source);
+        commit_file(&source, "base.txt", "base", "base");
+        git(&source, &["checkout", "--quiet", "-b", "feature"]);
+        let requested_commit = commit_file(&source, "commit.txt", "commit", "requested commit");
+        git(&source, &["checkout", "--quiet", "main"]);
+
+        let repository = parse_github_repository(&format!(
+            "https://github.com/acme/widget/commit/{requested_commit}"
+        ))
+        .unwrap();
+        let mut config = default_config(access_root.clone());
+        config.multi_project = true;
+        config.project_clone_dir = clone_dir.clone();
+        config.project_catalog.codex_config.enabled = false;
+
+        let target = clone_dir.join("widget");
+        let cloned = clone_repository_from(
+            &config,
+            &fs::canonicalize(&access_root).unwrap(),
+            &fs::canonicalize(&clone_dir).unwrap(),
+            &target,
+            &repository,
+            source.to_str().unwrap(),
+        )
+        .await
+        .unwrap();
+
+        assert!(cloned.cloned);
+        assert!(cloned.source_matches_checkout);
+        assert_eq!(
+            cloned.checkout_commit.as_deref(),
+            Some(requested_commit.as_str())
+        );
+        assert_eq!(git_text(&target, &["branch", "--show-current"]), "");
+        assert_eq!(git_text(&target, &["rev-parse", "HEAD"]), requested_commit);
+        assert_eq!(
+            fs::read_to_string(target.join("commit.txt")).unwrap(),
+            "commit"
+        );
+    }
+
+    #[tokio::test]
     async fn fetching_a_target_for_an_existing_checkout_does_not_move_head() {
         let root = TempDir::new().unwrap();
         let source = root.path().join("source");
@@ -1603,6 +1685,41 @@ mod tests {
         assert_eq!(fetched, branch_commit);
         assert_eq!(git_text(&checkout, &["rev-parse", "HEAD"]), base_commit);
         assert!(!checkout.join("branch.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn fetching_a_commit_for_an_existing_checkout_does_not_move_head() {
+        let root = TempDir::new().unwrap();
+        let source = root.path().join("source");
+        let checkout = root.path().join("checkout");
+        initialize_repository(&source);
+        let base_commit = commit_file(&source, "base.txt", "base", "base");
+        git(&source, &["checkout", "--quiet", "-b", "feature"]);
+        let requested_commit = commit_file(&source, "commit.txt", "commit", "requested commit");
+        git(&source, &["checkout", "--quiet", "main"]);
+        git(
+            root.path(),
+            &[
+                "clone",
+                "--quiet",
+                source.to_str().unwrap(),
+                checkout.to_str().unwrap(),
+            ],
+        );
+
+        let repository = parse_github_repository(&format!(
+            "https://github.com/acme/widget/commit/{requested_commit}"
+        ))
+        .unwrap();
+        let config = default_config(root.path().to_path_buf());
+        let fetched =
+            fetch_checkout_commit(&config, &checkout, &repository, source.to_str().unwrap())
+                .await
+                .unwrap();
+
+        assert_eq!(fetched, requested_commit);
+        assert_eq!(git_text(&checkout, &["rev-parse", "HEAD"]), base_commit);
+        assert!(!checkout.join("commit.txt").exists());
     }
 
     #[tokio::test]

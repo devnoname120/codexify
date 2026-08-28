@@ -686,7 +686,7 @@ impl SessionState {
 
         let Some(binding) = self.project_binding.lock().unwrap().clone() else {
             return Err(format!(
-                "No project root is selected for this MCP transport session. Call `set_project_root` with an existing directory beneath the access root `{}` or an exact GitHub repository, branch, or pull-request URL; GitHub URLs reuse a matching checkout or clone into the configured clone directory. If only a project name or purpose is known, call `list_projects` first. Then call `get_agent_brief` before using project tools.",
+                "No project root is selected for this MCP transport session. Call `set_project_root` with an existing directory beneath the access root `{}` or an exact GitHub repository, branch, pull-request, or commit URL; GitHub URLs reuse a matching checkout or clone into the configured clone directory. If only a project name or purpose is known, call `list_projects` first. Then call `get_agent_brief` before using project tools.",
                 config.work_dir.display()
             ));
         };
@@ -875,7 +875,7 @@ impl SessionState {
 
         if config.worktrees.mode == WorktreeMode::Never && requires_target_worktree {
             return Err(format!(
-                "The requested GitHub branch or pull request is not the current checkout in `{}` and worktree isolation is disabled. Enable worktrees with mode `auto` or `always`, or check out the requested target in that source repository before selecting it.",
+                "The requested GitHub branch, pull request, or commit is not the current checkout in `{}` and worktree isolation is disabled. Enable worktrees with mode `auto` or `always`, or check out the requested target in that source repository before selecting it.",
                 source_project_root.display()
             ));
         }

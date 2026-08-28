@@ -8,6 +8,10 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Multi-project `set_project_root` now accepts HTTPS GitHub commit URLs
+  (`/commit/<sha>`). Full 40-character commit IDs are fetched and selected exactly,
+  using a detached clone or managed worktree without moving an existing source
+  checkout.
 - `output.maxToolOutputTokens`, defaulting to 10,000 approximate tokens, as a
   connector-wide ceiling for textual model-visible tool results.
 

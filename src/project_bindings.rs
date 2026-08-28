@@ -188,7 +188,7 @@ impl ProjectBindingStore {
 
         let Some(binding) = self.selected_binding(config, identity)? else {
             return Err(format!(
-                "No project root is selected for this ChatGPT conversation. Call `set_project_root` with an existing directory beneath the access root `{}` or an exact GitHub repository, branch, or pull-request URL; GitHub URLs reuse a matching checkout or clone into the configured clone directory. If only a project name or purpose is known, call `list_projects` first. Then call `get_agent_brief` before using project tools. The selection is stored by ChatGPT conversation ID and will survive MCP reconnects and server restarts.",
+                "No project root is selected for this ChatGPT conversation. Call `set_project_root` with an existing directory beneath the access root `{}` or an exact GitHub repository, branch, pull-request, or commit URL; GitHub URLs reuse a matching checkout or clone into the configured clone directory. If only a project name or purpose is known, call `list_projects` first. Then call `get_agent_brief` before using project tools. The selection is stored by ChatGPT conversation ID and will survive MCP reconnects and server restarts.",
                 config.work_dir.display()
             ));
         };
@@ -277,7 +277,7 @@ impl ProjectBindingStore {
             WorktreeMode::Always => true,
             WorktreeMode::Never if requires_target_worktree => {
                 return Err(format!(
-                    "The requested GitHub branch or pull request is not the current checkout in `{}` and worktree isolation is disabled. Enable worktrees with mode `auto` or `always`, or check out the requested target in that source repository before selecting it.",
+                    "The requested GitHub branch, pull request, or commit is not the current checkout in `{}` and worktree isolation is disabled. Enable worktrees with mode `auto` or `always`, or check out the requested target in that source repository before selecting it.",
                     source_project_root.display()
                 ));
             }
