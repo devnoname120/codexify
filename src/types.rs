@@ -404,9 +404,9 @@ pub struct SkillsConfig {
     pub enabled: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub dirs: Option<Vec<String>>,
-    /// Also discover skills bundled with installed Claude Code plugins
-    /// (`~/.claude/plugins/cache/.../skills/*`). Default true; set false to
-    /// expose only the standalone skill directories.
+    /// Also discover skills bundled with installed OpenAI Codex and Claude Code
+    /// plugins. Default true; set false to expose only standalone skill
+    /// directories.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub include_plugins: Option<bool>,
 }

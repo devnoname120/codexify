@@ -8,6 +8,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use crate::codex_plugin_skills::discover_codex_plugin_skills;
 use crate::project_doc::project_dirs;
 use crate::types::AppConfig;
 use crate::util::home_dir;
@@ -31,7 +32,7 @@ const SKILL_DIR_NAMES: &[(&str, &str)] = &[
 pub enum SkillScope {
     Repo,
     User,
-    /// A skill bundled with an installed Claude Code plugin.
+    /// A skill bundled with an installed Codex or Claude Code plugin.
     Plugin,
 }
 
@@ -305,11 +306,13 @@ pub fn discover_skills(config: &AppConfig) -> SkillCatalog {
         }
     }
 
-    // Skills bundled with installed Claude Code plugins, discovered from the
-    // plugins cache and namespaced as `<plugin>:<skill>`.
+    // Plugin skills use the same qualified-name scheme as Codex. Native Codex
+    // plugins come first; Claude Code plugin discovery remains as a compatibility
+    // source behind the same includePlugins switch.
     if plugins_enabled(config) {
-        let (plugin_skills, plugin_warnings) = discover_plugin_skills();
-        for skill in plugin_skills {
+        let (codex_plugin_skills, codex_plugin_warnings) = discover_codex_plugin_skills();
+        let (claude_plugin_skills, claude_plugin_warnings) = discover_claude_plugin_skills();
+        for skill in codex_plugin_skills.into_iter().chain(claude_plugin_skills) {
             let key = skill.name.to_lowercase();
             if let Some(shadowed) = by_name.get(&key) {
                 warnings.push(SkillWarning {
@@ -325,7 +328,8 @@ pub fn discover_skills(config: &AppConfig) -> SkillCatalog {
             by_name.insert(key, skill.clone());
             skills.push(skill);
         }
-        warnings.extend(plugin_warnings);
+        warnings.extend(codex_plugin_warnings);
+        warnings.extend(claude_plugin_warnings);
     }
 
     skills.sort_by(|a, b| a.name.cmp(&b.name));
@@ -354,7 +358,7 @@ fn version_key(v: &str) -> (Vec<u64>, u8) {
 /// The layout is `~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/skills/<skill>/SKILL.md`.
 /// For each plugin the highest installed version is used, and each skill is
 /// namespaced `<plugin>:<name>` to keep it distinct from standalone skills.
-fn discover_plugin_skills() -> (Vec<Skill>, Vec<SkillWarning>) {
+fn discover_claude_plugin_skills() -> (Vec<Skill>, Vec<SkillWarning>) {
     let mut skills: Vec<Skill> = Vec::new();
     let mut warnings: Vec<SkillWarning> = Vec::new();
 

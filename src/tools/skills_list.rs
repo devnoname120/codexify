@@ -81,7 +81,7 @@ impl Tool for SkillsList {
 
     fn description(&self) -> String {
         format!(
-            "List the skills available for this project. A skill is a set of instructions stored in a {SKILL_FILENAME}, covering a task the user or the repository has already worked out how to do well. Skills are found under .agents/skills, .codex/skills and .claude/skills, in the project and in the user's home directory. Each entry gives a name and a description of when it applies; call skills_read with the name to get the instructions themselves. If the user names a skill, or the task clearly matches one of these descriptions, use it."
+            "List the skills available for this project. A skill is a set of instructions stored in a {SKILL_FILENAME}, covering a task the user or the repository has already worked out how to do well. Skills are found under .agents/skills, .codex/skills and .claude/skills, in the project and in the user's home directory, plus enabled installed Codex and Claude Code plugins. Each entry gives a name and a description of when it applies; call skills_read with the name to get the instructions themselves. If the user names a skill, or the task clearly matches one of these descriptions, use it."
         )
     }
 
@@ -101,7 +101,7 @@ impl Tool for SkillsList {
                         "properties": {
                             "name": { "type": "string", "description": "Name to pass to skills_read." },
                             "description": { "type": "string", "description": "When this skill applies." },
-                            "scope": { "type": "string", "description": "`repo` for a skill shipped with the project, `user` for a personal one." },
+                            "scope": { "type": "string", "description": "`repo` for a skill shipped with the project, `user` for a personal one, or `plugin` for a plugin-bundled skill." },
                             "path": { "type": "string", "description": format!("Absolute path of the {SKILL_FILENAME}.") }
                         },
                         "required": ["name", "description", "scope", "path"],

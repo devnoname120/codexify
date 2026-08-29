@@ -12,6 +12,7 @@ pub mod auth;
 pub mod bridge;
 pub mod codex_config;
 pub mod codex_mcp;
+mod codex_plugin_skills;
 pub mod config;
 pub mod conversation_auth;
 pub mod diff;
