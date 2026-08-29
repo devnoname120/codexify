@@ -4,13 +4,13 @@
 
 > 📖 **New here? Start with the [Wiki](https://github.com/devnoname120/codexify/wiki)** — an end-user guide covering [installation](https://github.com/devnoname120/codexify/wiki/Installation), [every CLI argument](https://github.com/devnoname120/codexify/wiki/CLI-Reference), [every config option](https://github.com/devnoname120/codexify/wiki/Configuration), and [how it all works end-to-end](https://github.com/devnoname120/codexify/wiki/How-It-Works). This README is the complete technical reference; the wiki is the friendlier path in.
 
-A local MCP bridge server that lets ChatGPT Web Pro call tools on your machine: read/write files, run shell commands, git operations, search. Codexify is the Rust continuation of the original Bun + TypeScript implementation, built on **tokio + axum** and the official [`rmcp`](https://crates.io/crates/rmcp) SDK over Streamable HTTP. It can expose that local MCP endpoint through OpenAI's native [Secure MCP Tunnel](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels), without opening an inbound port or publishing a general-purpose URL.
+A local MCP bridge server that lets ChatGPT Web Pro call tools on your machine: read/write files, run shell commands, git operations, and search. Codexify is implemented in Rust with **tokio + axum** and the official [`rmcp`](https://crates.io/crates/rmcp) SDK over Streamable HTTP. It can expose the local MCP endpoint through OpenAI's native [Secure MCP Tunnel](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels), without opening an inbound port or publishing a general-purpose URL.
 
-In native-tunnel mode, Codexify listens only on `127.0.0.1`, protects the MCP endpoint with a random per-process bearer token, starts OpenAI's official runtime-only tunnel client, and supervises it for the lifetime of the server. The tunnel client makes outbound HTTPS requests to OpenAI and forwards tunnel traffic to the authenticated loopback MCP endpoint. A conventional externally managed tunnel remains available as an alternative.
+In native-tunnel mode, Codexify listens only on `127.0.0.1`, protects the MCP endpoint with a random per-process bearer token, starts OpenAI's official runtime-only tunnel client, and supervises it for the lifetime of the server. The tunnel client makes outbound HTTPS requests to OpenAI and forwards tunnel traffic to the authenticated loopback MCP endpoint. Externally managed tunnels are also supported.
 
-The tool set covers the ones [Codex](https://github.com/openai/codex) gives its own agent — `apply_patch`, `exec_command`/`write_stdin`, `view_image`, `update_plan`, `clock_curr_time`/`clock_sleep` — so ChatGPT Web can work the way Codex does: patch files in place instead of rewriting them, drive interactive and long-running processes, and keep a plan across a task. It also bridges ChatGPT-native attachments and generated files into the active local project, and returns project files to ChatGPT as downloadable MCP resources, without reconstructing binary data in model-visible text or pretending a machine-local path is usable by the host. It carries the project's `AGENTS.md` and Codex's own agent brief, so the client is told how to behave and not just what it can call. It bounds what a tool call can return, keeps a plan and notes on disk across conversations, and records project-scoped review checkpoints so ChatGPT can inspect either the full task diff or only changes since the last review. And it loads Codex's skills: a `SKILL.md` in the repo or your home directory teaches the client how *you* do a recurring task, and only the ones that apply are ever read. Schemas and prompt are ported from the Codex source, not reimplemented from guesswork.
+The tool set follows [Codex](https://github.com/openai/codex) agent contracts for `apply_patch`, `exec_command`/`write_stdin`, `view_image`, `update_plan`, `clock_curr_time`/`clock_sleep`, project instructions, and skills. Codexify also bridges ChatGPT-native attachments and generated files into the active local project, returns project files as downloadable MCP resources, bounds model-visible tool output, persists task notes and plans, and records project-scoped review checkpoints.
 
-Beyond the port, Codexify can **aggregate other MCP servers**. It connects to local stdio servers or remote Streamable HTTP endpoints, keeps automatically imported Codex/plugin tool catalogues private by default, and gives the ChatGPT-side agent a fixed ranked discovery/schema/call surface. Explicit direct flattening and the older one-tool gateway remain available as compatibility modes.
+Codexify can also **aggregate other MCP servers**. It connects to local stdio servers or remote Streamable HTTP endpoints, keeps automatically imported Codex/plugin tool catalogues private by default, and gives the ChatGPT-side agent a fixed ranked discovery/schema/call surface. Direct exposure and single-dispatcher gateway modes are configurable per upstream.
 
 ## Architecture
 
@@ -169,7 +169,7 @@ by the wizard.
 
 On first use, Codexify downloads the pinned runtime-only build of OpenAI's official [`tunnel-client`](https://github.com/openai/tunnel-client), verifies the archive against the per-platform SHA-256 embedded in this Codexify build, and installs it under `~/.codexify/openai-tunnel/`. Codexify reports ready only after the runtime's `/readyz` check succeeds and its metrics show a successful control-plane poll. The runtime-only binary exposes loopback `/healthz`, `/readyz`, and `/metrics` endpoints; it intentionally does not include the full client's admin UI.
 
-To use a preinstalled official client instead, set `openaiTunnel.clientPath` or pass `--openai-tunnel-client /path/to/tunnel-client-runtime`. Codexify still checks the binary's version surface and required flags before starting it.
+To use a preinstalled official client, set `openaiTunnel.clientPath` or pass `--openai-tunnel-client /path/to/tunnel-client-runtime`. Codexify checks the binary's version surface and required flags before starting it.
 
 ### Local endpoint or externally managed tunnel
 
@@ -177,7 +177,7 @@ To use a preinstalled official client instead, set `openaiTunnel.clientPath` or 
 cargo run --release -- --work-dir /path/to/your/project
 ```
 
-Without `openaiTunnel`, the server keeps its legacy behavior: it listens on `0.0.0.0:3000`, serves MCP at `/mcp`, and serves `/health`. This is appropriate for local clients or an explicitly configured reverse proxy/tunnel. Do not publish this mode without authentication and network-level access controls.
+Without `openaiTunnel`, the server listens on `0.0.0.0:3000`, serves MCP at `/mcp`, and serves `/health`. This mode is intended for local clients or an explicitly configured reverse proxy/tunnel. Do not publish it without authentication and network-level access controls.
 
 To reuse one server across several independent projects, point it at their common parent and enable multi-project mode:
 
@@ -213,9 +213,8 @@ The MCP wire surface deliberately calls this authorization tool `setup` and its
 token parameter `ref`. ChatGPT can otherwise falsely classify a token-looking
 connector call as an unsafe secret leak and refuse to make the call. Keeping the
 actual token in a SHA-256-shaped format and using the innocuous `setup(ref)` names
-avoids that false positive. This is only a compatibility workaround for ChatGPT's
-connector safety behavior: `ref` is still the authentication token, it remains
-secret, and no digest transformation is applied before it is submitted.
+avoids that false positive. `ref` is the authentication token, remains secret,
+and is submitted verbatim; no digest transformation is applied.
 
 This extra gate is necessary because ChatGPT's connector OAuth state controls
 whether the account can use the connector at all; it does not independently
@@ -279,9 +278,9 @@ Each release ships a compiled binary per platform — `windows-x64`, `linux-x64`
 | `--worktree-root` | No | Codex worktree location | Directory for managed conversation worktrees |
 | `--port` | No | `3000` | Server port |
 | `--api-key` | No | - | Bearer token for auth |
-| `--config` | No | `CODEXIFY_CONFIG`, user config, then legacy `./codex.config.json` | Explicit config file path. The user config is `~/.codexify/codex.config.json`; relative explicit paths resolve from the startup directory, and a missing file is tolerated |
-| `--codex-cli` | No | Auto when available | Require successful Codex CLI-backed MCP discovery. When omitted, failure produces a warning and direct `config.toml` parsing remains the fallback |
-| `-v`, `--verbose` | No | Info logs | Enable Codexify debug diagnostics; repeat (`-vv`) for trace diagnostics (`--log-tool-calls` remains an alias) |
+| `--config` | No | `CODEXIFY_CONFIG`, user config, then `./codex.config.json` | Explicit config file path. The user config is `~/.codexify/codex.config.json`; relative explicit paths resolve from the startup directory, and a missing file is tolerated |
+| `--codex-cli` | No | Auto when available | Require successful Codex CLI-backed MCP discovery. When omitted, CLI failure produces a warning and discovery continues from `config.toml` |
+| `-v`, `--verbose` | No | Info logs | Enable Codexify debug diagnostics; repeat (`-vv`) for trace diagnostics (`--log-tool-calls` is an alias) |
 | `--log-tool-payloads[=<MODE>]` | No | `off` | Emit paired tool invocation lifecycle events with bounded, redacted payloads. `MODE` is `requests`, `responses`, or `all`; omitting it selects `all` |
 | `--tool-log-level <LEVEL>` | No | `info` | Severity for tool invocation events: `trace`, `debug`, `info`, `warn`, or `error` |
 | `--tool-log-max-request-bytes <BYTES>` | No | `2048` | Maximum UTF-8 bytes retained from each redacted request payload (`64`-`65536`) |
@@ -334,7 +333,7 @@ ahead of the protected tools:
 |------|-------------|
 | `setup` | ChatGPT-facing name for the per-conversation authorization tool. Checks the configured authentication token supplied as `ref`, then caches only the grant for the stable ChatGPT conversation or current transport |
 
-Ported from Codex's own agent tools:
+Codex-compatible agent tools:
 
 | Tool | Codex name | Description |
 |------|------------|-------------|
@@ -367,24 +366,23 @@ Multi-project mode adds two project-control tools:
 | `list_projects` | Search the read-only project catalogue before binding. Returns relative selectors for existing canonical directories authorized beneath the access root, plus names, aliases, descriptions, trust metadata, sources, and sanitized warnings. It never selects a project |
 | `set_project_root` | Bind the current ChatGPT conversation to an existing directory beneath the configured access root, an HTTPS/SSH GitHub repository-root URL, an HTTPS branch URL (`/tree/<branch>`), an HTTPS pull-request URL (`/pull/<number>`), or an HTTPS commit URL (`/commit/<sha>`). URL selection reuses a matching checkout or clones into `projectCloneDir`; targeted URLs fetch and select the exact target without moving an unrelated source checkout. Repeating the same canonical directory or exact URL selection is idempotent, but switching is rejected. Without ChatGPT conversation metadata, the binding lasts for the MCP transport session |
 
-Codex needs the first three for none of these reasons: it puts its agent brief in the system prompt, the OS and shell in an `<environment_context>` message, and `AGENTS.md` straight into the prompt, all before the first turn. An MCP server has none of those channels — it can only expose tools — so the same facts are tool calls here as well as part of the server's `instructions`. It needs `remember` and `recall` for the opposite reason: its context is large and its session state lives in the CLI process, whereas the client here is a chat window that loses the conversation. See [Context and memory](#context-and-memory), [Acting as a Codex agent](#acting-as-a-codex-agent), [Shells and the host](#shells-and-the-host), [AGENTS.md](#agentsmd) and [Skills](#skills).
+These tools expose runtime context, project instructions, and durable task state through MCP. See [Context and memory](#context-and-memory), [Acting as a Codex agent](#acting-as-a-codex-agent), [Shells and the host](#shells-and-the-host), [AGENTS.md](#agentsmd) and [Skills](#skills).
 
 That is 28 native tools in the default single-project mode and 30 in multi-project mode. Enabling conversation authorization adds the ChatGPT-facing `setup` tool, producing 29 or 31 respectively. Setting `artifactIngress.enabled` to `false` removes `import_host_file`; setting `artifactEgress.enabled` to `false` independently removes `export_host_file`. Each disabled direction reduces the applicable count by one. One or more [catalog-mode MCP upstreams](#catalog-mode-default-for-automatic-imports) add one shared four-tool discovery/call surface regardless of how many transitive tools they contain. Direct mode adds one downstream tool per selected upstream tool; gateway mode adds one downstream dispatcher per upstream server.
 
-Two deliberate differences from Codex:
+MCP-specific tool behavior:
 
-- **`apply_patch` takes a JSON string.** In Codex it is a *freeform* tool whose entire body is the raw patch. MCP has no freeform tools, so the patch goes in an `input` string parameter. The patch format itself is unchanged.
-- **`exec_command` runs with plain pipes, not a PTY.** Codex's own `tty` parameter documents pipes as the default, so ordinary commands behave the same; `tty: true` is rejected rather than silently ignored. Programs that only enable interactive behaviour when attached to a terminal will act as if piped.
+- **`apply_patch` takes a JSON string.** MCP has no freeform tools, so the patch is supplied through the `input` string parameter.
+- **`exec_command` runs with plain pipes, not a PTY.** `tty: true` is rejected. Programs that require an attached terminal behave as piped processes.
 
 For ChatGPT calls carrying `_meta["openai/session"]`, an `exec_command` process
 belongs to that hashed conversation identity rather than the current MCP
 transport. `write_stdin` can therefore resume or poll it after ChatGPT replaces
-the connector transport between adjacent tool calls. Generic MCP clients retain
+the connector transport between adjacent tool calls. Generic MCP clients use
 transport-session ownership. Process handles are in memory only: they do not
-survive a Codexify restart, and `exec.idleTimeoutMs` still expires abandoned
-sessions.
+survive a Codexify restart, and `exec.idleTimeoutMs` expires abandoned sessions.
 
-`clock_sleep` also caps at 5 minutes rather than Codex's 12 hours — a longer wait would outlive the HTTP request through the tunnel.
+`clock_sleep` caps at 5 minutes because a longer wait would outlive the HTTP request through the tunnel.
 
 Every tool that advertises an `outputSchema` also returns `structuredContent` matching it, as the MCP spec asks. `exec_command` and `write_stdin` return Codex's unified-exec object, `import_host_file` returns its destination, byte count and SHA-256 receipt, `export_host_file` returns its immutable-snapshot receipt and a standard MCP `resource_link`, `clock_curr_time` returns `{ current_time }`, `get_environment` returns the environment object, `get_project_doc` returns `{ files, content }` and `skills_list` returns `{ skills, content }`; the rest return `{ content: <text> }`, which the server derives from the text blocks so handlers don't repeat it. `show_changes` deliberately advertises no output schema: its model-visible result is concise text, while its complete review payload is attached as component-only result `_meta` for the MCP App.
 
@@ -397,22 +395,15 @@ Codexify resolves one server-level JSON config in this order:
 1. `--config <PATH>`;
 2. the non-empty `CODEXIFY_CONFIG` environment variable;
 3. an existing `~/.codexify/codex.config.json`;
-4. an existing `./codex.config.json` as a legacy compatibility fallback;
+4. an existing `./codex.config.json`;
 5. built-in defaults.
 
 Relative paths supplied through `--config` or `CODEXIFY_CONFIG` resolve against
 the process's startup directory. Explicit CLI and environment paths are
 authoritative even when missing; a missing file is tolerated and built-in defaults
-are used. The startup banner prints the selected path and its source. Selecting the
-legacy working-directory file also prints a migration warning because process
-authority should not normally depend on which repository happened to be the launch
-directory. Move that file to `~/.codexify/codex.config.json`, or make its location
-explicit with `--config` or `CODEXIFY_CONFIG`.
-
-`quickstart` always chooses the user-level path when neither explicit source is
-set; it does not update the legacy working-directory fallback. Every field is
-optional and uses the same camelCase names as the original TypeScript project, so
-an existing config keeps working.
+are used. The startup banner prints the selected path and its source. `quickstart`
+uses the user-level path when neither explicit source is set. Every config field is
+optional and uses camelCase names.
 
 ```json
 {
@@ -538,7 +529,7 @@ config; manually created configs should be protected equivalently.
 
 ## Diagnostics, tool payloads, and audit logging
 
-The default tracing level remains `info`. Every completed call names the downstream tool and, for a direct, gateway, or catalog-discovered MCP call, the resolved raw upstream server and tool. `-v` changes the default filter to `codexify=debug,rmcp=warn`, which adds tool-start events, hashed conversation/project context, argument field names, duration, and output accounting without dumping payloads. `-vv` changes Codexify to `trace` while keeping `rmcp` suppressed and adds the fully redacted argument-shape summary. An explicit `RUST_LOG` value takes precedence over the `-v`/`-vv` default filter, but rmcp protocol-internal events remain blocked because they may contain unbounded model or user content:
+The default tracing level is `info`. Every completed call names the downstream tool and, for a direct, gateway, or catalog-discovered MCP call, the resolved raw upstream server and tool. `-v` uses `codexify=debug,rmcp=warn`, which adds tool-start events, hashed conversation/project context, argument field names, duration, and output accounting without dumping payloads. `-vv` uses Codexify `trace` while keeping `rmcp` suppressed and adds the fully redacted argument-shape summary. An explicit `RUST_LOG` value takes precedence over these defaults, but rmcp protocol-internal events remain blocked because they may contain unbounded model or user content:
 
 ```bash
 codexify -v --work-dir /path/to/project
@@ -588,7 +579,7 @@ The `toolLogging` config block provides the same controls:
 | `maxResponseBytes` | `4096` | Maximum UTF-8 bytes retained from each redacted response; accepted range is `64`-`65536` |
 | `redactEnv` | `[]` | Environment-variable names whose current values must be removed from payloads |
 
-CLI mode, level, and byte-limit options replace their corresponding config values. Repeated `--tool-log-redact-env` values are merged with `toolLogging.redactEnv` so a CLI invocation cannot accidentally remove configured redactions. Payload events use the `codexify::tool_payload` tracing target at the selected level, so an explicit restrictive `RUST_LOG` filter can suppress them without incurring payload serialization work; when that happens, the ordinary info-level completion event remains available instead of silently removing all call visibility. Events go through the established tracing subscriber (stdout in the current HTTP server); they are never written to a bridged upstream's protocol pipe or to the downstream Streamable HTTP response. The pre-existing `--log-tool-calls` alias deliberately remains equivalent to `-v`; it does not opt an existing deployment into retaining payloads.
+CLI mode, level, and byte-limit options replace their corresponding config values. Repeated `--tool-log-redact-env` values are merged with `toolLogging.redactEnv` so a CLI invocation cannot accidentally remove configured redactions. Payload events use the `codexify::tool_payload` tracing target at the selected level, so an explicit restrictive `RUST_LOG` filter can suppress them without incurring payload serialization work; when that happens, the ordinary info-level completion event remains available. Events go through the tracing subscriber (stdout in the HTTP server); they are never written to a bridged upstream's protocol pipe or to the downstream Streamable HTTP response. `--log-tool-calls` is equivalent to `-v`; it does not enable payload logging.
 
 Audit logging is separate from diagnostic tracing and is disabled unless a file is configured:
 
@@ -646,7 +637,7 @@ Native mode deliberately cannot be combined with a caller-supplied `apiKey` / `-
 
 The OpenAI runtime key authenticates the outbound control-plane connection. Codexify resolves the configured `env:NAME` or `file:/path` reference once, passes the value to the tunnel child under a private synthetic environment name, and removes the original environment variable from model-launched commands and bridged MCP children. The tunnel runtime starts with a small allowlist of ordinary OS variables rather than inheriting tunnel-client configuration, proxy, header, or trust-store overrides from the launching shell. On Unix, a referenced key file must not be readable by group or other users. These measures prevent accidental inheritance; they do not create a secret boundary against hostile code running as the same OS user, which can potentially inspect same-user processes or read an accessible key file.
 
-The top-level `multiProject` key is the config-file equivalent of `--multi-project`. In that mode the process still reads one static `codex.config.json`; project selection changes the effective work directory used by project-scoped tools, not the server configuration itself. The native Codex project table is the exception to the startup snapshot: `list_projects` rereads it on every call so newly trusted projects become discoverable without restarting Codexify. ChatGPT conversation bindings are independent of the `memory` block and remain enabled even when `memory.enabled` is `false`.
+The top-level `multiProject` key is the config-file equivalent of `--multi-project`. In that mode the process reads one static `codex.config.json`; project selection changes the effective work directory used by project-scoped tools, not the server configuration itself. The native Codex project table is the exception to the startup snapshot: `list_projects` rereads it on every call so newly trusted projects become discoverable without restarting Codexify. ChatGPT conversation bindings are independent of the `memory` block and are enabled even when `memory.enabled` is `false`.
 
 `projectCloneDir` selects where `set_project_root` places a repository that is requested by GitHub URL but has no matching local checkout. It defaults to the multi-project access root (`--work-dir`); a relative value is resolved against that access root, while `--project-clone-dir` overrides the file setting. The directory must already exist, must be a directory, and must canonicalize to the access root or one of its descendants. The destination follows normal `git clone` naming (`<projectCloneDir>/<repository-name>`); an unrelated file or checkout at that path is never overwritten. Branch URLs clone the named branch when a repository must be created, while PR and commit URLs clone the repository and then detach at the fetched target commit.
 
@@ -654,7 +645,7 @@ The `worktrees` block controls isolation between conversations selecting the sam
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `mode` | `"auto"` | `"auto"` lets the first conversation use the selected checkout and gives later conversations managed worktrees; `"always"` isolates every conversation; `"never"` preserves direct-checkout sharing |
+| `mode` | `"auto"` | `"auto"` lets the first conversation use the selected checkout and gives later conversations managed worktrees; `"always"` isolates every conversation; `"never"` uses the selected checkout directly |
 | `root` | Codex worktree location | Parent directory for managed worktrees; overridden by `--worktree-root` |
 | `upstreamRefreshMode` | Codex setting or `"never"` | `"best-effort"` refreshes a tracked upstream before worktree creation without making fetch failure fatal |
 | `autoCleanupEnabled` | Codex setting or `true` | On startup, remove old unreferenced worktrees only when their working trees are clean |
@@ -668,7 +659,7 @@ The `exec` block governs `exec_command` and `write_stdin`:
 | Key | Default | Description |
 |-----|---------|-------------|
 | `mode` | `"allowlist"` | `"allowlist"` checks every command in the string against the allowlist; `"unrestricted"` runs whatever it is given |
-| `extraAllowedCommands` | 18 read-only utilities | Added to `allowedCommands` for `exec_command` only, so `run_command` stays as narrow as it was |
+| `extraAllowedCommands` | 18 read-only utilities | Additional allowlist entries used only by `exec_command`; `run_command` uses `allowedCommands` only |
 | `maxSessions` | `8` | Cap on concurrent background sessions per ChatGPT conversation, or per MCP transport for clients without conversation metadata |
 | `idleTimeoutMs` | `300000` | Milliseconds without a tool interaction before a resident process is killed and forgotten; `0` disables idle expiry |
 | `defaultShell` | `$SHELL`, else PowerShell on Windows and `/bin/sh` elsewhere | Shell used when an `exec_command` call names none |
@@ -683,7 +674,7 @@ The `ignore` block decides what the file-walking tools — `glob`, `grep`, `tree
 | `useDefaultPatterns` | `true` | Skip a built-in set (`node_modules`, `.git`, `dist`, `build`, `out`, `.next`, `.nuxt`, `.svelte-kit`, `.turbo`, `coverage`, `__pycache__`, `.venv`, `venv`, `.cache`) |
 | `customPatterns` | `[]` | Extra gitignore-syntax patterns applied on top for every tool |
 
-Patterns use `.gitignore` syntax. `node_modules` and `.git` are pruned from every walk no matter what, so a search never pays to descend them even with everything else turned off. The older `tree.ignore` list still works and applies to all four tools too. `list_directory` pointed straight at an ignored directory still shows its contents, so you can look inside `node_modules` on purpose.
+Patterns use `.gitignore` syntax. `node_modules` and `.git` are pruned from every walk no matter what, so a search never pays to descend them even with everything else turned off. `tree.ignore` applies to all four walking tools. `list_directory` pointed directly at an ignored directory shows its contents, so an ignored directory can be inspected explicitly.
 
 The `projectDoc` block governs [AGENTS.md](#agentsmd) discovery. All three keys are optional, and the block itself can be left out entirely:
 
@@ -794,7 +785,7 @@ For example:
 }
 ```
 
-Metadata overlays are merged by canonical path. Explicit entries are operator-authored providers in their own right, so they may include a path that native Codex marks untrusted or does not record; they still cannot widen the access-root boundary. Aliases are deduplicated case-insensitively, and aliases shared by different projects produce a warning because they make intent matching ambiguous. Catalogue construction never opens a candidate's README, source, `.codex/`, or `AGENTS.md`; project contents remain unread until the conversation has selected that project.
+Metadata overlays are merged by canonical path. Explicit entries are operator-authored providers in their own right, so they may include a path that native Codex marks untrusted or does not record; they cannot widen the access-root boundary. Aliases are deduplicated case-insensitively, and aliases shared by different projects produce a warning because they make intent matching ambiguous. Catalogue construction never opens a candidate's README, source, `.codex/`, or `AGENTS.md`; project contents remain unread until the conversation has selected that project.
 
 GitHub URL selection is separate from catalogue listing. Before cloning, Codexify checks the normal destination, catalogue candidates, and immediate child directories of `projectCloneDir`, then compares normalized GitHub remotes at each Git top level. Exactly one match is reused; multiple matches are rejected as ambiguous so the caller can pass an explicit path. Accepted forms are repository-root URLs on `github.com` (`https://github.com/owner/repo`, `git@github.com:owner/repo.git`, and equivalent SSH forms), HTTPS branch URLs (`https://github.com/owner/repo/tree/<branch>`), HTTPS pull-request URLs (`https://github.com/owner/repo/pull/<number>`), and HTTPS commit URLs (`https://github.com/owner/repo/commit/<sha>`). For branch URLs, everything after `/tree/` is interpreted as the branch ref, including `/` characters. Commit URLs require the full 40-character hexadecimal object ID and normalize it to lowercase. Credential-bearing URLs, unsupported repository subpages, query strings, fragments, insecure transports, and non-GitHub hosts are rejected.
 
@@ -853,7 +844,7 @@ Each URI contains a 256-bit random bearer capability. Issued resources are not a
 
 By default the server is pinned to one project: `--work-dir` *is* the project root, and every project-scoped tool resolves against it. Multi-project mode turns `--work-dir` into an *access root* instead — a directory beneath which each conversation selects its own project — so a single running server can serve many repositories without a process per repo.
 
-Enable it with `--multi-project` or `"multiProject": true` (see [CLI flags](#cli-flags) and [Config file](#config-file)). One static `codex.config.json` is still read once at startup; selection changes only the effective work directory the project tools use, never the server configuration itself.
+Enable it with `--multi-project` or `"multiProject": true` (see [CLI flags](#cli-flags) and [Config file](#config-file)). One static `codex.config.json` is read at startup; selection changes only the effective work directory the project tools use, never the server configuration itself.
 
 Each conversation binds a project exactly once, through the [`set_project_root`](#tools) tool. When neither an exact path nor an exact GitHub URL is known, [`list_projects`](#tools) provides a project-independent enumeration step first:
 
@@ -877,7 +868,7 @@ trust_level = "trusted"
 
 Codexify reads those paths as candidates. It does not treat the table as exhaustive: entries may be stale, may represent separate worktrees, and contain no semantic description beyond the path. Explicit `projectCatalog.entries` can therefore add aliases/descriptions or supply projects absent from the native table.
 
-Every candidate still passes Codexify's own checks. Its path must exist, resolve to a directory, and canonicalize to the access root itself or a descendant; missing entries, files, and symlink escapes are skipped, while duplicate canonical targets are merged into one candidate. Native Codex trust is only catalogue metadata plus the default `trustedOnly` filter. It never grants Codexify access to a path outside `--work-dir`, and an explicit catalogue entry does not widen that boundary either.
+Every candidate passes Codexify's own checks. Its path must exist, resolve to a directory, and canonicalize to the access root itself or a descendant; missing entries, files, and symlink escapes are skipped, while duplicate canonical targets are merged into one candidate. Native Codex trust is only catalogue metadata plus the default `trustedOnly` filter. It never grants Codexify access to a path outside `--work-dir`, and an explicit catalogue entry does not widen that boundary either.
 
 `list_projects` returns a selector relative to the access root, which can be passed unchanged as `set_project_root.path`. Its optional query matches names, aliases, descriptions, and selectors case-insensitively with deterministic exact/prefix/substring ranking. The tool never binds automatically. If several results remain plausible, the agent instructions require asking the user rather than guessing, because a wrong binding cannot be changed in that conversation.
 
@@ -905,15 +896,15 @@ refs/codexify/review/<project-hash>/<conversation-hash>/project-open
 refs/codexify/review/<project-hash>/<conversation-hash>/last-review
 ```
 
-The raw conversation identifier is never written. The refs survive MCP reconnects and Codexify restarts. Generic MCP clients receive transport-local in-memory checkpoints instead. Each conversation/project pair retains only its current two referenced snapshots; superseded synthetic commits are ordinary Git-GC candidates. To inspect or remove old conversation refs manually, use `git for-each-ref refs/codexify/review/` and `git update-ref -d <ref>`. Removing both refs resets that owner to the current scoped state on its next project call.
+The raw conversation identifier is never written. The refs survive MCP reconnects and Codexify restarts. Generic MCP clients receive transport-local in-memory checkpoints instead. Each conversation/project pair retains only its current two referenced snapshots; unreferenced synthetic commits are ordinary Git-GC candidates. To inspect or remove conversation refs manually, use `git for-each-ref refs/codexify/review/` and `git update-ref -d <ref>`. Removing both refs resets that owner to the current scoped state on its next project call.
 
-Codexify also advertises the standard MCP Apps extension and serves a self-contained resource at `ui://codexify/review/v3/mcp-app.html`. Compatible ChatGPT developer connectors render `show_changes` as a file, statistic and patch card from component-only result metadata. Textual hunks use GitHub-style old/new line-number gutters, full-width addition/deletion backgrounds, blue hunk headers, bundled language-aware syntax highlighting, and stronger intraline highlights; code wraps inside the card instead of requiring a horizontal scroller. Changed line numbers use the normal code color, context line numbers remain muted, and redundant per-line `+`/`-` markers are omitted. The app requests no extra host border, keeps only the review panel opaque while leaving the surrounding iframe canvas transparent, and begins directly with the collapsible file summary rather than repeating checkpoint and scope metadata above it. No separate web service or public app publication is needed; clients that ignore MCP Apps metadata receive only the concise ordinary text result. Checkpoint advancement completes before that result is returned and does not wait for user interaction. The card remains independently interactive while the model continues, and its overall disclosure, expanded file diffs, and larger-file-list state are persisted as private ChatGPT widget state so an iframe remount restores them. The v2 and prior unversioned resource URIs remain readable, and the widget retains a structured-content fallback solely so historical cards created before component-only review metadata can still remount; current `show_changes` results never populate that model-visible field. The card updates at the `show_changes` tool-call boundary—it is not a continuous filesystem watcher.
+Codexify advertises the standard MCP Apps extension and serves a self-contained review resource at `ui://codexify/review/v3/mcp-app.html`. Compatible ChatGPT developer connectors render `show_changes` as an interactive GitHub-style file/statistic/patch card from component-only result metadata, while other clients receive the concise text result. Expansion state is persisted as private widget state. Checkpoint advancement completes before the result is returned, and the card updates at the `show_changes` tool-call boundary rather than continuously watching the filesystem.
 
 ## Context and memory
 
-Codex runs against a large context window and keeps its session in a process you control. ChatGPT Web does neither: the window is smaller than most real tasks, and when it fills — or when you open a new chat — the plan and everything learned along the way are gone, with no sign to the model that they ever existed. Codexify attacks both halves of that.
+Codexify bounds model-visible tool output and persists task state so long-running work can continue across context limits and conversations.
 
-**Spend the window on less.** Every non-self-managed tool result passes through a 10,000-token model-output ceiling by default. The policy covers both textual `content` and model-visible `structuredContent`; component-only result `_meta` remains outside model context. File and list tools still stop at their semantic paging boundaries and name the argument that continues from where they stopped:
+**Spend the window on less.** Every non-self-managed tool result passes through a 10,000-token model-output ceiling by default. The policy covers both textual `content` and model-visible `structuredContent`; component-only result `_meta` remains outside model context. File and list tools stop at their semantic paging boundaries and name the argument that continues from where they stopped:
 
 ```
 (showing lines 1-1000 of 4820 — call again with offset=1000 for the rest)
@@ -933,11 +924,11 @@ The division of labour is worth keeping straight: `AGENTS.md` is what is true of
 
 ## Acting as a Codex agent
 
-A tool list says what a model *can* do; it says nothing about how a careful engineer uses it. Codex closes that gap with a system prompt, and so does this bridge — the behavioural half of `codex-rs/core/gpt-5.2-codex_prompt.md` is ported into the server's `instructions`.
+A tool list says what a model *can* do; the server's `instructions` add the operating rules for how to use those tools. The agent brief is derived from `codex-rs/core/gpt-5.2-codex_prompt.md`.
 
 That brief is what stops the client rewriting a file it never read, reverting your uncommitted work, reaching for `git reset --hard`, or making a one-step plan. It carries Codex's editing constraints (ASCII by default, comments only where they earn their place, `apply_patch` over rewrites, and the dirty-worktree rules in full), its planning rules, its code-review posture, and its habit of reporting back concisely without pasting files you already have on disk.
 
-The `initialize` response layers Codex's four in Codex's own order, each outranking the one above it, plus one Codex has no need for:
+The `initialize` response layers these sources in precedence order:
 
 1. **The agent brief** — how to behave.
 2. **The environment** — OS, shell, work directory, command policy.
@@ -945,7 +936,7 @@ The `initialize` response layers Codex's four in Codex's own order, each outrank
 4. **The skill catalogue** — what this project and this user already know how to do, when any is installed. See [Skills](#skills).
 5. **`AGENTS.md`** — the project speaking for itself, behind the `--- project-doc ---` marker.
 
-Three parts of Codex's prompt are deliberately dropped. Its `rg` preference is redundant here, since `grep` and `glob` are tools that behave the same on every OS. Its final-answer style rules and clickable file-reference syntax both exist to drive a terminal renderer, and an MCP client renders markdown — importing them would produce CLI-flavoured output in a chat window. What those sections were *for* — brevity, not dumping files, relaying output the user cannot see — is kept.
+CLI-renderer-specific prompt rules are omitted: search is already exposed through `grep`/`glob`, and MCP clients render their own markdown and file references.
 
 ### Starting a chat
 
@@ -1003,7 +994,7 @@ Only project identity is conversation-persistent. A live `exec_command` process 
 
 ## Shells and the host
 
-Windows, macOS and Linux are all supported natively; there is no WSL or POSIX-emulation layer in between. Which shell runs is decided by name, not by host platform, the same way Codex's `Shell::derive_exec_args` does it:
+Windows, macOS and Linux are supported natively. Which shell runs is decided by name, not by host platform:
 
 | Shell | Invoked as |
 |-------|------------|
@@ -1023,7 +1014,7 @@ Because the resolved shell decides what a command should even look like, it is p
 
 ## AGENTS.md
 
-A project's `AGENTS.md` is how it tells an agent its own conventions — which test command to run, which files not to touch, how commits should look. Codex reads it before the first turn; so does this bridge, using the same algorithm as `codex-rs/core/src/agents_md.rs`.
+A project's `AGENTS.md` tells the agent its conventions — which test command to run, which files not to touch, how commits should look. Codexify discovers it using the algorithm from `codex-rs/core/src/agents_md.rs`.
 
 In single-project mode, discovery walks up from `--work-dir` to the nearest directory holding a **root marker** (`.git` by default), then collects **one doc per directory on the way back down**, so a monorepo's root conventions arrive before the ones belonging to the subdirectory you pointed the server at. In multi-project mode the selected directory is treated as the exact project root and discovery never reads an access-root parent, preventing instructions from one sibling project or the common parent from leaking into another session. In each directory considered, `AGENTS.override.md` wins over `AGENTS.md`, which wins over anything in `projectDoc.fallbackFilenames`. The files are concatenated outermost-first under a **shared 32 KiB budget**, counted in bytes rather than characters; a file that runs past what is left is cut there and reported as truncated, and whitespace-only files are skipped without spending any of it. If no marker is found anywhere above in single-project mode, only the work directory itself is checked.
 
@@ -1036,7 +1027,7 @@ Instructions are built per MCP session, so editing `AGENTS.md` takes effect on t
 
 ## Skills
 
-`AGENTS.md` says what is true of the project always. A **skill** says how to do one recurring task well — cut a release, review a PR the way this team reviews PRs, debug the flaky suite — and is only read when that task comes up. Codex has had them since its extension crate landed; Codexify ports the format and the discovery, from `codex-rs/ext/skills` and `codex-rs/skills`.
+`AGENTS.md` says what is true of the project always. A **skill** says how to do one recurring task well — cut a release, review a PR the way this team reviews PRs, debug the flaky suite — and is only read when that task comes up. Codexify uses the `SKILL.md` format and discovery model from `codex-rs/ext/skills` and `codex-rs/skills`.
 
 A skill is a directory holding a `SKILL.md` whose YAML frontmatter names it and says when it applies:
 
@@ -1081,19 +1072,19 @@ Discovery runs per MCP session, so adding a skill takes effect on the next conne
 
 ## Bridging other MCP servers
 
-Codexify can also act as an **MCP aggregator**: it connects to local stdio or remote Streamable HTTP MCP servers as a client and materializes their complete paginated `tools/list` catalogues at startup. Catalogue ownership and model exposure are separate. A server can keep its transitive tools private behind a fixed progressive-disclosure surface, expose each tool directly, or use the older one-tool gateway.
+Codexify can also act as an **MCP aggregator**: it connects to local stdio or remote Streamable HTTP MCP servers as a client and materializes their complete paginated `tools/list` catalogues at startup. Catalogue ownership and model exposure are separate. A server can keep its transitive tools private behind a fixed progressive-disclosure surface, expose each tool directly, or use a one-tool gateway.
 
 ### Exposure modes and defaults
 
 | `mode` | Default provenance | Downstream exposure |
 |--------|--------------------|---------------------|
 | `"catalog"` | Servers automatically imported from Codex `config.toml` or the Codex CLI/plugin catalogue | The complete filtered catalogue stays private. All catalog-mode sources share four fixed tools: `mcp_list_sources`, `mcp_search_tools`, `mcp_get_tool`, and `mcp_call_tool` |
-| `"direct"` | A standalone entry declared only in `codex.config.json.mcpServers` | Every selected upstream tool becomes `<server>__<tool>`, preserving the historical bridge behavior |
-| `"gateway"` | Never implicit; explicit compatibility opt-in only | The server becomes one `{ function, arguments }` dispatcher plus a generated skill containing every function schema |
+| `"direct"` | A standalone entry declared only in `codex.config.json.mcpServers` | Every selected upstream tool becomes `<server>__<tool>` |
+| `"gateway"` | Never implicit; explicit opt-in only | The server becomes one `{ function, arguments }` dispatcher plus a generated skill containing every function schema |
 
-The default is based on **provenance**, not a brittle tool-count threshold. Automatically imported Codex/plugin servers use catalog mode even when they expose only a few tools. Standalone explicit entries remain direct by default for backward compatibility. An explicit entry that overlays an imported server inherits that imported provenance; set `mode` in the overlay to choose another exposure deliberately.
+The default is based on **provenance**, not a tool-count threshold. Automatically imported Codex/plugin servers use catalog mode even when they expose only a few tools. Standalone explicit entries use direct mode by default. An explicit entry that overlays an imported server inherits that imported provenance; set `mode` in the overlay to choose another exposure.
 
-To restore the pre-catalog behavior for an imported server:
+To expose every imported tool directly:
 
 ```json
 {
@@ -1120,7 +1111,7 @@ To keep a standalone explicit server out of the connector capability catalogue:
 
 ### Automatic discovery from Codex
 
-Codexify always has a standalone fallback: it reads `$CODEX_HOME/config.toml` when `CODEX_HOME` is set, otherwise `~/.codex/config.toml`. The file is read only; Codexify never rewrites it. This direct parser imports user-configured MCP servers without requiring a `codex` executable. MCP-server import intentionally does not reproduce Codex's project-local configuration layers or use project trust decisions; [project catalogue discovery](#project-catalogue-semantics) is a separate consumer of the same user-level file.
+Codexify reads `$CODEX_HOME/config.toml` when `CODEX_HOME` is set, otherwise `~/.codex/config.toml`. The file is read only. This parser imports user-configured MCP servers without requiring a `codex` executable. MCP-server import does not apply Codex's project-local configuration layers or project trust decisions; [project catalogue discovery](#project-catalogue-semantics) is a separate consumer of the same user-level file.
 
 For each `[mcp_servers.<name>]` entry, Codexify imports the fields it can preserve:
 
@@ -1128,7 +1119,7 @@ For each `[mcp_servers.<name>]` entry, Codexify imports the fields it can preser
 - local `env_vars`, resolved from Codexify's process environment;
 - `url` for Streamable HTTP;
 - `bearer_token_env_var`, `http_headers`, and `env_http_headers` for HTTP authentication and request headers;
-- `startup_timeout_sec` (or legacy `startup_timeout_ms`) and `tool_timeout_sec`;
+- `startup_timeout_sec`, `startup_timeout_ms`, and `tool_timeout_sec`;
 - `enabled = false` as a disabled upstream;
 - `enabled_tools` as an allow-list and `disabled_tools` as a deny-list applied afterwards.
 
@@ -1136,7 +1127,7 @@ By default, Codexify also tries `codex mcp list --json`. Servers present in Code
 
 When the CLI is missing, fails, times out, or returns incompatible JSON, normal startup continues with the direct `config.toml` result and prints a warning that plugin-provided MCP servers may be missing. Pass `--codex-cli` to make successful CLI discovery mandatory instead; the same condition then becomes a startup error. Set `"codexMcp": { "useCli": false }` to suppress CLI invocation while retaining direct config parsing.
 
-Non-local execution environments remain unsupported: Codexify itself opens the HTTP connection and cannot delegate header resolution or stdio launch into a Codex executor. `http_headers_helper` is also unsupported. Other Codex-only fields are ignored explicitly: the startup report names those fields, but never prints header values, environment values, or bearer tokens. A missing or unreadable Codex config does not prevent CLI-discovered or explicitly declared `codex.config.json` servers from loading.
+Non-local execution environments are unsupported: Codexify itself opens the HTTP connection and cannot delegate header resolution or stdio launch into a Codex executor. `http_headers_helper` is also unsupported. Other Codex-only fields are ignored explicitly: the startup report names those fields, but never prints header values, environment values, or bearer tokens. A missing or unreadable Codex config does not prevent CLI-discovered or explicitly declared `codex.config.json` servers from loading.
 
 Disable discovery while retaining explicit upstreams with:
 
@@ -1157,7 +1148,7 @@ To keep direct Codex config import but never start the Codex CLI:
 
 ### Explicit servers and overrides
 
-The `mcpServers` map in `codex.config.json` remains supported. A local entry is a stdio command that Codexify launches and drives over stdin/stdout. Because this entry is standalone and has no `mode`, it uses direct exposure:
+The `mcpServers` map in `codex.config.json` declares explicit upstream servers. A local entry is a stdio command that Codexify launches and drives over stdin/stdout. A standalone entry with no `mode` uses direct exposure:
 
 ```json
 {
@@ -1229,7 +1220,7 @@ An upstream that fails to launch, connect, authenticate, or answer is skipped; i
 
 ### Catalog mode (default for automatic imports)
 
-Catalog mode is the closest architecture an MCP-only bridge can provide to Codex's deferred tool exposure. Codexify still discovers and stores every filtered upstream definition internally, but downstream `tools/list` receives only a small fixed surface:
+Catalog mode keeps every filtered upstream definition private while downstream `tools/list` receives only a small fixed surface:
 
 | Tool | Contract |
 |------|----------|
@@ -1238,7 +1229,7 @@ Catalog mode is the closest architecture an MCP-only bridge can provide to Codex
 | `mcp_get_tool` | Return one exact upstream tool definition, including its separate model-facing ID and raw name, title, description, input/output schemas, annotations, icons, and `_meta` |
 | `mcp_call_tool` | Invoke the selected source/tool ID with an `arguments` object. Dispatch resolves the original server and raw tool name exactly |
 
-A typical agent flow is `mcp_list_sources` once when it needs to learn the available systems, `mcp_search_tools` with task-specific terminology, `mcp_get_tool` for the selected match when its exact schema or side-effect metadata matters, then `mcp_call_tool`. Search returns compact summaries rather than every schema, so a 66-tool IDA server still contributes only these four fixed connector capabilities.
+A typical agent flow is `mcp_list_sources` once when it needs to learn the available systems, `mcp_search_tools` with task-specific terminology, `mcp_get_tool` for the selected match when its exact schema or side-effect metadata matters, then `mcp_call_tool`. Search returns compact summaries rather than every schema, so a 66-tool IDA server contributes only these four fixed connector capabilities.
 
 Model-facing IDs are sanitized and collision-disambiguated independently from raw names. The raw server/tool strings are never reconstructed from those IDs; dispatch uses the stored originals. This matters for names such as `rename-function` and `rename_function`, which can normalize to the same identifier but remain distinct upstream calls.
 
@@ -1250,13 +1241,13 @@ The private catalogue is a startup snapshot. Dynamic upstream `tools/list_change
 
 ### Direct mode
 
-With `"mode": "direct"`, each upstream tool becomes a `BridgedTool` named `<server>__<tool>` (sanitized to `[A-Za-z0-9_]`, so `remote-exec` becomes `remote_exec__exec`). Calls use the tool's stored **raw upstream name**, not the downstream identifier. Input/output schemas, title, annotations, icons, and `_meta` are preserved in downstream `tools/list`; text, images, structured content, error state, and result metadata pass through on calls. A downstream name colliding with a native or previously registered tool is skipped with a warning.
+With `"mode": "direct"`, each upstream tool becomes a `BridgedTool` named `<server>__<tool>` (sanitized to `[A-Za-z0-9_]`, so `remote-exec` becomes `remote_exec__exec`). Calls use the tool's stored **raw upstream name**, not the downstream identifier. Input/output schemas, title, annotations, icons, and `_meta` are preserved in downstream `tools/list`; text, images, structured content, error state, and result metadata pass through on calls. A downstream name colliding with a native or already registered tool is skipped with a warning.
 
-Direct mode is the strongest compatibility option, but it intentionally places every selected schema in the connector capability catalogue. Use `tools`/`disabledTools` to curate it when full exposure is unnecessary.
+Direct mode places every selected schema in the connector capability catalogue. Use `tools`/`disabledTools` to curate it when full exposure is unnecessary.
 
 ### Gateway mode
 
-**`mode: "gateway"`** retains the earlier compact compatibility mechanism: a whole server becomes one dispatcher tool plus a generated skill.
+**`mode: "gateway"`** exposes a whole server as one dispatcher tool plus a generated skill.
 
 ```json
 {
@@ -1268,7 +1259,7 @@ Direct mode is the strongest compatibility option, but it intentionally places e
 }
 ```
 
-When `remote-exec` was imported from Codex, that overlay is sufficient; include its launch fields when it exists only in `codex.config.json`. Gateway mode registers one sanitized tool named `remote_exec` taking `{ "function": "<name>", "arguments": { ... } }`, and generates a skill (`skills_read name="remote-exec"`) documenting every raw function and argument schema. An 84-tool server therefore shows up as one tool plus one skill. This mode does not provide ranked search, exact per-tool metadata retrieval, or per-tool connector approval semantics; catalog mode is the preferred compact architecture for new configurations.
+For an upstream imported from Codex, the overlay alone is sufficient; an upstream declared only in `codex.config.json` also needs its launch fields. Gateway mode registers one sanitized tool named `remote_exec` taking `{ "function": "<name>", "arguments": { ... } }`, and generates a skill (`skills_read name="remote-exec"`) documenting every raw function and argument schema. An 84-tool server therefore shows up as one tool plus one skill. This mode does not provide ranked search, exact per-tool metadata retrieval, or per-tool connector approval semantics; catalog mode provides those capabilities with the same compact connector surface.
 
 ### Common transport and filtering behavior
 
@@ -1279,9 +1270,9 @@ When `remote-exec` was imported from Codex, that overlay is sufficient; include 
 - `startupTimeoutSec` bounds initialization plus complete paginated `tools/list`; the default is 20 seconds.
 - `toolTimeoutSec` bounds each forwarded call and sends MCP cancellation when the limit expires.
 - `type` is inferred: `command` means `"stdio"`, while `url` means Streamable HTTP. Explicit HTTP aliases `"http"`, `"streamable-http"`, and `"streamable_http"` are accepted.
-- Legacy SSE and WebSocket transports are rejected explicitly because current Codex supports stdio and Streamable HTTP, not those legacy protocols.
+- SSE and WebSocket transports are rejected; supported upstream transports are stdio and Streamable HTTP.
 
-OAuth authorization-code login and credential persistence are not implemented by this bridge. An OAuth-protected upstream must therefore be supplied a usable bearer token through `bearerTokenEnvVar` or an environment-backed `Authorization` header. Upstream MCP resources, resource templates, and prompts remain separate capability work: Codexify's native exported-file resources are resolved locally, but resource links returned by a bridged server are not proxied through that server. Catalog mode reports upstream initialization instructions as source metadata, but does not inject them into Codexify's own initialization instructions.
+OAuth authorization-code login and credential persistence are not implemented by this bridge. An OAuth-protected upstream must therefore be supplied a usable bearer token through `bearerTokenEnvVar` or an environment-backed `Authorization` header. Upstream MCP resources, resource templates, and prompts are separate capability work: Codexify's native exported-file resources are resolved locally, but resource links returned by a bridged server are not proxied through that server. Catalog mode reports upstream initialization instructions as source metadata, but does not inject them into Codexify's own initialization instructions.
 
 If your server doesn't show up, **check the banner first** — the most common cause is a wrong `command` path.
 
@@ -1316,7 +1307,7 @@ Native tunnel mode ignores `allowedHosts` and forces the accepted authorities to
 ## Security
 
 - **Path traversal prevention**: every filesystem tool — including `apply_patch` and `view_image` — resolves paths through a guard that rejects anything outside the active project root. In multi-project mode, both catalogue discovery and `set_project_root` canonicalize the configured access root and candidate directory, so `..` and symlinks cannot expose or bind a project outside the access root.
-- **Stable server-config authority**: the implicit config is user-scoped at `~/.codexify/codex.config.json`, so changing the launch directory does not normally change command, MCP-server, network, tunnel, or worktree policy. `--config` and `CODEXIFY_CONFIG` remain explicit overrides. The old `./codex.config.json` behavior is retained only as a warned compatibility fallback when no user config exists.
+- **Stable server-config authority**: the implicit config is user-scoped at `~/.codexify/codex.config.json`, so changing the launch directory does not normally change command, MCP-server, network, tunnel, or worktree policy. `--config` and `CODEXIFY_CONFIG` are explicit overrides; `./codex.config.json` is the final file-based fallback before built-in defaults.
 - **Bounded GitHub cloning and target fetching**: URL-based project selection accepts only normalized HTTPS/SSH repository roots plus HTTPS branch, PR, and full commit URLs on `github.com`. It separates owner/repository identity from the exact checkout target, rejects embedded credentials, unsupported subpages, and non-GitHub/insecure transports, and disables interactive Git credential prompts. The configured clone directory is canonicalized inside the access root at startup and revalidated at use time. Resolution uses per-repository cross-process locks, bounded subprocess timeouts, private temporary clone destinations, remote verification, exact branch/PR refspecs or full commit object IDs, and collision refusal. Existing source checkouts are fetched without moving `HEAD`; a conversation already bound to another selection is rejected before the network/disk side effect.
 - **Host-authorized native-file ingress**: `import_host_file` accepts only ChatGPT's declared native-file object, rejects local source paths, constrains the download URL and every redirect hop to the configurable `artifactIngress.allowedHosts` allowlist (default `"*"`, which admits any public HTTPS host but never a loopback, private, link-local, unique-local, CGNAT, `localhost`, or metadata address), ignores ambient proxy credentials, and enforces whole-request, idle, size and concurrency limits. Its signed URL and file ID are never logged or returned: RMCP debug/trace payload logging is unconditionally suppressed even when `RUST_LOG` requests it. Destination publication uses a capability-confined directory handle, canonical-path and file-identity revalidation, a private partial file, SHA-256, and atomic no-overwrite linking so traversal, moved roots, symlink escapes, partial visibility and replacement races fail closed.
 - **Bounded native-file egress**: `export_host_file` accepts only a relative regular-file path inside the active project, opens it through a capability-confined directory handle, rejects traversal and symlink escapes, enforces `artifactEgress.maxFileBytes` before and during the read, and returns a SHA-256 receipt plus a standard MCP resource link. The link carries a random 256-bit opaque capability rather than a local path. Its immutable bytes live only in a process-wide memory cache bounded by `maxCachedBytes`, `maxReferences` and `referenceTtlMs`; expired and evicted references fail closed, and audit output records only the number of resource links, never their URIs or filenames.
