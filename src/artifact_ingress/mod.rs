@@ -410,7 +410,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let client = client(vec![BodyStep::Chunk(b"partial"), BodyStep::Stall], None);
         let config = ArtifactIngressConfig {
-            request_timeout_ms: 100,
+            request_timeout_ms: 5_000,
             idle_timeout_ms: 10,
             ..Default::default()
         };

@@ -11,7 +11,15 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Checksummed Linux, macOS, and Windows installation scripts that download the
   latest GitHub release, replace the executable under `~/.codexify/bin`, and add
   that directory to the user's shell or Windows `PATH`. The macOS installer also
-  removes the executable's quarantine attribute.
+  removes the executable's quarantine attribute. Installers register and start
+  the native per-user background service unless `CODEXIFY_SKIP_SERVICE=1` is set.
+- Native user-service management through systemd on Linux, launchd on macOS, and
+  Task Scheduler on Windows. `codexify service install|enable|disable|remove` owns
+  lifecycle state, while `codexify service logs [-f]` reads bounded rotating logs.
+  The service supervisor waits for first-run configuration, restarts failed server
+  processes with bounded backoff, and launches them with an absolute config path.
+- Top-level `workDir` configuration for unattended launches. Quickstart stores the
+  canonical absolute project path and restarts an installed service automatically.
 - Multi-project `set_project_root` now accepts HTTPS GitHub commit URLs
   (`/commit/<sha>`). Full 40-character commit IDs are fetched and selected exactly,
   using a detached clone or managed worktree without moving an existing source

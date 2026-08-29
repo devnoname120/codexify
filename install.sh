@@ -176,7 +176,8 @@ esac
 
 asset="codexify-$VERSION-$platform_os-$platform_arch.tar.gz"
 tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/codexify-install.XXXXXX")
-trap 'rm -rf "$tmp_dir"' 0 HUP INT TERM
+trap 'rm -rf "$tmp_dir"' 0
+trap 'exit 1' HUP INT TERM
 archive=$tmp_dir/$asset
 checksums=$tmp_dir/checksums.txt
 release_url=$RELEASE_ROOT/$VERSION
@@ -212,6 +213,15 @@ fi
 
 "$target" --help >/dev/null 2>&1 || fail 'the installed executable did not start successfully'
 configure_path
+
+if [ "${CODEXIFY_SKIP_SERVICE:-0}" != 1 ]; then
+    if "$target" service --help >/dev/null 2>&1; then
+        "$target" service install \
+            || fail 'the executable was installed, but the background service could not be installed; rerun with CODEXIFY_SKIP_SERVICE=1 to install without it'
+    else
+        printf 'The installed release does not provide service management; executable installation will continue.\n' >&2
+    fi
+fi
 
 printf '\nInstalled Codexify %s to %s\n' "$VERSION" "$target"
 printf 'Open a new terminal or run: export PATH="$HOME/.codexify/bin:$PATH"\n'

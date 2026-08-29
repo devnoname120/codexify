@@ -75,8 +75,32 @@ try {
     New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
     $Target = Join-Path $InstallDir 'codexify.exe'
     $Staged = Join-Path $InstallDir ('.codexify.new.' + $PID + '.exe')
+
+    if (Test-Path -LiteralPath $Target) {
+        try {
+            & $Target service disable *> $null
+        }
+        catch {
+        }
+    }
+
     Copy-Item -LiteralPath $Binaries[0].FullName -Destination $Staged -Force
-    Remove-Item -LiteralPath $Target -Force -ErrorAction SilentlyContinue
+    if (Test-Path -LiteralPath $Target) {
+        $Removed = $false
+        for ($Attempt = 0; $Attempt -lt 40; $Attempt++) {
+            try {
+                Remove-Item -LiteralPath $Target -Force
+                $Removed = $true
+                break
+            }
+            catch {
+                Start-Sleep -Milliseconds 250
+            }
+        }
+        if (-not $Removed) {
+            throw "Could not replace $Target; stop the Codexify service and try again"
+        }
+    }
     Move-Item -LiteralPath $Staged -Destination $Target
 
     & $Target --help *> $null
@@ -94,6 +118,19 @@ try {
     }
     if (-not (($env:Path -split ';') | Where-Object { [Environment]::ExpandEnvironmentVariables($_).TrimEnd('\') -ieq $InstallDir.TrimEnd('\') })) {
         $env:Path = "$InstallDir;$env:Path"
+    }
+
+    if ($env:CODEXIFY_SKIP_SERVICE -ne '1') {
+        & $Target service --help *> $null
+        if ($LASTEXITCODE -eq 0) {
+            & $Target service install
+            if ($LASTEXITCODE -ne 0) {
+                throw 'The executable was installed, but the background service could not be installed. Set CODEXIFY_SKIP_SERVICE=1 to install without it.'
+            }
+        }
+        else {
+            Write-Warning 'The installed release does not provide service management; executable installation will continue.'
+        }
     }
 
     Write-Host "Installed Codexify $Version to $Target"

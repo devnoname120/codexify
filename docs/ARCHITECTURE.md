@@ -346,8 +346,9 @@ completion so reviews cannot capture an in-process write halfway through.
 The fully-resolved config handed to every tool. `config.rs` selects one JSON file
 from explicit `--config`, `CODEXIFY_CONFIG`, the user-level
 `~/.codexify/codexify.config.json`, or built-in defaults, in that order. It parses
-camelCase fields, imports
-user-level Codex MCP definitions through `codex_mcp.rs`, opportunistically adds
+camelCase fields and resolves the active project from CLI `--work-dir` or the
+config's absolute `workDir`. It imports user-level Codex MCP definitions through
+`codex_mcp.rs`, opportunistically adds
 plugin-provided entries from the Codex CLI's effective catalogue, then applies
 explicit `mcpServers` entries as field overlays. Optional sub-configs (`projectDoc`,
 `projectCatalog`, `output`, `review`, `artifactIngress`, `artifactEgress`, `worktrees`,
@@ -375,18 +376,36 @@ testable line-oriented wizard for ordinary prompts and terminal-hidden input for
 the runtime API key. Without an explicit CLI or environment override, it writes
 `~/.codexify/codexify.config.json` and its generated launch command relies on normal
 user-config discovery rather than adding `--config`. The wizard canonicalizes the
-project directory, validates the tunnel credentials with the same helpers as normal
-startup, merges only the managed fields into the existing JSON object, and stores
-the key outside the project behind an absolute `file:` reference. Config and
+project directory, stores it as absolute `workDir`, validates the tunnel credentials
+with the same helpers as normal startup, merges only the managed fields into the
+existing JSON object, and stores the key outside the project behind an absolute
+`file:` reference. Config and
 credential replacement use temporary files in the destination directory. Once
-setup is complete, the same process can pass the selected work directory through
-`load_config`; normal config discovery reselects the file the wizard just wrote
-before entering the ordinary supervised server lifecycle. There is no separate
-quickstart runtime.
+setup is complete, quickstart either restarts an installed native service with the
+selected config or passes the selected work directory through `load_config` before
+entering the foreground server lifecycle.
 The wizard does not expose the advanced `conversationAuthToken` policy as an
 onboarding choice. If an existing config already contains a valid token, it
 preserves the token, protects the config as a private file on Unix, and prints the
 one-line instruction needed by an individual chat or ChatGPT Project.
+
+### Native user service (`service.rs`)
+
+The public `service install|enable|disable|remove|logs` commands manage one
+per-user native definition: a systemd user unit on Linux, a launchd agent on
+macOS, or an at-logon Scheduled Task on Windows. Installation stores the current
+executable path and the selected config path as absolute arguments. The hidden
+`service run` command is the native manager's entry point.
+
+The service runner does not construct a second server configuration. It waits if
+the selected file does not exist, then starts the ordinary Codexify executable
+with `--config <absolute-path>`. Child stdout and stderr are serialized into a
+private 10 MiB log with five numbered generations. Child failures use bounded
+exponential restart backoff; systemd, launchd, and Task Scheduler separately
+restart the runner if the runner itself fails. On shutdown, the runner terminates
+the server process group/tree before exiting. Windows children are assigned to a
+kill-on-close Job Object so Task Scheduler termination cannot orphan the server
+or its descendants.
 
 ---
 
@@ -512,6 +531,7 @@ the original order and rejects duplicate names.
 | `apply_patch.rs` | The Codex patch format: parse then apply, atomically, with fuzzy context matching and CRLF preservation. |
 | `memory.rs` | Working memory outside the repo, keyed by a hash of the normalized active root, with `O_EXCL` locking and atomic writes. In multi-project mode, a configured `memory.dir` is a base containing one hashed child per project. |
 | `quickstart.rs` | Interactive first-install wizard for project scope, native tunnel credentials, JSON config merging, preservation of preconfigured advanced conversation authorization, and the ChatGPT developer-mode connector handoff. |
+| `service.rs` | Per-user systemd, launchd, and Windows Task Scheduler definitions; service lifecycle commands; bounded child restart supervision; private rotating stdout/stderr logs; and `service logs [-f]`. |
 | `openai_tunnel.rs` | Verified installation and lifecycle supervision for OpenAI's outbound Secure MCP Tunnel runtime. |
 | `process_env.rs` | Child-process environment boundaries: isolate the tunnel runtime and remove tunnel credentials from model-controlled and upstream subprocesses. |
 | `project_doc.rs` | `AGENTS.md` discovery from project root down to the work dir under a byte budget. Multi-project mode treats the selected directory as the exact project root and never walks into the common access-root parent. |
@@ -712,10 +732,13 @@ The server selects configuration from `--config`, then `CODEXIFY_CONFIG`, then
 `~/.codexify/codexify.config.json`. If no selected file exists, built-in defaults
 are used. Relative explicit paths resolve from the startup directory, and the
 startup banner prints the exact source. `quickstart` writes the user-level path by
-default. All fields are optional.
+default. All fields are optional, but server startup requires either CLI
+`--work-dir` or an absolute config `workDir`; native service launches use the
+latter.
 
 ```jsonc
 {
+  "workDir": "/absolute/path/to/project", // required when --work-dir is omitted
   "port": 3000,
   "apiKey": "…",                      // or --api-key; bearer token
   "conversationAuthToken": "0123456789abcdef…", // exactly 64 lowercase hex characters

@@ -123,7 +123,9 @@ published SHA-256 checksums, and replaces the executable under
 `~/.codexify/bin`. On Unix it adds that directory to every recognized existing
 shell profile and creates the active shell's profile when needed. On Windows it
 updates the persistent user `PATH`. The macOS installer removes the executable's
-`com.apple.quarantine` attribute after installation.
+`com.apple.quarantine` attribute after installation. It also installs and starts
+the per-user Codexify background service. Set `CODEXIFY_SKIP_SERVICE=1` in the
+installer process to install only the executable and `PATH` entry.
 
 ### Interactive setup (recommended for a first install)
 
@@ -151,9 +153,10 @@ The runtime key is entered without terminal echo and stored in a dedicated
 per-tunnel file under `~/.codexify/openai-tunnel/credentials/`. On Unix, the
 wizard restricts the credential directory and file to the current user.
 The wizard writes `~/.codexify/codexify.config.json` by default; that file receives
-only a `file:` reference, and unrelated existing JSON settings are preserved. At
-the end, the wizard can start Codexify immediately so ChatGPT can scan the live
-connector. Keep that process running while using the connector.
+the absolute `workDir`, a `file:` reference to the runtime key, and the selected
+project mode; unrelated JSON settings are preserved. When the background service
+is installed, quickstart updates its definition and restarts it with this config.
+Otherwise, the wizard offers to start Codexify in the current terminal.
 
 When an existing config already contains `conversationAuthToken`, quickstart
 preserves it, restricts the config file to the current user on Unix, and prints the
@@ -174,6 +177,7 @@ by the wizard.
 
    ```json
    {
+     "workDir": "/absolute/path/to/your/project",
      "openaiTunnel": {
        "tunnelId": "tunnel_0123456789abcdef0123456789abcdef",
        "apiKeyRef": "env:CONTROL_PLANE_API_KEY"
@@ -282,7 +286,12 @@ Each release ships a compiled binary per platform — `windows-x64`, `linux-x64`
 
 | Command | Description |
 |---------|-------------|
-| `quickstart` | Interactively configure the project scope, native OpenAI tunnel credentials, JSON config, and ChatGPT developer-mode connector; optionally start the server when setup is complete |
+| `quickstart` | Interactively configure the project scope, native OpenAI tunnel credentials, JSON config, and ChatGPT developer-mode connector; restart the installed service or optionally start a foreground server |
+| `service install` | Install, enable, and start the native per-user service using the selected absolute config path |
+| `service enable` | Enable and start an installed service |
+| `service disable` | Stop and disable the installed service |
+| `service remove` | Stop and remove the installed service definition |
+| `service logs [-f]` | Print the latest service log lines; `-f` follows new output |
 
 `quickstart` writes `~/.codexify/codexify.config.json` by default. It accepts
 `--config <PATH>` (or `CODEXIFY_CONFIG`) to select another file and
@@ -292,7 +301,7 @@ Each release ships a compiled binary per platform — `windows-x64`, `linux-x64`
 
 | Flag | Required | Default | Description |
 |------|----------|---------|-------------|
-| `--work-dir` | Yes | - | Project directory for server mode, or the project access root with `--multi-project` and `projects list` |
+| `--work-dir` | Conditional | `workDir` | Project directory for server mode, or the project access root with `--multi-project` and `projects list`. Required when the config does not set `workDir` |
 | `--multi-project` | No | Disabled | Let each ChatGPT conversation bind once to a project beneath `--work-dir`; other clients fall back to transport-session binding |
 | `--project-clone-dir` | No | `--work-dir` | Existing directory beneath the multi-project access root where GitHub URLs are cloned; overrides `projectCloneDir` |
 | `--worktree-mode` | No | `auto` | Multi-project worktree policy: `auto`, `always`, or `never` |
@@ -325,6 +334,50 @@ codexify projects list --work-dir /path/to/projects --show-skipped
 ```
 
 `--show-skipped` is deliberately local-only: it prints the configured paths rejected as missing, untrusted, or outside the access root, plus duplicate entries that were merged. Normal CLI output and the MCP tool expose only aggregate warnings, so an agent does not learn absolute paths it cannot select.
+
+## Background service
+
+The installation scripts register a per-user native service and start it
+immediately. The service definition invokes the installed executable with an
+absolute config path:
+
+```text
+codexify service run --config /absolute/path/to/codexify.config.json
+```
+
+The hidden `service run` command supervises the ordinary Codexify server. It
+waits when the config file has not been created yet, restarts a failed server
+with bounded exponential backoff, and forwards stdout and stderr into
+`~/.codexify/logs/codexify.log`. The current log rotates at 10 MiB, with five
+numbered generations retained. The native service manager also restarts the
+supervisor if the supervisor itself fails. On Windows, the supervised server is
+contained in a kill-on-close Job Object so stopping the scheduled task cannot
+leave its process tree behind.
+
+| Platform | Per-user service |
+|----------|------------------|
+| Linux | systemd user unit `~/.config/systemd/user/codexify.service` |
+| macOS | launchd agent `~/Library/LaunchAgents/dev.codexify.service.plist` |
+| Windows | Task Scheduler task `Codexify`, triggered at user logon |
+
+The service uses `~/.codexify/codexify.config.json` unless `service install` is
+given an explicit path:
+
+```bash
+codexify service install
+codexify service install --config /absolute/path/to/codexify.config.json
+codexify service disable
+codexify service enable
+codexify service logs
+codexify service logs -f
+codexify service remove
+```
+
+`workDir` in the selected config must be an absolute existing directory. The
+quickstart wizard writes it and restarts an installed service automatically.
+For a manually written service config, prefer `file:/absolute/path` secret
+references because login services do not necessarily inherit variables exported
+only by an interactive shell.
 
 ## Tools
 
@@ -427,6 +480,7 @@ optional and uses camelCase names.
 
 ```json
 {
+  "workDir": "/absolute/path/to/project",
   "multiProject": false,
   "projectCloneDir": ".",
   "conversationAuthToken": null,
@@ -535,6 +589,11 @@ optional and uses camelCase names.
 ```
 
 CLI flags override values from the config file.
+
+`workDir` supplies the project directory or multi-project access root when
+`--work-dir` is omitted. It must be absolute. Background-service launches rely
+on this field because the native service definition supplies only the absolute
+config path.
 
 `conversationAuthToken` has no CLI override. A non-null value must contain exactly
 64 lowercase hexadecimal characters. Generate it with a cryptographically secure

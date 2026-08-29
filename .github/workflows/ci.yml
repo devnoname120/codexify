@@ -22,7 +22,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Validate POSIX installer
-        run: sh -n install.sh
+        run: |
+          sh -n install.sh
+          sh -n scripts/test-posix-installer.sh
+          ./scripts/test-posix-installer.sh
 
       - name: Validate PowerShell installer
         shell: pwsh
@@ -47,3 +50,23 @@ jobs:
 
       - name: Test
         run: cargo test --all
+
+  service-platforms:
+    name: Service integration (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Compile platform service integration
+        run: cargo check --all-targets
+
+      - name: Test service contracts
+        run: cargo test service

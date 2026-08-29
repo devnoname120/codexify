@@ -31,6 +31,9 @@ pub struct QuickstartArgs {
 
     /// Initial directory shown by the project-directory prompt.
     pub work_dir: Option<PathBuf>,
+
+    /// Whether a native Codexify service is already installed for this user.
+    pub service_installed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,6 +41,7 @@ pub struct QuickstartOutcome {
     pub work_dir: PathBuf,
     pub config_path: PathBuf,
     pub start_server: bool,
+    pub restart_service: bool,
 }
 
 struct QuickstartEnvironment {
@@ -252,6 +256,7 @@ where
         &mut file_config,
         &tunnel_id,
         &key_path,
+        &work_dir,
         multi_project,
         conversation_auth_token.as_deref(),
     )?;
@@ -283,26 +288,36 @@ where
     if let Some(token) = conversation_auth_token.as_deref() {
         print_conversation_auth_step(&mut wizard, token)?;
     }
-    let start_server = wizard.confirm(
-        "Start Codexify now and keep this terminal open while ChatGPT scans the connector?",
-        true,
-    )?;
-    if start_server {
+    let (start_server, restart_service) = if args.service_installed {
         writeln!(
             wizard.output,
-            "\nStarting Codexify. Wait for `OpenAI Secure MCP Tunnel: ready`, then complete the ChatGPT steps above."
+            "\nThe installed Codexify service will be updated and restarted with this configuration."
         )?;
+        (false, true)
     } else {
-        writeln!(
-            wizard.output,
-            "\nRun the launch command above before scanning or using the connector."
+        let start_server = wizard.confirm(
+            "Start Codexify now and keep this terminal open while ChatGPT scans the connector?",
+            true,
         )?;
-    }
+        if start_server {
+            writeln!(
+                wizard.output,
+                "\nStarting Codexify. Wait for `OpenAI Secure MCP Tunnel: ready`, then complete the ChatGPT steps above."
+            )?;
+        } else {
+            writeln!(
+                wizard.output,
+                "\nRun the launch command above before scanning or using the connector."
+            )?;
+        }
+        (start_server, false)
+    };
 
     Ok(QuickstartOutcome {
         work_dir,
         config_path,
         start_server,
+        restart_service,
     })
 }
 
@@ -645,6 +660,7 @@ fn merge_tunnel_config(
     config: &mut Map<String, Value>,
     tunnel_id: &str,
     key_path: &Path,
+    work_dir: &Path,
     multi_project: bool,
     conversation_auth_token: Option<&str>,
 ) -> anyhow::Result<()> {
@@ -658,6 +674,15 @@ fn merge_tunnel_config(
     tunnel.insert(
         "apiKeyRef".to_string(),
         Value::String(format!("file:{}", key_path.display())),
+    );
+    config.insert(
+        "workDir".to_string(),
+        Value::String(
+            work_dir
+                .to_str()
+                .context("project directory must be valid UTF-8 to store it as workDir")?
+                .to_string(),
+        ),
     );
     config.insert("multiProject".to_string(), Value::Bool(multi_project));
     match conversation_auth_token {
@@ -900,6 +925,7 @@ mod tests {
             config,
             config_explicit: true,
             work_dir: Some(work_dir.to_path_buf()),
+            service_installed: false,
         }
     }
 
@@ -1030,6 +1056,7 @@ mod tests {
         );
         let outcome = result.unwrap();
         assert!(!outcome.start_server);
+        assert!(!outcome.restart_service);
         assert_eq!(outcome.work_dir, fs::canonicalize(&project).unwrap());
         assert_eq!(outcome.config_path, config_path);
 
@@ -1037,6 +1064,10 @@ mod tests {
         assert_eq!(fs::read_to_string(&key_path).unwrap().trim(), RUNTIME_KEY);
         let config: Value =
             serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+        assert_eq!(
+            config["workDir"],
+            json!(fs::canonicalize(&project).unwrap())
+        );
         assert_eq!(config["multiProject"], json!(false));
         assert!(config.get("conversationAuthToken").is_none());
         assert_eq!(config["openaiTunnel"]["tunnelId"], json!(TUNNEL_ID));
@@ -1113,6 +1144,7 @@ mod tests {
         );
         let outcome = result.unwrap();
         assert!(!outcome.start_server);
+        assert!(!outcome.restart_service);
         assert!(output.contains("valid stored runtime key already exists"));
         assert_eq!(fs::read_to_string(&key_path).unwrap().trim(), RUNTIME_KEY);
 
@@ -1120,6 +1152,10 @@ mod tests {
             serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
         assert!(config.get("apiKey").is_none());
         assert_eq!(config["multiProject"], json!(true));
+        assert_eq!(
+            config["workDir"],
+            json!(fs::canonicalize(&project).unwrap())
+        );
         assert_eq!(config["conversationAuthToken"], json!(CONVERSATION_TOKEN));
         assert!(output.contains(&conversation_auth_prompt(CONVERSATION_TOKEN)));
         assert!(!output.contains("Require each new ChatGPT conversation"));
@@ -1165,6 +1201,27 @@ mod tests {
         assert!(output.contains("OpenAI tunnel API key is malformed"));
         assert!(!output.contains(invalid_key));
         assert!(!output.contains(RUNTIME_KEY));
+    }
+
+    #[test]
+    fn installed_service_is_reconfigured_without_foreground_start_prompt() {
+        let root = TempDir::new().unwrap();
+        let project = root.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+        let config_path = project.join("codexify.config.json");
+        let environment = environment(&root, &project);
+        let mut quickstart_args = args(config_path.clone(), &project);
+        quickstart_args.service_installed = true;
+        let input = format!("\n\n\n\n{TUNNEL_ID}\n");
+
+        let (result, output) =
+            run_test_wizard(quickstart_args, environment, &input, &[RUNTIME_KEY]);
+        let outcome = result.unwrap();
+        assert!(!outcome.start_server);
+        assert!(outcome.restart_service);
+        assert_eq!(outcome.config_path, config_path);
+        assert!(output.contains("service will be updated and restarted"));
+        assert!(!output.contains("Start Codexify now"));
     }
 
     #[test]

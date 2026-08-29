@@ -179,12 +179,41 @@ pub enum CliCommand {
     ///
     /// The wizard reads `--config`, CODEXIFY_CONFIG, and the global `--work-dir` option.
     Quickstart,
+    /// Manage the per-user Codexify background service.
+    Service {
+        #[command(subcommand)]
+        command: ServiceCommand,
+    },
 }
 
 #[derive(Subcommand, Debug)]
 pub enum ProjectsCommand {
     /// List selectable projects without starting the MCP server.
     List(ProjectsListArgs),
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ServiceCommand {
+    /// Install, enable, and start the background service.
+    Install,
+    /// Enable and start the installed background service.
+    Enable,
+    /// Stop and disable the installed background service.
+    Disable,
+    /// Stop and remove the background service definition.
+    Remove,
+    /// Print recent service logs.
+    Logs(ServiceLogsArgs),
+    /// Run the service supervisor under the native service manager.
+    #[command(hide = true)]
+    Run,
+}
+
+#[derive(Args, Debug)]
+pub struct ServiceLogsArgs {
+    /// Continue printing new log output until interrupted.
+    #[arg(short = 'f', long)]
+    pub follow: bool,
 }
 
 #[derive(Args, Debug)]
@@ -493,6 +522,7 @@ impl PartialMcpServerSpec {
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct FileConfig {
+    work_dir: Option<String>,
     api_key: Option<String>,
     conversation_auth_token: Option<String>,
     port: Option<u16>,
@@ -847,14 +877,24 @@ fn resolve_work_dir(raw: &str) -> PathBuf {
     }
 }
 
-fn resolve_cli_work_dir(cli: &Cli) -> Result<PathBuf, String> {
-    let raw = cli
+fn resolve_configured_work_dir(cli: &Cli, file_value: Option<&str>) -> Result<PathBuf, String> {
+    let work_dir = if let Some(raw) = cli
         .work_dir
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .ok_or_else(|| "missing required --work-dir".to_string())?;
-    let work_dir = resolve_work_dir(raw);
+    {
+        resolve_work_dir(raw)
+    } else if let Some(raw) = file_value.map(str::trim).filter(|value| !value.is_empty()) {
+        let path = PathBuf::from(raw);
+        if !path.is_absolute() {
+            return Err("workDir in codexify.config.json must be an absolute path".to_string());
+        }
+        path
+    } else {
+        return Err("missing required --work-dir or workDir in codexify.config.json".to_string());
+    };
+
     match std::fs::metadata(&work_dir) {
         Ok(metadata) if metadata.is_dir() => Ok(work_dir),
         Ok(_) => Err(format!(
@@ -1042,6 +1082,26 @@ pub fn config_path_for_quickstart(cli: &Cli) -> Result<QuickstartConfigSelection
         &current_dir,
         home.as_deref(),
     )
+}
+
+pub fn config_path_for_service(cli: &Cli) -> Result<PathBuf, String> {
+    select_config_path(cli)?
+        .path
+        .ok_or_else(|| {
+            format!(
+                "service configuration requires --config, {CODEXIFY_CONFIG_ENV}, or a user home directory"
+            )
+        })
+        .and_then(|path| {
+            if path.is_absolute() {
+                Ok(path)
+            } else {
+                Err(format!(
+                    "service config path must be absolute: {}",
+                    path.display()
+                ))
+            }
+        })
 }
 
 fn announce_loaded_config(selection: &ConfigPathSelection, path: &Path) {
@@ -1288,8 +1348,8 @@ fn resolve_audit(file: Option<PartialAudit>, cli: &Cli) -> Result<AuditConfig, S
 /// Load and merge config. Errors are returned as strings for the caller to
 /// print and exit on, mirroring the TS which validates and `process.exit`s.
 pub fn load_config(cli: Cli) -> Result<AppConfig, String> {
-    let work_dir = resolve_cli_work_dir(&cli)?;
     let mut file = load_file_config(&cli, true)?;
+    let work_dir = resolve_configured_work_dir(&cli, file.work_dir.as_deref())?;
     let project_clone_dir = resolve_project_clone_dir(
         &work_dir,
         cli.project_clone_dir.as_deref(),
@@ -1394,8 +1454,8 @@ pub fn load_config(cli: Cli) -> Result<AppConfig, String> {
 }
 
 pub fn load_project_catalog_for_cli(cli: &Cli) -> Result<ProjectCatalog, String> {
-    let work_dir = resolve_cli_work_dir(cli)?;
     let mut file = load_file_config(cli, false)?;
+    let work_dir = resolve_configured_work_dir(cli, file.work_dir.as_deref())?;
     let project_catalog = resolve_project_catalog(&mut file);
     let codex_path = if project_catalog.codex_config.enabled {
         Some(codex_config_path()?)
@@ -1522,6 +1582,49 @@ mod tests {
         let selected = select_config_path_with(None, None, &current_dir, Some(Path::new("")));
         assert_eq!(selected.source, ConfigPathSource::Defaults);
         assert!(selected.path.is_none());
+    }
+
+    #[test]
+    fn config_work_dir_supports_unattended_startup_and_cli_override() {
+        let root = tempfile::tempdir().unwrap();
+        let config_path = root.path().join("codexify.config.json");
+        let configured = root.path().join("configured");
+        let overridden = root.path().join("overridden");
+        std::fs::create_dir_all(&configured).unwrap();
+        std::fs::create_dir_all(&overridden).unwrap();
+        std::fs::write(
+            &config_path,
+            serde_json::to_vec(&json!({
+                "workDir": configured,
+                "codexMcp": { "enabled": false }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let mut from_file = cli(&overridden, &config_path);
+        from_file.work_dir = None;
+        assert_eq!(load_config(from_file).unwrap().work_dir, configured);
+
+        let from_cli = cli(&overridden, &config_path);
+        assert_eq!(load_config(from_cli).unwrap().work_dir, overridden);
+    }
+
+    #[test]
+    fn config_work_dir_must_be_absolute() {
+        let root = tempfile::tempdir().unwrap();
+        let config_path = root.path().join("codexify.config.json");
+        std::fs::write(
+            &config_path,
+            r#"{"workDir":"relative/project","codexMcp":{"enabled":false}}"#,
+        )
+        .unwrap();
+        let mut args = cli(root.path(), &config_path);
+        args.work_dir = None;
+        assert_eq!(
+            load_config(args).unwrap_err(),
+            "workDir in codexify.config.json must be an absolute path"
+        );
     }
 
     #[test]
@@ -2228,6 +2331,37 @@ mod tests {
         };
         assert_eq!(args.query.as_deref(), Some("bridge"));
         assert!(args.json);
+    }
+
+    #[test]
+    fn service_logs_cli_accepts_follow_flag() {
+        let parsed = Cli::try_parse_from(["codexify", "service", "logs", "-f"]).unwrap();
+        let Some(CliCommand::Service {
+            command: ServiceCommand::Logs(args),
+        }) = parsed.command
+        else {
+            panic!("service logs subcommand was not parsed");
+        };
+        assert!(args.follow);
+    }
+
+    #[test]
+    fn service_install_cli_accepts_global_config_after_subcommand() {
+        let parsed = Cli::try_parse_from([
+            "codexify",
+            "service",
+            "install",
+            "--config",
+            "/tmp/codexify.config.json",
+        ])
+        .unwrap();
+        assert_eq!(parsed.config.as_deref(), Some("/tmp/codexify.config.json"));
+        assert!(matches!(
+            parsed.command,
+            Some(CliCommand::Service {
+                command: ServiceCommand::Install
+            })
+        ));
     }
 
     #[test]

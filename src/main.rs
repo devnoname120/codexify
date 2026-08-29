@@ -5,8 +5,8 @@ use serde::Serialize;
 
 use anyhow::Context;
 use codexify::config::{
-    Cli, CliCommand, ProjectsCommand, ProjectsListArgs, config_path_for_quickstart, load_config,
-    load_project_catalog_for_cli,
+    Cli, CliCommand, ProjectsCommand, ProjectsListArgs, ServiceCommand, config_path_for_quickstart,
+    config_path_for_service, load_config, load_project_catalog_for_cli,
 };
 use codexify::logging;
 use codexify::project_catalog::{
@@ -15,6 +15,7 @@ use codexify::project_catalog::{
 };
 use codexify::quickstart;
 use codexify::server::start_http_server;
+use codexify::service;
 
 #[derive(Serialize)]
 struct CliProjectListOutput {
@@ -115,53 +116,69 @@ async fn main() {
     // constructed by a dependency also finds a provider.
     codexify::tls::ensure_crypto_provider();
 
-    let cli = Cli::parse();
-    if let Some(CliCommand::Projects {
-        command: ProjectsCommand::List(args),
-    }) = &cli.command
-    {
-        if let Err(error) = run_projects_list(&cli, args) {
-            eprintln!("Error: {error}");
-            std::process::exit(1);
-        }
-        return;
-    }
-
-    logging::init(cli.verbose);
-
-    if let Err(error) = run().await {
+    if let Err(error) = run(Cli::parse()).await {
         eprintln!("Error: {error:#}");
         std::process::exit(1);
     }
 }
 
-async fn run() -> anyhow::Result<()> {
-    let mut cli = Cli::parse();
+async fn run(mut cli: Cli) -> anyhow::Result<()> {
     if let Some(command) = cli.command.take() {
         match command {
+            CliCommand::Projects {
+                command: ProjectsCommand::List(args),
+            } => {
+                return run_projects_list(&cli, &args).map_err(anyhow::Error::msg);
+            }
+            CliCommand::Service { command } => {
+                return run_service(&cli, command).await;
+            }
             CliCommand::Quickstart => {
+                logging::init(cli.verbose);
                 let config = config_path_for_quickstart(&cli).map_err(anyhow::Error::msg)?;
+                let service_installed = service::is_installed().unwrap_or_else(|error| {
+                    eprintln!("Warning: could not determine service state: {error:#}");
+                    false
+                });
                 let args = quickstart::QuickstartArgs {
                     config: config.path,
                     config_explicit: config.explicit,
                     work_dir: cli.work_dir.clone().map(PathBuf::from),
+                    service_installed,
                 };
                 let outcome = quickstart::run(args)?;
+                if outcome.restart_service {
+                    return service::install(&outcome.config_path);
+                }
                 if !outcome.start_server {
                     return Ok(());
                 }
                 cli.work_dir = Some(outcome.work_dir.to_string_lossy().into_owned());
             }
-            CliCommand::Projects { .. } => {
-                // Project catalogue subcommands are dispatched in `main` before
-                // the server path is reached; there is nothing to start here.
-                return Ok(());
-            }
         }
+    } else {
+        logging::init(cli.verbose);
     }
 
     let config = load_config(cli).map_err(anyhow::Error::msg)?;
     start_http_server(config)
         .await
         .context("start Codexify server")
+}
+
+async fn run_service(cli: &Cli, command: ServiceCommand) -> anyhow::Result<()> {
+    match command {
+        ServiceCommand::Install => {
+            let config = config_path_for_service(cli).map_err(anyhow::Error::msg)?;
+            service::install(&config)
+        }
+        ServiceCommand::Enable => service::enable(),
+        ServiceCommand::Disable => service::disable(),
+        ServiceCommand::Remove => service::remove(),
+        ServiceCommand::Logs(args) => service::print_logs(args.follow).await,
+        ServiceCommand::Run => {
+            let config = config_path_for_service(cli).map_err(anyhow::Error::msg)?;
+            service::run_supervisor(config).await
+        }
+    }
 }

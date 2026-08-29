@@ -36,6 +36,7 @@ pub mod review;
 pub mod review_ui;
 pub mod safe_path;
 pub mod server;
+pub mod service;
 pub mod skills;
 pub mod tls;
 pub mod tool;
