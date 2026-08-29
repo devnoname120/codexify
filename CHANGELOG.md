@@ -8,6 +8,10 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Checksummed Linux, macOS, and Windows installation scripts that download the
+  latest GitHub release, replace the executable under `~/.codexify/bin`, and add
+  that directory to the user's shell or Windows `PATH`. The macOS installer also
+  removes the executable's quarantine attribute.
 - Multi-project `set_project_root` now accepts HTTPS GitHub commit URLs
   (`/commit/<sha>`). Full 40-character commit IDs are fetched and selected exactly,
   using a detached clone or managed worktree without moving an existing source

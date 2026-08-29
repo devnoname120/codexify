@@ -21,6 +21,24 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: Validate POSIX installer
+        run: sh -n install.sh
+
+      - name: Validate PowerShell installer
+        shell: pwsh
+        run: |
+          $tokens = $null
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path install.ps1),
+            [ref]$tokens,
+            [ref]$errors
+          ) > $null
+          if ($errors.Count) {
+            $errors | ForEach-Object { Write-Error $_ }
+            exit 1
+          }
+
       - name: Format
         run: cargo fmt --all --check
 

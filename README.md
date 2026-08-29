@@ -104,6 +104,27 @@ Dotted edges are conditional: `list_projects` and `set_project_root` appear only
 
 ## Quick start
 
+### Install the latest release
+
+Linux and macOS:
+
+```bash
+curl -q -fsSL https://raw.githubusercontent.com/devnoname120/codexify/main/install.sh | sh
+```
+
+Windows PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/devnoname120/codexify/main/install.ps1 | iex
+```
+
+The installer downloads the latest release archive, verifies it against the
+published SHA-256 checksums, and replaces the executable under
+`~/.codexify/bin`. On Unix it adds that directory to every recognized existing
+shell profile and creates the active shell's profile when needed. On Windows it
+updates the persistent user `PATH`. The macOS installer removes the executable's
+`com.apple.quarantine` attribute after installation.
+
 ### Interactive setup (recommended for a first install)
 
 Run the guided setup from an installed binary:
