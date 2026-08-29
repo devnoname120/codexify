@@ -63,6 +63,8 @@ fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
     match args.as_slice() {
         [arg] if arg == "--help" => {}
+        [migration] if migration == "migrate-legacy-install" => record("migrate"),
+        [migration, arg] if migration == "migrate-legacy-install" && arg == "--help" => {}
         [service, arg] if service == "service" && arg == "--help" => {}
         [service, action] if service == "service" && action == "install" => record("install"),
         [service, action] if service == "service" && action == "disable" => record("disable"),
@@ -132,6 +134,9 @@ fn main() {
     }
     if (@($Calls | Where-Object { $_ -eq 'disable' }).Count -ne 1) {
         throw 'Installer did not disable the existing service before replacement.'
+    }
+    if (@($Calls | Where-Object { $_ -eq 'migrate' }).Count -ne 3) {
+        throw 'Installer did not run legacy state migration after each executable replacement.'
     }
 
     $NormalizedInstallDir = [IO.Path]::GetFullPath($InstallDir).TrimEnd('\')

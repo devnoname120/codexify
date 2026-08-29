@@ -184,6 +184,9 @@ pub enum CliCommand {
         #[command(subcommand)]
         command: ServiceCommand,
     },
+    /// Migrate state from the pre-Codexify application name during installation.
+    #[command(hide = true)]
+    MigrateLegacyInstall,
 }
 
 #[derive(Subcommand, Debug)]

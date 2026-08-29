@@ -15,6 +15,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   that directory to the user's shell or Windows `PATH`. The macOS installer also
   removes the executable's quarantine attribute. Installers register and start
   the native per-user background service unless `CODEXIFY_SKIP_SERVICE=1` is set.
+- Install-time migration of legacy `~/.codex-free` state into `~/.codexify`.
+  The old `codex.config.json` is rebased onto Codexify defaults so only values
+  that differed from Codex Free defaults are carried forward, `review` settings
+  become `diff`, and state-path references are rewritten. Existing Codexify
+  config values win conflicts, conflicting legacy state files are retained, and
+  pre-rename conversation, authorization, review-checkpoint, and worktree state
+  remains addressable across the renamed hash and metadata namespaces.
 - Native user-service management through systemd on Linux, launchd on macOS, and
   Task Scheduler on Windows. `codexify service install|enable|disable|remove` owns
   lifecycle state, while `codexify service logs [-f]` reads bounded rotating logs.

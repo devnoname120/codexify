@@ -113,6 +113,17 @@ try {
         throw 'The installed executable did not start successfully'
     }
 
+    & $Target migrate-legacy-install --help *> $null
+    if ($LASTEXITCODE -eq 0) {
+        & $Target migrate-legacy-install
+        if ($LASTEXITCODE -ne 0) {
+            throw 'The executable was installed, but legacy Codex Free state migration failed.'
+        }
+    }
+    else {
+        Write-Warning 'The installed release does not provide legacy Codex Free state migration; continuing without it.'
+    }
+
     $UserPath = [Environment]::GetEnvironmentVariable('Path', 'User')
     $Entries = if ($UserPath) { @($UserPath -split ';' | Where-Object { $_ }) } else { @() }
     $Present = $Entries | Where-Object { [Environment]::ExpandEnvironmentVariables($_).TrimEnd('\') -ieq $InstallDir.TrimEnd('\') }

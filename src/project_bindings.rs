@@ -23,6 +23,10 @@ pub const OPENAI_SESSION_META_KEY: &str = "openai/session";
 
 const BINDING_VERSION: u32 = 2;
 const LEGACY_BINDING_VERSION: u32 = 1;
+const OPENAI_SESSION_HASH_DOMAIN: &[u8] = b"codexify/openai-session/v1\0";
+const LEGACY_OPENAI_SESSION_HASH_DOMAIN: &[u8] = b"codex-free/openai-session/v1\0";
+const ACCESS_ROOT_HASH_DOMAIN: &[u8] = b"codexify/access-root/v1\0";
+const LEGACY_ACCESS_ROOT_HASH_DOMAIN: &[u8] = b"codex-free/access-root/v1\0";
 const LOCK_STALE_MS: u128 = 10 * 60 * 1_000;
 const LOCK_TIMEOUT_MS: u128 = 5 * 60 * 1_000;
 const LOCK_RETRY_MS: u64 = 50;
@@ -32,6 +36,7 @@ static ATOMIC_COUNTER: AtomicU64 = AtomicU64::new(0);
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct ConversationIdentity {
     key: String,
+    legacy_key: String,
 }
 
 impl std::fmt::Debug for ConversationIdentity {
@@ -56,16 +61,18 @@ impl ConversationIdentity {
             return None;
         }
 
-        let mut hasher = Sha256::new();
-        hasher.update(b"codexify/openai-session/v1\0");
-        hasher.update(session.as_bytes());
         Some(Self {
-            key: encode_hex(&hasher.finalize(), 64),
+            key: hash_identity(OPENAI_SESSION_HASH_DOMAIN, session),
+            legacy_key: hash_identity(LEGACY_OPENAI_SESSION_HASH_DOMAIN, session),
         })
     }
 
     pub(crate) fn stable_key(&self) -> &str {
         &self.key
+    }
+
+    pub(crate) fn legacy_stable_key(&self) -> &str {
+        &self.legacy_key
     }
 
     pub fn audit_hash(&self) -> &str {
@@ -225,7 +232,7 @@ impl ProjectBindingStore {
         let binding_path = self.binding_path(&access_root, identity);
         let binding_lock = acquire_lock(&binding_path).await?;
 
-        if let Some(mut current) = self.read_binding(&binding_path, &access_root)? {
+        if let Some(mut current) = self.selected_binding(config, identity)? {
             if project_reference_matches(
                 config,
                 &reference,
@@ -373,7 +380,11 @@ impl ProjectBindingStore {
     ) -> Result<Option<ResolvedProjectBinding>, String> {
         let access_root = canonical_access_root(config)?;
         let path = self.binding_path(&access_root, identity);
-        self.read_binding(&path, &access_root)
+        if let Some(binding) = self.read_binding(&path, &access_root)? {
+            return Ok(Some(binding));
+        }
+        let legacy_path = self.legacy_binding_path(&access_root, identity);
+        self.read_binding(&legacy_path, &access_root)
     }
 
     fn scan_source_assignments(
@@ -402,35 +413,46 @@ impl ProjectBindingStore {
     }
 
     fn binding_files(&self, access_root: &Path) -> Vec<PathBuf> {
-        let directory = self.access_root_dir(access_root);
-        let Ok(entries) = std::fs::read_dir(directory) else {
-            return Vec::new();
-        };
-        entries
-            .flatten()
-            .filter_map(|entry| {
-                let path = entry.path();
-                (entry.file_type().ok()?.is_file()
-                    && path
-                        .extension()
-                        .is_some_and(|extension| extension == "json"))
-                .then_some(path)
-            })
-            .collect()
+        [
+            self.access_root_dir(access_root),
+            self.legacy_access_root_dir(access_root),
+        ]
+        .into_iter()
+        .flat_map(|directory| {
+            std::fs::read_dir(directory)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .filter_map(|entry| {
+                    let path = entry.path();
+                    (entry.file_type().ok()?.is_file()
+                        && path
+                            .extension()
+                            .is_some_and(|extension| extension == "json"))
+                    .then_some(path)
+                })
+        })
+        .collect()
     }
 
     fn access_root_dir(&self, access_root: &Path) -> PathBuf {
         self.base_dir.join(access_root_key(access_root))
     }
 
+    fn legacy_access_root_dir(&self, access_root: &Path) -> PathBuf {
+        self.base_dir.join(legacy_access_root_key(access_root))
+    }
+
     fn binding_path(&self, access_root: &Path, identity: &ConversationIdentity) -> PathBuf {
-        let mut hasher = Sha256::new();
-        hasher.update(b"codexify/access-root/v1\0");
-        hasher.update(access_root.to_string_lossy().as_bytes());
-        let access_key = encode_hex(&hasher.finalize(), 24);
         self.base_dir
-            .join(access_key)
+            .join(access_root_key(access_root))
             .join(format!("{}.json", identity.stable_key()))
+    }
+
+    fn legacy_binding_path(&self, access_root: &Path, identity: &ConversationIdentity) -> PathBuf {
+        self.base_dir
+            .join(legacy_access_root_key(access_root))
+            .join(format!("{}.json", identity.legacy_stable_key()))
     }
 
     fn assignment_path(&self, access_root: &Path, source_project_root: &Path) -> PathBuf {
@@ -876,10 +898,25 @@ fn canonical_access_root(config: &AppConfig) -> Result<PathBuf, String> {
 }
 
 fn access_root_key(access_root: &Path) -> String {
+    hash_path_key(ACCESS_ROOT_HASH_DOMAIN, access_root, 24)
+}
+
+fn legacy_access_root_key(access_root: &Path) -> String {
+    hash_path_key(LEGACY_ACCESS_ROOT_HASH_DOMAIN, access_root, 24)
+}
+
+fn hash_path_key(domain: &[u8], path: &Path, length: usize) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(b"codexify/access-root/v1\0");
-    hasher.update(access_root.to_string_lossy().as_bytes());
-    encode_hex(&hasher.finalize(), 24)
+    hasher.update(domain);
+    hasher.update(path.to_string_lossy().as_bytes());
+    encode_hex(&hasher.finalize(), length)
+}
+
+fn hash_identity(domain: &[u8], session: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(domain);
+    hasher.update(session.as_bytes());
+    encode_hex(&hasher.finalize(), 64)
 }
 
 async fn acquire_lock(target: &Path) -> Result<BindingLock, String> {
@@ -961,4 +998,45 @@ fn encode_hex(bytes: &[u8], chars: usize) -> String {
     }
     encoded.truncate(chars);
     encoded
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn moved_pre_rename_binding_is_found_through_legacy_hash_domains() {
+        let root = tempfile::tempdir().unwrap();
+        let access_root = root.path().join("projects");
+        let project = access_root.join("demo");
+        std::fs::create_dir_all(&project).unwrap();
+        let access_root = std::fs::canonicalize(access_root).unwrap();
+        let project = std::fs::canonicalize(project).unwrap();
+        let mut config = crate::config::default_config(access_root.clone());
+        config.multi_project = true;
+        let identity = ConversationIdentity::from_openai_session("pre-rename-binding").unwrap();
+        let store = ProjectBindingStore::new(root.path().join("state"));
+        let legacy_path = store.legacy_binding_path(&access_root, &identity);
+        std::fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &legacy_path,
+            serde_json::to_vec_pretty(&StoredProjectBinding {
+                version: BINDING_VERSION,
+                access_root: access_root.to_string_lossy().into_owned(),
+                project_root: project.to_string_lossy().into_owned(),
+                source_project_root: Some(project.to_string_lossy().into_owned()),
+                repository_url: None,
+                managed_worktree: false,
+                worktree_git_root: None,
+                worktrees_root: None,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            store.selected_project_root(&config, &identity).unwrap(),
+            Some(project)
+        );
+    }
 }

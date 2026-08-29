@@ -8,6 +8,7 @@ use codexify::config::{
     Cli, CliCommand, ProjectsCommand, ProjectsListArgs, ServiceCommand, config_path_for_quickstart,
     config_path_for_service, load_config, load_project_catalog_for_cli,
 };
+use codexify::legacy_migration;
 use codexify::logging;
 use codexify::project_catalog::{
     MAX_PROJECT_LIMIT, ProjectCatalogDiagnostic, ProjectListOutput, ProjectSource,
@@ -132,6 +133,25 @@ async fn run(mut cli: Cli) -> anyhow::Result<()> {
             }
             CliCommand::Service { command } => {
                 return run_service(&cli, command).await;
+            }
+            CliCommand::MigrateLegacyInstall => {
+                let outcome = legacy_migration::migrate_default_home()?;
+                if outcome.found {
+                    println!(
+                        "Migrated Codex Free state to ~/.codexify ({} config fields, {} state entries).",
+                        outcome.config_fields_added, outcome.moved_entries
+                    );
+                    if outcome.config_conflicts > 0 {
+                        println!(
+                            "Kept {} existing Codexify config value(s) instead of conflicting legacy values.",
+                            outcome.config_conflicts
+                        );
+                    }
+                    for warning in outcome.warnings {
+                        eprintln!("Warning: {warning}");
+                    }
+                }
+                return Ok(());
             }
             CliCommand::Quickstart => {
                 logging::init(cli.verbose);

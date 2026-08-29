@@ -19,7 +19,9 @@ use crate::types::AppConfig;
 
 const DIFF_REF_ROOT: &str = "refs/codexify/diff";
 const LEGACY_REVIEW_REF_ROOT: &str = "refs/codexify/review";
+const LEGACY_CODEX_FREE_REVIEW_REF_ROOT: &str = "refs/codex-free/review";
 const LEGACY_PROJECT_SCOPE_HASH_DOMAIN: &[u8] = b"codexify/review-project/v1\0";
+const LEGACY_CODEX_FREE_PROJECT_SCOPE_HASH_DOMAIN: &[u8] = b"codex-free/review-project/v1\0";
 const SYNTHETIC_IDENTITY_NAME: &str = "Codexify Diff";
 const SYNTHETIC_IDENTITY_EMAIL: &str = "diff@codexify.local";
 const MAX_GIT_ERROR_BYTES: usize = 64 * 1024;
@@ -210,13 +212,16 @@ impl Default for TransportDiffState {
 
 #[derive(Clone)]
 pub enum DiffOwner {
-    Conversation(String),
+    Conversation { key: String, legacy_key: String },
     Transport(TransportDiffState),
 }
 
 impl DiffOwner {
     pub fn conversation(identity: &ConversationIdentity) -> Self {
-        Self::Conversation(identity.stable_key().to_string())
+        Self::Conversation {
+            key: identity.stable_key().to_string(),
+            legacy_key: identity.legacy_stable_key().to_string(),
+        }
     }
 
     pub fn transport(state: TransportDiffState) -> Self {
@@ -225,7 +230,7 @@ impl DiffOwner {
 
     fn lock_key(&self, workspace_key: &str) -> String {
         match self {
-            Self::Conversation(key) => format!("conversation:{key}:{workspace_key}"),
+            Self::Conversation { key, .. } => format!("conversation:{key}:{workspace_key}"),
             Self::Transport(state) => format!("{}:{workspace_key}", state.id),
         }
     }
@@ -289,8 +294,8 @@ impl DiffCheckpointManager {
             Err(WorkspaceResolutionError::Failed(error)) => return Err(error),
         };
         match owner {
-            DiffOwner::Conversation(owner_key) => {
-                load_or_initialize_persistent(config, &workspace, owner_key).await?;
+            DiffOwner::Conversation { key, legacy_key } => {
+                load_or_initialize_persistent(config, &workspace, key, legacy_key).await?;
             }
             DiffOwner::Transport(state) => {
                 let mut checkpoints = state.checkpoints.lock().await;
@@ -317,12 +322,13 @@ impl DiffCheckpointManager {
         let _guard = lock.lock().await;
 
         match owner {
-            DiffOwner::Conversation(owner_key) => {
-                let pair = load_or_initialize_persistent(config, &workspace, &owner_key).await?;
+            DiffOwner::Conversation { key, legacy_key } => {
+                let pair =
+                    load_or_initialize_persistent(config, &workspace, &key, &legacy_key).await?;
                 let current = create_snapshot(config, &workspace, &[]).await?;
                 let mut result = compare(config, &workspace, &pair, &current, request, &[]).await?;
                 if request.advance {
-                    let refs = checkpoint_refs(&workspace.key, &owner_key);
+                    let refs = checkpoint_refs(&workspace.key, &key);
                     if update_ref_compare_and_swap(
                         config,
                         &workspace.git_root,
@@ -384,6 +390,7 @@ struct DiffWorkspace {
     pathspec: PathBuf,
     scope: String,
     key: String,
+    legacy_codex_free_key: String,
 }
 
 struct CheckpointRefs {
@@ -428,6 +435,14 @@ fn checkpoint_refs(workspace_key: &str, owner_key: &str) -> CheckpointRefs {
 
 fn legacy_checkpoint_refs(workspace_key: &str, owner_key: &str) -> CheckpointRefs {
     let prefix = format!("{LEGACY_REVIEW_REF_ROOT}/{workspace_key}/{owner_key}");
+    CheckpointRefs {
+        project_open: format!("{prefix}/project-open"),
+        last_diff: format!("{prefix}/last-review"),
+    }
+}
+
+fn legacy_codex_free_checkpoint_refs(workspace_key: &str, owner_key: &str) -> CheckpointRefs {
+    let prefix = format!("{LEGACY_CODEX_FREE_REVIEW_REF_ROOT}/{workspace_key}/{owner_key}");
     CheckpointRefs {
         project_open: format!("{prefix}/project-open"),
         last_diff: format!("{prefix}/last-review"),
@@ -486,6 +501,10 @@ async fn resolve_workspace(
     };
     Ok(DiffWorkspace {
         key: hash_path(&project_root),
+        legacy_codex_free_key: hash_path_with_domain(
+            &project_root,
+            LEGACY_CODEX_FREE_PROJECT_SCOPE_HASH_DOMAIN,
+        ),
         git_root,
         pathspec,
         scope,
@@ -493,10 +512,14 @@ async fn resolve_workspace(
 }
 
 fn hash_path(path: &Path) -> String {
+    hash_path_with_domain(path, LEGACY_PROJECT_SCOPE_HASH_DOMAIN)
+}
+
+fn hash_path_with_domain(path: &Path, domain: &[u8]) -> String {
     let mut hasher = Sha256::new();
     // Keep the project key stable so current review refs can be copied lazily
     // into the diff namespace without scanning or exposing project paths.
-    hasher.update(LEGACY_PROJECT_SCOPE_HASH_DOMAIN);
+    hasher.update(domain);
     hasher.update(path.to_string_lossy().as_bytes());
     hex(&hasher.finalize())
 }
@@ -515,9 +538,10 @@ async fn load_or_initialize_persistent(
     config: &AppConfig,
     workspace: &DiffWorkspace,
     owner_key: &str,
+    legacy_owner_key: &str,
 ) -> Result<CheckpointPair, String> {
     let refs = checkpoint_refs(&workspace.key, owner_key);
-    migrate_legacy_checkpoint_refs(config, workspace, owner_key, &refs).await?;
+    migrate_legacy_checkpoint_refs(config, workspace, owner_key, legacy_owner_key, &refs).await?;
     let project_open = read_ref(config, &workspace.git_root, &refs.project_open).await?;
     let last_diff = read_ref(config, &workspace.git_root, &refs.last_diff).await?;
 
@@ -565,19 +589,25 @@ async fn migrate_legacy_checkpoint_refs(
     config: &AppConfig,
     workspace: &DiffWorkspace,
     owner_key: &str,
+    legacy_owner_key: &str,
     refs: &CheckpointRefs,
 ) -> Result<(), String> {
-    let legacy = legacy_checkpoint_refs(&workspace.key, owner_key);
-    for (current, previous) in [
-        (&refs.project_open, &legacy.project_open),
-        (&refs.last_diff, &legacy.last_diff),
-    ] {
-        if read_ref(config, &workspace.git_root, current)
-            .await?
-            .is_none()
-            && let Some(value) = read_ref(config, &workspace.git_root, previous).await?
-        {
-            create_ref_if_absent(config, &workspace.git_root, current, &value).await?;
+    let legacy_families = [
+        legacy_checkpoint_refs(&workspace.key, owner_key),
+        legacy_codex_free_checkpoint_refs(&workspace.legacy_codex_free_key, legacy_owner_key),
+    ];
+    for legacy in &legacy_families {
+        for (current, previous) in [
+            (&refs.project_open, &legacy.project_open),
+            (&refs.last_diff, &legacy.last_diff),
+        ] {
+            if read_ref(config, &workspace.git_root, current)
+                .await?
+                .is_none()
+                && let Some(value) = read_ref(config, &workspace.git_root, previous).await?
+            {
+                create_ref_if_absent(config, &workspace.git_root, current, &value).await?;
+            }
         }
     }
     Ok(())
@@ -1396,6 +1426,7 @@ mod tests {
             pathspec: PathBuf::from("."),
             scope: ".".to_string(),
             key: "test".to_string(),
+            legacy_codex_free_key: "legacy-test".to_string(),
         };
         let patch_args = rendered_args(patch_args(&workspace, "baseline", "current"));
 
@@ -1462,6 +1493,66 @@ mod tests {
         );
         assert_eq!(
             read_ref(&config, &workspace.git_root, &legacy.last_diff)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some(head.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn pre_rename_codex_free_review_refs_are_copied_into_the_diff_namespace() {
+        let repo = tempfile::tempdir().unwrap();
+        run_git(repo.path(), &["init", "--quiet"]);
+        run_git(repo.path(), &["config", "user.name", "Test"]);
+        run_git(repo.path(), &["config", "user.email", "test@example.com"]);
+        run_git(repo.path(), &["config", "commit.gpgsign", "false"]);
+        std::fs::write(repo.path().join("file.txt"), "before\n").unwrap();
+        run_git(repo.path(), &["add", "file.txt"]);
+        run_git(repo.path(), &["commit", "--quiet", "-m", "seed"]);
+
+        let config = crate::config::default_config(repo.path().to_path_buf());
+        let identity = ConversationIdentity::from_openai_session("pre-rename-diff").unwrap();
+        let project_root = canonical_project_root(repo.path()).unwrap();
+        let workspace = resolve_workspace(&config, project_root).await.unwrap();
+        let legacy = legacy_codex_free_checkpoint_refs(
+            &workspace.legacy_codex_free_key,
+            identity.legacy_stable_key(),
+        );
+        let head = run_git(repo.path(), &["rev-parse", "HEAD"]);
+        create_ref_if_absent(&config, &workspace.git_root, &legacy.project_open, &head)
+            .await
+            .unwrap();
+        create_ref_if_absent(&config, &workspace.git_root, &legacy.last_diff, &head)
+            .await
+            .unwrap();
+
+        std::fs::write(repo.path().join("file.txt"), "after\n").unwrap();
+        let result = DiffCheckpointManager::new()
+            .show_diff(
+                &config,
+                DiffOwner::conversation(&identity),
+                DiffRequest {
+                    since: DiffBaseline::LastDiff,
+                    advance: false,
+                    include_patch: true,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(result.patch.contains("-before"));
+        assert!(result.patch.contains("+after"));
+
+        let current = checkpoint_refs(&workspace.key, identity.stable_key());
+        assert_eq!(
+            read_ref(&config, &workspace.git_root, &current.project_open)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some(head.as_str())
+        );
+        assert_eq!(
+            read_ref(&config, &workspace.git_root, &current.last_diff)
                 .await
                 .unwrap()
                 .as_deref(),

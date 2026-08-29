@@ -16,6 +16,7 @@ use crate::types::{AppConfig, WorktreeUpstreamRefreshMode};
 
 const METADATA_VERSION: u32 = 1;
 const METADATA_FILENAME: &str = ".codexify-worktree.json";
+const LEGACY_METADATA_FILENAME: &str = ".codex-free-worktree.json";
 const LOCAL_ENVIRONMENT_CONFIG_KEY: &str = "codex.localEnvironmentConfigPath";
 const NO_LOCAL_ENVIRONMENT: &str = "__none__";
 const MAX_COMMAND_OUTPUT_BYTES: usize = 16_384;
@@ -260,24 +261,50 @@ pub fn metadata_path_for_worktree(worktree_git_root: &Path) -> Option<PathBuf> {
 }
 
 pub fn load_metadata(path: &Path) -> Result<ManagedWorktreeMetadata, String> {
-    let raw = fs::read_to_string(path).map_err(|error| {
-        format!(
-            "Could not read managed-worktree metadata {}: {error}",
-            path.display()
-        )
-    })?;
+    let (raw, source_path, legacy_source) = match fs::read_to_string(path) {
+        Ok(raw) => (raw, path.to_path_buf(), None),
+        Err(error)
+            if error.kind() == std::io::ErrorKind::NotFound
+                && path.file_name() == Some(OsStr::new(METADATA_FILENAME)) =>
+        {
+            let legacy = path.with_file_name(LEGACY_METADATA_FILENAME);
+            let raw = fs::read_to_string(&legacy).map_err(|legacy_error| {
+                if legacy_error.kind() == std::io::ErrorKind::NotFound {
+                    format!(
+                        "Could not read managed-worktree metadata {}: {error}",
+                        path.display()
+                    )
+                } else {
+                    format!(
+                        "Could not read legacy managed-worktree metadata {}: {legacy_error}",
+                        legacy.display()
+                    )
+                }
+            })?;
+            (raw, legacy.clone(), Some(legacy))
+        }
+        Err(error) => {
+            return Err(format!(
+                "Could not read managed-worktree metadata {}: {error}",
+                path.display()
+            ));
+        }
+    };
     let metadata: ManagedWorktreeMetadata = serde_json::from_str(&raw).map_err(|error| {
         format!(
             "Managed-worktree metadata {} is invalid: {error}",
-            path.display()
+            source_path.display()
         )
     })?;
     if metadata.version != METADATA_VERSION {
         return Err(format!(
             "Managed-worktree metadata {} uses unsupported version {}",
-            path.display(),
+            source_path.display(),
             metadata.version
         ));
+    }
+    if let Some(legacy) = legacy_source {
+        let _ = fs::rename(legacy, path);
     }
     Ok(metadata)
 }
@@ -1409,6 +1436,32 @@ fn trim_ascii_newlines(mut bytes: &[u8]) -> &[u8] {
         bytes = &bytes[..bytes.len() - 1];
     }
     bytes
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_worktree_metadata_is_loaded_and_renamed() {
+        let root = tempfile::tempdir().unwrap();
+        let current = root.path().join(METADATA_FILENAME);
+        let legacy = root.path().join(LEGACY_METADATA_FILENAME);
+        let metadata = ManagedWorktreeMetadata {
+            version: METADATA_VERSION,
+            source_project_root: "/source".to_string(),
+            project_root: "/worktree/project".to_string(),
+            source_git_root: "/source".to_string(),
+            worktree_git_root: "/worktree".to_string(),
+            worktrees_root: "/worktrees".to_string(),
+            created_at_ms: 123,
+        };
+        std::fs::write(&legacy, serde_json::to_vec_pretty(&metadata).unwrap()).unwrap();
+
+        assert_eq!(load_metadata(&current).unwrap().created_at_ms, 123);
+        assert!(current.is_file());
+        assert!(!legacy.exists());
+    }
 }
 
 #[cfg(unix)]

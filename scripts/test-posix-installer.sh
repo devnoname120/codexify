@@ -33,6 +33,16 @@ cat > "$stage/codexify" <<'SCRIPT'
 #!/bin/sh
 case "${1:-}" in
     --help) exit 0 ;;
+    migrate-legacy-install)
+        if [ "${2:-}" = --help ]; then
+            exit 0
+        fi
+        [ -z "${2:-}" ] || exit 2
+        count=0
+        [ ! -f "$HOME/legacy-migrations" ] || count=$(cat "$HOME/legacy-migrations")
+        printf '%s\n' "$((count + 1))" > "$HOME/legacy-migrations"
+        exit 0
+        ;;
     service)
         if [ "${2:-}" = --help ]; then
             exit 0
@@ -110,6 +120,7 @@ CODEXIFY_SKIP_SERVICE=1 \
 
 [ "$("$home/.codexify/bin/codexify")" = fake-codexify ]
 [ "$(cat "$home/service-installs")" = 2 ]
+[ "$(cat "$home/legacy-migrations")" = 3 ]
 [ -f "$home/.zshrc" ]
 for profile in \
     "$home/.profile" \

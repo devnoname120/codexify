@@ -212,6 +212,12 @@ if [ "$platform_os" = darwin ]; then
 fi
 
 "$target" --help >/dev/null 2>&1 || fail 'the installed executable did not start successfully'
+if "$target" migrate-legacy-install --help >/dev/null 2>&1; then
+    "$target" migrate-legacy-install \
+        || fail 'the executable was installed, but legacy Codex Free state migration failed'
+else
+    printf 'The installed release does not provide legacy Codex Free state migration; continuing without it.\n' >&2
+fi
 configure_path
 
 if [ "${CODEXIFY_SKIP_SERVICE:-0}" != 1 ]; then

@@ -21,6 +21,7 @@ pub mod exec_policy;
 pub mod exec_sessions;
 pub mod ignore_rules;
 pub mod instructions;
+pub mod legacy_migration;
 pub mod logging;
 mod mcp_catalog;
 pub mod memory;

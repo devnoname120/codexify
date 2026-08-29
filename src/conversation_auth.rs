@@ -36,6 +36,7 @@ impl ConversationAuthorizationScope {
 pub struct ConversationAuthorizationStore {
     authorized: Mutex<HashSet<ConversationIdentity>>,
     persistence_dir: Option<PathBuf>,
+    legacy_persistence_dir: Option<PathBuf>,
 }
 
 impl Default for ConversationAuthorizationStore {
@@ -43,6 +44,7 @@ impl Default for ConversationAuthorizationStore {
         Self {
             authorized: Mutex::new(HashSet::new()),
             persistence_dir: None,
+            legacy_persistence_dir: None,
         }
     }
 }
@@ -59,17 +61,25 @@ impl ConversationAuthorizationStore {
         let Some(home) = home_dir() else {
             return Self::new();
         };
-        Self::persistent(
-            home.join(".codexify").join("conversation-authorizations"),
-            &config.work_dir,
-            token,
-        )
+        let base_dir = home.join(".codexify").join("conversation-authorizations");
+        Self::persistent_with_legacy(base_dir, &config.work_dir, token)
     }
 
     pub fn persistent(base_dir: PathBuf, work_dir: &Path, token: &str) -> Self {
         Self {
             authorized: Mutex::new(HashSet::new()),
             persistence_dir: Some(base_dir.join(authorization_scope_key(work_dir, token))),
+            legacy_persistence_dir: None,
+        }
+    }
+
+    fn persistent_with_legacy(base_dir: PathBuf, work_dir: &Path, token: &str) -> Self {
+        Self {
+            authorized: Mutex::new(HashSet::new()),
+            persistence_dir: Some(base_dir.join(authorization_scope_key(work_dir, token))),
+            legacy_persistence_dir: Some(
+                base_dir.join(legacy_authorization_scope_key(work_dir, token)),
+            ),
         }
     }
 
@@ -123,32 +133,18 @@ impl ConversationAuthorizationStore {
             .map(|directory| directory.join(format!("{}.allowed", identity.stable_key())))
     }
 
+    fn legacy_authorization_path(&self, identity: &ConversationIdentity) -> Option<PathBuf> {
+        self.legacy_persistence_dir
+            .as_ref()
+            .map(|directory| directory.join(format!("{}.allowed", identity.legacy_stable_key())))
+    }
+
     fn persisted_authorization_exists(&self, identity: &ConversationIdentity) -> bool {
-        let Some(path) = self.authorization_path(identity) else {
-            return false;
-        };
-        let Some(directory) = path.parent() else {
-            return false;
-        };
-        let Ok(directory_metadata) = std::fs::symlink_metadata(directory) else {
-            return false;
-        };
-        if !directory_metadata.is_dir()
-            || directory_metadata.file_type().is_symlink()
-            || !private_directory_permissions(&directory_metadata)
-        {
-            return false;
-        }
-        let Ok(metadata) = std::fs::symlink_metadata(&path) else {
-            return false;
-        };
-        if !metadata.is_file()
-            || metadata.file_type().is_symlink()
-            || !private_file_permissions(&metadata)
-        {
-            return false;
-        }
-        std::fs::read(path).is_ok_and(|contents| contents == b"authorized\n")
+        self.authorization_path(identity)
+            .is_some_and(|path| persisted_authorization_exists_at(&path))
+            || self
+                .legacy_authorization_path(identity)
+                .is_some_and(|path| persisted_authorization_exists_at(&path))
     }
 
     fn persist_authorization(&self, identity: &ConversationIdentity) -> Result<(), String> {
@@ -164,7 +160,7 @@ impl ConversationAuthorizationStore {
         ensure_private_directory(directory)?;
 
         if path.exists() {
-            return if self.persisted_authorization_exists(identity) {
+            return if persisted_authorization_exists_at(&path) {
                 Ok(())
             } else {
                 Err(format!(
@@ -202,7 +198,7 @@ impl ConversationAuthorizationStore {
         match temporary.persist_noclobber(&path) {
             Ok(_) => Ok(()),
             Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
-                if self.persisted_authorization_exists(identity) {
+                if persisted_authorization_exists_at(&path) {
                     Ok(())
                 } else {
                     Err(format!(
@@ -218,6 +214,31 @@ impl ConversationAuthorizationStore {
             )),
         }
     }
+}
+
+fn persisted_authorization_exists_at(path: &Path) -> bool {
+    let Some(directory) = path.parent() else {
+        return false;
+    };
+    let Ok(directory_metadata) = std::fs::symlink_metadata(directory) else {
+        return false;
+    };
+    if !directory_metadata.is_dir()
+        || directory_metadata.file_type().is_symlink()
+        || !private_directory_permissions(&directory_metadata)
+    {
+        return false;
+    }
+    let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+        return false;
+    };
+    if !metadata.is_file()
+        || metadata.file_type().is_symlink()
+        || !private_file_permissions(&metadata)
+    {
+        return false;
+    }
+    std::fs::read(path).is_ok_and(|contents| contents == b"authorized\n")
 }
 
 pub fn generate_conversation_auth_token() -> anyhow::Result<String> {
@@ -265,9 +286,25 @@ pub fn conversation_auth_prompt(token: &str) -> String {
 }
 
 fn authorization_scope_key(work_dir: &Path, token: &str) -> String {
+    authorization_scope_key_with_domain(
+        b"codexify/conversation-authorization-scope/v1\0",
+        work_dir,
+        token,
+    )
+}
+
+fn legacy_authorization_scope_key(work_dir: &Path, token: &str) -> String {
+    authorization_scope_key_with_domain(
+        b"codex-free/conversation-authorization-scope/v1\0",
+        work_dir,
+        token,
+    )
+}
+
+fn authorization_scope_key_with_domain(domain: &[u8], work_dir: &Path, token: &str) -> String {
     let work_dir = std::fs::canonicalize(work_dir).unwrap_or_else(|_| work_dir.to_path_buf());
     let mut hasher = Sha256::new();
-    hasher.update(b"codexify/conversation-authorization-scope/v1\0");
+    hasher.update(domain);
     hasher.update(work_dir.to_string_lossy().as_bytes());
     hasher.update(b"\0");
     hasher.update(token.as_bytes());
@@ -447,6 +484,24 @@ mod tests {
 
         let second = ConversationAuthorizationStore::persistent(state, &work_dir, token);
         assert!(second.is_authorized(Some(&identity), &second_session));
+    }
+
+    #[test]
+    fn migrated_codex_free_authorization_marker_remains_valid() {
+        let root = tempfile::tempdir().unwrap();
+        let state = root.path().join("state");
+        let work_dir = root.path().join("project");
+        std::fs::create_dir_all(&work_dir).unwrap();
+        let token = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let identity = ConversationIdentity::from_openai_session("pre-rename-chat").unwrap();
+        let store = ConversationAuthorizationStore::persistent_with_legacy(state, &work_dir, token);
+        let legacy_marker = store.legacy_authorization_path(&identity).unwrap();
+        ensure_private_directory(legacy_marker.parent().unwrap()).unwrap();
+        std::fs::write(&legacy_marker, b"authorized\n").unwrap();
+        make_private_file(&legacy_marker).unwrap();
+
+        assert!(!store.authorization_path(&identity).unwrap().exists());
+        assert!(store.is_authorized(Some(&identity), &SessionState::new()));
     }
 
     #[test]
