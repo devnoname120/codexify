@@ -115,6 +115,14 @@ fn service_path(executable: &Path) -> anyhow::Result<String> {
     let mut entries = std::env::var_os("PATH")
         .map(|value| std::env::split_paths(&value).collect::<Vec<_>>())
         .unwrap_or_default();
+    entries.retain(|entry| entry.is_absolute());
+    let mut unique = Vec::with_capacity(entries.len());
+    for entry in entries {
+        if !unique.contains(&entry) {
+            unique.push(entry);
+        }
+    }
+    let mut entries = unique;
     if let Some(parent) = executable.parent()
         && !entries.iter().any(|entry| entry == parent)
     {
@@ -208,6 +216,7 @@ pub fn log_path() -> anyhow::Result<PathBuf> {
 
 pub fn install(config: &Path) -> anyhow::Result<()> {
     let spec = ServiceSpec::resolve(config)?;
+    let config_exists = spec.config.is_file();
     ensure_log_directory(&spec.home)?;
     platform_install(&spec)?;
     println!(
@@ -215,6 +224,11 @@ pub fn install(config: &Path) -> anyhow::Result<()> {
         spec.config.display()
     );
     println!("Service logs: {}", log_path()?.display());
+    if !config_exists {
+        println!(
+            "The service is waiting for that config file; run `codexify quickstart` or create it with an absolute workDir."
+        );
+    }
     Ok(())
 }
 

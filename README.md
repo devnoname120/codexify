@@ -337,9 +337,9 @@ codexify projects list --work-dir /path/to/projects --show-skipped
 
 ## Background service
 
-The installation scripts register a per-user native service and start it
-immediately. The service definition invokes the installed executable with an
-absolute config path:
+The installation scripts register a per-user native service, start it
+immediately, and enable it for subsequent user logins. The service definition
+invokes the installed executable with an absolute config path:
 
 ```text
 codexify service run --config /absolute/path/to/codexify.config.json
