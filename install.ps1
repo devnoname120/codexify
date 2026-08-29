@@ -3,7 +3,12 @@ Set-StrictMode -Version Latest
 $ProgressPreference = 'SilentlyContinue'
 
 $Repository = if ($env:CODEXIFY_GITHUB_REPOSITORY) { $env:CODEXIFY_GITHUB_REPOSITORY } else { 'devnoname120/codexify' }
-$InstallDir = Join-Path $HOME '.codexify\bin'
+$InstallDir = if ($env:CODEXIFY_INSTALL_DIR) {
+    [IO.Path]::GetFullPath($env:CODEXIFY_INSTALL_DIR)
+}
+else {
+    Join-Path $HOME '.codexify\bin'
+}
 $ReleaseRoot = if ($env:CODEXIFY_RELEASE_ROOT) { $env:CODEXIFY_RELEASE_ROOT.TrimEnd('/') } else { "https://github.com/$Repository/releases/download" }
 $Version = $env:CODEXIFY_VERSION
 $Headers = @{ 'User-Agent' = 'codexify-installer'; 'Accept' = 'application/vnd.github+json' }
@@ -76,7 +81,7 @@ try {
     $Target = Join-Path $InstallDir 'codexify.exe'
     $Staged = Join-Path $InstallDir ('.codexify.new.' + $PID + '.exe')
 
-    if (Test-Path -LiteralPath $Target) {
+    if ((Test-Path -LiteralPath $Target) -and $env:CODEXIFY_SKIP_SERVICE -ne '1') {
         try {
             & $Target service disable *> $null
         }

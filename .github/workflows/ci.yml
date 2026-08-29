@@ -30,16 +30,18 @@ jobs:
       - name: Validate PowerShell installer
         shell: pwsh
         run: |
-          $tokens = $null
-          $errors = $null
-          [System.Management.Automation.Language.Parser]::ParseFile(
-            (Resolve-Path install.ps1),
-            [ref]$tokens,
-            [ref]$errors
-          ) > $null
-          if ($errors.Count) {
-            $errors | ForEach-Object { Write-Error $_ }
-            exit 1
+          foreach ($path in @('install.ps1', 'scripts/test-windows-installer.ps1')) {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              (Resolve-Path $path),
+              [ref]$tokens,
+              [ref]$errors
+            ) > $null
+            if ($errors.Count) {
+              $errors | ForEach-Object { Write-Error "${path}: $_" }
+              exit 1
+            }
           }
 
       - name: Format
@@ -67,6 +69,15 @@ jobs:
 
       - name: Compile platform service integration
         run: cargo check --all-targets
+
+      - name: Test POSIX installer on macOS
+        if: runner.os == 'macOS'
+        run: ./scripts/test-posix-installer.sh
+
+      - name: Test Windows installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/test-windows-installer.ps1
 
       - name: Test service contracts
         run: cargo test service

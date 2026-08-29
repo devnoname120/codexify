@@ -356,7 +356,7 @@ leave its process tree behind.
 
 | Platform | Per-user service |
 |----------|------------------|
-| Linux | systemd user unit `~/.config/systemd/user/codexify.service` |
+| Linux | systemd user unit `$XDG_CONFIG_HOME/systemd/user/codexify.service`, or `~/.config/systemd/user/codexify.service` |
 | macOS | launchd agent `~/Library/LaunchAgents/dev.codexify.service.plist` |
 | Windows | Task Scheduler task `Codexify`, triggered at user logon |
 

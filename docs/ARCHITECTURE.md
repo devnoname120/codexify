@@ -392,7 +392,7 @@ one-line instruction needed by an individual chat or ChatGPT Project.
 ### Native user service (`service.rs`)
 
 The public `service install|enable|disable|remove|logs` commands manage one
-per-user native definition: a systemd user unit on Linux, a launchd agent on
+per-user native definition: an XDG-aware systemd user unit on Linux, a launchd agent on
 macOS, or an at-logon Scheduled Task on Windows. Installation stores the current
 executable path and the selected config path as absolute arguments. The hidden
 `service run` command is the native manager's entry point.

@@ -2365,6 +2365,25 @@ mod tests {
     }
 
     #[test]
+    fn service_runner_cli_accepts_definition_argument_order() {
+        let parsed = Cli::try_parse_from([
+            "codexify",
+            "service",
+            "run",
+            "--config",
+            "/tmp/codexify.config.json",
+        ])
+        .unwrap();
+        assert_eq!(parsed.config.as_deref(), Some("/tmp/codexify.config.json"));
+        assert!(matches!(
+            parsed.command,
+            Some(CliCommand::Service {
+                command: ServiceCommand::Run
+            })
+        ));
+    }
+
+    #[test]
     fn existing_server_cli_syntax_remains_valid() {
         let parsed = Cli::try_parse_from([
             "codexify",

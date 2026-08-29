@@ -397,7 +397,10 @@ fn windows_install_script(spec: &ServiceSpec) -> String {
 
 #[cfg(target_os = "linux")]
 fn systemd_path(home: &Path) -> PathBuf {
-    home.join(".config")
+    std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .unwrap_or_else(|| home.join(".config"))
         .join("systemd")
         .join("user")
         .join(SYSTEMD_UNIT)
@@ -1251,8 +1254,8 @@ where
             }
         };
 
+        #[cfg(unix)]
         if let Some(pid) = pid {
-            #[cfg(unix)]
             signal_process_group(pid, libc::SIGKILL);
         }
         #[cfg(windows)]
@@ -1453,6 +1456,25 @@ mod tests {
             .arg(&path)
             .output()
             .unwrap();
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn scheduled_task_definition_is_valid_powershell() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("service-install.ps1");
+        fs::write(&path, windows_install_script(&spec(root.path()))).unwrap();
+        let path = powershell_quote(&path.to_string_lossy());
+        let parser = format!(
+            "$tokens = $null\n$errors = $null\n[System.Management.Automation.Language.Parser]::ParseFile({path}, [ref]$tokens, [ref]$errors) | Out-Null\nif ($errors.Count) {{ $errors | ForEach-Object {{ Write-Error $_ }}; exit 1 }}\n"
+        );
+        let output = powershell_command(&parser).output().unwrap();
         assert!(
             output.status.success(),
             "{}{}",
