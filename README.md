@@ -379,6 +379,29 @@ For a manually written service config, prefer `file:/absolute/path` secret
 references because login services do not necessarily inherit variables exported
 only by an interactive shell.
 
+### Self-update
+
+The `self_update` MCP tool updates a standard `~/.codexify/bin` installation to
+the latest GitHub release. It requires an explicit user request and
+`{"confirm": true}`. Codexify downloads the platform archive and published
+checksums, verifies SHA-256, extracts exactly one executable, and runs the staged
+binary's `--help` probe while the current server remains available.
+
+For a service-supervised server, Codexify then submits a one-shot updater outside
+the service's process tree: a transient systemd user unit on Linux, a submitted
+launchd job on macOS, or an on-demand Task Scheduler task on Windows. The worker
+waits for the MCP response to be delivered, stops the service, atomically replaces
+the executable while retaining a rollback copy, validates the replacement, and
+starts the service again. A failed replacement is rolled back before restart. The
+MCP connection therefore disconnects temporarily after a successful scheduling
+response.
+
+Progress and failures are appended to the normal rotating service log and can be
+followed with `codexify service logs -f`. A fixed update lock rejects concurrent
+updates. Self-update refuses source-tree or nonstandard executable locations;
+native Windows self-update also requires the background service because a running
+executable cannot be replaced in place.
+
 ## Tools
 
 Structured primitives — cheaper and safer than shelling out for the same job, and identical on Windows and POSIX:
@@ -423,13 +446,14 @@ Codex-compatible agent tools:
 
 Codex's dotted names are flattened to underscores because MCP tool names must match `^[a-zA-Z0-9_-]{1,64}$`.
 
-Seven always-on tools have no Codex counterpart:
+Eight always-on tools have no Codex counterpart:
 
 | Tool | Description |
 |------|-------------|
 | `get_agent_brief` | Return the whole operating brief — behaviour, environment, saved state and project rules — in one call |
 | `get_environment` | Report the OS, the shell `exec_command` uses, the work directory, and what the policy allows |
 | `get_project_doc` | Read the project's `AGENTS.md` instructions |
+| `self_update` | Download and verify the latest Codexify release, then schedule a detached executable swap and service restart after explicit confirmation |
 | `remember` | Create one durable note under a new short key; existing keys are never overwritten |
 | `update_memory_note` | Replace one existing durable note without creating a missing key |
 | `forget_memory_note` | Delete one existing durable note |
@@ -444,7 +468,7 @@ Multi-project mode adds two project-control tools:
 
 These tools expose runtime context, project instructions, and the four durable memory/task-state operations through MCP. See [Context and memory](#context-and-memory), [Acting as a Codex agent](#acting-as-a-codex-agent), [Shells and the host](#shells-and-the-host), [AGENTS.md](#agentsmd) and [Skills](#skills).
 
-That is 30 native tools in the default single-project mode and 32 in multi-project mode. Enabling conversation authorization adds the ChatGPT-facing `setup` tool, producing 31 or 33 respectively. Setting `artifactIngress.enabled` to `false` removes `import_host_file`; setting `artifactEgress.enabled` to `false` independently removes `export_host_file`. Each disabled direction reduces the applicable count by one. One or more [catalog-mode MCP upstreams](#catalog-mode-default-for-automatic-imports) add one shared four-tool discovery/call surface regardless of how many transitive tools they contain. Direct mode adds one downstream tool per selected upstream tool; gateway mode adds one downstream dispatcher per upstream server.
+That is 31 native tools in the default single-project mode and 33 in multi-project mode. Enabling conversation authorization adds the ChatGPT-facing `setup` tool, producing 32 or 34 respectively. Setting `artifactIngress.enabled` to `false` removes `import_host_file`; setting `artifactEgress.enabled` to `false` independently removes `export_host_file`. Each disabled direction reduces the applicable count by one. One or more [catalog-mode MCP upstreams](#catalog-mode-default-for-automatic-imports) add one shared four-tool discovery/call surface regardless of how many transitive tools they contain. Direct mode adds one downstream tool per selected upstream tool; gateway mode adds one downstream dispatcher per upstream server.
 
 MCP-specific tool behavior:
 
@@ -1390,6 +1414,7 @@ Native tunnel mode ignores `allowedHosts` and forces the accepted authorities to
 
 ## Security
 
+- **Self-update is an explicit privileged operation**: `self_update` is advertised as destructive and open-world, requires `confirm=true`, and accepts only the standard installed executable. Downloads are bounded and SHA-256-verified against the selected GitHub release before any service interruption. The detached worker is a generated private file with fixed arguments; it retains a rollback executable until replacement validation and service restart complete.
 - **Path traversal prevention**: every filesystem tool — including `apply_patch` and `view_image` — resolves paths through a guard that rejects anything outside the active project root. In multi-project mode, both catalogue discovery and `set_project_root` canonicalize the configured access root and candidate directory, so `..` and symlinks cannot expose or bind a project outside the access root.
 - **Stable server-config authority**: the implicit config is user-scoped at `~/.codexify/codexify.config.json`, so changing the launch directory does not change command, MCP-server, network, tunnel, or worktree policy. `--config` and `CODEXIFY_CONFIG` are explicit overrides.
 - **Bounded Git cloning and GitHub target fetching**: URL-based project selection accepts provider-agnostic HTTPS/SSH repository URLs ending in `.git`, plus GitHub repository roots and HTTPS branch, PR, and full commit URLs. Normalized remote identity lets conventional hosting-service SSH forms such as `git@host:group/repository.git` reuse their HTTPS checkout while keeping arbitrary SSH users and custom-port endpoints distinct. Credential-bearing HTTPS URLs, local/file transports, HTTP, `git://`, query strings, fragments, and unsupported GitHub subpages are rejected, and interactive Git credential prompts are disabled. The configured clone directory is canonicalized inside the access root at startup and revalidated at use time. Resolution uses per-repository cross-process locks, bounded subprocess timeouts, private temporary clone destinations, remote verification, exact GitHub branch/PR refspecs or full commit object IDs, and collision refusal. Existing source checkouts are fetched without moving `HEAD`; a conversation already bound to another selection is rejected before the network/disk side effect.

@@ -764,6 +764,32 @@ each start) documenting every function and its argument schema. That directory i
 added to the skill roots, so the generated skill is discovered like any other and
 read through `skills_read`. Scope `plugin`.
 
+
+### 8.4 Detached self-update
+
+`self_update.rs` implements the global `self_update` MCP tool. The tool requires
+`confirm=true`, verifies that the running process belongs to the standard
+`~/.codexify/bin/codexify[.exe]` installation, and acquires the single
+`~/.codexify/update/update.lock` before contacting GitHub. It resolves the latest
+semantic-versioned release, downloads `checksums.txt` and the exact platform
+archive through a bounded rustls client, verifies SHA-256, accepts exactly one
+bounded regular executable from the archive, writes it beside the installed
+binary, and validates it with `--help`. No service interruption occurs during
+that preflight.
+
+The service supervisor marks only its ordinary server child with
+`CODEXIFY_SERVICE_SUPERVISED=1`; model-launched subprocesses have that marker
+removed. A supervised update hands the final transaction to an OS-managed job
+outside the service's process tree: a transient systemd user unit, a submitted
+launchd job, or an on-demand Windows scheduled task. The worker delays briefly so
+the MCP result can be delivered, stops the service, retains the old executable as
+a rollback copy, atomically installs and probes the replacement, restarts the
+service, and removes its task, staging files, and lock. Unix foreground processes
+can schedule the same detached replacement without a service restart and continue
+running their already-open executable image; Windows requires service supervision
+because the running executable is locked. Update events share the rotating service
+log.
+
 ---
 
 ## 9. Configuration reference
@@ -859,7 +885,7 @@ The banner is designed so failures are never silent:
 
 ```
 Config: C:\Users\alice\.codexify\codexify.config.json (user config)
-Tools loaded (35): 31 native + 4 upstream-facing MCP tools
+Tools loaded (36): 32 native + 4 upstream-facing MCP tools
 Upstream MCP servers:
   idalib      -> catalog (66 private tool(s))
   remote-exec -> catalog (84 private tool(s))

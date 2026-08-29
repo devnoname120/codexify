@@ -8,6 +8,7 @@ use crate::types::AppConfig;
 
 pub const CHILD_CONTROL_PLANE_API_KEY_ENV: &str = "CODEXIFY_OPENAI_TUNNEL_API_KEY";
 pub const CHILD_MCP_AUTHORIZATION_ENV: &str = "CODEXIFY_INTERNAL_MCP_AUTHORIZATION";
+pub const SERVICE_SUPERVISED_ENV: &str = "CODEXIFY_SERVICE_SUPERVISED";
 
 const TUNNEL_ENV_PASSTHROUGH: &[&str] = &[
     "PATH",
@@ -33,7 +34,8 @@ pub fn scrub_untrusted_child_env(command: &mut Command, config: &AppConfig) {
     }
     command
         .env_remove(CHILD_CONTROL_PLANE_API_KEY_ENV)
-        .env_remove(CHILD_MCP_AUTHORIZATION_ENV);
+        .env_remove(CHILD_MCP_AUTHORIZATION_ENV)
+        .env_remove(SERVICE_SUPERVISED_ENV);
 }
 
 pub fn isolate_tunnel_child_env(command: &mut Command) {
@@ -84,6 +86,7 @@ mod tests {
         assert!(removed.contains(&OsStr::new("PRIVATE_TUNNEL_KEY")));
         assert!(removed.contains(&OsStr::new(CHILD_CONTROL_PLANE_API_KEY_ENV)));
         assert!(removed.contains(&OsStr::new(CHILD_MCP_AUTHORIZATION_ENV)));
+        assert!(removed.contains(&OsStr::new(SERVICE_SUPERVISED_ENV)));
     }
 
     #[test]

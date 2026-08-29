@@ -11,6 +11,7 @@ use tokio::io::AsyncReadExt;
 use tokio::process::Command as TokioCommand;
 use tokio::time::Instant;
 
+use crate::process_env::SERVICE_SUPERVISED_ENV;
 use crate::util::home_dir;
 
 #[cfg(any(target_os = "macos", test))]
@@ -1186,6 +1187,7 @@ where
         command
             .arg("--config")
             .arg(&config)
+            .env(SERVICE_SUPERVISED_ENV, "1")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

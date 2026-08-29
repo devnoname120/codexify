@@ -8,6 +8,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- MCP `self_update` tool for verified in-place updates of standard installations. It downloads and validates the latest release before scheduling an OS-managed detached worker that stops the background service, atomically swaps the executable with rollback protection, and restarts the service. Progress is written to the rotating service log.
+
 - Checksummed Linux, macOS, and Windows installation scripts that download the
   latest GitHub release, replace the executable under `~/.codexify/bin`, and add
   that directory to the user's shell or Windows `PATH`. The macOS installer also

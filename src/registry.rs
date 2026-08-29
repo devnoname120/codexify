@@ -90,6 +90,7 @@ fn load_tools_with_options(
         Box::new(tools::get_environment::GetEnvironment),
         Box::new(tools::get_project_doc::GetProjectDoc),
         Box::new(tools::get_agent_brief::GetAgentBrief),
+        Box::new(tools::self_update::SelfUpdate),
         // Persistent working memory: what a chat window loses between conversations.
         Box::new(tools::remember::Remember),
         Box::new(tools::update_memory_note::UpdateMemoryNote),
@@ -98,7 +99,7 @@ fn load_tools_with_options(
         // Codex's skills.list / skills.read.
         Box::new(tools::skills_list::SkillsList),
         Box::new(tools::skills_read::SkillsRead),
-    ] as [Box<dyn Tool>; 26]);
+    ] as [Box<dyn Tool>; 27]);
 
     let mut seen = std::collections::HashSet::new();
     for tool in &all {
