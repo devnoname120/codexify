@@ -22,7 +22,7 @@ codexify/
 ├── main.ts                   # Entry: parse CLI args, boot server
 ├── package.json
 ├── tsconfig.json
-├── codex.config.json          # Default config (allowlist, port, etc.)
+├── codexify.config.json          # Default config (allowlist, port, etc.)
 ├── README.md                  # English documentation
 ├── LICENSE                    # MIT
 ├── src/
@@ -49,7 +49,7 @@ codexify/
 bun run main.ts --work-dir ../project [--api-key xxx] [--port 3000]
   │
   1. Parse CLI args (util.parseArgs — zero dependency)
-  2. Load config: merge defaults → codex.config.json → CLI flags
+  2. Load config: merge defaults → codexify.config.json → CLI flags
   3. Validate work-dir exists and is a directory
   4. Registry: import all tool modules from src/tools/
   5. Create MCP Server, register tools from registry
@@ -119,7 +119,7 @@ interface AppConfig {
 | `run_command` | `command` (required), `args?`, `timeout?` | Execute a command in workDir. Only commands in the allowlist are permitted. Default timeout 30s. Returns stdout + stderr + exit code. |
 
 **Allowlist mechanism:**
-- `codex.config.json` contains `allowedCommands: ["bun", "npm", "node", "git", ...]`
+- `codexify.config.json` contains `allowedCommands: ["bun", "npm", "node", "git", ...]`
 - Only the binary name (first token) is checked, not arguments
 - Rejected commands return a clear error listing all allowed commands
 
@@ -202,12 +202,12 @@ bun run main.ts [options]
   --work-dir <path>     Required. Project directory for all tool operations.
   --port <number>       Listen port. Default: 3000.
   --api-key <string>    Bearer token for authentication. No auth if omitted.
-  --config <path>       Path to config file. Default: ./codex.config.json
+  --config <path>       Path to config file. Default: ./codexify.config.json
 ```
 
 Parsed with `util.parseArgs` (Node-compatible, zero dependency in Bun).
 
-### Config File: `codex.config.json`
+### Config File: `codexify.config.json`
 
 ```json
 {
@@ -252,6 +252,6 @@ Bun built-ins cover: HTTP server, file I/O, child process spawning, `parseArgs`,
 - All source files per project structure above
 - `README.md` — English documentation covering setup, usage, tool descriptions, config
 - `LICENSE` — MIT license
-- `codex.config.json` — Default configuration
+- `codexify.config.json` — Default configuration
 - `package.json` — with `"scripts": { "start": "bun run main.ts" }`
 - `tsconfig.json` — Bun-compatible TypeScript config

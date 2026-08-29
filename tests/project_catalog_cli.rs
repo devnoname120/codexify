@@ -89,7 +89,7 @@ fn run_discovered_config(
 }
 
 #[test]
-fn config_discovery_prefers_env_then_user_then_legacy() {
+fn config_discovery_prefers_env_then_user_and_ignores_working_directory() {
     let root = TempDir::new().unwrap();
     let access = root.path().join("projects");
     let current_dir = root.path().join("cwd");
@@ -97,7 +97,7 @@ fn config_discovery_prefers_env_then_user_then_legacy() {
     let codex_home = root.path().join("codex-home");
     let env_project = access.join("env-project");
     let user_project = access.join("user-project");
-    let legacy_project = access.join("legacy-project");
+    let working_directory_project = access.join("working-directory-project");
     for directory in [
         &access,
         &current_dir,
@@ -105,32 +105,32 @@ fn config_discovery_prefers_env_then_user_then_legacy() {
         &codex_home,
         &env_project,
         &user_project,
-        &legacy_project,
+        &working_directory_project,
     ] {
         fs::create_dir_all(directory).unwrap();
     }
 
     let env_config = root.path().join("env.json");
-    let user_config = home.join(".codexify").join("codex.config.json");
-    let legacy_config = current_dir.join("codex.config.json");
+    let user_config = home.join(".codexify").join("codexify.config.json");
+    let working_directory_config = current_dir.join("codexify.config.json");
     write_catalog_config(&env_config, &env_project, "Environment");
     write_catalog_config(&user_config, &user_project, "User");
-    write_catalog_config(&legacy_config, &legacy_project, "Legacy");
+    write_catalog_config(
+        &working_directory_config,
+        &working_directory_project,
+        "Working Directory",
+    );
 
-    let (value, stderr) =
+    let (value, _) =
         run_discovered_config(&access, &current_dir, &home, &codex_home, Some(&env_config));
     assert_eq!(value["projects"][0]["name"], "Environment");
-    assert!(!stderr.contains("legacy working-directory config"));
 
-    let (value, stderr) = run_discovered_config(&access, &current_dir, &home, &codex_home, None);
+    let (value, _) = run_discovered_config(&access, &current_dir, &home, &codex_home, None);
     assert_eq!(value["projects"][0]["name"], "User");
-    assert!(!stderr.contains("legacy working-directory config"));
 
     fs::remove_file(user_config).unwrap();
-    let (value, stderr) = run_discovered_config(&access, &current_dir, &home, &codex_home, None);
-    assert_eq!(value["projects"][0]["name"], "Legacy");
-    assert!(stderr.contains("legacy working-directory config"));
-    assert!(stderr.contains(".codexify"));
+    let (value, _) = run_discovered_config(&access, &current_dir, &home, &codex_home, None);
+    assert!(value["projects"].as_array().unwrap().is_empty());
 }
 
 #[test]
@@ -141,7 +141,7 @@ fn json_command_lists_native_projects_with_explicit_metadata() {
     let codex_home = root.path().join("codex-home");
     fs::create_dir_all(&project).unwrap();
     write_native_config(&codex_home, &project, "trusted");
-    let local_config = root.path().join("codex.config.json");
+    let local_config = root.path().join("codexify.config.json");
     fs::write(
         &local_config,
         format!(
@@ -266,7 +266,7 @@ fn skipped_absolute_paths_are_disclosed_only_with_the_local_diagnostic_flag() {
     fs::create_dir_all(&access).unwrap();
     fs::create_dir_all(&outside).unwrap();
     fs::create_dir_all(&codex_home).unwrap();
-    let local_config = root.path().join("codex.config.json");
+    let local_config = root.path().join("codexify.config.json");
     fs::write(
         &local_config,
         format!(

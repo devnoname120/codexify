@@ -1002,14 +1002,14 @@ mod tests {
         let root = TempDir::new().unwrap();
         let executable = root.path().join("bin").join("codexify");
         let work_dir = root.path().join("project");
-        let config = root.path().join("home/.codexify/codex.config.json");
+        let config = root.path().join("home/.codexify/codexify.config.json");
 
         let default_command = launch_command(&executable, &work_dir, &config, false);
         assert!(!default_command.contains("--config"));
 
         let explicit_default_command = launch_command(&executable, &work_dir, &config, true);
         assert!(explicit_default_command.contains("--config"));
-        assert!(explicit_default_command.contains("codex.config.json"));
+        assert!(explicit_default_command.contains("codexify.config.json"));
     }
 
     #[test]
@@ -1017,7 +1017,7 @@ mod tests {
         let root = TempDir::new().unwrap();
         let project = root.path().join("project");
         fs::create_dir_all(&project).unwrap();
-        let config_path = project.join("codex.config.json");
+        let config_path = project.join("codexify.config.json");
         let environment = environment(&root, &project);
         let home_dir = environment.home_dir.clone();
         let input = format!("\n\n\n\n{TUNNEL_ID}\nn\n");
@@ -1149,7 +1149,7 @@ mod tests {
         let root = TempDir::new().unwrap();
         let project = root.path().join("project");
         fs::create_dir_all(&project).unwrap();
-        let config_path = project.join("codex.config.json");
+        let config_path = project.join("codexify.config.json");
         let environment = environment(&root, &project);
         let input = format!("\nn\n\n\ninvalid-tunnel\n{TUNNEL_ID}\nn\n");
         let invalid_key = "not a valid key!";
@@ -1172,7 +1172,7 @@ mod tests {
         let root = TempDir::new().unwrap();
         let project = root.path().join("project");
         fs::create_dir_all(&project).unwrap();
-        let config_path = project.join("codex.config.json");
+        let config_path = project.join("codexify.config.json");
         fs::write(
             &config_path,
             r#"{"conversationAuthToken":"not valid whitespace"}"#,
@@ -1201,7 +1201,7 @@ mod tests {
         let root = TempDir::new().unwrap();
         let project = root.path().join("project");
         fs::create_dir_all(&project).unwrap();
-        let config_path = project.join("codex.config.json");
+        let config_path = project.join("codexify.config.json");
         fs::write(&config_path, r#"{"openaiTunnel":"invalid"}"#).unwrap();
         let environment = environment(&root, &project);
         let credentials = environment.home_dir.join(".codexify");
@@ -1226,7 +1226,7 @@ mod tests {
         let project = root.path().join("project");
         fs::create_dir_all(&project).unwrap();
         let target = project.join("actual.json");
-        let config_path = project.join("codex.config.json");
+        let config_path = project.join("codexify.config.json");
         fs::write(&target, "{}").unwrap();
         symlink(&target, &config_path).unwrap();
         let environment = environment(&root, &project);

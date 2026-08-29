@@ -345,8 +345,8 @@ completion so reviews cannot capture an in-process write halfway through.
 ### `AppConfig` (`types.rs`)
 The fully-resolved config handed to every tool. `config.rs` selects one JSON file
 from explicit `--config`, `CODEXIFY_CONFIG`, the user-level
-`~/.codexify/codex.config.json`, or the warned legacy working-directory fallback,
-in that order. It parses camelCase fields for backward compatibility, imports
+`~/.codexify/codexify.config.json`, or built-in defaults, in that order. It parses
+camelCase fields, imports
 user-level Codex MCP definitions through `codex_mcp.rs`, opportunistically adds
 plugin-provided entries from the Codex CLI's effective catalogue, then applies
 explicit `mcpServers` entries as field overlays. Optional sub-configs (`projectDoc`,
@@ -373,7 +373,7 @@ result as a conversation authorization grant.
 The `quickstart` subcommand runs before server configuration is loaded. It uses a
 testable line-oriented wizard for ordinary prompts and terminal-hidden input for
 the runtime API key. Without an explicit CLI or environment override, it writes
-`~/.codexify/codex.config.json` and its generated launch command relies on normal
+`~/.codexify/codexify.config.json` and its generated launch command relies on normal
 user-config discovery rather than adding `--config`. The wizard canonicalizes the
 project directory, validates the tunnel credentials with the same helpers as normal
 startup, merges only the managed fields into the existing JSON object, and stores
@@ -544,7 +544,7 @@ is resolved from `PATH`. Missing/incompatible CLI discovery warns in automatic
 mode and is fatal only when `--codex-cli` explicitly requires it.
 
 Every `McpServerSpec` retains internal provenance after explicit
-`codex.config.json.mcpServers` overlays are applied:
+`codexify.config.json.mcpServers` overlays are applied:
 
 | Provenance | Default exposure |
 |------------|------------------|
@@ -708,13 +708,11 @@ read through `skills_read`. Scope `plugin`.
 
 ## 9. Configuration reference
 
-The server selects one `codex.config.json`: `--config`, then
-`CODEXIFY_CONFIG`, then an existing `~/.codexify/codex.config.json`, then an
-existing `./codex.config.json` compatibility fallback. If none exists, built-in
-defaults are used. Relative explicit paths resolve from the startup directory; the
-startup banner prints the exact source, and selecting the legacy fallback emits a
-migration warning. `quickstart` writes the user-level path by default rather than
-the legacy fallback. All fields are optional.
+The server selects configuration from `--config`, then `CODEXIFY_CONFIG`, then
+`~/.codexify/codexify.config.json`. If no selected file exists, built-in defaults
+are used. Relative explicit paths resolve from the startup directory, and the
+startup banner prints the exact source. `quickstart` writes the user-level path by
+default. All fields are optional.
 
 ```jsonc
 {
@@ -797,7 +795,7 @@ the legacy fallback. All fields are optional.
 The banner is designed so failures are never silent:
 
 ```
-Config: C:\Users\alice\.codexify\codex.config.json (user config)
+Config: C:\Users\alice\.codexify\codexify.config.json (user config)
 Tools loaded (35): 31 native + 4 upstream-facing MCP tools
 Upstream MCP servers:
   idalib      -> catalog (66 private tool(s))
@@ -810,9 +808,8 @@ Audit command previews: disabled
 ```
 
 - `Config:` names both the selected file and its source. Explicit relative paths
-  resolve from the launch directory; implicit discovery normally selects the
-  stable user-level file instead. The legacy working-directory fallback also
-  emits a migration warning on stderr.
+  resolve from the launch directory; implicit discovery selects the stable
+  user-level file.
 - The `Upstream MCP servers:` block reports each server's outcome.
 - In native tunnel mode, the banner also reports loopback-only exposure, the
   internal-auth boundary, managed runtime version or operator-supplied client,
@@ -897,7 +894,7 @@ Run: `cargo test`. Build a standalone binary: `cargo build --release`.
 | Symptom | Cause / fix |
 |---------|-------------|
 | An upstream is unavailable; banner shows `-> FAILED` | For stdio, verify that `command` is runnable on the machine where Codexify runs. For Streamable HTTP, verify the URL, TLS trust, bearer/header environment variables, and upstream authentication. |
-| Banner shows a server you didn't configure (e.g. `idasql -> disabled`) | Codexify loaded a *different* `codex.config.json` than you edited. Check the `Config:` line and edit that file, set `CODEXIFY_CONFIG`, or pass `--config`. |
+| Banner shows a server you didn't configure (e.g. `idasql -> disabled`) | Codexify loaded a *different* `codexify.config.json` than you edited. Check the `Config:` line and edit that file, set `CODEXIFY_CONFIG`, or pass `--config`. |
 | codexify exposes a newer tool set but the client still shows the old one | The client caches the tool manifest — **remove and re-add the connector** so it re-fetches `tools/list`. |
 | A direct-mode upstream floods the connector catalogue or some tools disappear | Use `"mode": "catalog"` for ranked progressive disclosure, or keep direct mode and curate raw names with `"tools": [...]`. Gateway mode remains available for compatibility with its generated-skill workflow. |
 | Upstream uses `type: "sse"` or `"websocket"` | Current Codex transport parity is stdio plus Streamable HTTP. Point the entry at a Streamable HTTP endpoint and use `url` (or an HTTP type alias). |

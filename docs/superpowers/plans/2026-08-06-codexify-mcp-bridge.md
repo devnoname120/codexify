@@ -15,7 +15,7 @@
 **Files:**
 - Create: `package.json`
 - Create: `tsconfig.json`
-- Create: `codex.config.json`
+- Create: `codexify.config.json`
 - Create: `LICENSE`
 
 - [ ] **Step 1: Initialize package.json**
@@ -60,7 +60,7 @@
 }
 ```
 
-- [ ] **Step 3: Create codex.config.json**
+- [ ] **Step 3: Create codexify.config.json**
 
 ```json
 {
@@ -112,7 +112,7 @@ Expected: lockfile created, node_modules populated, no errors.
 
 ```bash
 git init
-git add package.json tsconfig.json codex.config.json LICENSE bun.lock
+git add package.json tsconfig.json codexify.config.json LICENSE bun.lock
 git commit -m "chore: scaffold project with dependencies and config"
 ```
 
@@ -197,7 +197,7 @@ export function parseCli(): CliArgs {
 }
 
 export async function loadConfig(cli: CliArgs): Promise<AppConfig> {
-  const configPath = cli.configPath ?? resolve(import.meta.dir, "..", "codex.config.json");
+  const configPath = cli.configPath ?? resolve(import.meta.dir, "..", "codexify.config.json");
 
   let fileConfig: Partial<AppConfig> = {};
   const configFile = Bun.file(configPath);
@@ -1699,7 +1699,7 @@ bun run main.ts --work-dir ../my-project --config ./my-config.json
 | `--work-dir` | Yes | — | Project directory for all tool operations |
 | `--port` | No | `3000` | Server port |
 | `--api-key` | No | — | Bearer token for authentication |
-| `--config` | No | `./codex.config.json` | Path to config file |
+| `--config` | No | `./codexify.config.json` | Path to config file |
 
 ## Tools
 
@@ -1717,7 +1717,7 @@ bun run main.ts --work-dir ../my-project --config ./my-config.json
 
 ## Configuration
 
-Create a `codex.config.json` in the project root:
+Create a `codexify.config.json` in the project root:
 
 ```json
 {

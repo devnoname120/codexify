@@ -111,7 +111,7 @@ jobs:
           STAGE="codexify-${VERSION}-${{ matrix.name }}"
           mkdir "${STAGE}"
           cp "target/${{ matrix.target }}/release/codexify${{ matrix.ext }}" "${STAGE}/"
-          cp codex.config.json LICENSE README.md "${STAGE}/"
+          cp codexify.config.json LICENSE README.md "${STAGE}/"
           echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
           echo "STAGE=${STAGE}" >> "$GITHUB_ENV"
 

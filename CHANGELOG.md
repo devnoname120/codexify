@@ -103,10 +103,9 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   implementation metadata, tool names/titles/descriptions, and recursively useful
   input/output-schema fields without registering every transitive definition in
   the ChatGPT connector catalogue.
-- User-level config discovery through `~/.codexify/codex.config.json` and the
-  `CODEXIFY_CONFIG` environment variable. Explicit `--config` remains highest
-  priority; the old working-directory `codex.config.json` is retained as a warned
-  compatibility fallback only when no user config exists.
+- User-level config discovery through `~/.codexify/codexify.config.json` and the
+  `CODEXIFY_CONFIG` environment variable. Explicit `--config` has highest
+  priority.
 
 ### Changed
 
@@ -192,7 +191,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   canonical work directory and current token, so token rotation invalidates older
   grants without copying the token into the cache. Audit command previews also
   redact the configured conversation token. The token remains plaintext in
-  `codex.config.json` by design and must be kept private and out of version control.
+  `codexify.config.json` by design and must be kept private and out of version control.
 - Generic MCP transport-session project bindings now revalidate the complete
   direct-checkout or managed-worktree relationship on every project tool call.
   A moved, replaced, or internally inconsistent active root cannot escape its
@@ -272,7 +271,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   configurable `allowedHosts` download allowlist.
 - Upstream MCP Streamable HTTP support alongside stdio. Codexify now imports
   compatible `url` entries from Codex configuration and accepts remote entries in
-  `codex.config.json`, including bearer-token environment variables, static and
+  `codexify.config.json`, including bearer-token environment variables, static and
   environment-backed HTTP headers, startup timeouts, per-tool cancellable
   timeouts, the existing tool filters, and gateway mode.
 
@@ -379,7 +378,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Automatically import local stdio MCP servers from Codex's user-level
   `$CODEX_HOME/config.toml` (or `~/.codex/config.toml`), including launch
   environment, working directory, enablement and tool filters. Explicit
-  `codex.config.json` entries overlay imported fields, and discovery can be
+  `codexify.config.json` entries overlay imported fields, and discovery can be
   disabled with `codexMcp.enabled`.
 - Native OpenAI Secure MCP Tunnel support through the official
   `tunnel-client-runtime`. Codexify can supervise the outbound tunnel directly,
@@ -437,7 +436,7 @@ The binary is now `codexify`.
 ### Added
 
 - **MCP aggregator.** Bridge other local MCP servers through an `mcpServers`
-  section in `codex.config.json`: Codexify launches each as a stdio child,
+  section in `codexify.config.json`: Codexify launches each as a stdio child,
   discovers its tools at startup, and re-exposes them as `<server>__<tool>`
   alongside the native tools. Startup banner reports every configured server so a
   bad path or failed handshake is never silent.

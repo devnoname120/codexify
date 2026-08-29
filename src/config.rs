@@ -1,10 +1,8 @@
-//! CLI parsing and config loading. Ports `src/config.ts`.
+//! CLI parsing and config loading.
 //!
-//! An existing `codex.config.json` keeps working: every field is read with its
-//! original camelCase name, absent sections fall back to the same defaults the
-//! TypeScript used, and a missing config file is tolerated. Server-level config
-//! defaults to `~/.codexify/codex.config.json`; the old working-directory file
-//! remains a warned compatibility fallback.
+//! Server-level config defaults to `~/.codexify/codexify.config.json`. Fields use
+//! camelCase names, absent sections use built-in defaults, and a missing config
+//! file is tolerated.
 
 use std::ffi::{OsStr, OsString};
 use std::io;
@@ -33,7 +31,7 @@ use crate::types::{
 use crate::util::home_dir;
 
 pub const CODEXIFY_CONFIG_ENV: &str = "CODEXIFY_CONFIG";
-const CONFIG_FILE_NAME: &str = "codex.config.json";
+const CONFIG_FILE_NAME: &str = "codexify.config.json";
 const CONFIG_HOME_DIR: &str = ".codexify";
 
 #[derive(Parser, Debug)]
@@ -127,8 +125,7 @@ pub struct Cli {
     #[arg(long = "api-key")]
     pub api_key: Option<String>,
 
-    /// Config file path. Default: CODEXIFY_CONFIG, then ~/.codexify/codex.config.json.
-    /// A working-directory codex.config.json remains a warned legacy fallback.
+    /// Config file path. Default: CODEXIFY_CONFIG, then ~/.codexify/codexify.config.json.
     #[arg(long, global = true)]
     pub config: Option<String>,
 
@@ -557,7 +554,7 @@ fn merge_mcp_servers(
         let imported_entry = imported.remove(&name);
         if imported_entry.is_some() {
             report.push(format!(
-                "{name} -> imported fields overlaid by codex.config.json"
+                "{name} -> imported fields overlaid by codexify.config.json"
             ));
         }
         let base = imported_entry.unwrap_or_default();
@@ -920,7 +917,6 @@ enum ConfigPathSource {
     CommandLine,
     Environment,
     User,
-    LegacyWorkingDirectory,
     Defaults,
 }
 
@@ -928,7 +924,6 @@ enum ConfigPathSource {
 struct ConfigPathSelection {
     path: Option<PathBuf>,
     source: ConfigPathSource,
-    user_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -968,13 +963,6 @@ fn explicit_config_path(
     })
 }
 
-fn config_path_is_present(path: &Path) -> bool {
-    match std::fs::symlink_metadata(path) {
-        Ok(_) => true,
-        Err(error) => error.kind() != io::ErrorKind::NotFound,
-    }
-}
-
 fn select_config_path_with(
     cli_config: Option<&str>,
     env_config: Option<&OsStr>,
@@ -989,39 +977,17 @@ fn select_config_path_with(
         return ConfigPathSelection {
             path: Some(path),
             source,
-            user_path,
-        };
-    }
-    if let Some(path) = user_path
-        .as_ref()
-        .filter(|path| config_path_is_present(path))
-    {
-        return ConfigPathSelection {
-            path: Some(path.clone()),
-            source: ConfigPathSource::User,
-            user_path,
-        };
-    }
-
-    let legacy_path = current_dir.join(CONFIG_FILE_NAME);
-    if config_path_is_present(&legacy_path) {
-        return ConfigPathSelection {
-            path: Some(legacy_path),
-            source: ConfigPathSource::LegacyWorkingDirectory,
-            user_path,
         };
     }
 
     match user_path {
         Some(path) => ConfigPathSelection {
-            path: Some(path.clone()),
+            path: Some(path),
             source: ConfigPathSource::User,
-            user_path: Some(path),
         },
         None => ConfigPathSelection {
             path: None,
             source: ConfigPathSource::Defaults,
-            user_path: None,
         },
     }
 }
@@ -1078,33 +1044,12 @@ pub fn config_path_for_quickstart(cli: &Cli) -> Result<QuickstartConfigSelection
     )
 }
 
-fn warn_legacy_config(selection: &ConfigPathSelection, path: &Path) {
-    if selection.source != ConfigPathSource::LegacyWorkingDirectory {
-        return;
-    }
-    match &selection.user_path {
-        Some(user_path) => eprintln!(
-            "Warning: using legacy working-directory config at {}. Move it to {} or select it explicitly with --config or {CODEXIFY_CONFIG_ENV}.",
-            path.display(),
-            user_path.display()
-        ),
-        None => eprintln!(
-            "Warning: using legacy working-directory config at {}. Select it explicitly with --config or {CODEXIFY_CONFIG_ENV}.",
-            path.display()
-        ),
-    }
-}
-
 fn announce_loaded_config(selection: &ConfigPathSelection, path: &Path) {
     match selection.source {
         ConfigPathSource::CommandLine => println!("Config: {} (from --config)", path.display()),
         ConfigPathSource::Environment => {
             println!("Config: {} (from {CODEXIFY_CONFIG_ENV})", path.display())
         }
-        ConfigPathSource::LegacyWorkingDirectory => println!(
-            "Config: {} (legacy working-directory fallback)",
-            path.display()
-        ),
         ConfigPathSource::User => println!("Config: {} (user config)", path.display()),
         ConfigPathSource::Defaults => {}
     }
@@ -1125,7 +1070,7 @@ fn announce_missing_config(selection: &ConfigPathSelection) {
             path.display()
         ),
         (None, _) => println!(
-            "Config: no user home or legacy working-directory config available — using built-in defaults (set --config or {CODEXIFY_CONFIG_ENV})"
+            "Config: no user home available — using built-in defaults (set --config or {CODEXIFY_CONFIG_ENV})"
         ),
     }
 }
@@ -1140,7 +1085,6 @@ fn load_file_config(cli: &Cli, announce: bool) -> Result<FileConfig, String> {
     };
     match std::fs::read_to_string(config_path) {
         Ok(text) => {
-            warn_legacy_config(&selection, config_path);
             if announce {
                 announce_loaded_config(&selection, config_path);
             }
@@ -1516,7 +1460,7 @@ mod tests {
     }
 
     #[test]
-    fn config_path_precedence_is_cli_env_user_legacy_then_defaults() {
+    fn config_path_precedence_is_cli_env_user_then_defaults() {
         let root = tempfile::tempdir().unwrap();
         let current_dir = root.path().join("cwd");
         let home = root.path().join("home");
@@ -1526,8 +1470,8 @@ mod tests {
         let user_path = user_config_path(&home);
         std::fs::create_dir_all(user_path.parent().unwrap()).unwrap();
         std::fs::write(&user_path, "{}").unwrap();
-        let legacy_path = current_dir.join(CONFIG_FILE_NAME);
-        std::fs::write(&legacy_path, "{}").unwrap();
+        let working_directory_path = current_dir.join(CONFIG_FILE_NAME);
+        std::fs::write(&working_directory_path, "{}").unwrap();
 
         let selected = select_config_path_with(
             Some("cli.json"),
@@ -1564,14 +1508,12 @@ mod tests {
 
         std::fs::remove_file(&user_path).unwrap();
         let selected = select_config_path_with(None, None, &current_dir, Some(&home));
-        assert_eq!(selected.source, ConfigPathSource::LegacyWorkingDirectory);
-        assert_eq!(selected.path.as_deref(), Some(legacy_path.as_path()));
-        assert_eq!(selected.user_path.as_deref(), Some(user_path.as_path()));
-
-        std::fs::remove_file(&legacy_path).unwrap();
-        let selected = select_config_path_with(None, None, &current_dir, Some(&home));
         assert_eq!(selected.source, ConfigPathSource::User);
         assert_eq!(selected.path.as_deref(), Some(user_path.as_path()));
+        assert_ne!(
+            selected.path.as_deref(),
+            Some(working_directory_path.as_path())
+        );
 
         let selected = select_config_path_with(None, None, &current_dir, None);
         assert_eq!(selected.source, ConfigPathSource::Defaults);
@@ -2161,7 +2103,7 @@ mod tests {
         };
         let automatic = resolve_mcp_servers_from(
             &mut automatic_file,
-            &cli(root.path(), &root.path().join("codex.config.json")),
+            &cli(root.path(), &root.path().join("codexify.config.json")),
             Ok(codex_config.clone()),
             Some(missing_cli.clone()),
         )
@@ -2181,7 +2123,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        let mut required_cli = cli(root.path(), &root.path().join("codex.config.json"));
+        let mut required_cli = cli(root.path(), &root.path().join("codexify.config.json"));
         required_cli.codex_cli = true;
         let error = resolve_mcp_servers_from(
             &mut required_file,
@@ -2214,7 +2156,7 @@ mod tests {
 
         let servers = resolve_mcp_servers_from(
             &mut file,
-            &cli(root.path(), &root.path().join("codex.config.json")),
+            &cli(root.path(), &root.path().join("codexify.config.json")),
             Ok(codex_config),
             Some(root.path().join("missing-codex-cli").into_os_string()),
         )

@@ -555,7 +555,7 @@ So this is **addition, not replacement**. codexify contributes safe, structured,
 
 ## Configuration
 
-New `codex.config.json` keys, all optional with defaults:
+New `codexify.config.json` keys, all optional with defaults:
 
 ```json
 {
@@ -656,7 +656,7 @@ src/types.ts                  # ToolContent union, handler 3rd param, SessionSta
 src/server.ts                 # per-session SessionState; kill exec sessions on close
 src/registry.ts               # register 7 new tools
 src/config.ts                 # exec / viewImage / sleep defaults
-codex.config.json             # new keys
+codexify.config.json             # new keys
 src/tools/write-file.ts       # description only
 src/tools/run-command.ts      # description only
 src/tools/read-file.ts        # description only

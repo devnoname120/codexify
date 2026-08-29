@@ -1,8 +1,8 @@
 //! Shared configuration and result types.
 //!
-//! Ports the interfaces from the TypeScript `src/types.ts`. Config field names
-//! are kept camelCase on the wire (`allowedCommands`, `maxSessions`, …) via
-//! serde renames so an existing `codex.config.json` keeps parsing unchanged.
+//! Core data structures shared by configuration, tools, and MCP transport code.
+//! Config field names use camelCase on the wire (`allowedCommands`,
+//! `maxSessions`, …) through serde renames.
 
 use std::fmt;
 use std::ops::Deref;
