@@ -231,23 +231,23 @@ impl ToolCallLogger {
 
     fn events_enabled(&self) -> bool {
         match self.level {
-            ToolLogLevel::Trace => tracing::enabled!(
+            ToolLogLevel::Trace => tracing::event_enabled!(
                 target: "codexify::tool_payload",
                 tracing::Level::TRACE
             ),
-            ToolLogLevel::Debug => tracing::enabled!(
+            ToolLogLevel::Debug => tracing::event_enabled!(
                 target: "codexify::tool_payload",
                 tracing::Level::DEBUG
             ),
-            ToolLogLevel::Info => tracing::enabled!(
+            ToolLogLevel::Info => tracing::event_enabled!(
                 target: "codexify::tool_payload",
                 tracing::Level::INFO
             ),
-            ToolLogLevel::Warn => tracing::enabled!(
+            ToolLogLevel::Warn => tracing::event_enabled!(
                 target: "codexify::tool_payload",
                 tracing::Level::WARN
             ),
-            ToolLogLevel::Error => tracing::enabled!(
+            ToolLogLevel::Error => tracing::event_enabled!(
                 target: "codexify::tool_payload",
                 tracing::Level::ERROR
             ),

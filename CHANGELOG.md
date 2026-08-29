@@ -18,6 +18,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   their terminal after installation and then run `codexify quickstart` to finish
   connector setup.
 
+### Fixed
+
+- Payload logging now checks tracing filters using event metadata, so a filtered
+  payload level reliably falls back to the ordinary tool-completion event.
+
 ## [1.0.0] - 2026-08-29
 
 ### Added
