@@ -7,7 +7,7 @@
 //!
 //! Local servers use stdio; remote servers use MCP Streamable HTTP.
 
-use std::{collections::HashMap, time::Duration};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use http::{HeaderName, HeaderValue, header::AUTHORIZATION};
@@ -28,6 +28,7 @@ use serde_json::{Value, json};
 use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
 
+use crate::bridged_resources::BridgedResourceStore;
 use crate::exec_sessions::SessionState;
 use crate::mcp_catalog::{CatalogSourceInput, build_catalog_tools};
 use crate::process_env::scrub_untrusted_child_env;
@@ -43,6 +44,8 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 /// lifetime (dropping one closes its transport and any child process).
 pub struct Bridge {
     pub tools: Vec<Box<dyn Tool>>,
+    /// Shared opaque-capability store for resource links returned by upstream tools.
+    pub resources: Arc<BridgedResourceStore>,
     /// Held only to keep upstream transports alive; never read directly.
     pub services: Vec<RunningService<RoleClient, ()>>,
     /// One human-readable line per configured server (connected or failed),
@@ -68,6 +71,7 @@ struct BridgedTool {
     meta: Option<MetaObject>,
     peer: Peer<RoleClient>,
     tool_timeout: Option<Duration>,
+    resources: Arc<BridgedResourceStore>,
 }
 
 impl BridgedTool {
@@ -86,6 +90,7 @@ impl BridgedTool {
             &self.original_name,
             self.tool_timeout,
             cancellation,
+            &self.resources,
         )
         .await
     }
@@ -210,11 +215,12 @@ pub(crate) async fn forward_tool_call(
     tool: &str,
     tool_timeout: Option<Duration>,
     cancellation: Option<&CancellationToken>,
+    resources: &BridgedResourceStore,
 ) -> ToolResult {
     let result = call_upstream_tool(peer, params, tool_timeout, cancellation).await;
 
     match result {
-        Ok(result) => map_call_result(result),
+        Ok(result) => map_call_result(result, peer, server, tool_timeout, resources),
         Err(error) => ToolResult::error(format!(
             "Upstream MCP server '{server}' failed to run '{tool}': {error}"
         )),
@@ -288,7 +294,27 @@ async fn call_upstream_tool(
 /// preserving text, images, error state, structured content, and result metadata.
 /// Content blocks this server has no native representation for are rendered as
 /// JSON text so nothing is silently dropped.
-fn map_call_result(result: CallToolResult) -> ToolResult {
+fn map_call_result(
+    result: CallToolResult,
+    peer: &Peer<RoleClient>,
+    server: &str,
+    tool_timeout: Option<Duration>,
+    resources: &BridgedResourceStore,
+) -> ToolResult {
+    map_call_result_with(result, |resource| {
+        match resources.register(peer.clone(), server, tool_timeout, resource) {
+            Ok(resource) => ToolContent::ResourceLink(resource),
+            Err(error) => ToolContent::Text(format!(
+                "Bridged MCP resource link could not be exposed to the downstream client: {error}"
+            )),
+        }
+    })
+}
+
+fn map_call_result_with(
+    result: CallToolResult,
+    mut map_resource: impl FnMut(rmcp::model::Resource) -> ToolContent,
+) -> ToolResult {
     let content: Vec<ToolContent> = result
         .content
         .into_iter()
@@ -298,6 +324,7 @@ fn map_call_result(result: CallToolResult) -> ToolResult {
                 data: i.data,
                 mime_type: i.mime_type,
             },
+            ContentBlock::ResourceLink(resource) => map_resource(resource),
             other => ToolContent::Text(
                 serde_json::to_string(&other).unwrap_or_else(|_| "[unrenderable content]".into()),
             ),
@@ -366,6 +393,7 @@ pub async fn connect_upstreams(config: &AppConfig) -> Bridge {
     let mut services: Vec<RunningService<RoleClient, ()>> = Vec::new();
     let mut report: Vec<String> = Vec::new();
     let mut catalog_sources = Vec::new();
+    let resources = Arc::new(BridgedResourceStore::new(config.artifact_egress.clone()));
 
     // Deterministic order so logs and tool ordering are stable across runs.
     let mut names: Vec<&String> = config.mcp_servers.keys().collect();
@@ -410,6 +438,7 @@ pub async fn connect_upstreams(config: &AppConfig) -> Bridge {
                             function_names: functions.iter().map(|f| f.name.clone()).collect(),
                             peer: peer.clone(),
                             tool_timeout,
+                            resources: resources.clone(),
                         }));
                         report.push(format!(
                             "{server_name} -> gateway ({count} functions via `{sanitized}`)"
@@ -453,6 +482,7 @@ pub async fn connect_upstreams(config: &AppConfig) -> Bridge {
                                 meta: tool.meta,
                                 peer: peer.clone(),
                                 tool_timeout,
+                                resources: resources.clone(),
                             }));
                         }
                         tracing::info!(
@@ -486,12 +516,13 @@ pub async fn connect_upstreams(config: &AppConfig) -> Bridge {
         }
     }
 
-    let mut catalog_tools = build_catalog_tools(catalog_sources);
+    let mut catalog_tools = build_catalog_tools(catalog_sources, resources.clone());
     catalog_tools.append(&mut tools);
     tools = catalog_tools;
 
     Bridge {
         tools,
+        resources,
         services,
         report,
     }
@@ -593,6 +624,7 @@ struct GatewayTool {
     function_names: Vec<String>,
     peer: Peer<RoleClient>,
     tool_timeout: Option<Duration>,
+    resources: Arc<BridgedResourceStore>,
 }
 
 impl GatewayTool {
@@ -629,6 +661,7 @@ impl GatewayTool {
             function,
             self.tool_timeout,
             cancellation,
+            &self.resources,
         )
         .await
     }
@@ -1052,7 +1085,9 @@ mod tests {
         ErrorData as McpError, ServerHandler,
         model::{
             CallToolResponse, Icon, Implementation, InitializeResult, ListToolsResult, MetaObject,
-            PaginatedRequestParams, ServerCapabilities, ServerInfo, ToolAnnotations,
+            PaginatedRequestParams, ReadResourceRequestParams, ReadResourceResponse,
+            ReadResourceResult, Resource, ResourceContents, ServerCapabilities, ServerInfo,
+            ToolAnnotations,
         },
         service::{RequestContext, RoleServer},
         transport::streamable_http_server::{
@@ -1155,6 +1190,111 @@ mod tests {
         let app = Router::new().nest_service("/mcp", service).layer(
             axum::middleware::from_fn_with_state(expected, require_expected_headers),
         );
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (format!("http://{address}/mcp"), task)
+    }
+
+    #[derive(Clone)]
+    struct ResourceTestMcp;
+
+    impl ServerHandler for ResourceTestMcp {
+        fn get_info(&self) -> ServerInfo {
+            InitializeResult::new(
+                ServerCapabilities::builder()
+                    .enable_tools()
+                    .enable_resources()
+                    .build(),
+            )
+            .with_server_info(Implementation::new("resource-test-upstream", "1.0.0"))
+        }
+
+        async fn list_tools(
+            &self,
+            _request: Option<PaginatedRequestParams>,
+            _context: RequestContext<RoleServer>,
+        ) -> Result<ListToolsResult, McpError> {
+            let schema = object_schema(json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }));
+            Ok(ListToolsResult::with_all_items(vec![
+                rmcp::model::Tool::new(
+                    "download",
+                    "Expose a downloadable binary resource",
+                    schema.clone(),
+                ),
+                rmcp::model::Tool::new(
+                    "slow_download",
+                    "Expose a resource whose read is intentionally slow",
+                    schema,
+                ),
+            ]))
+        }
+
+        async fn call_tool(
+            &self,
+            request: CallToolRequestParams,
+            _context: RequestContext<RoleServer>,
+        ) -> Result<CallToolResponse, McpError> {
+            let (uri, name) = match request.name.as_ref() {
+                "download" => ("fixture://artifact/report.bin", "report.bin"),
+                "slow_download" => ("fixture://artifact/slow.bin", "slow.bin"),
+                _ => {
+                    return Err(McpError::invalid_params(
+                        "unknown resource fixture tool".to_string(),
+                        None,
+                    ));
+                }
+            };
+            let resource = Resource::new(uri, name)
+                .with_mime_type("application/octet-stream")
+                .with_size(4);
+            Ok(CallToolResult::success(vec![ContentBlock::resource_link(resource)]).into())
+        }
+
+        async fn read_resource(
+            &self,
+            request: ReadResourceRequestParams,
+            _context: RequestContext<RoleServer>,
+        ) -> Result<ReadResourceResponse, McpError> {
+            match request.uri.as_str() {
+                "fixture://artifact/report.bin" => Ok(ReadResourceResult::new(vec![
+                    ResourceContents::blob("AAEC/w==", request.uri)
+                        .with_mime_type("application/octet-stream"),
+                ])
+                .into()),
+                "fixture://artifact/slow.bin" => {
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    Ok(ReadResourceResult::new(vec![
+                        ResourceContents::blob("AAEC/w==", request.uri)
+                            .with_mime_type("application/octet-stream"),
+                    ])
+                    .into())
+                }
+                _ => Err(McpError::resource_not_found(
+                    "fixture resource not found".to_string(),
+                    None,
+                )),
+            }
+        }
+    }
+
+    async fn spawn_resource_upstream() -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut config = StreamableHttpServerConfig::default();
+        config.json_response = true;
+        let service = StreamableHttpService::new(
+            || Ok(ResourceTestMcp),
+            Arc::new(LocalSessionManager::default()),
+            config,
+        );
+        let app = Router::new().nest_service("/mcp", service);
         let task = tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
@@ -1386,6 +1526,48 @@ mod tests {
             .await
     }
 
+    async fn call_resource_fixture(bridge: &Bridge, exposure: McpToolExposure) -> ToolResult {
+        match exposure {
+            McpToolExposure::Direct => call_bridge_tool(bridge, "files__download", json!({})).await,
+            McpToolExposure::Gateway => {
+                call_bridge_tool(
+                    bridge,
+                    "files",
+                    json!({ "function": "download", "arguments": {} }),
+                )
+                .await
+            }
+            McpToolExposure::Catalog => {
+                let listed = call_bridge_tool(bridge, MCP_LIST_SOURCES, json!({}))
+                    .await
+                    .structured_content
+                    .unwrap();
+                let source = listed["sources"][0]["id"].as_str().unwrap();
+                let searched = call_bridge_tool(
+                    bridge,
+                    MCP_SEARCH_TOOLS,
+                    json!({ "query": "download binary resource", "source": source, "limit": 5 }),
+                )
+                .await
+                .structured_content
+                .unwrap();
+                let tool = searched["matches"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|entry| entry["toolName"] == "download")
+                    .and_then(|entry| entry["toolId"].as_str())
+                    .unwrap();
+                call_bridge_tool(
+                    bridge,
+                    MCP_CALL_TOOL,
+                    json!({ "source": source, "tool": tool, "arguments": {} }),
+                )
+                .await
+            }
+        }
+    }
+
     #[test]
     fn unique_name_dedups_with_suffix() {
         let mut used = std::collections::HashSet::new();
@@ -1441,15 +1623,159 @@ mod tests {
 
     #[test]
     fn maps_text_and_structured_result() {
-        let r = map_call_result(CallToolResult::success(vec![ContentBlock::text("hi")]));
+        let map = |_: rmcp::model::Resource| unreachable!("no resource link in fixture");
+        let r = map_call_result_with(CallToolResult::success(vec![ContentBlock::text("hi")]), map);
         assert!(!r.is_error);
         assert_eq!(r.joined_text(), "hi");
 
-        let s = map_call_result(CallToolResult::structured(serde_json::json!({ "k": "v" })));
+        let s = map_call_result_with(
+            CallToolResult::structured(serde_json::json!({ "k": "v" })),
+            map,
+        );
         assert_eq!(s.structured_content, Some(serde_json::json!({ "k": "v" })));
 
-        let e = map_call_result(CallToolResult::error(vec![ContentBlock::text("boom")]));
+        let e = map_call_result_with(CallToolResult::error(vec![ContentBlock::text("boom")]), map);
         assert!(e.is_error);
+    }
+
+    #[tokio::test]
+    async fn bridged_resource_links_round_trip_in_every_exposure_mode() {
+        for exposure in [
+            McpToolExposure::Direct,
+            McpToolExposure::Gateway,
+            McpToolExposure::Catalog,
+        ] {
+            let (url, server_task) = spawn_resource_upstream().await;
+            let mut config = crate::config::default_config(std::env::temp_dir());
+            config.mcp_servers.insert(
+                "files".to_string(),
+                McpServerSpec {
+                    url: Some(url),
+                    mode: Some(exposure),
+                    ..Default::default()
+                },
+            );
+
+            let bridge = connect_upstreams(&config).await;
+            let result = call_resource_fixture(&bridge, exposure).await;
+            assert!(!result.is_error, "{}", result.joined_text());
+            let link = result
+                .content
+                .iter()
+                .find_map(|content| match content {
+                    ToolContent::ResourceLink(resource) => Some(resource),
+                    _ => None,
+                })
+                .expect("bridged result should expose a resource link");
+            assert!(
+                link.uri
+                    .starts_with(crate::bridged_resources::BRIDGED_RESOURCE_URI_PREFIX)
+            );
+            assert!(!link.uri.contains("fixture://"));
+            assert_eq!(link.name, "report.bin");
+            assert_eq!(link.mime_type.as_deref(), Some("application/octet-stream"));
+            assert_eq!(link.size, Some(4));
+
+            let read = bridge
+                .resources
+                .read_resource(&link.uri, &CancellationToken::new())
+                .await
+                .unwrap()
+                .expect("opaque bridged resource should be readable");
+            assert_eq!(read.contents.len(), 1);
+            assert_eq!(read.cache_scope, Some(rmcp::model::CacheScope::Private));
+            match &read.contents[0] {
+                ResourceContents::BlobResourceContents {
+                    uri,
+                    mime_type,
+                    blob,
+                    ..
+                } => {
+                    assert_eq!(uri, &link.uri);
+                    assert_eq!(mime_type.as_deref(), Some("application/octet-stream"));
+                    assert_eq!(blob, "AAEC/w==");
+                    assert!(!uri.contains("fixture://"));
+                }
+                _ => panic!("expected blob resource content"),
+            }
+
+            drop(bridge);
+            server_task.abort();
+            let _ = server_task.await;
+        }
+    }
+
+    #[tokio::test]
+    async fn bridged_resource_capabilities_expire_and_reads_are_cancellable() {
+        let (url, server_task) = spawn_resource_upstream().await;
+        let mut config = crate::config::default_config(std::env::temp_dir());
+        config.artifact_egress.reference_ttl_ms = 5;
+        config.mcp_servers.insert(
+            "files".to_string(),
+            McpServerSpec {
+                url: Some(url.clone()),
+                mode: Some(McpToolExposure::Direct),
+                ..Default::default()
+            },
+        );
+
+        let bridge = connect_upstreams(&config).await;
+        let result = call_bridge_tool(&bridge, "files__download", json!({})).await;
+        let expired_uri = result
+            .content
+            .iter()
+            .find_map(|content| match content {
+                ToolContent::ResourceLink(resource) => Some(resource.uri.clone()),
+                _ => None,
+            })
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(15)).await;
+        assert!(
+            bridge
+                .resources
+                .read_resource(&expired_uri, &CancellationToken::new())
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        drop(bridge);
+        config.artifact_egress = crate::types::ArtifactEgressConfig::default();
+        let bridge = connect_upstreams(&config).await;
+        let slow = call_bridge_tool(&bridge, "files__slow_download", json!({})).await;
+        let slow_uri = slow
+            .content
+            .iter()
+            .find_map(|content| match content {
+                ToolContent::ResourceLink(resource) => Some(resource.uri.clone()),
+                _ => None,
+            })
+            .unwrap();
+        let cancellation = CancellationToken::new();
+        let cancel_task = {
+            let cancellation = cancellation.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+                cancellation.cancel();
+            })
+        };
+        let started = std::time::Instant::now();
+        let error = bridge
+            .resources
+            .read_resource(&slow_uri, &cancellation)
+            .await
+            .unwrap_err();
+        cancel_task.await.unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains("cancelled by the downstream client")
+        );
+        assert!(started.elapsed() < Duration::from_millis(150));
+
+        drop(bridge);
+        server_task.abort();
+        let _ = server_task.await;
     }
 
     #[tokio::test]
@@ -2183,6 +2509,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(tools.len(), 2);
+        let resources = BridgedResourceStore::new(config.artifact_egress.clone());
 
         let echo = forward_tool_call(
             service.peer(),
@@ -2192,6 +2519,7 @@ mod tests {
             "echo",
             tool_timeout,
             None,
+            &resources,
         )
         .await;
         assert!(!echo.is_error);
@@ -2205,6 +2533,7 @@ mod tests {
             "slow",
             tool_timeout,
             None,
+            &resources,
         )
         .await;
         assert!(slow.is_error);
@@ -2227,6 +2556,7 @@ mod tests {
             "slow",
             Some(Duration::from_secs(5)),
             Some(&cancellation),
+            &resources,
         )
         .await;
         cancel_task.await.unwrap();

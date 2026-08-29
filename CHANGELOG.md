@@ -8,6 +8,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Bridged MCP `resource_link` results now work end-to-end through Codexify in direct, gateway, and catalog modes. Upstream resource URIs are replaced with short-lived opaque capabilities; downstream `resources/read` is proxied to the originating MCP with cancellation, timeout, size, TTL, and reference bounds, and returned content URIs are rewritten before reaching the connector.
+
 - OpenAI Codex plugin skills now participate in the normal Codexify skill catalogue using Codex-compatible plugin activation, active-version selection, manifest-declared skill roots and namespaces, Agent Plugin direct-child discovery, legacy recursive and migrated-command discovery, and `[[skills.config]]` enablement rules. Claude Code plugin-skill discovery remains supported under the same `skills.includePlugins` switch.
 
 - MCP `self_update` tool for verified in-place updates of standard installations. It downloads and validates the latest release before scheduling an OS-managed detached worker that stops the background service, atomically swaps the executable with rollback protection, and restarts the service. Progress is written to the rotating service log.

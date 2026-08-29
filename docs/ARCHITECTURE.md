@@ -91,9 +91,10 @@ Five integration surfaces are exposed to the client:
 - **Resources / MCP App** — the self-contained diff resource linked from
   `show_diff`, whose complete diff arrives through component-only result
   metadata, plus opaque exported-file resources linked from `export_host_file`
-  and resolved through `resources/read`. Unsupported clients ignore diff UI
-  metadata and keep the concise ordinary text result; a client must support
-  resource links to retrieve exported file bytes.
+  and opaque capabilities replacing resource links returned by bridged MCP tools.
+  `resources/read` resolves local snapshots or proxies the read to the originating
+  upstream peer. Unsupported clients ignore diff UI metadata and keep the concise
+  ordinary text result; a client must support resource links to retrieve file bytes.
 
 ---
 
@@ -115,8 +116,9 @@ Five integration surfaces are exposed to the client:
    icons, input/output schemas, OpenAI file-parameter metadata, and MCP Apps
    resource metadata. Transitive definitions held by the private MCP catalog are
    deliberately absent from this registry. `resources/list` exposes only the
-   embedded diff HTML. `resources/read` serves that static resource and also
-   resolves opaque exported-file capabilities returned by `export_host_file`;
+   embedded diff HTML. `resources/read` serves that static resource, resolves
+   opaque exported-file capabilities returned by `export_host_file`, and proxies
+   opaque capabilities created from bridged upstream `resource_link` results;
    those dynamic references are intentionally not enumerable.
 4. `tools/call` → `CodexHandler::call_tool` reads `openai/session` from rmcp's
    `RequestContext::meta`. rmcp moves wire-level request `_meta` into that context
@@ -462,9 +464,10 @@ or its descendants.
   `ProjectBindingStore` resolves its project, the persistent
   `ConversationAuthorizationStore` resolves the optional token grant, and the in-memory
   `ConversationExecSessionStore` resolves resident commands across replacement
-  transports, and `ArtifactEgressStore` preserves short-lived exported-file
-  snapshots across the same replacement. Upstream MCP connections, all four stores,
-  and the tool registry are shared (`Arc`) across transports.
+  transports, `ArtifactEgressStore` preserves short-lived exported-file snapshots,
+  and `BridgedResourceStore` preserves short-lived upstream-resource routing
+  capabilities across the same replacement. Upstream MCP connections, these
+  stores, and the tool registry are shared (`Arc`) across transports.
 - **`get_info`** advertises server name `codexify` (wire-compatible identity),
   version, tools/resources capabilities, the `io.modelcontextprotocol/ui` extension,
   and the `instructions`. The diff resource is embedded in the binary and has no
@@ -472,8 +475,11 @@ or its descendants.
 - **Tool descriptors and results** preserve generic titles, MCP annotations and
   `_meta` extensions. `import_host_file` uses the descriptor path for
   `_meta["openai/fileParams"]`; `export_host_file` returns a standard
-  `resource_link`, and `resources/read` resolves only locally issued opaque
-  artifact capabilities. The conversion layer has no tool-name special case.
+  `resource_link`. Bridged `resource_link` blocks are converted to the same
+  downstream content type after their upstream URI is replaced by an opaque
+  `codexify://upstream-resource/...` capability. `resources/read` resolves native
+  snapshots locally or forwards bridged capabilities to their originating peer.
+  The conversion layer has no tool-name special case.
 - **Errors**: a tool that fails returns `Ok(CallToolResult::error(...))`
   (`isError: true`) so the caller sees the message; only an unknown tool name is
   an error *result* as well. Protocol errors are avoided.
@@ -550,6 +556,7 @@ the original order and rejects duplicate names.
 | `safe_path.rs` | Lexical path-traversal guard (no `canonicalize`; component-wise containment) used by the ordinary filesystem tools. Native file ingress and egress use their own capability-confined boundaries below. |
 | `artifact_ingress/` | OpenAI native-file validation and streaming plus capability-confined, atomic no-overwrite workspace publication. It never accepts a local source path, and constrains the download URL and every redirect hop to the configurable `artifactIngress.allowedHosts` allowlist (default `"*"`, which still rejects loopback, private, link-local, unique-local, CGNAT, `localhost`, and metadata addresses). |
 | `artifact_egress.rs` | Capability-confined regular-file snapshotting plus a process-wide bounded store of immutable bytes. It returns random opaque `codexify://artifact/...` resource capabilities, enforces per-file/total-byte/reference/TTL limits, and serves blobs only through `resources/read`; absolute paths, traversal, symlink escapes, and delayed path rereads are excluded. |
+| `bridged_resources.rs` | Process-wide opaque capability registry for `resource_link` blocks returned by upstream MCP tools. It binds a random `codexify://upstream-resource/...` token to the originating peer and URI without caching the payload, forwards `resources/read` with cancellation/timeout handling, applies artifact-egress file/reference/TTL limits, and rewrites returned content URIs so upstream capabilities never become downstream routing tokens. |
 | `logging.rs` | Tracing initialization with default filters for normal, `-v`, and `-vv` operation (an explicit `RUST_LOG` remains authoritative), plus a non-overridable filter that suppresses RMCP framework events, preventing native-file bearer URLs from appearing in logs before tool dispatch or malformed-session errors. |
 | `tool_logging.rs` | Opt-in configurable-level invocation tracing for every native and bridged tool, monotonic call pairing, resolved raw MCP identities, compact MCP-shaped response rendering, MCP image content-block and resource-capability elision, a serializer that stops at the byte budget, and UTF-8-safe prefix markers. |
 | `redaction.rs` | Shared value/JSON/argv redaction for audit command previews and tool payload tracing. It collects configured and environment-backed connector/MCP/tunnel secrets, removes secret/checksum-labelled fields and native-file capability URLs, applies schema sensitivity and credential-syntax heuristics, and supplies lazy serialization wrappers so payload redaction does not require cloning the full value. |
@@ -590,6 +597,14 @@ servers and materialize their complete filtered tool catalogues at startup.
 `mcp_catalog.rs` owns the private catalogue, index, and fixed progressive-
 disclosure tools. `server.rs::start_http_server` connects upstreams before it
 constructs the downstream registry.
+
+All exposure modes share one `BridgedResourceStore`. `bridge.rs` maps upstream
+`resource_link` content through that store before returning a tool result, so
+direct proxies, gateway dispatch and `mcp_call_tool` all produce the same opaque
+downstream capability. `server.rs::read_resource` recognizes that capability and
+routes the read back over the already-connected upstream `Peer`; the original
+resource routing URI is replaced in the downstream link and in returned
+`ResourceContents.uri` fields.
 
 ### 7.1 Configuration provenance and effective exposure
 
@@ -961,6 +976,10 @@ units to match the TS `text.length` / `text.slice`.
   byte snapshots after source replacement, MIME and SHA-256 receipts, traversal,
   symlink escape and oversize rejection, caller cancellation boundaries, cache-byte
   and reference eviction, and reference expiry.
+- `bridged_resources` unit tests cover downstream URI rewriting and actual-content
+  size enforcement; `bridge.rs` integration fixtures verify resource-link/read
+  round-trips in direct, gateway and catalog modes plus expiry and downstream
+  cancellation.
 - `tests/review_fixes.rs` locks the behavioral-fidelity fixes found by the
   adversarial review of the port. The bridge/gateway/skills code was reviewed the
   same way; the confirmed low-severity findings (name-collision dedup, YAML-safe
@@ -971,8 +990,8 @@ units to match the TS `text.length` / `text.slice`.
 - `bridge.rs` starts loopback Streamable HTTP MCP servers to verify bearer/custom
   headers, many-tool private catalogues, source discovery, ranked schema-aware
   search, exact metadata retrieval, collision-safe IDs, raw dispatch, filters,
-  result passthrough, direct/gateway compatibility, deadlines, and caller
-  cancellation.
+  result passthrough, direct/gateway compatibility, transitive resource egress,
+  deadlines, and caller cancellation.
 
 Run: `cargo test`. Build a standalone binary: `cargo build --release`.
 

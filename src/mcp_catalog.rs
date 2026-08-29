@@ -13,6 +13,7 @@ use serde_json::{Map, Value, json};
 use tokio_util::sync::CancellationToken;
 
 use crate::bridge::forward_tool_call;
+use crate::bridged_resources::BridgedResourceStore;
 use crate::exec_sessions::SessionState;
 use crate::tool::{Tool, ToolBehavior, ToolCallIdentity, ToolRequestContext};
 use crate::types::{AppConfig, McpServerProvenance, ToolResult};
@@ -1008,6 +1009,7 @@ impl Tool for McpGetToolTool {
 
 struct McpCallToolTool {
     catalog: Arc<Catalog>,
+    resources: Arc<BridgedResourceStore>,
 }
 
 impl McpCallToolTool {
@@ -1051,6 +1053,7 @@ impl McpCallToolTool {
             tool.raw.name.as_ref(),
             source.tool_timeout,
             cancellation,
+            &self.resources,
         )
         .await
     }
@@ -1143,7 +1146,10 @@ impl Tool for McpCallToolTool {
     }
 }
 
-pub(crate) fn build_catalog_tools(inputs: Vec<CatalogSourceInput>) -> Vec<Box<dyn Tool>> {
+pub(crate) fn build_catalog_tools(
+    inputs: Vec<CatalogSourceInput>,
+    resources: Arc<BridgedResourceStore>,
+) -> Vec<Box<dyn Tool>> {
     if inputs.is_empty() {
         return Vec::new();
     }
@@ -1165,7 +1171,7 @@ pub(crate) fn build_catalog_tools(inputs: Vec<CatalogSourceInput>) -> Vec<Box<dy
         Box::new(McpGetToolTool {
             catalog: catalog.clone(),
         }),
-        Box::new(McpCallToolTool { catalog }),
+        Box::new(McpCallToolTool { catalog, resources }),
     ]
 }
 

@@ -37,6 +37,7 @@ use crate::audit::{
     AuditLogger, AuditScope, argument_field_names, summarize_arguments, summarize_output,
 };
 use crate::auth::{generate_internal_bearer_token, require_auth};
+use crate::bridged_resources::{BRIDGED_RESOURCE_URI_PREFIX, BridgedResourceStore};
 use crate::conversation_auth::{AUTHORIZATION_TOOL_WIRE_NAME, ConversationAuthorizationStore};
 use crate::diff::{DiffAvailability, DiffCheckpointManager, DiffOwner};
 use crate::diff_ui;
@@ -84,6 +85,7 @@ pub struct CodexHandler {
     conversation_exec_sessions: Arc<ConversationExecSessionStore>,
     diff_checkpoints: Arc<DiffCheckpointManager>,
     artifact_egress: Arc<ArtifactEgressStore>,
+    bridged_resources: Arc<BridgedResourceStore>,
     audit: Option<Arc<AuditLogger>>,
     tool_logging: Option<Arc<ToolCallLogger>>,
     next_tool_call_id: Arc<AtomicU64>,
@@ -263,6 +265,23 @@ impl ServerHandler for CodexHandler {
         request: ReadResourceRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<ReadResourceResponse, McpError> {
+        match self
+            .bridged_resources
+            .read_resource(&request.uri, &context.ct)
+            .await
+        {
+            Ok(Some(result)) => return Ok(result.into()),
+            Ok(None) => {}
+            Err(error) => {
+                return Err(McpError::internal_error(error.to_string(), None));
+            }
+        }
+        if request.uri.starts_with(BRIDGED_RESOURCE_URI_PREFIX) {
+            return Err(McpError::resource_not_found(
+                "Unknown or expired bridged MCP resource".to_string(),
+                None,
+            ));
+        }
         match self
             .artifact_egress
             .read_resource(&request.uri, &context.ct)
@@ -601,6 +620,7 @@ pub async fn start_http_server(mut config: AppConfig) -> anyhow::Result<()> {
     // they are held in `_bridge_services` until `axum::serve` returns.
     let bridge = crate::bridge::connect_upstreams(&config).await;
     let bridge_report = bridge.report;
+    let bridged_resources = bridge.resources;
     let _bridge_services = bridge.services;
 
     let mut all_tools = validate_and_wrap_tools(load_tools_for_config(&config))
@@ -656,6 +676,7 @@ pub async fn start_http_server(mut config: AppConfig) -> anyhow::Result<()> {
     let factory_conversation_exec_sessions = conversation_exec_sessions.clone();
     let factory_diff_checkpoints = diff_checkpoints.clone();
     let factory_artifact_egress = artifact_egress.clone();
+    let factory_bridged_resources = bridged_resources.clone();
     let factory_audit = audit.clone();
     let factory_tool_logging = tool_logging.clone();
     let factory_next_tool_call_id = next_tool_call_id.clone();
@@ -671,6 +692,7 @@ pub async fn start_http_server(mut config: AppConfig) -> anyhow::Result<()> {
                 conversation_exec_sessions: factory_conversation_exec_sessions.clone(),
                 diff_checkpoints: factory_diff_checkpoints.clone(),
                 artifact_egress: factory_artifact_egress.clone(),
+                bridged_resources: factory_bridged_resources.clone(),
                 audit: factory_audit.clone(),
                 tool_logging: factory_tool_logging.clone(),
                 next_tool_call_id: factory_next_tool_call_id.clone(),
@@ -1333,6 +1355,9 @@ mod tests {
             artifact_egress: Arc::new(ArtifactEgressStore::new(
                 crate::types::ArtifactEgressConfig::default(),
             )),
+            bridged_resources: Arc::new(BridgedResourceStore::new(
+                crate::types::ArtifactEgressConfig::default(),
+            )),
             audit,
             tool_logging,
             next_tool_call_id: Arc::new(AtomicU64::new(1)),
@@ -1591,6 +1616,9 @@ mod tests {
             artifact_egress: Arc::new(ArtifactEgressStore::new(
                 crate::types::ArtifactEgressConfig::default(),
             )),
+            bridged_resources: Arc::new(BridgedResourceStore::new(
+                crate::types::ArtifactEgressConfig::default(),
+            )),
             audit: None,
             tool_logging: None,
             next_tool_call_id: Arc::new(AtomicU64::new(1)),
@@ -1625,6 +1653,9 @@ mod tests {
             conversation_exec_sessions: Arc::new(ConversationExecSessionStore::new()),
             diff_checkpoints: Arc::new(DiffCheckpointManager::new()),
             artifact_egress: Arc::new(ArtifactEgressStore::new(
+                crate::types::ArtifactEgressConfig::default(),
+            )),
+            bridged_resources: Arc::new(BridgedResourceStore::new(
                 crate::types::ArtifactEgressConfig::default(),
             )),
             audit: None,
