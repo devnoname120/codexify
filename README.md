@@ -115,7 +115,7 @@ curl -q -fsSL https://raw.githubusercontent.com/devnoname120/codexify/main/insta
 Windows PowerShell:
 
 ```powershell
-irm https://raw.githubusercontent.com/devnoname120/codexify/main/install.ps1 | iex
+powershell -ExecutionPolicy ByPass -c "irm https://raw.githubusercontent.com/devnoname120/codexify/main/install.ps1 | iex"
 ```
 
 The installer downloads the latest release archive, verifies it against the
