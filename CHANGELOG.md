@@ -6,6 +6,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- Release publication now downloads only `codexify-*` build artifacts, preventing
+  the GitHub Pages deployment artifact from being attached to GitHub releases.
+
 ## [1.0.0] - 2026-08-29
 
 ### Added

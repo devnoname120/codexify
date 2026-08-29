@@ -148,6 +148,7 @@ jobs:
     steps:
       - uses: actions/download-artifact@v5
         with:
+          pattern: codexify-*
           path: artifacts
           merge-multiple: true
 
