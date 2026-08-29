@@ -109,13 +109,13 @@ Dotted edges are conditional: `list_projects` and `set_project_root` appear only
 Linux and macOS:
 
 ```bash
-curl -q -fsSL https://raw.githubusercontent.com/devnoname120/codexify/main/install.sh | sh
+curl -q -fsSL https://codexify.dev/install.sh | sh
 ```
 
 Windows PowerShell:
 
 ```powershell
-powershell -ExecutionPolicy ByPass -c "irm https://raw.githubusercontent.com/devnoname120/codexify/main/install.ps1 | iex"
+powershell -ExecutionPolicy ByPass -c "irm https://codexify.dev/install.ps1 | iex"
 ```
 
 The installer downloads the latest release archive, verifies it against the

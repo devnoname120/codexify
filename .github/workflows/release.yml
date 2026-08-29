@@ -134,8 +134,16 @@ jobs:
           name: codexify-${{ matrix.name }}
           path: ${{ env.ARCHIVE }}
 
-  release:
+  deploy-installers:
     needs: build
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    uses: ./.github/workflows/pages.yml
+
+  release:
+    needs: [build, deploy-installers]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v5
