@@ -806,7 +806,7 @@ impl SessionState {
 
         let Some(binding) = self.project_binding.lock().unwrap().clone() else {
             return Err(format!(
-                "No project root is selected for this MCP transport session. Call `set_project_root` with an existing directory beneath the access root `{}` or an exact GitHub repository, branch, pull-request, or commit URL; GitHub URLs reuse a matching checkout or clone into the configured clone directory. If only a project name or purpose is known, call `list_projects` first. Then call `get_agent_brief` before using project tools.",
+                "No project root is selected for this MCP transport session. Call `set_project_root` with an existing directory beneath the access root `{}`, an HTTPS/SSH Git repository URL ending in `.git`, or an exact GitHub repository, branch, pull-request, or commit URL. Repository URLs reuse a matching checkout or clone into the configured clone directory. If only a project name or purpose is known, call `list_projects` first. Then call `get_agent_brief` before using project tools.",
                 config.work_dir.display()
             ));
         };
@@ -955,7 +955,7 @@ impl SessionState {
             .await?
             {
                 if current.repository_url.is_none()
-                    && let ProjectReference::GitHub(repository) = &reference
+                    && let ProjectReference::Git(repository) = &reference
                 {
                     current.repository_url = Some(repository.web_url().to_string());
                 }

@@ -24,6 +24,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (`/commit/<sha>`). Full 40-character commit IDs are fetched and selected exactly,
   using a detached clone or managed worktree without moving an existing source
   checkout.
+- Multi-project `set_project_root` now accepts provider-agnostic HTTPS and SSH Git
+  repository URLs ending in `.git`, including GitLab and SCP-style SSH clone URLs.
+  Conventional service remotes such as `git@host:group/repo.git` are matched to
+  their HTTPS equivalents, while arbitrary SSH users remain distinct. Unsafe local,
+  insecure, and credential-bearing HTTPS transports remain rejected.
 - `output.maxToolOutputTokens`, defaulting to 10,000 approximate tokens, as a
   connector-wide ceiling for textual model-visible tool results.
 - Configurable all-tool payload tracing through `toolLogging` and

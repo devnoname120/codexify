@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 
 use crate::project_clone::{
     ProjectReference, normalize_repository_url, project_matches_repository, repository_url_matches,
-    resolve_github_project,
+    resolve_git_project,
 };
 use crate::types::{AppConfig, WorktreeMode};
 use crate::util::home_dir;
@@ -188,7 +188,7 @@ impl ProjectBindingStore {
 
         let Some(binding) = self.selected_binding(config, identity)? else {
             return Err(format!(
-                "No project root is selected for this ChatGPT conversation. Call `set_project_root` with an existing directory beneath the access root `{}` or an exact GitHub repository, branch, pull-request, or commit URL; GitHub URLs reuse a matching checkout or clone into the configured clone directory. If only a project name or purpose is known, call `list_projects` first. Then call `get_agent_brief` before using project tools. The selection is stored by ChatGPT conversation ID and will survive MCP reconnects and server restarts.",
+                "No project root is selected for this ChatGPT conversation. Call `set_project_root` with an existing directory beneath the access root `{}`, an HTTPS/SSH Git repository URL ending in `.git`, or an exact GitHub repository, branch, pull-request, or commit URL. Repository URLs reuse a matching checkout or clone into the configured clone directory. If only a project name or purpose is known, call `list_projects` first. Then call `get_agent_brief` before using project tools. The selection is stored by ChatGPT conversation ID and will survive MCP reconnects and server restarts.",
                 config.work_dir.display()
             ));
         };
@@ -235,7 +235,7 @@ impl ProjectBindingStore {
             .await?
             {
                 if current.repository_url.is_none()
-                    && let ProjectReference::GitHub(repository) = &reference
+                    && let ProjectReference::Git(repository) = &reference
                 {
                     current.repository_url = Some(repository.web_url().to_string());
                 }
@@ -510,7 +510,7 @@ impl ProjectBindingStore {
             .transpose()
             .map_err(|error| {
                 format!(
-                    "The GitHub repository URL in the ChatGPT conversation binding at {} is invalid: {error}. Start a new chat or remove that binding file.",
+                    "The Git repository URL in the ChatGPT conversation binding at {} is invalid: {error}. Start a new chat or remove that binding file.",
                     path.display()
                 )
             })?;
@@ -725,7 +725,7 @@ pub async fn prepare_project_root(
                 warnings: Vec::new(),
             })
         }
-        ProjectReference::GitHub(repository) => {
+        ProjectReference::Git(repository) => {
             if !config.multi_project {
                 return Err(
                     "Project-root selection is disabled. Start codexify with `--multi-project` or set `multiProject` to true."
@@ -733,7 +733,7 @@ pub async fn prepare_project_root(
                 );
             }
             let access_root = canonical_access_root(config)?;
-            let resolved = resolve_github_project(config, &access_root, repository).await?;
+            let resolved = resolve_git_project(config, &access_root, repository).await?;
             Ok(PreparedProjectRoot {
                 access_root,
                 source_project_root: resolved.source_project_root,
@@ -758,7 +758,7 @@ pub async fn project_reference_matches(
             let (_, requested) = resolve_project_root(config, path)?;
             Ok(requested == source_project_root)
         }
-        ProjectReference::GitHub(repository) => {
+        ProjectReference::Git(repository) => {
             if repository_url.is_some_and(|url| repository_url_matches(url, repository)) {
                 return Ok(true);
             }

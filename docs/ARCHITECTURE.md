@@ -135,8 +135,9 @@ Five integration surfaces are exposed to the client:
    against the access root, and returns relative selectors without reading project
    content or creating a binding.
 7. `set_project_root` canonicalizes an existing directory below the configured
-   access root, or parses a strict GitHub repository, branch, pull-request, or
-   commit URL.
+   access root, parses a provider-agnostic HTTPS/SSH Git repository URL ending in
+   `.git`, or parses a supported GitHub repository, branch, pull-request, or commit
+   URL.
    URL resolution first looks for a matching local Git top level; when none exists,
    it clones beneath `projectCloneDir` and verifies the resulting remote. A branch
    URL fetches `refs/heads/<branch>` and a PR URL fetches
@@ -265,20 +266,26 @@ identifier is written to disk. Records are namespaced by canonical access-root
 hash, written atomically under a per-record lock, and validated again on every
 load so a deleted project or changed symlink fails closed. A new store instance
 can recover the same binding after a server restart. URL-created bindings also
-persist the canonical GitHub selection URL, allowing transport/case variants of a
-repository root—and equivalent encodings of an exact branch, PR, or commit
+persist the canonical Git selection URL, allowing normalized equivalents of the
+same repository—and equivalent encodings of an exact GitHub branch, PR, or commit
 selection—to remain idempotent without another remote inspection.
 
-### GitHub project resolution (`project_clone.rs`)
-`ProjectReference` distinguishes ordinary filesystem selectors from HTTPS/SSH
-GitHub repository-root URLs and HTTPS GitHub branch, pull-request, or commit URLs
-without widening `set_project_root` to arbitrary Git transports. Parsing accepts
-repository roots, `/tree/<branch>`, `/pull/<number>`, and
-`/commit/<40-character-hex-ID>` on `github.com`; it rejects credentials, queries,
-fragments, unsupported subpages, and insecure/non-GitHub transports. Repository
-identity is normalized case-insensitively as owner/repository, while checkout
-identity retains the case-sensitive branch name, PR number, or lowercase commit ID
-and the parser retains a safe HTTPS or SSH clone URL.
+### Git project resolution (`project_clone.rs`)
+`ProjectReference` distinguishes ordinary filesystem selectors from HTTPS/SSH Git
+repository URLs and GitHub's richer branch, pull-request, or commit URL forms.
+Provider-agnostic selections require a repository-root URL ending in `.git`, which
+keeps arbitrary provider web pages out of the clone surface; existing matching
+remotes may omit that suffix. HTTPS, `ssh://`, and SCP-style SSH forms are accepted,
+while embedded HTTPS credentials, local/file transports, HTTP, `git://`, queries,
+fragments, and other transports are rejected. Generic repository identity is
+host/path based and preserves the provider path's case. HTTPS is considered
+equivalent to default-port SSH only for the conventional shared `git` account used
+by hosting services; arbitrary SSH users, custom ports, and non-service SSH forms
+remain distinct to avoid equating repositories whose server-side path semantics may
+differ. GitHub repository roots retain their existing shorthand without `.git`,
+normalize owner/repository identity case-insensitively, and additionally accept `/tree/<branch>`,
+`/pull/<number>`, and `/commit/<40-character-hex-ID>` target URLs. Exact checkout
+identity retains the case-sensitive branch name, PR number, or lowercase commit ID.
 
 Resolution revalidates `projectCloneDir` beneath the canonical access root, then
 checks the normal `<clone-dir>/<repository-name>` destination, live catalogue
@@ -552,7 +559,7 @@ the original order and rejects duplicate names.
 | `ignore_rules.rs` | One `.gitignore`-accurate matcher (the `ignore` crate) shared by glob/grep/tree/list_directory. |
 | `exec_policy.rs` | Shell-string allowlist guard for `exec_command` (a guardrail, not a sandbox). |
 | `project_bindings.rs` | Canonical project-root validation plus durable ChatGPT conversation bindings keyed by a hash of `openai/session`, namespaced by access root, locked per record, and atomically written. |
-| `project_clone.rs` | Strict GitHub repository/branch/PR/commit URL parsing, normalized remote matching, existing-checkout discovery, exact target-ref or object-ID fetching, bounded non-interactive cloning below `projectCloneDir`, cross-process repository locks, collision refusal, and post-clone verification. |
+| `project_clone.rs` | Strict provider-agnostic HTTPS/SSH Git repository URL parsing plus GitHub branch/PR/commit target parsing, conservative normalized remote matching, existing-checkout discovery, exact GitHub target-ref or object-ID fetching, bounded non-interactive cloning below `projectCloneDir`, cross-process repository locks, collision refusal, and post-clone verification. |
 | `worktrees.rs` | Per-conversation managed Git worktree lifecycle: create a detached checkout under `worktrees.root` via `git worktree add`, optionally at an exact fetched commit, dual source/worktree root tracking, startup sweep bounded by `keepCount`, Windows `\\?\`-prefix handling, and the opt-in `allowSetupScript` gate for per-worktree environment setup. |
 | `project_catalog.rs` | Live, read-only project discovery from native Codex plus explicit metadata; canonical access-root filtering, deduplication, deterministic query ranking, sanitized MCP warnings, and local diagnostics. |
 | `exec_sessions.rs` | Generic-client transport fallback plus conversation-owned unified-exec sessions and transport-local diff state: trusted configured-shell resolution, Codex-compatible model shell-type selection by basename, PowerShell exit-code wrapping, background stdout/stderr drain tasks, process-group kill, idle cleanup, and output truncation (UTF-16 units to match the TS). |

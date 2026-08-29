@@ -28,7 +28,7 @@ static CLONE_COUNTER: AtomicU64 = AtomicU64::new(0);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProjectReference {
     Path(String),
-    GitHub(GitHubRepository),
+    Git(GitRepository),
 }
 
 impl ProjectReference {
@@ -39,7 +39,7 @@ impl ProjectReference {
         }
 
         if looks_like_remote(input) {
-            return parse_github_repository(input).map(Self::GitHub);
+            return parse_git_repository(input).map(Self::Git);
         }
 
         Ok(Self::Path(input.to_string()))
@@ -48,7 +48,7 @@ impl ProjectReference {
     pub fn display(&self) -> &str {
         match self {
             Self::Path(path) => path,
-            Self::GitHub(repository) => repository.web_url(),
+            Self::Git(repository) => repository.web_url(),
         }
     }
 }
@@ -59,25 +59,42 @@ enum CloneTransport {
     Ssh,
 }
 
+impl CloneTransport {
+    fn scheme(self) -> &'static str {
+        match self {
+            Self::Https => "https",
+            Self::Ssh => "ssh",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GitHubRepository {
-    owner: String,
+struct GenericRemoteAuthority {
+    host: String,
+    port: Option<u16>,
+    transport: CloneTransport,
+    ssh_user: Option<String>,
+    scp_style: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitRepository {
     name: String,
     identity: String,
-    checkout: GitHubCheckout,
+    checkout: GitCheckout,
     web_url: String,
     clone_url: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum GitHubCheckout {
+enum GitCheckout {
     DefaultBranch,
     Branch(String),
     PullRequest(u64),
     Commit(String),
 }
 
-impl GitHubRepository {
+impl GitRepository {
     pub fn web_url(&self) -> &str {
         &self.web_url
     }
@@ -91,7 +108,7 @@ impl GitHubRepository {
     }
 
     pub fn has_explicit_checkout(&self) -> bool {
-        !matches!(self.checkout, GitHubCheckout::DefaultBranch)
+        !matches!(self.checkout, GitCheckout::DefaultBranch)
     }
 
     fn same_identity(&self, other: &Self) -> bool {
@@ -104,7 +121,7 @@ impl GitHubRepository {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ResolvedGitHubProject {
+pub struct ResolvedGitProject {
     pub source_project_root: PathBuf,
     pub repository_url: String,
     pub checkout_commit: Option<String>,
@@ -113,26 +130,26 @@ pub struct ResolvedGitHubProject {
     pub warnings: Vec<String>,
 }
 
-pub fn repository_url_matches(url: &str, repository: &GitHubRepository) -> bool {
-    parse_github_repository(url)
+pub fn repository_url_matches(url: &str, repository: &GitRepository) -> bool {
+    parse_git_repository(url)
         .map(|candidate| candidate.same_selection(repository))
         .unwrap_or(false)
 }
 
-fn remote_url_matches(url: &str, repository: &GitHubRepository) -> bool {
-    parse_github_repository(url)
+fn remote_url_matches(url: &str, repository: &GitRepository) -> bool {
+    parse_git_remote(url, false)
         .map(|candidate| candidate.same_identity(repository))
         .unwrap_or(false)
 }
 
 pub fn normalize_repository_url(url: &str) -> Result<String, String> {
-    parse_github_repository(url).map(|repository| repository.web_url)
+    parse_git_repository(url).map(|repository| repository.web_url)
 }
 
 pub async fn project_matches_repository(
     config: &AppConfig,
     project_root: &Path,
-    repository: &GitHubRepository,
+    repository: &GitRepository,
 ) -> Result<bool, String> {
     let Some(git_root) = git_top_level(config, project_root).await? else {
         return Ok(false);
@@ -140,11 +157,11 @@ pub async fn project_matches_repository(
     remote_matches(config, &git_root, repository).await
 }
 
-pub async fn resolve_github_project(
+pub async fn resolve_git_project(
     config: &AppConfig,
     access_root: &Path,
-    repository: &GitHubRepository,
-) -> Result<ResolvedGitHubProject, String> {
+    repository: &GitRepository,
+) -> Result<ResolvedGitProject, String> {
     let clone_dir = canonical_clone_dir(config, access_root)?;
     let target = clone_dir.join(repository.name());
     let mut warnings = Vec::new();
@@ -192,10 +209,10 @@ pub async fn resolve_github_project(
 
 fn resolved(
     materialized: MaterializedRepository,
-    repository: &GitHubRepository,
+    repository: &GitRepository,
     warnings: Vec<String>,
-) -> ResolvedGitHubProject {
-    ResolvedGitHubProject {
+) -> ResolvedGitProject {
+    ResolvedGitProject {
         source_project_root: materialized.source_project_root,
         repository_url: repository.web_url().to_string(),
         checkout_commit: materialized.checkout_commit,
@@ -214,20 +231,60 @@ struct MaterializedRepository {
 }
 
 fn looks_like_remote(input: &str) -> bool {
-    input.contains("://")
-        || input
-            .get(..4)
-            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("git@"))
+    input.contains("://") || looks_like_scp_remote(input)
 }
 
-fn parse_github_repository(input: &str) -> Result<GitHubRepository, String> {
+fn looks_like_scp_remote(input: &str) -> bool {
+    let Some((authority, path)) = input.split_once(':') else {
+        return false;
+    };
+    authority.contains('@')
+        && !authority.contains(['/', '\\'])
+        && !path.is_empty()
+        && !path.contains(['?', '#'])
+}
+
+fn parse_git_repository(input: &str) -> Result<GitRepository, String> {
+    parse_git_remote(input, true)
+}
+
+fn parse_git_remote(input: &str, require_dot_git: bool) -> Result<GitRepository, String> {
     if input.chars().any(char::is_control) {
-        return Err("GitHub repository URL contains control characters".to_string());
+        return Err("Git repository URL contains control characters".to_string());
     }
     if input.contains(['?', '#']) {
-        return Err("GitHub repository URL must not contain a query or fragment".to_string());
+        return Err("Git repository URL must not contain a query or fragment".to_string());
     }
 
+    if looks_like_github_remote(input) {
+        return parse_github_repository(input);
+    }
+
+    parse_generic_git_repository(input, require_dot_git)
+}
+
+fn looks_like_github_remote(input: &str) -> bool {
+    if input
+        .get(.."git@github.com:".len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("git@github.com:"))
+    {
+        return true;
+    }
+
+    let Some((scheme, remainder)) = input.split_once("://") else {
+        return false;
+    };
+    let Some((authority, _)) = remainder.split_once('/') else {
+        return false;
+    };
+    match scheme.to_ascii_lowercase().as_str() {
+        "https" => matches_github_https_authority(authority),
+        "ssh" => matches_github_ssh_authority(authority),
+        _ => false,
+    }
+}
+
+fn parse_github_repository(input: &str) -> Result<GitRepository, String> {
     let lower = input.to_ascii_lowercase();
     if lower.starts_with("git@github.com:") {
         let path = &input["git@github.com:".len()..];
@@ -266,10 +323,11 @@ fn parse_github_repository(input: &str) -> Result<GitHubRepository, String> {
             }
             let mut repository = repository_from_path(path, CloneTransport::Ssh, false)?;
             if authority.eq_ignore_ascii_case("git@ssh.github.com:443") {
-                repository.clone_url = format!(
-                    "ssh://git@ssh.github.com:443/{}/{}.git",
-                    repository.owner, repository.name
-                );
+                let path = repository
+                    .clone_url
+                    .strip_prefix("git@github.com:")
+                    .ok_or_else(|| "Internal error: invalid normalized GitHub SSH URL".to_string())?;
+                repository.clone_url = format!("ssh://git@ssh.github.com:443/{path}");
             }
             Ok(repository)
         }
@@ -277,6 +335,263 @@ fn parse_github_repository(input: &str) -> Result<GitHubRepository, String> {
             "Only HTTPS or SSH GitHub repository URLs are supported; insecure and arbitrary Git transports are rejected"
                 .to_string(),
         ),
+    }
+}
+
+fn parse_generic_git_repository(
+    input: &str,
+    require_dot_git: bool,
+) -> Result<GitRepository, String> {
+    if let Some((scheme, remainder)) = input.split_once("://") {
+        let transport = match scheme.to_ascii_lowercase().as_str() {
+            "https" => CloneTransport::Https,
+            "ssh" => CloneTransport::Ssh,
+            _ => {
+                return Err(
+                    "Only HTTPS or SSH Git repository URLs are supported; local, insecure, and arbitrary Git transports are rejected"
+                        .to_string(),
+                );
+            }
+        };
+        let Some((authority, path)) = remainder.split_once('/') else {
+            return Err("Git repository URL is missing a repository path".to_string());
+        };
+        let remote_authority = parse_generic_authority(authority, transport)?;
+        let path = path.trim_matches('/');
+        if path.is_empty() {
+            return Err("Git repository URL is missing a repository path".to_string());
+        }
+        let clone_url = format!("{}://{authority}/{path}", scheme.to_ascii_lowercase());
+        return generic_repository_from_parts(&remote_authority, path, clone_url, require_dot_git);
+    }
+
+    let Some((authority, path)) = input.split_once(':') else {
+        return Err(
+            "Only HTTPS or SSH Git repository URLs are supported (for example https://gitlab.com/group/repo.git or git@gitlab.com:group/repo.git)"
+                .to_string(),
+        );
+    };
+    if !authority.contains('@') || authority.contains(['/', '\\']) {
+        return Err(
+            "SSH Git repository URLs without a scheme must use user@host:path.git syntax"
+                .to_string(),
+        );
+    }
+    let (user, host) = authority
+        .split_once('@')
+        .ok_or_else(|| "SSH Git repository URL has an invalid authority".to_string())?;
+    validate_ssh_user(user)?;
+    validate_git_host(host)?;
+    let path = path.trim_matches('/');
+    if path.is_empty() {
+        return Err("Git repository URL is missing a repository path".to_string());
+    }
+    let remote_authority = GenericRemoteAuthority {
+        host: host.to_ascii_lowercase(),
+        port: None,
+        transport: CloneTransport::Ssh,
+        ssh_user: Some(user.to_string()),
+        scp_style: true,
+    };
+    generic_repository_from_parts(
+        &remote_authority,
+        path,
+        format!("{authority}:{path}"),
+        require_dot_git,
+    )
+}
+
+fn parse_generic_authority(
+    authority: &str,
+    transport: CloneTransport,
+) -> Result<GenericRemoteAuthority, String> {
+    if authority.is_empty() {
+        return Err("Git repository URL has an empty authority".to_string());
+    }
+
+    let (host_port, ssh_user) = match transport {
+        CloneTransport::Https => {
+            if authority.contains('@') {
+                return Err(
+                    "Credential-bearing HTTPS Git URLs are rejected; use a credential helper or SSH URL"
+                        .to_string(),
+                );
+            }
+            (authority, None)
+        }
+        CloneTransport::Ssh => match authority.rsplit_once('@') {
+            Some((user, host_port)) => {
+                validate_ssh_user(user)?;
+                (host_port, Some(user.to_string()))
+            }
+            None => (authority, None),
+        },
+    };
+
+    let (host, port) = parse_git_host_port(host_port)?;
+    Ok(GenericRemoteAuthority {
+        host: host.to_ascii_lowercase(),
+        port,
+        transport,
+        ssh_user,
+        scp_style: false,
+    })
+}
+
+fn parse_git_host_port(authority: &str) -> Result<(String, Option<u16>), String> {
+    if let Some(rest) = authority.strip_prefix('[') {
+        let Some((host, suffix)) = rest.split_once(']') else {
+            return Err("Git repository URL has an invalid bracketed host".to_string());
+        };
+        host.parse::<std::net::Ipv6Addr>()
+            .map_err(|_| "Git repository URL has an invalid IPv6 host".to_string())?;
+        let port = if suffix.is_empty() {
+            None
+        } else {
+            Some(parse_git_port(suffix.strip_prefix(':').ok_or_else(
+                || "Git repository URL has invalid text after its host".to_string(),
+            )?)?)
+        };
+        return Ok((format!("[{host}]"), port));
+    }
+
+    if authority.matches(':').count() > 1 {
+        return Err("IPv6 Git hosts must be enclosed in brackets".to_string());
+    }
+    let (host, port) = match authority.rsplit_once(':') {
+        Some((host, port)) => (host, Some(parse_git_port(port)?)),
+        None => (authority, None),
+    };
+    validate_git_host(host)?;
+    Ok((host.to_string(), port))
+}
+
+fn parse_git_port(value: &str) -> Result<u16, String> {
+    value
+        .parse::<u16>()
+        .ok()
+        .filter(|port| *port > 0)
+        .ok_or_else(|| "Git repository URL has an invalid port".to_string())
+}
+
+fn validate_ssh_user(user: &str) -> Result<(), String> {
+    if !user.is_empty()
+        && !user.starts_with('-')
+        && user.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
+        })
+    {
+        Ok(())
+    } else {
+        Err("SSH Git repository URL has an invalid user name".to_string())
+    }
+}
+
+fn validate_git_host(host: &str) -> Result<(), String> {
+    if !host.is_empty()
+        && !host.starts_with('-')
+        && host.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
+        })
+    {
+        Ok(())
+    } else {
+        Err("Git repository URL has an invalid host".to_string())
+    }
+}
+
+fn generic_repository_from_parts(
+    authority: &GenericRemoteAuthority,
+    path: &str,
+    clone_url: String,
+    require_dot_git: bool,
+) -> Result<GitRepository, String> {
+    if path.contains('\\') {
+        return Err("Git repository URL path must use forward slashes".to_string());
+    }
+    let components = path.split('/').collect::<Vec<_>>();
+    if components.is_empty()
+        || components
+            .iter()
+            .any(|component| component.is_empty() || matches!(*component, "." | ".."))
+    {
+        return Err("Git repository URL has an invalid repository path".to_string());
+    }
+
+    let last = components.last().copied().unwrap_or_default();
+    let without_dot_git = strip_dot_git(last);
+    if require_dot_git && without_dot_git.is_none() {
+        return Err(
+            "Non-GitHub repository URLs must end in .git so Codexify can distinguish repository roots from arbitrary web pages"
+                .to_string(),
+        );
+    }
+    let repository_component = without_dot_git.unwrap_or(last);
+    if repository_component.is_empty() {
+        return Err("Git repository URL has an empty repository name".to_string());
+    }
+    let name = percent_decode(repository_component, "Git repository URL")?;
+    validate_clone_directory_name(&name)?;
+
+    let mut identity_components = components[..components.len() - 1].to_vec();
+    identity_components.push(repository_component);
+    let identity_path = identity_components.join("/");
+    let default_port = match authority.transport {
+        CloneTransport::Https => matches!(authority.port, None | Some(443)),
+        CloneTransport::Ssh => matches!(authority.port, None | Some(22)),
+    };
+    let conventional_service_ssh = authority.transport == CloneTransport::Ssh
+        && authority.ssh_user.as_deref() == Some("git")
+        && default_port;
+    let identity_host = if authority.transport == CloneTransport::Https && default_port
+        || conventional_service_ssh
+    {
+        authority.host.to_ascii_lowercase()
+    } else {
+        let scheme = if authority.scp_style {
+            "scp"
+        } else {
+            authority.transport.scheme()
+        };
+        let user = authority
+            .ssh_user
+            .as_deref()
+            .map(|user| format!("{user}@"))
+            .unwrap_or_default();
+        let port = authority
+            .port
+            .map(|port| format!(":{port}"))
+            .unwrap_or_default();
+        format!("{scheme}://{user}{}{port}", authority.host)
+    };
+    let identity = format!("{identity_host}/{identity_path}");
+
+    Ok(GitRepository {
+        name,
+        identity,
+        checkout: GitCheckout::DefaultBranch,
+        web_url: clone_url.clone(),
+        clone_url,
+    })
+}
+
+fn strip_dot_git(value: &str) -> Option<&str> {
+    value
+        .get(value.len().saturating_sub(4)..)
+        .filter(|suffix| suffix.eq_ignore_ascii_case(".git"))
+        .map(|_| &value[..value.len() - 4])
+}
+
+fn validate_clone_directory_name(value: &str) -> Result<(), String> {
+    if !value.is_empty()
+        && !matches!(value, "." | "..")
+        && !value
+            .chars()
+            .any(|character| character.is_control() || matches!(character, '/' | '\\'))
+    {
+        Ok(())
+    } else {
+        Err("Git repository URL has an invalid repository name".to_string())
     }
 }
 
@@ -297,7 +612,7 @@ fn repository_from_path(
     path: &str,
     transport: CloneTransport,
     allow_checkout: bool,
-) -> Result<GitHubRepository, String> {
+) -> Result<GitRepository, String> {
     let path = path.trim_matches('/');
     let parts = path.split('/').collect::<Vec<_>>();
     if parts.len() < 2 || parts.iter().any(|part| part.is_empty()) {
@@ -316,11 +631,11 @@ fn repository_from_path(
     validate_component(name, "repository")?;
 
     let checkout = match &parts[2..] {
-        [] => GitHubCheckout::DefaultBranch,
+        [] => GitCheckout::DefaultBranch,
         ["tree", branch @ ..] if allow_checkout && !branch.is_empty() => {
-            let branch = percent_decode(&branch.join("/"))?;
+            let branch = percent_decode(&branch.join("/"), "GitHub branch URL")?;
             validate_branch_name(&branch)?;
-            GitHubCheckout::Branch(branch)
+            GitCheckout::Branch(branch)
         }
         ["pull", number] if allow_checkout => {
             let number = number
@@ -328,11 +643,9 @@ fn repository_from_path(
                 .ok()
                 .filter(|number| *number > 0)
                 .ok_or_else(|| "GitHub pull-request URL has an invalid PR number".to_string())?;
-            GitHubCheckout::PullRequest(number)
+            GitCheckout::PullRequest(number)
         }
-        ["commit", commit] if allow_checkout => {
-            GitHubCheckout::Commit(normalize_commit_id(commit)?)
-        }
+        ["commit", commit] if allow_checkout => GitCheckout::Commit(normalize_commit_id(commit)?),
         _ => {
             return Err(
                 "Supported GitHub URLs identify a repository root, a branch with /tree/<branch>, a pull request with /pull/<number>, or a commit with /commit/<sha>"
@@ -348,17 +661,17 @@ fn repository_from_path(
     );
     let repository_web_url = format!("https://github.com/{owner}/{name}");
     let web_url = match &checkout {
-        GitHubCheckout::DefaultBranch => repository_web_url,
-        GitHubCheckout::Branch(branch) => {
+        GitCheckout::DefaultBranch => repository_web_url,
+        GitCheckout::Branch(branch) => {
             format!(
                 "{repository_web_url}/tree/{}",
                 percent_encode_branch(branch)
             )
         }
-        GitHubCheckout::PullRequest(number) => {
+        GitCheckout::PullRequest(number) => {
             format!("{repository_web_url}/pull/{number}")
         }
-        GitHubCheckout::Commit(commit) => {
+        GitCheckout::Commit(commit) => {
             format!("{repository_web_url}/commit/{commit}")
         }
     };
@@ -367,8 +680,7 @@ fn repository_from_path(
         CloneTransport::Ssh => format!("git@github.com:{owner}/{name}.git"),
     };
 
-    Ok(GitHubRepository {
-        owner: owner.to_string(),
+    Ok(GitRepository {
         name: name.to_string(),
         identity,
         checkout,
@@ -377,7 +689,7 @@ fn repository_from_path(
     })
 }
 
-fn percent_decode(value: &str) -> Result<String, String> {
+fn percent_decode(value: &str, context: &str) -> Result<String, String> {
     let bytes = value.as_bytes();
     let mut decoded = Vec::with_capacity(bytes.len());
     let mut index = 0;
@@ -388,17 +700,16 @@ fn percent_decode(value: &str) -> Result<String, String> {
             continue;
         }
         if index + 2 >= bytes.len() {
-            return Err("GitHub branch URL contains an incomplete percent escape".to_string());
+            return Err(format!("{context} contains an incomplete percent escape"));
         }
         let high = hex_value(bytes[index + 1])
-            .ok_or_else(|| "GitHub branch URL contains an invalid percent escape".to_string())?;
+            .ok_or_else(|| format!("{context} contains an invalid percent escape"))?;
         let low = hex_value(bytes[index + 2])
-            .ok_or_else(|| "GitHub branch URL contains an invalid percent escape".to_string())?;
+            .ok_or_else(|| format!("{context} contains an invalid percent escape"))?;
         decoded.push((high << 4) | low);
         index += 3;
     }
-    String::from_utf8(decoded)
-        .map_err(|_| "GitHub branch URL is not valid UTF-8 after decoding".to_string())
+    String::from_utf8(decoded).map_err(|_| format!("{context} is not valid UTF-8 after decoding"))
 }
 
 fn hex_value(value: u8) -> Option<u8> {
@@ -498,7 +809,7 @@ async fn find_existing_repositories(
     access_root: &Path,
     clone_dir: &Path,
     target: &Path,
-    repository: &GitHubRepository,
+    repository: &GitRepository,
 ) -> Result<(BTreeSet<PathBuf>, Vec<String>), String> {
     let mut candidates = BTreeSet::new();
     let mut warnings = Vec::new();
@@ -559,7 +870,7 @@ async fn matching_repository_at(
     config: &AppConfig,
     access_root: &Path,
     candidate: &Path,
-    repository: &GitHubRepository,
+    repository: &GitRepository,
 ) -> Result<Option<PathBuf>, String> {
     let Ok(candidate) = fs::canonicalize(candidate) else {
         return Ok(None);
@@ -589,7 +900,7 @@ async fn matching_repository_at(
 
 fn unique_existing_match(
     matches: BTreeSet<PathBuf>,
-    repository: &GitHubRepository,
+    repository: &GitRepository,
 ) -> Result<Option<PathBuf>, String> {
     if matches.len() <= 1 {
         return Ok(matches.into_iter().next());
@@ -606,7 +917,7 @@ fn unique_existing_match(
     ))
 }
 
-fn destination_collision(target: &Path, repository: &GitHubRepository) -> String {
+fn destination_collision(target: &Path, repository: &GitRepository) -> String {
     format!(
         "Cannot clone {} because the destination `{}` already exists and is not a checkout of that repository. Move it, configure another projectCloneDir/--project-clone-dir, or pass an existing matching project path.",
         repository.web_url(),
@@ -617,7 +928,7 @@ fn destination_collision(target: &Path, repository: &GitHubRepository) -> String
 async fn materialize_existing_repository(
     config: &AppConfig,
     source_project_root: PathBuf,
-    repository: &GitHubRepository,
+    repository: &GitRepository,
 ) -> Result<MaterializedRepository, String> {
     let checkout_commit = if repository.has_explicit_checkout() {
         let fetch_source = matching_remote_source(config, &source_project_root, repository)
@@ -651,7 +962,7 @@ async fn clone_repository(
     access_root: &Path,
     clone_dir: &Path,
     target: &Path,
-    repository: &GitHubRepository,
+    repository: &GitRepository,
 ) -> Result<MaterializedRepository, String> {
     clone_repository_from(
         config,
@@ -669,7 +980,7 @@ async fn clone_repository_from(
     access_root: &Path,
     clone_dir: &Path,
     target: &Path,
-    repository: &GitHubRepository,
+    repository: &GitRepository,
     clone_source: &str,
 ) -> Result<MaterializedRepository, String> {
     let staging = temporary_clone_path(clone_dir, repository)?;
@@ -677,7 +988,7 @@ async fn clone_repository_from(
 
     let mut command = Command::new("git");
     command.args(["clone", "--no-recurse-submodules"]);
-    if let GitHubCheckout::Branch(branch) = &repository.checkout {
+    if let GitCheckout::Branch(branch) = &repository.checkout {
         command.args(["--branch", branch]);
     }
     command
@@ -750,7 +1061,7 @@ async fn clone_repository_from(
         if !output.status.success() {
             let _ = fs::remove_dir_all(&staging);
             return Err(format!(
-                "Could not record the requested GitHub remote after cloning: {}",
+                "Could not record the requested Git remote after cloning: {}",
                 bounded_output(&output)
             ));
         }
@@ -766,7 +1077,7 @@ async fn clone_repository_from(
     if !matches {
         let _ = fs::remove_dir_all(&staging);
         return Err(format!(
-            "The completed clone did not report the requested GitHub repository as a remote: {}",
+            "The completed clone did not report the requested Git repository as a remote: {}",
             repository.web_url()
         ));
     }
@@ -902,12 +1213,12 @@ fn publish_clone_no_replace(_source: &Path, _target: &Path) -> io::Result<()> {
 async fn prepare_cloned_checkout(
     config: &AppConfig,
     git_root: &Path,
-    repository: &GitHubRepository,
+    repository: &GitRepository,
     clone_source: &str,
 ) -> Result<Option<String>, String> {
     match &repository.checkout {
-        GitHubCheckout::DefaultBranch => Ok(None),
-        GitHubCheckout::Branch(branch) => {
+        GitCheckout::DefaultBranch => Ok(None),
+        GitCheckout::Branch(branch) => {
             let head = head_commit(config, git_root).await?;
             let branch_commit = required_commit(
                 config,
@@ -924,7 +1235,7 @@ async fn prepare_cloned_checkout(
             }
             Ok(Some(head))
         }
-        GitHubCheckout::PullRequest(_) | GitHubCheckout::Commit(_) => {
+        GitCheckout::PullRequest(_) | GitCheckout::Commit(_) => {
             let commit = fetch_checkout_commit(config, git_root, repository, clone_source).await?;
             let output = git_output(
                 config,
@@ -953,16 +1264,16 @@ async fn prepare_cloned_checkout(
 async fn fetch_checkout_commit(
     config: &AppConfig,
     git_root: &Path,
-    repository: &GitHubRepository,
+    repository: &GitRepository,
     fetch_source: &str,
 ) -> Result<String, String> {
     let source_spec = match &repository.checkout {
-        GitHubCheckout::DefaultBranch => {
+        GitCheckout::DefaultBranch => {
             return Err("Internal error: default-branch selection has no explicit ref".to_string());
         }
-        GitHubCheckout::Branch(branch) => format!("refs/heads/{branch}"),
-        GitHubCheckout::PullRequest(number) => format!("refs/pull/{number}/head"),
-        GitHubCheckout::Commit(commit) => commit.clone(),
+        GitCheckout::Branch(branch) => format!("refs/heads/{branch}"),
+        GitCheckout::PullRequest(number) => format!("refs/pull/{number}/head"),
+        GitCheckout::Commit(commit) => commit.clone(),
     };
     let destination_ref = checkout_storage_ref(repository);
     let refspec = format!("+{source_spec}:{destination_ref}");
@@ -998,7 +1309,7 @@ async fn fetch_checkout_commit(
     .await
 }
 
-fn checkout_storage_ref(repository: &GitHubRepository) -> String {
+fn checkout_storage_ref(repository: &GitRepository) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"codexify/github-checkout/v1\0");
     hasher.update(repository.identity.as_bytes());
@@ -1072,7 +1383,7 @@ async fn git_top_level(config: &AppConfig, path: &Path) -> Result<Option<PathBuf
 async fn remote_matches(
     config: &AppConfig,
     git_root: &Path,
-    repository: &GitHubRepository,
+    repository: &GitRepository,
 ) -> Result<bool, String> {
     Ok(!matching_remote_sources(config, git_root, repository)
         .await?
@@ -1082,7 +1393,7 @@ async fn remote_matches(
 async fn matching_remote_source(
     config: &AppConfig,
     git_root: &Path,
-    repository: &GitHubRepository,
+    repository: &GitRepository,
 ) -> Result<Option<String>, String> {
     Ok(matching_remote_sources(config, git_root, repository)
         .await?
@@ -1094,7 +1405,7 @@ async fn matching_remote_source(
 async fn matching_remote_sources(
     config: &AppConfig,
     git_root: &Path,
-    repository: &GitHubRepository,
+    repository: &GitRepository,
 ) -> Result<Vec<(String, String)>, String> {
     let output = git_output(
         config,
@@ -1184,10 +1495,7 @@ fn bounded_output(output: &Output) -> String {
     }
 }
 
-fn temporary_clone_path(
-    clone_dir: &Path,
-    repository: &GitHubRepository,
-) -> Result<PathBuf, String> {
+fn temporary_clone_path(clone_dir: &Path, repository: &GitRepository) -> Result<PathBuf, String> {
     loop {
         let counter = CLONE_COUNTER.fetch_add(1, Ordering::SeqCst);
         let path = clone_dir.join(format!(
@@ -1224,7 +1532,7 @@ fn temporary_clone_path(
     }
 }
 
-fn repository_key(repository: &GitHubRepository) -> String {
+fn repository_key(repository: &GitRepository) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"codexify/github-repository/v1\0");
     hasher.update(repository.identity.as_bytes());
@@ -1246,7 +1554,7 @@ impl Drop for CloneLock {
 
 async fn acquire_clone_lock(
     clone_dir: &Path,
-    repository: &GitHubRepository,
+    repository: &GitRepository,
 ) -> Result<CloneLock, String> {
     let lock_path = clone_dir.join(format!(
         ".codexify-clone-{}.lock",
@@ -1358,14 +1666,14 @@ mod tests {
     #[test]
     fn parses_and_normalizes_common_github_urls() {
         let https = ProjectReference::parse("https://github.com/OpenAI/codex.git/").unwrap();
-        let ProjectReference::GitHub(https) = https else {
+        let ProjectReference::Git(https) = https else {
             panic!("expected GitHub reference");
         };
         assert_eq!(https.web_url(), "https://github.com/OpenAI/codex");
         assert_eq!(https.clone_url(), "https://github.com/OpenAI/codex.git");
 
         let ssh = ProjectReference::parse("git@github.com:openai/CODEX.git").unwrap();
-        let ProjectReference::GitHub(ssh) = ssh else {
+        let ProjectReference::Git(ssh) = ssh else {
             panic!("expected GitHub reference");
         };
         assert!(https.same_identity(&ssh));
@@ -1373,7 +1681,7 @@ mod tests {
 
         let alternate =
             ProjectReference::parse("ssh://git@ssh.github.com:443/OpenAI/codex.git").unwrap();
-        let ProjectReference::GitHub(alternate) = alternate else {
+        let ProjectReference::Git(alternate) = alternate else {
             panic!("expected GitHub reference");
         };
         assert!(https.same_identity(&alternate));
@@ -1386,7 +1694,7 @@ mod tests {
             "https://github.com/OpenAI/codex/tree/feature%2Fproject-selection",
         )
         .unwrap();
-        let ProjectReference::GitHub(branch) = branch else {
+        let ProjectReference::Git(branch) = branch else {
             panic!("expected GitHub reference");
         };
         assert_eq!(
@@ -1398,7 +1706,7 @@ mod tests {
         assert!(!https.same_selection(&branch));
 
         let pull = ProjectReference::parse("https://github.com/OpenAI/codex/pull/886/").unwrap();
-        let ProjectReference::GitHub(pull) = pull else {
+        let ProjectReference::Git(pull) = pull else {
             panic!("expected GitHub reference");
         };
         assert_eq!(pull.web_url(), "https://github.com/OpenAI/codex/pull/886");
@@ -1408,7 +1716,7 @@ mod tests {
             "https://github.com/OpenAI/codex/commit/C8CAE44BF004A6AC6BFC267C5DFE503D57652103/",
         )
         .unwrap();
-        let ProjectReference::GitHub(commit) = commit else {
+        let ProjectReference::Git(commit) = commit else {
             panic!("expected GitHub reference");
         };
         assert_eq!(
@@ -1418,12 +1726,99 @@ mod tests {
         assert!(commit.has_explicit_checkout());
         assert!(https.same_identity(&commit));
         assert!(!https.same_selection(&commit));
+
+        let wiki = ProjectReference::parse("https://github.com/hypnguyen1209/codex-free.wiki.git")
+            .unwrap();
+        let ProjectReference::Git(wiki) = wiki else {
+            panic!("expected Git reference");
+        };
+        assert_eq!(wiki.name(), "codex-free.wiki");
+        assert_eq!(
+            wiki.clone_url(),
+            "https://github.com/hypnguyen1209/codex-free.wiki.git"
+        );
     }
 
     #[test]
-    fn rejects_non_github_credentials_and_unsupported_subpages() {
+    fn parses_provider_agnostic_git_repository_urls() {
+        let https = ProjectReference::parse("https://gitlab.com/acme/platform/widget.git").unwrap();
+        let ProjectReference::Git(https) = https else {
+            panic!("expected Git reference");
+        };
+        assert_eq!(https.name(), "widget");
+        assert_eq!(
+            https.web_url(),
+            "https://gitlab.com/acme/platform/widget.git"
+        );
+        assert_eq!(https.clone_url(), https.web_url());
+        assert!(!https.has_explicit_checkout());
+
+        let scp = ProjectReference::parse("git@gitlab.com:acme/platform/widget.git").unwrap();
+        let ProjectReference::Git(scp) = scp else {
+            panic!("expected Git reference");
+        };
+        assert!(https.same_identity(&scp));
+
+        let ssh = ProjectReference::parse("ssh://git@gitlab.com/acme/platform/widget.git").unwrap();
+        let ProjectReference::Git(ssh) = ssh else {
+            panic!("expected Git reference");
+        };
+        assert!(https.same_identity(&ssh));
+        let https_default_port =
+            ProjectReference::parse("https://gitlab.com:443/acme/platform/widget.git").unwrap();
+        let ProjectReference::Git(https_default_port) = https_default_port else {
+            panic!("expected Git reference");
+        };
+        assert!(https.same_identity(&https_default_port));
+        let ssh_default_port =
+            ProjectReference::parse("ssh://git@gitlab.com:22/acme/platform/widget.git").unwrap();
+        let ProjectReference::Git(ssh_default_port) = ssh_default_port else {
+            panic!("expected Git reference");
+        };
+        assert!(https.same_identity(&ssh_default_port));
+
+        let https_custom_port =
+            ProjectReference::parse("https://gitlab.com:8443/acme/platform/widget.git").unwrap();
+        let ProjectReference::Git(https_custom_port) = https_custom_port else {
+            panic!("expected Git reference");
+        };
+        let ssh_custom_port =
+            ProjectReference::parse("ssh://git@gitlab.com:8443/acme/platform/widget.git").unwrap();
+        let ProjectReference::Git(ssh_custom_port) = ssh_custom_port else {
+            panic!("expected Git reference");
+        };
+        assert!(!https_custom_port.same_identity(&ssh_custom_port));
+
+        let alice = ProjectReference::parse("alice@git.example:acme/platform/widget.git").unwrap();
+        let ProjectReference::Git(alice) = alice else {
+            panic!("expected Git reference");
+        };
+        let bob = ProjectReference::parse("bob@git.example:acme/platform/widget.git").unwrap();
+        let ProjectReference::Git(bob) = bob else {
+            panic!("expected Git reference");
+        };
+        let generic_https =
+            ProjectReference::parse("https://git.example/acme/platform/widget.git").unwrap();
+        let ProjectReference::Git(generic_https) = generic_https else {
+            panic!("expected Git reference");
+        };
+        assert!(!alice.same_identity(&bob));
+        assert!(!alice.same_identity(&generic_https));
+
+        assert!(remote_url_matches(
+            "https://gitlab.com/acme/platform/widget",
+            &https
+        ));
+    }
+
+    #[test]
+    fn rejects_unsafe_transports_credentials_and_unsupported_pages() {
         for input in [
             "https://gitlab.com/openai/codex",
+            "https://token@gitlab.com/openai/codex.git",
+            "http://gitlab.com/openai/codex.git",
+            "git://gitlab.com/openai/codex.git",
+            "file:///tmp/codex.git",
             "https://token@github.com/openai/codex",
             "http://github.com/openai/codex",
             "git://github.com/openai/codex",
@@ -1449,7 +1844,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn clones_into_the_configured_directory_and_verifies_the_requested_remote() {
+    async fn clones_provider_agnostic_git_remote_and_verifies_the_requested_remote() {
         let root = TempDir::new().unwrap();
         let access_root = root.path().join("projects");
         let clone_dir = access_root.join("cloned");
@@ -1474,7 +1869,8 @@ mod tests {
             ],
         );
 
-        let repository = parse_github_repository("https://github.com/acme/widget").unwrap();
+        let repository =
+            parse_git_repository("https://gitlab.example/acme/platform/widget.git").unwrap();
         let mut config = default_config(access_root.clone());
         config.multi_project = true;
         config.project_clone_dir = clone_dir.clone();
@@ -1502,6 +1898,10 @@ mod tests {
         assert_eq!(
             fs::read_to_string(target.join("README.md")).unwrap(),
             "fixture"
+        );
+        assert_eq!(
+            git_text(&target, &["remote", "get-url", "origin"]),
+            "https://gitlab.example/acme/platform/widget.git"
         );
         assert!(
             project_matches_repository(&config, &target, &repository)
@@ -1748,7 +2148,7 @@ mod tests {
         config.project_catalog.codex_config.enabled = false;
         let repository = parse_github_repository("https://github.com/acme/widget").unwrap();
 
-        let error = resolve_github_project(
+        let error = resolve_git_project(
             &config,
             &fs::canonicalize(&access_root).unwrap(),
             &repository,
@@ -1773,7 +2173,7 @@ mod tests {
         config.project_catalog.codex_config.enabled = false;
         let repository = parse_github_repository("https://github.com/acme/widget").unwrap();
 
-        let error = resolve_github_project(
+        let error = resolve_git_project(
             &config,
             &fs::canonicalize(&access_root).unwrap(),
             &repository,

@@ -104,7 +104,7 @@ pub struct Cli {
     #[arg(long = "multi-project")]
     pub multi_project: bool,
 
-    /// Existing directory below --work-dir where GitHub repositories are cloned.
+    /// Existing directory below --work-dir where Git repositories are cloned.
     /// Default: --work-dir.
     #[arg(long = "project-clone-dir")]
     pub project_clone_dir: Option<String>,
