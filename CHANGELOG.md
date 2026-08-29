@@ -4,6 +4,20 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project aims to
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-08-30
+
+### Added
+
+- A GitHub Pages landing page at `codexify.dev` with installation commands,
+  feature and architecture documentation, and automatic light/dark theming based
+  on the browser's preferred color scheme.
+
+### Changed
+
+- The macOS/Linux and Windows installers now explicitly tell users to restart
+  their terminal after installation and then run `codexify quickstart` to finish
+  connector setup.
+
 ## [1.0.0] - 2026-08-29
 
 ### Added
@@ -86,4 +100,5 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   drained through bounded head/tail buffers, while component-only `_meta` remains
   outside the model-visible limit.
 
+[1.1.0]: https://github.com/devnoname120/codexify/releases/tag/v1.1.0
 [1.0.0]: https://github.com/devnoname120/codexify/releases/tag/v1.0.0

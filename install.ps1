@@ -150,7 +150,8 @@ try {
     }
 
     Write-Host "Installed Codexify $Version to $Target"
-    Write-Host 'Open a new terminal to use codexify from PATH.'
+    Write-Host 'Restart your terminal, then run:'
+    Write-Host '  codexify quickstart'
 }
 finally {
     Remove-Item -LiteralPath $TempDir -Recurse -Force -ErrorAction SilentlyContinue

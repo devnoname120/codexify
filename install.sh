@@ -230,4 +230,4 @@ if [ "${CODEXIFY_SKIP_SERVICE:-0}" != 1 ]; then
 fi
 
 printf '\nInstalled Codexify %s to %s\n' "$VERSION" "$target"
-printf 'Open a new terminal or run: export PATH="$HOME/.codexify/bin:$PATH"\n'
+printf 'Restart your terminal, then run:\n  codexify quickstart\n'
