@@ -1,4 +1,4 @@
-name: Deploy installer pages
+name: Deploy Codexify site
 
 on:
   workflow_call:
@@ -22,10 +22,10 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Stage installer site
+      - name: Stage Pages site
         run: |
           mkdir public
-          cp install.sh install.ps1 public/
+          cp site/index.html install.sh install.ps1 public/
           touch public/.nojekyll
 
       - uses: actions/configure-pages@v6
@@ -34,6 +34,6 @@ jobs:
         with:
           path: public
 
-      - name: Deploy installers
+      - name: Deploy site
         id: deployment
         uses: actions/deploy-pages@v5

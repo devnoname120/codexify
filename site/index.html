@@ -1,0 +1,923 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Codexify brings Codex-style local tooling into ChatGPT through a secure Rust MCP bridge.">
+  <meta name="theme-color" content="#0b0d10">
+  <meta property="og:title" content="Codexify — Codex-style local tooling for ChatGPT">
+  <meta property="og:description" content="Run commands, edit files, use git, bridge attachments, aggregate MCP servers, and keep work scoped to your machine.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://codexify.dev">
+  <title>Codexify — Codex-style local tooling for ChatGPT</title>
+  <style>
+    :root {
+      --bg: #090b0e;
+      --bg-raised: #101318;
+      --panel: rgba(18, 22, 28, 0.78);
+      --panel-strong: #151922;
+      --text: #f3f5f7;
+      --muted: #9ca6b4;
+      --line: rgba(255, 255, 255, 0.10);
+      --line-strong: rgba(255, 255, 255, 0.18);
+      --accent: #f36d3d;
+      --accent-soft: rgba(243, 109, 61, 0.15);
+      --mint: #77e6b6;
+      --mint-soft: rgba(119, 230, 182, 0.13);
+      --blue: #84b6ff;
+      --shadow: 0 30px 80px rgba(0, 0, 0, 0.42);
+      --radius: 22px;
+      --max: 1180px;
+      font-synthesis: none;
+      color-scheme: dark;
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      min-width: 320px;
+      background:
+        radial-gradient(circle at 15% 0%, rgba(243, 109, 61, 0.13), transparent 28rem),
+        radial-gradient(circle at 84% 10%, rgba(119, 230, 182, 0.08), transparent 30rem),
+        var(--bg);
+      color: var(--text);
+      font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.55;
+      text-rendering: optimizeLegibility;
+    }
+
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      opacity: 0.22;
+      background-image:
+        linear-gradient(rgba(255,255,255,.025) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255,255,255,.025) 1px, transparent 1px);
+      background-size: 34px 34px;
+      mask-image: linear-gradient(to bottom, black, transparent 72%);
+      z-index: -1;
+    }
+
+    a { color: inherit; text-decoration: none; }
+    button, a { -webkit-tap-highlight-color: transparent; }
+    button { font: inherit; }
+
+    .shell { width: min(calc(100% - 40px), var(--max)); margin: 0 auto; }
+
+    .nav-wrap {
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      backdrop-filter: blur(18px);
+      background: linear-gradient(to bottom, rgba(9,11,14,.92), rgba(9,11,14,.70));
+      border-bottom: 1px solid transparent;
+      transition: border-color .2s ease;
+    }
+    .nav-wrap.scrolled { border-color: var(--line); }
+    .nav {
+      min-height: 72px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 24px;
+    }
+    .brand { display: inline-flex; align-items: center; gap: 11px; font-weight: 760; letter-spacing: -0.02em; }
+    .brand-mark {
+      width: 34px;
+      height: 34px;
+      display: grid;
+      place-items: center;
+      border: 1px solid var(--line-strong);
+      border-radius: 10px;
+      background: linear-gradient(145deg, rgba(243,109,61,.22), rgba(255,255,255,.03));
+      box-shadow: inset 0 1px 0 rgba(255,255,255,.08);
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 16px;
+      color: #ffd6c8;
+    }
+    .nav-links { display: flex; align-items: center; gap: 24px; color: var(--muted); font-size: 14px; }
+    .nav-links a:hover { color: var(--text); }
+    .nav-actions { display: flex; gap: 10px; }
+
+    .button {
+      min-height: 42px;
+      padding: 0 16px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 9px;
+      border: 1px solid var(--line-strong);
+      border-radius: 12px;
+      background: rgba(255,255,255,.035);
+      color: var(--text);
+      font-weight: 670;
+      font-size: 14px;
+      cursor: pointer;
+      transition: transform .15s ease, border-color .15s ease, background .15s ease;
+    }
+    .button:hover { transform: translateY(-1px); border-color: rgba(255,255,255,.30); background: rgba(255,255,255,.065); }
+    .button.primary { background: var(--text); color: #0d1014; border-color: var(--text); }
+    .button.primary:hover { background: white; }
+    .button.accent { background: var(--accent); color: #180b07; border-color: var(--accent); }
+    .button.accent:hover { background: #ff7a48; }
+
+    .hero-zone {
+      position: relative;
+    }
+    .hero {
+      position: relative;
+      display: grid;
+      grid-template-columns: minmax(0, 1.04fr) minmax(420px, .96fr);
+      gap: 62px;
+      align-items: start;
+      padding: 104px 0 78px;
+    }
+    .hero-copy {
+      position: sticky;
+      top: 92px;
+      align-self: start;
+      min-width: 0;
+    }
+    .eyebrow {
+      width: fit-content;
+      padding: 7px 10px;
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      border: 1px solid rgba(119,230,182,.22);
+      border-radius: 999px;
+      background: var(--mint-soft);
+      color: #b8f5d9;
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: .04em;
+      text-transform: uppercase;
+    }
+    .pulse { width: 7px; height: 7px; border-radius: 50%; background: var(--mint); box-shadow: 0 0 0 5px rgba(119,230,182,.10); }
+    h1 {
+      margin: 22px 0 22px;
+      max-width: 780px;
+      font-size: clamp(52px, 7.2vw, 92px);
+      line-height: .94;
+      letter-spacing: -.065em;
+      font-weight: 820;
+    }
+    .hero-em { color: var(--accent); }
+    .lede { max-width: 670px; margin: 0; color: #b9c1cc; font-size: clamp(18px, 2vw, 21px); line-height: 1.55; }
+    .hero-actions { margin-top: 30px; display: flex; flex-wrap: wrap; gap: 11px; }
+    .microcopy { margin-top: 20px; display: flex; flex-wrap: wrap; gap: 8px 18px; color: var(--muted); font-size: 13px; }
+    .microcopy span::before { content: "·"; color: var(--accent); margin-right: 8px; }
+    .chatshot {
+      position: relative;
+      width: 100%;
+      max-width: 520px;
+      margin-left: auto;
+      border: 1px solid rgba(255,255,255,.08);
+      border-radius: 34px;
+      overflow: hidden;
+      background: #08090b;
+      box-shadow: 0 38px 90px rgba(0, 0, 0, 0.52);
+      transform: perspective(1000px) rotateY(-2deg) rotateX(1deg);
+    }
+    .chatshot::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      background: linear-gradient(180deg, rgba(255,255,255,.05), transparent 12%, transparent 88%, rgba(255,255,255,.03));
+    }
+    .chatshot-header {
+      padding: 18px 18px 14px;
+      display: grid;
+      grid-template-columns: 52px 1fr 52px;
+      align-items: center;
+      gap: 10px;
+      border-bottom: 1px solid rgba(255,255,255,.06);
+    }
+    .chat-circle {
+      width: 46px;
+      height: 46px;
+      display: grid;
+      place-items: center;
+      border: 1px solid rgba(255,255,255,.12);
+      border-radius: 50%;
+      background: rgba(255,255,255,.06);
+      color: #ffffff;
+      font-size: 27px;
+      line-height: 1;
+    }
+    .chat-title {
+      text-align: center;
+      line-height: 1.15;
+    }
+    .chat-title strong {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 21px;
+      letter-spacing: -.03em;
+    }
+    .chat-appicon {
+      width: 20px;
+      height: 20px;
+      display: inline-grid;
+      place-items: center;
+      border: 1px solid #2e7cff;
+      border-radius: 6px;
+      color: #56a0ff;
+      font: 700 12px ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    .chat-title span {
+      display: block;
+      margin-top: 5px;
+      color: #a0a7b1;
+      font-size: 15px;
+    }
+    .chatshot-body {
+      min-height: 690px;
+      padding: 18px 18px 10px;
+      display: grid;
+      gap: 18px;
+      background: #08090b;
+    }
+    .prompt-bubble {
+      justify-self: end;
+      max-width: 86%;
+      padding: 19px 22px;
+      border-radius: 28px;
+      background: #e7e7eb;
+      color: #0c0d10;
+      font-size: 18px;
+      line-height: 1.56;
+      box-shadow: inset 0 1px 0 rgba(255,255,255,.42);
+    }
+    .prompt-bubble strong {
+      color: #3490ff;
+      font-weight: 760;
+    }
+    .assistant-block {
+      display: grid;
+      gap: 12px;
+      color: #f2f4f7;
+    }
+    .assistant-meta {
+      color: #8b919b;
+      font-size: 13px;
+      letter-spacing: -.01em;
+    }
+    .assistant-copy {
+      margin: 0;
+      color: #f2f4f7;
+      font-size: 16px;
+      line-height: 1.7;
+      letter-spacing: -.015em;
+    }
+    .tool-list {
+      display: grid;
+      gap: 10px;
+    }
+    .tool-card {
+      padding: 13px 14px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+      border: 1px solid rgba(255,255,255,.08);
+      border-radius: 16px;
+      background: rgba(255,255,255,.035);
+    }
+    .tool-card strong {
+      display: block;
+      font: 700 13px ui-monospace, SFMono-Regular, Menlo, monospace;
+      color: #edf2f7;
+    }
+    .tool-card span {
+      display: block;
+      margin-top: 3px;
+      color: #9fa7b2;
+      font-size: 13px;
+    }
+    .tool-state {
+      flex: 0 0 auto;
+      padding: 4px 8px;
+      border-radius: 999px;
+      background: rgba(119,230,182,.11);
+      color: #bbf5dd;
+      font: 700 11px ui-monospace, SFMono-Regular, Menlo, monospace;
+      white-space: nowrap;
+    }
+    .diff-card {
+      border: 1px solid rgba(255,255,255,.08);
+      border-radius: 18px;
+      overflow: hidden;
+      background: #0d1117;
+    }
+    .diff-head {
+      padding: 12px 14px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      border-bottom: 1px solid rgba(255,255,255,.08);
+      background: rgba(255,255,255,.02);
+      color: #d0d7de;
+      font-size: 13px;
+    }
+    .diff-head strong { color: #ffffff; }
+    .diff-file {
+      color: #c9d1d9;
+      font: 12px ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    .diff-lines {
+      font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace;
+      color: #c9d1d9;
+    }
+    .diff-line {
+      display: grid;
+      grid-template-columns: 38px 38px 1fr;
+      padding: 0 12px;
+    }
+    .diff-line .num {
+      color: #6e7681;
+      padding: 2px 0;
+    }
+    .diff-line .code,
+    .diff-line .code-add,
+    .diff-line .code-del,
+    .diff-line .code-hunk {
+      padding: 2px 0;
+      overflow-wrap: anywhere;
+    }
+    .diff-line.hunk {
+      background: rgba(56,139,253,.18);
+      color: #dbeafe;
+    }
+    .diff-line.del { background: rgba(248,81,73,.14); }
+    .diff-line.add { background: rgba(46,160,67,.16); }
+    .diff-line .code-add { color: #aff5b4; }
+    .diff-line .code-del { color: #ffd1cf; }
+    .validation {
+      padding: 15px 16px 16px;
+      border: 1px solid rgba(119,230,182,.18);
+      border-radius: 18px;
+      background: rgba(119,230,182,.08);
+      color: #e5fff3;
+    }
+    .validation strong {
+      display: block;
+      font-size: 15px;
+      margin-bottom: 8px;
+    }
+    .validation ul {
+      margin: 0;
+      padding-left: 18px;
+      color: #d5fbe7;
+      font-size: 13px;
+      line-height: 1.65;
+    }
+    .chatshot-footer {
+      padding: 6px 18px 18px;
+      background: #08090b;
+    }
+    .chat-input {
+      min-height: 62px;
+      padding: 0 12px;
+      display: grid;
+      grid-template-columns: 44px 1fr 34px 40px;
+      align-items: center;
+      gap: 10px;
+      border: 1px solid rgba(255,255,255,.12);
+      border-radius: 999px;
+      background: rgba(255,255,255,.05);
+      color: #949aa4;
+    }
+    .chat-input .plus {
+      font-size: 38px;
+      font-weight: 320;
+      line-height: 1;
+      color: #ffffff;
+      text-align: center;
+      transform: translateY(-1px);
+    }
+    .chat-input .placeholder {
+      font-size: 15px;
+      color: #878d96;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .chat-input .mic {
+      font-size: 24px;
+      color: #ffffff;
+      text-align: center;
+    }
+    .chat-input .voice {
+      width: 36px;
+      height: 36px;
+      display: grid;
+      place-items: center;
+      border-radius: 50%;
+      background: #ffffff;
+      color: #0d1014;
+      font-size: 16px;
+      font-weight: 700;
+    }
+    .cursor { display: inline-block; width: 8px; height: 15px; vertical-align: -2px; background: var(--accent); animation: blink 1.1s steps(1) infinite; }
+    @keyframes blink { 50% { opacity: .15; } }
+
+    .proof-strip {
+      margin: 10px 0 108px;
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      overflow: hidden;
+      background: rgba(255,255,255,.02);
+    }
+    .proof-item { min-height: 118px; padding: 23px 24px; border-right: 1px solid var(--line); }
+    .proof-item:last-child { border-right: 0; }
+    .proof-kicker { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .08em; font-weight: 720; }
+    .proof-value { margin-top: 8px; font-size: 20px; font-weight: 740; letter-spacing: -.025em; }
+
+    section { scroll-margin-top: 90px; }
+    .section { padding: 90px 0; }
+    .section-head { max-width: 760px; margin-bottom: 42px; }
+    .section-label { color: var(--accent); font-size: 13px; font-weight: 760; letter-spacing: .08em; text-transform: uppercase; }
+    h2 { margin: 10px 0 16px; font-size: clamp(38px, 4.7vw, 62px); line-height: 1.04; letter-spacing: -.045em; }
+    .section-head p { margin: 0; color: var(--muted); font-size: 18px; }
+
+    .feature-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+    .feature {
+      min-height: 250px;
+      padding: 24px;
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      background: linear-gradient(160deg, rgba(255,255,255,.035), rgba(255,255,255,.012));
+      transition: transform .18s ease, border-color .18s ease;
+    }
+    .feature:hover { transform: translateY(-3px); border-color: var(--line-strong); }
+    .feature-icon {
+      width: 42px;
+      height: 42px;
+      display: grid;
+      place-items: center;
+      border: 1px solid var(--line);
+      border-radius: 11px;
+      background: var(--accent-soft);
+      color: #ffc4af;
+      font: 700 14px ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    .feature h3 { margin: 22px 0 8px; font-size: 19px; letter-spacing: -.02em; }
+    .feature p { margin: 0; color: var(--muted); font-size: 15px; }
+
+    .architecture {
+      display: grid;
+      grid-template-columns: 1fr auto 1fr auto 1fr;
+      gap: 14px;
+      align-items: stretch;
+    }
+    .arch-node {
+      min-height: 220px;
+      padding: 24px;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      background: var(--panel);
+    }
+    .arch-node.main { border-color: rgba(243,109,61,.32); background: linear-gradient(160deg, rgba(243,109,61,.10), rgba(255,255,255,.02)); }
+    .arch-node .tag { color: var(--muted); font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; text-transform: uppercase; letter-spacing: .08em; }
+    .arch-node h3 { margin: 10px 0; font-size: 23px; letter-spacing: -.025em; }
+    .arch-node p { margin: 0; color: var(--muted); font-size: 14px; }
+    .arch-arrow { display: grid; place-items: center; color: #56606e; font-size: 23px; }
+    .arch-list { margin-top: 18px; display: flex; flex-wrap: wrap; gap: 7px; }
+    .arch-list span { padding: 5px 8px; border: 1px solid var(--line); border-radius: 8px; color: #c7ced7; font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+    .steps { counter-reset: steps; display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+    .step {
+      position: relative;
+      min-height: 220px;
+      padding: 26px;
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      background: rgba(255,255,255,.02);
+    }
+    .step::before {
+      counter-increment: steps;
+      content: "0" counter(steps);
+      color: var(--accent);
+      font: 700 13px ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    .step h3 { margin: 26px 0 8px; font-size: 20px; }
+    .step p { margin: 0; color: var(--muted); }
+
+    .quick-install {
+      margin: 8px 0 18px;
+      scroll-margin-top: 92px;
+    }
+    .install-shell {
+      border: 1px solid var(--line-strong);
+      border-radius: 22px;
+      overflow: hidden;
+      background: #0d1014;
+      box-shadow: var(--shadow);
+    }
+    .install-tabs { padding: 12px; display: flex; gap: 8px; border-bottom: 1px solid var(--line); background: rgba(255,255,255,.02); }
+    .tab {
+      padding: 9px 13px;
+      border: 1px solid transparent;
+      border-radius: 9px;
+      background: transparent;
+      color: var(--muted);
+      cursor: pointer;
+      font-weight: 650;
+    }
+    .tab[aria-selected="true"] { color: var(--text); background: rgba(255,255,255,.05); border-color: var(--line); }
+    .install-panel { display: none; padding: 28px; }
+    .install-panel.active { display: block; }
+    .install-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+    .install-row code {
+      color: #dfebe5;
+      font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+      overflow-wrap: anywhere;
+    }
+    .copy { flex: 0 0 auto; }
+    .quickstart {
+      margin-top: 16px;
+      padding-top: 20px;
+      border-top: 1px solid var(--line);
+      color: var(--muted);
+    }
+    .quickstart code { color: #ffc1aa; }
+
+    .security-grid { display: grid; grid-template-columns: .92fr 1.08fr; gap: 20px; align-items: stretch; }
+    .security-copy, .security-list {
+      padding: 30px;
+      border: 1px solid var(--line);
+      border-radius: 20px;
+      background: rgba(255,255,255,.02);
+    }
+    .security-copy h3 { margin: 0 0 12px; font-size: 27px; letter-spacing: -.03em; }
+    .security-copy p { margin: 0; color: var(--muted); }
+    .security-list { display: grid; gap: 10px; }
+    .security-line { padding: 13px 0; display: grid; grid-template-columns: 28px 1fr; gap: 10px; border-bottom: 1px solid var(--line); }
+    .security-line:last-child { border-bottom: 0; }
+    .check { color: var(--mint); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .security-line strong { display: block; margin-bottom: 3px; font-size: 14px; }
+    .security-line span { color: var(--muted); font-size: 13px; }
+
+    .cta {
+      margin: 92px 0 50px;
+      padding: 50px;
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 30px;
+      align-items: center;
+      border: 1px solid rgba(243,109,61,.28);
+      border-radius: 24px;
+      background:
+        radial-gradient(circle at 95% 50%, rgba(243,109,61,.18), transparent 24rem),
+        rgba(255,255,255,.025);
+    }
+    .cta h2 { margin: 0 0 10px; font-size: clamp(32px, 4vw, 50px); }
+    .cta p { margin: 0; color: var(--muted); }
+    .cta-actions { display: flex; gap: 10px; flex-wrap: wrap; justify-content: flex-end; }
+
+    footer { padding: 30px 0 48px; border-top: 1px solid var(--line); color: var(--muted); font-size: 13px; }
+    .footer-row { display: flex; justify-content: space-between; gap: 20px; align-items: center; }
+    .footer-links { display: flex; flex-wrap: wrap; gap: 18px; }
+    .footer-links a:hover { color: var(--text); }
+
+    .reveal { opacity: 0; transform: translateY(16px); transition: opacity .55s ease, transform .55s ease; }
+    .reveal.visible { opacity: 1; transform: none; }
+
+    @media (max-width: 980px) {
+      .nav-links { display: none; }
+      .hero { grid-template-columns: 1fr; padding-top: 76px; }
+      .hero-copy { position: static; }
+      .chatshot { transform: none; max-width: 760px; }
+      .proof-strip { grid-template-columns: repeat(2, 1fr); }
+      .proof-item:nth-child(2) { border-right: 0; }
+      .proof-item:nth-child(-n+2) { border-bottom: 1px solid var(--line); }
+      .feature-grid { grid-template-columns: repeat(2, 1fr); }
+      .architecture { grid-template-columns: 1fr; }
+      .arch-arrow { transform: rotate(90deg); min-height: 25px; }
+      .steps { grid-template-columns: 1fr; }
+      .security-grid { grid-template-columns: 1fr; }
+      .cta { grid-template-columns: 1fr; padding: 36px; }
+      .cta-actions { justify-content: flex-start; }
+    }
+
+    @media (max-width: 640px) {
+      .shell { width: min(calc(100% - 24px), var(--max)); }
+      .nav { min-height: 64px; }
+      .nav-actions .button:first-child { display: none; }
+      .hero { gap: 40px; padding: 56px 0 58px; }
+      h1 { font-size: clamp(46px, 15vw, 68px); }
+      .chatshot-body { min-height: 0; padding: 14px; }
+      .chatshot { border-radius: 28px; }
+      .chatshot-header { grid-template-columns: 46px 1fr 46px; padding: 14px 14px 12px; }
+      .chat-circle { width: 40px; height: 40px; font-size: 24px; }
+      .chat-title strong { font-size: 18px; }
+      .prompt-bubble { max-width: 92%; padding: 16px 18px; font-size: 16px; }
+      .assistant-copy { font-size: 15px; }
+      .diff-line { grid-template-columns: 28px 28px 1fr; padding: 0 10px; }
+      .chat-input { grid-template-columns: 38px 1fr 28px 34px; min-height: 56px; }
+      .chat-input .placeholder { font-size: 14px; }
+      .proof-strip { grid-template-columns: 1fr; }
+      .proof-item, .proof-item:nth-child(2) { border-right: 0; border-bottom: 1px solid var(--line); }
+      .proof-item:last-child { border-bottom: 0; }
+      .section { padding: 68px 0; }
+      .feature-grid { grid-template-columns: 1fr; }
+      .install-panel { padding: 20px; }
+      .install-row { align-items: flex-start; flex-direction: column; }
+      .cta { margin-top: 60px; padding: 28px; }
+      .footer-row { align-items: flex-start; flex-direction: column; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      html { scroll-behavior: auto; }
+      *, *::before, *::after { animation: none !important; transition: none !important; }
+      .reveal { opacity: 1; transform: none; }
+    }
+  </style>
+</head>
+<body>
+  <header class="nav-wrap" id="topbar">
+    <nav class="nav shell" aria-label="Primary">
+      <a class="brand" href="#top" aria-label="Codexify home">
+        <span class="brand-mark">&gt;_</span>
+        <span>codexify</span>
+      </a>
+      <div class="nav-links">
+        <a href="#features">Features</a>
+        <a href="#how">How it works</a>
+        <a href="#security">Security</a>
+        <a href="#install">Install</a>
+        <a href="https://github.com/devnoname120/codexify/wiki">Wiki</a>
+      </div>
+      <div class="nav-actions">
+        <a class="button" href="https://github.com/devnoname120/codexify">GitHub</a>
+        <a class="button primary" href="#install">Get Codexify</a>
+      </div>
+    </nav>
+  </header>
+
+  <main id="top">
+    <div class="shell hero-zone">
+      <section class="hero">
+        <div class="hero-copy">
+          <div class="eyebrow"><span class="pulse"></span> Open source · MIT</div>
+          <h1>Codex, <span class="hero-em">inside ChatGPT.</span></h1>
+          <p class="lede">Codexify is a local Rust MCP bridge that gives ChatGPT Codex-style tools on your machine while letting you use the full ChatGPT web model lineup — including Sol 5.6 Pro, which is not available in Codex.</p>
+          <div class="hero-actions">
+            <a class="button accent" href="#install">Install Codexify</a>
+            <a class="button" href="https://github.com/devnoname120/codexify/wiki/How-It-Works">See how it works</a>
+          </div>
+          <div class="microcopy" aria-label="Highlights">
+            <span>All ChatGPT web models</span>
+            <span>Sol 5.6 Pro included</span>
+            <span>macOS, Linux, Windows</span>
+            <span>Codex quota is <strong>not used</strong>. Unlimited on Plus/Pro plans!</span>
+          </div>
+        </div>
+
+        <div class="chatshot" aria-label="Illustrative ChatGPT and Codexify session">
+          <div class="chatshot-header">
+            <div class="chat-circle">‹</div>
+            <div class="chat-title">
+              <strong>ChatGPT</strong>
+              <span>Chat</span>
+            </div>
+            <div class="chat-circle">···</div>
+          </div>
+          <div class="chatshot-body">
+            <div class="prompt-bubble"><strong>@Codexify</strong> Fix this bug!</div>
+            <div class="assistant-block">
+              <div class="assistant-meta">Worked for 14m 25s</div>
+              <p class="assistant-copy">I inspected the failing parser test, patched the EOF edge case, re-ran the validation suite, and called <code>show_diff</code> so you can review the exact changes.</p>
+              <div class="tool-list" aria-label="Tool calls">
+                <div class="tool-card"><div><strong>get_agent_brief</strong><span>Loaded project instructions and connector context</span></div><span class="tool-state">done</span></div>
+                <div class="tool-card"><div><strong>exec_command</strong><span>Ran <code>cargo test parser</code></span></div><span class="tool-state">done</span></div>
+                <div class="tool-card"><div><strong>apply_patch</strong><span>Updated <code>src/parser.rs</code></span></div><span class="tool-state">patched</span></div>
+                <div class="tool-card"><div><strong>show_diff</strong><span>Rendered the current uncommitted diff</span></div><span class="tool-state">ready</span></div>
+              </div>
+              <div class="diff-card" aria-label="GitHub-style diff">
+                <div class="diff-head"><strong>3 files changed</strong><span class="diff-file">src/parser.rs &nbsp; +22 −4</span></div>
+                <div class="diff-lines">
+                  <div class="diff-line hunk"><span class="num"></span><span class="num"></span><span class="code-hunk">@@ −118,3 +118,4 @@ fn parse(input: &str) {</span></div>
+                  <div class="diff-line"><span class="num">118</span><span class="num">118</span><span class="code"> if input.is_empty() {</span></div>
+                  <div class="diff-line del"><span class="num">119</span><span class="num"></span><span class="code-del">-    return Ok(None);</span></div>
+                  <div class="diff-line add"><span class="num"></span><span class="num">119</span><span class="code-add">+    return Err(ParseError::UnexpectedEof);</span></div>
+                  <div class="diff-line"><span class="num">120</span><span class="num">120</span><span class="code"> }</span></div>
+                  <div class="diff-line add"><span class="num"></span><span class="num">121</span><span class="code-add">+assert_eq!(parse(""), Err(ParseError::UnexpectedEof));</span></div>
+                </div>
+              </div>
+              <div class="validation">
+                <strong>All tests are green</strong>
+                <ul>
+                  <li><code>cargo fmt --all -- --check</code></li>
+                  <li><code>cargo test parser</code> — 14 passed</li>
+                  <li><code>git diff --check</code></li>
+                </ul>
+              </div>
+            </div>
+          </div>
+          <div class="chatshot-footer">
+            <div class="chat-input" aria-label="Message composer">
+              <span class="plus">+</span>
+              <span class="placeholder">Message ChatGPT</span>
+              <span class="mic">◦</span>
+              <span class="voice">◍</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="quick-install" id="install" aria-label="Install Codexify">
+        <div class="install-shell reveal">
+          <div class="install-tabs" role="tablist" aria-label="Operating system">
+            <button class="tab" role="tab" aria-selected="true" data-tab="unix">macOS / Linux</button>
+            <button class="tab" role="tab" aria-selected="false" data-tab="windows">Windows</button>
+          </div>
+          <div class="install-panel active" id="unix" role="tabpanel">
+            <div class="install-row">
+              <code>curl -q -fsSL https://codexify.dev/install.sh | sh</code>
+              <button class="button copy" data-copy="curl -q -fsSL https://codexify.dev/install.sh | sh">Copy</button>
+            </div>
+            <div class="quickstart">Then run <code>codexify quickstart</code> and follow the guided connector setup.</div>
+          </div>
+          <div class="install-panel" id="windows" role="tabpanel">
+            <div class="install-row">
+              <code>powershell -ExecutionPolicy ByPass -c "irm https://codexify.dev/install.ps1 | iex"</code>
+              <button class="button copy" data-copy="powershell -ExecutionPolicy ByPass -c &quot;irm https://codexify.dev/install.ps1 | iex&quot;">Copy</button>
+            </div>
+            <div class="quickstart">Then run <code>codexify quickstart</code> and follow the guided connector setup.</div>
+          </div>
+        </div>
+      </section>
+
+      <section class="proof-strip reveal" aria-label="Technical highlights">
+        <div class="proof-item"><div class="proof-kicker">Models</div><div class="proof-value">Full ChatGPT web lineup</div></div>
+        <div class="proof-item"><div class="proof-kicker">Flagship</div><div class="proof-value">Includes Sol 5.6 Pro</div></div>
+        <div class="proof-item"><div class="proof-kicker">Tunnel</div><div class="proof-value">Official OpenAI runtime</div></div>
+        <div class="proof-item"><div class="proof-kicker">Scope</div><div class="proof-value">Local-first projects</div></div>
+      </section>
+    </div>
+
+    <section class="section" id="features">
+      <div class="shell">
+        <div class="section-head reveal">
+          <div class="section-label">The local tool layer</div>
+          <h2>Give ChatGPT a real development environment.</h2>
+          <p>Codexify implements Codex-compatible tool contracts while keeping execution anchored to a project on your machine, without giving up ChatGPT Web's broader model selection.</p>
+        </div>
+        <div class="feature-grid">
+          <article class="feature reveal"><div class="feature-icon">AI</div><h3>Use ChatGPT's best models</h3><p>Stay in ChatGPT Web and pair Codexify with the full available model lineup, including Sol 5.6 Pro.</p></article>
+          <article class="feature reveal"><div class="feature-icon">FS</div><h3>Files and patches</h3><p>Read, write, search, glob, and apply structured patches inside the active project root.</p></article>
+          <article class="feature reveal"><div class="feature-icon">$</div><h3>Shell sessions</h3><p>Run commands, keep interactive exec sessions alive, stream input, and bound model-visible output.</p></article>
+          <article class="feature reveal"><div class="feature-icon">git</div><h3>Git-native workflow</h3><p>Status, diff, log, commit, push, plus project-scoped diff checkpoints and an MCP App diff view.</p></article>
+          <article class="feature reveal"><div class="feature-icon">↕</div><h3>Attachment bridge</h3><p>Bring ChatGPT attachments into the active project and return generated project files as downloadable resources.</p></article>
+          <article class="feature reveal"><div class="feature-icon">MCP</div><h3>Aggregate MCP servers</h3><p>Connect local stdio and remote Streamable HTTP MCP servers through a ranked discovery, schema, and call surface.</p></article>
+          <article class="feature reveal"><div class="feature-icon">SK</div><h3>Skills and instructions</h3><p>Load project instructions and skills from Codex, Agent Plugin, and supported Claude Code plugin layouts.</p></article>
+          <article class="feature reveal"><div class="feature-icon">MP</div><h3>Multi-project mode</h3><p>Bind each ChatGPT conversation to one project, with optional managed worktrees for concurrent isolated chats.</p></article>
+          <article class="feature reveal"><div class="feature-icon">UP</div><h3>Verified self-update</h3><p>Standard installations can update in place with release verification, rollback protection, and service restart.</p></article>
+          <article class="feature reveal"><div class="feature-icon">OS</div><h3>Native background service</h3><p>systemd, launchd, and Windows Task Scheduler support unattended per-user operation after setup.</p></article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="how">
+      <div class="shell">
+        <div class="section-head reveal">
+          <div class="section-label">How it works</div>
+          <h2>One secure bridge between conversation and code.</h2>
+          <p>ChatGPT calls the connector with whichever ChatGPT Web model you choose; Codexify resolves those calls against the project and tools you intentionally expose.</p>
+        </div>
+        <div class="architecture reveal" role="img" aria-label="ChatGPT connects through the OpenAI Secure MCP Tunnel to Codexify, which connects to local tools and optional upstream MCP servers">
+          <div class="arch-node">
+            <div><div class="tag">Cloud</div><h3>ChatGPT</h3><p>Your conversation, plans, files, and model-side tool calls.</p></div>
+            <div class="arch-list"><span>connector</span><span>attachments</span><span>resources</span></div>
+          </div>
+          <div class="arch-arrow">→</div>
+          <div class="arch-node main">
+            <div><div class="tag">Loopback</div><h3>Codexify</h3><p>Rust MCP bridge, project binding, tool registry, output policy, state, and supervision.</p></div>
+            <div class="arch-list"><span>127.0.0.1</span><span>bearer token</span><span>rmcp</span></div>
+          </div>
+          <div class="arch-arrow">→</div>
+          <div class="arch-node">
+            <div><div class="tag">Your machine</div><h3>Projects + tools</h3><p>Filesystem, shell, git, skills, managed worktrees, and optional upstream MCP servers.</p></div>
+            <div class="arch-list"><span>git</span><span>shell</span><span>MCP</span><span>skills</span></div>
+          </div>
+        </div>
+
+        <div style="height: 34px"></div>
+        <div class="steps">
+          <article class="step reveal"><h3>Install the native binary</h3><p>Use the checksummed installer for macOS/Linux or Windows. Standard installs register the per-user background service.</p></article>
+          <article class="step reveal"><h3>Run <code>codexify quickstart</code></h3><p>Choose the project scope, create the OpenAI Secure MCP Tunnel, and write the matching Codexify configuration.</p></article>
+          <article class="step reveal"><h3>Connect from ChatGPT</h3><p>Add the developer-mode connector using the exact values printed by quickstart, then work against your local project.</p></article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="security">
+      <div class="shell">
+        <div class="section-head reveal">
+          <div class="section-label">Security model</div>
+          <h2>Local by default. Explicit at every boundary.</h2>
+          <p>The native tunnel path is designed so Codexify does not need to expose a general-purpose inbound URL to the internet.</p>
+        </div>
+        <div class="security-grid">
+          <div class="security-copy reveal">
+            <h3>The bridge stays on loopback.</h3>
+            <p>In native-tunnel mode Codexify listens on <code>127.0.0.1</code>, authenticates its MCP endpoint with a random per-process bearer token, and supervises OpenAI's official runtime-only tunnel client. The tunnel client makes outbound HTTPS requests to OpenAI.</p>
+          </div>
+          <div class="security-list reveal">
+            <div class="security-line"><div class="check">01</div><div><strong>Verified tunnel runtime</strong><span>The pinned official tunnel client archive is checked against a SHA-256 embedded in the build.</span></div></div>
+            <div class="security-line"><div class="check">02</div><div><strong>Project-scoped access</strong><span>Work is constrained to the configured project root or selected project in multi-project mode.</span></div></div>
+            <div class="security-line"><div class="check">03</div><div><strong>Optional conversation gate</strong><span>An advanced per-conversation authorization token can be required before ordinary tool calls are accepted.</span></div></div>
+            <div class="security-line"><div class="check">04</div><div><strong>Bounded model-visible output</strong><span>Connector-wide output policy limits tool payloads and redacts secrets/checksums from trace previews.</span></div></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+
+    <div class="shell">
+      <section class="cta reveal">
+        <div>
+          <h2>Keep the model in ChatGPT. Put the tools on your machine.</h2>
+          <p>Codexify is open source, MIT licensed, built in Rust, and designed to keep you inside ChatGPT instead of forcing you into a narrower Codex-only model menu.</p>
+        </div>
+        <div class="cta-actions">
+          <a class="button primary" href="https://github.com/devnoname120/codexify">View on GitHub</a>
+          <a class="button" href="https://github.com/devnoname120/codexify/wiki">Read the wiki</a>
+          <a class="button" href="https://github.com/devnoname120/codexify/releases/latest">Latest release</a>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <footer>
+    <div class="shell footer-row">
+      <div>Codexify · Codex-style local tooling for ChatGPT</div>
+      <div class="footer-links">
+        <a href="https://github.com/devnoname120/codexify/wiki/Installation">Installation</a>
+        <a href="https://github.com/devnoname120/codexify/wiki/Configuration">Configuration</a>
+        <a href="https://github.com/devnoname120/codexify/wiki/CLI-Reference">CLI reference</a>
+        <a href="https://github.com/devnoname120/codexify/blob/main/LICENSE">MIT License</a>
+      </div>
+    </div>
+  </footer>
+
+  <script>
+    const tabs = document.querySelectorAll('.tab');
+    const panels = document.querySelectorAll('.install-panel');
+    tabs.forEach((tab) => {
+      tab.addEventListener('click', () => {
+        tabs.forEach((item) => item.setAttribute('aria-selected', 'false'));
+        panels.forEach((panel) => panel.classList.remove('active'));
+        tab.setAttribute('aria-selected', 'true');
+        document.getElementById(tab.dataset.tab).classList.add('active');
+      });
+    });
+
+    document.querySelectorAll('[data-copy]').forEach((button) => {
+      button.addEventListener('click', async () => {
+        const original = button.textContent;
+        try {
+          await navigator.clipboard.writeText(button.dataset.copy);
+          button.textContent = 'Copied';
+        } catch {
+          button.textContent = 'Select command';
+        }
+        window.setTimeout(() => { button.textContent = original; }, 1400);
+      });
+    });
+
+    const topbar = document.getElementById('topbar');
+    const updateTopbar = () => topbar.classList.toggle('scrolled', window.scrollY > 8);
+    updateTopbar();
+    window.addEventListener('scroll', updateTopbar, { passive: true });
+
+    const reveals = document.querySelectorAll('.reveal');
+    if ('IntersectionObserver' in window && !window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      const observer = new IntersectionObserver((entries) => {
+        entries.forEach((entry) => {
+          if (entry.isIntersecting) {
+            entry.target.classList.add('visible');
+            observer.unobserve(entry.target);
+          }
+        });
+      }, { threshold: 0.12 });
+      reveals.forEach((element) => observer.observe(element));
+    } else {
+      reveals.forEach((element) => element.classList.add('visible'));
+    }
+  </script>
+</body>
+</html>
