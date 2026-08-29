@@ -581,6 +581,7 @@ fn tools_that_need_their_own_structured_content() {
             "get_environment".to_string(),
             "get_project_doc".to_string(),
             "import_host_file".to_string(),
+            "self_update".to_string(),
             "skills_list".to_string(),
             "write_stdin".to_string(),
         ]

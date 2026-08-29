@@ -980,28 +980,28 @@ fn powershell_quote(value: &str) -> String {
 fn schedule_worker(worker: &Path, id: &str, supervised: bool) -> anyhow::Result<()> {
     #[cfg(target_os = "linux")]
     {
-        return match schedule_systemd(worker, id) {
+        match schedule_systemd(worker, id) {
             Ok(()) => Ok(()),
             Err(error) if !supervised => spawn_detached_unix(worker)
                 .with_context(|| format!("systemd transient unit was unavailable ({error:#})")),
             Err(error) => Err(error),
-        };
+        }
     }
     #[cfg(target_os = "macos")]
     {
-        return match schedule_launchd(worker, id) {
+        match schedule_launchd(worker, id) {
             Ok(()) => Ok(()),
             Err(error) if !supervised => spawn_detached_unix(worker)
                 .with_context(|| format!("launchd submitted job was unavailable ({error:#})")),
             Err(error) => Err(error),
-        };
+        }
     }
     #[cfg(windows)]
     {
         if !supervised {
             bail!("Windows self-update requires the Codexify background service");
         }
-        return schedule_windows(worker, id);
+        schedule_windows(worker, id)
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     {
