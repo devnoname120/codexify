@@ -1570,10 +1570,11 @@ mod tests {
         fs::write(
             &executable,
             format!(
-                "#!/bin/sh\ncount=0\n[ ! -f '{}' ] || count=$(cat '{}')\nprintf '%s\\n' $((count + 1)) > '{}'\nsleep 30 &\nprintf '%s\\n' $! > '{}'\nprintf 'fake server run %s\\n' $((count + 1))\nexit 7\n",
+                "#!/bin/sh\ncount=0\n[ ! -f '{}' ] || count=$(cat '{}')\nprintf '%s\\n' $((count + 1)) > '{}'\nsleep 30 &\ndescendant_tmp='{}.tmp.'$$\nprintf '%s\\n' $! > \"$descendant_tmp\"\nmv \"$descendant_tmp\" '{}'\nprintf 'fake server run %s\\n' $((count + 1))\nexit 7\n",
                 count.display(),
                 count.display(),
                 count.display(),
+                descendant.display(),
                 descendant.display()
             ),
         )

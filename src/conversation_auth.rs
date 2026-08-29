@@ -229,7 +229,7 @@ fn persisted_authorization_exists_at(path: &Path) -> bool {
     {
         return false;
     }
-    let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+    let Ok(metadata) = std::fs::symlink_metadata(path) else {
         return false;
     };
     if !metadata.is_file()

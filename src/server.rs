@@ -231,7 +231,7 @@ impl ServerHandler for CodexHandler {
         );
         capabilities.extensions = Some(extensions);
         InitializeResult::new(capabilities)
-            .with_server_info(Implementation::new("codexify", "1.8.0"))
+            .with_server_info(Implementation::new("codexify", env!("CARGO_PKG_VERSION")))
             .with_instructions(build_initial_instructions(&self.config))
     }
 

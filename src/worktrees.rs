@@ -1438,6 +1438,30 @@ fn trim_ascii_newlines(mut bytes: &[u8]) -> &[u8] {
     bytes
 }
 
+#[cfg(unix)]
+fn bytes_to_path(bytes: &[u8]) -> Result<PathBuf, String> {
+    use std::os::unix::ffi::OsStringExt;
+    Ok(PathBuf::from(OsString::from_vec(bytes.to_vec())))
+}
+
+#[cfg(not(unix))]
+fn bytes_to_path(bytes: &[u8]) -> Result<PathBuf, String> {
+    String::from_utf8(bytes.to_vec())
+        .map(PathBuf::from)
+        .map_err(|_| "Git returned a filesystem path that is not valid UTF-8".to_string())
+}
+
+fn is_native_shard_name(name: &str) -> bool {
+    name.len() == 4 && name.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(u64::MAX as u128) as u64)
+        .unwrap_or(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1462,28 +1486,4 @@ mod tests {
         assert!(current.is_file());
         assert!(!legacy.exists());
     }
-}
-
-#[cfg(unix)]
-fn bytes_to_path(bytes: &[u8]) -> Result<PathBuf, String> {
-    use std::os::unix::ffi::OsStringExt;
-    Ok(PathBuf::from(OsString::from_vec(bytes.to_vec())))
-}
-
-#[cfg(not(unix))]
-fn bytes_to_path(bytes: &[u8]) -> Result<PathBuf, String> {
-    String::from_utf8(bytes.to_vec())
-        .map(PathBuf::from)
-        .map_err(|_| "Git returned a filesystem path that is not valid UTF-8".to_string())
-}
-
-fn is_native_shard_name(name: &str) -> bool {
-    name.len() == 4 && name.bytes().all(|byte| byte.is_ascii_hexdigit())
-}
-
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|duration| duration.as_millis().min(u64::MAX as u128) as u64)
-        .unwrap_or(0)
 }

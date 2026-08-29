@@ -6,6 +6,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-08-29
+
 ### Added
 
 - MCP `self_update` tool for verified in-place updates of standard installations. It downloads and validates the latest release before scheduling an OS-managed detached worker that stops the background service, atomically swaps the executable with rollback protection, and restarts the service. Progress is written to the rotating service log.
@@ -82,7 +84,10 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   drained through bounded head/tail buffers, while component-only `_meta` remains
   outside the model-visible limit.
 
-## [1.8.0] - 2026-08-28
+The sections below preserve the pre-rename Codex Free release history. Codexify
+restarts semantic versioning at 1.0.0.
+
+## Codex Free 1.8.0 - 2026-08-28
 
 ### Added
 
@@ -129,7 +134,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   behind a random 256-bit short-lived capability; cache eviction and restart
   invalidate references, and audit records never include their URIs or filenames.
 
-## [1.7.0] - 2026-08-26
+## Codex Free 1.7.0 - 2026-08-26
 
 ### Added
 
@@ -164,7 +169,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   from its generated launch command for that canonical path. Explicit CLI or
   environment-selected paths continue to be preserved.
 
-## [1.6.0] - 2026-08-25
+## Codex Free 1.6.0 - 2026-08-25
 
 ### Added
 
@@ -194,7 +199,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   checkouts are never switched to satisfy a branch or PR URL, and a session already
   bound to another project is rejected before any clone or fetch side effect.
 
-## [1.5.0] - 2026-08-25
+## Codex Free 1.5.0 - 2026-08-25
 
 ### Added
 
@@ -234,7 +239,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   A moved, replaced, or internally inconsistent active root cannot escape its
   selected source or recorded managed-worktree boundary.
 
-## [1.4.0] - 2026-08-25
+## Codex Free 1.4.0 - 2026-08-25
 
 ### Fixed
 
@@ -258,7 +263,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - `view_image`: an optional `detail` hint is now accepted and ignored so a
     Codex client sending it is not schema-rejected.
 
-## [1.3.0] - 2026-08-25
+## Codex Free 1.3.0 - 2026-08-25
 
 ### Added
 
@@ -374,7 +379,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   ring crypto provider — installed once before any HTTP client is built, so
   there is a single set of trust roots and no aws-lc-rs backend.
 
-## [1.2.0] - 2026-08-24
+## Codex Free 1.2.0 - 2026-08-24
 
 ### Added
 
@@ -408,7 +413,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   before building, so a mistagged release can no longer ship a binary whose
   `--version` disagrees with its tag.
 
-## [1.1.0] - 2026-08-24
+## Codex Free 1.1.0 - 2026-08-24
 
 ### Added
 
@@ -451,7 +456,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   inheriting ambient tunnel-client configuration, proxy, header, or trust-store
   overrides. HTTP and tunnel shutdown paths are coupled and time-bounded.
 
-## [1.0.1] - 2026-08-24
+## Codex Free 1.0.1 - 2026-08-24
 
 ### Changed
 
@@ -463,7 +468,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `macos-13` (Intel) pool, and the build job now has a 30-minute timeout so a
   stalled runner fails fast.
 
-## [1.0.0] - 2026-08-19
+## Codex Free 1.0.0 - 2026-08-19
 
 The first Rust release. The server was rewritten from Bun + TypeScript to Rust
 (**tokio + axum + [`rmcp`](https://crates.io/crates/rmcp)**), keeping the tool
@@ -506,14 +511,5 @@ filename sort uses byte/Unicode ordering rather than `localeCompare`;
 `write_file` reports UTF-8 byte counts; `exec_command` uses plain pipes, not a
 PTY. See the README's "Notes on the port" for the full list.
 
-[Unreleased]: https://github.com/devnoname120/codexify/compare/v1.8.0...HEAD
-[1.8.0]: https://github.com/devnoname120/codexify/compare/v1.7.0...v1.8.0
-[1.7.0]: https://github.com/devnoname120/codexify/compare/v1.6.0...v1.7.0
-[1.6.0]: https://github.com/devnoname120/codexify/compare/v1.5.0...v1.6.0
-[1.5.0]: https://github.com/devnoname120/codexify/compare/v1.4.0...v1.5.0
-[1.4.0]: https://github.com/devnoname120/codexify/compare/v1.3.0...v1.4.0
-[1.3.0]: https://github.com/devnoname120/codexify/compare/v1.2.0...v1.3.0
-[1.2.0]: https://github.com/devnoname120/codexify/compare/v1.1.0...v1.2.0
-[1.1.0]: https://github.com/devnoname120/codexify/releases/tag/v1.1.0
-[1.0.1]: https://github.com/devnoname120/codexify/releases/tag/v1.0.1
+[Unreleased]: https://github.com/devnoname120/codexify/compare/v1.0.0...HEAD
 [1.0.0]: https://github.com/devnoname120/codexify/releases/tag/v1.0.0
