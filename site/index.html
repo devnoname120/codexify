@@ -4,7 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="description" content="Codexify brings Codex-style local tooling into ChatGPT through a secure Rust MCP bridge.">
-  <meta name="theme-color" content="#0b0d10">
+  <meta name="theme-color" content="#090b0e" media="(prefers-color-scheme: dark)">
+  <meta name="theme-color" content="#f7f5f1" media="(prefers-color-scheme: light)">
   <meta property="og:title" content="Codexify — Codex-style local tooling for ChatGPT">
   <meta property="og:description" content="Run commands, edit files, use git, bridge attachments, aggregate MCP servers, and keep work scoped to your machine.">
   <meta property="og:type" content="website">
@@ -637,6 +638,152 @@
       .install-row { align-items: flex-start; flex-direction: column; }
       .cta { margin-top: 60px; padding: 28px; }
       .footer-row { align-items: flex-start; flex-direction: column; }
+    }
+
+    @media (prefers-color-scheme: light) {
+      :root {
+        --bg: #f7f5f1;
+        --bg-raised: #ffffff;
+        --panel: rgba(255, 255, 255, 0.82);
+        --panel-strong: #ffffff;
+        --text: #17191d;
+        --muted: #626b78;
+        --line: rgba(23, 25, 29, 0.11);
+        --line-strong: rgba(23, 25, 29, 0.19);
+        --accent: #d4552c;
+        --accent-soft: rgba(212, 85, 44, 0.11);
+        --mint: #16865f;
+        --mint-soft: rgba(22, 134, 95, 0.10);
+        --blue: #286fc5;
+        --shadow: 0 30px 80px rgba(41, 35, 30, 0.14);
+        color-scheme: light;
+      }
+
+      body {
+        background:
+          radial-gradient(circle at 15% 0%, rgba(212, 85, 44, 0.11), transparent 28rem),
+          radial-gradient(circle at 84% 10%, rgba(22, 134, 95, 0.08), transparent 30rem),
+          var(--bg);
+      }
+      body::before {
+        opacity: 0.32;
+        background-image:
+          linear-gradient(rgba(23,25,29,.035) 1px, transparent 1px),
+          linear-gradient(90deg, rgba(23,25,29,.035) 1px, transparent 1px);
+      }
+
+      .nav-wrap {
+        background: linear-gradient(to bottom, rgba(247,245,241,.94), rgba(247,245,241,.76));
+      }
+      .brand-mark {
+        background: linear-gradient(145deg, rgba(212,85,44,.14), rgba(255,255,255,.66));
+        box-shadow: inset 0 1px 0 rgba(255,255,255,.88);
+        color: #9c3819;
+      }
+      .button { background: rgba(255,255,255,.58); }
+      .button:hover { border-color: rgba(23,25,29,.28); background: rgba(255,255,255,.92); }
+      .button.primary { background: #17191d; color: #ffffff; border-color: #17191d; }
+      .button.primary:hover { background: #000000; }
+      .button.accent { color: #ffffff; }
+      .button.accent:hover { background: #bf4520; }
+
+      .eyebrow {
+        border-color: rgba(22,134,95,.22);
+        color: #116b4d;
+      }
+      .lede { color: #505866; }
+
+      .chatshot {
+        border-color: rgba(23,25,29,.12);
+        background: #ffffff;
+        box-shadow: 0 38px 90px rgba(41, 35, 30, 0.18);
+      }
+      .chatshot::after {
+        background: linear-gradient(180deg, rgba(255,255,255,.42), transparent 12%, transparent 88%, rgba(23,25,29,.025));
+      }
+      .chatshot-header { border-bottom-color: rgba(23,25,29,.08); }
+      .chat-circle {
+        border-color: rgba(23,25,29,.14);
+        background: rgba(23,25,29,.045);
+        color: #17191d;
+      }
+      .chat-title span { color: #6a717c; }
+      .chatshot-body, .chatshot-footer { background: #ffffff; }
+      .prompt-bubble {
+        background: #ececef;
+        color: #17191d;
+        box-shadow: inset 0 1px 0 rgba(255,255,255,.86);
+      }
+      .prompt-bubble strong { color: #1671cf; }
+      .assistant-block, .assistant-copy { color: #202328; }
+      .assistant-meta { color: #717985; }
+      .tool-card {
+        border-color: rgba(23,25,29,.10);
+        background: rgba(23,25,29,.025);
+      }
+      .tool-card strong { color: #22262b; }
+      .tool-card span { color: #69717d; }
+      .tool-state {
+        background: rgba(22,134,95,.10);
+        color: #116b4d;
+      }
+
+      .diff-card {
+        border-color: #d0d7de;
+        background: #ffffff;
+      }
+      .diff-head {
+        border-bottom-color: #d8dee4;
+        background: #f6f8fa;
+        color: #57606a;
+      }
+      .diff-head strong { color: #1f2328; }
+      .diff-file, .diff-lines { color: #24292f; }
+      .diff-line .num { color: #6e7781; }
+      .diff-line.hunk { background: #ddf4ff; color: #0969da; }
+      .diff-line.del { background: #ffebe9; }
+      .diff-line.add { background: #dafbe1; }
+      .diff-line .code-add { color: #116329; }
+      .diff-line .code-del { color: #82071e; }
+      .validation {
+        border-color: rgba(22,134,95,.20);
+        background: rgba(22,134,95,.075);
+        color: #185c45;
+      }
+      .validation ul { color: #286c53; }
+      .chat-input {
+        border-color: rgba(23,25,29,.14);
+        background: rgba(23,25,29,.04);
+        color: #6c7480;
+      }
+      .chat-input .plus, .chat-input .mic { color: #17191d; }
+      .chat-input .placeholder { color: #737b86; }
+      .chat-input .voice { background: #17191d; color: #ffffff; }
+
+      .proof-strip { background: rgba(255,255,255,.40); }
+      .feature {
+        background: linear-gradient(160deg, rgba(255,255,255,.76), rgba(255,255,255,.36));
+      }
+      .feature-icon { color: #a43b1b; }
+      .arch-node.main {
+        border-color: rgba(212,85,44,.28);
+        background: linear-gradient(160deg, rgba(212,85,44,.085), rgba(255,255,255,.55));
+      }
+      .arch-arrow { color: #8b929b; }
+      .arch-list span { color: #4e5763; }
+      .step, .security-copy, .security-list { background: rgba(255,255,255,.42); }
+
+      .install-shell { background: #ffffff; }
+      .install-tabs { background: #f5f3ef; }
+      .tab[aria-selected="true"] { background: #ffffff; }
+      .install-row code { color: #245547; }
+      .quickstart code { color: #a43b1b; }
+
+      .cta {
+        background:
+          radial-gradient(circle at 95% 50%, rgba(212,85,44,.12), transparent 24rem),
+          rgba(255,255,255,.42);
+      }
     }
 
     @media (prefers-reduced-motion: reduce) {
