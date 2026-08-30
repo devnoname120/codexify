@@ -109,7 +109,7 @@ Dotted edges are conditional: `list_projects` and `set_project_root` appear only
 Linux and macOS:
 
 ```bash
-curl -q -fsSL https://codexify.dev/install.sh | sh
+curl -qfsSL https://codexify.dev/install.sh | sh
 ```
 
 Windows PowerShell:

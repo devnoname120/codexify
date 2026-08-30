@@ -163,7 +163,7 @@ case $(uname -m) in
 esac
 
 if [ -z "$VERSION" ]; then
-    latest_url=$(curl -q -fsSL -o /dev/null -w '%{url_effective}' "https://github.com/$REPOSITORY/releases/latest") \
+    latest_url=$(curl -qfsSL -o /dev/null -w '%{url_effective}' "https://github.com/$REPOSITORY/releases/latest") \
         || fail 'could not resolve the latest GitHub release'
     VERSION=${latest_url%%\?*}
     VERSION=${VERSION%/}
@@ -183,9 +183,9 @@ checksums=$tmp_dir/checksums.txt
 release_url=$RELEASE_ROOT/$VERSION
 
 printf 'Downloading Codexify %s for %s-%s...\n' "$VERSION" "$platform_os" "$platform_arch"
-curl -q -fsSL --retry 3 --connect-timeout 15 -o "$archive" "$release_url/$asset" \
+curl -qfsSL --retry 3 --connect-timeout 15 -o "$archive" "$release_url/$asset" \
     || fail "could not download $asset"
-curl -q -fsSL --retry 3 --connect-timeout 15 -o "$checksums" "$release_url/checksums.txt" \
+curl -qfsSL --retry 3 --connect-timeout 15 -o "$checksums" "$release_url/checksums.txt" \
     || fail 'could not download checksums.txt'
 
 expected=$(awk -v file="$asset" '$2 == file || $2 == "*" file { print $1; exit }' "$checksums")
