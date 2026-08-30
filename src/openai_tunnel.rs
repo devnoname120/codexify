@@ -96,6 +96,12 @@ pub struct RunningOpenAiTunnel {
     base_url: Url,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TunnelRuntimeInspection {
+    Ready(PathBuf),
+    MissingManaged(PathBuf),
+}
+
 impl RunningOpenAiTunnel {
     pub fn health_url(&self) -> &str {
         &self.health_url
@@ -420,6 +426,49 @@ async fn resolve_client(settings: &OpenAiTunnelConfig) -> anyhow::Result<PathBuf
     }
 }
 
+pub(crate) fn validate_key_reference(reference: &str) -> anyhow::Result<()> {
+    drop(resolve_key_reference(reference)?);
+    Ok(())
+}
+
+pub(crate) async fn inspect_runtime(
+    settings: &OpenAiTunnelConfig,
+) -> anyhow::Result<TunnelRuntimeInspection> {
+    let home = home_dir().context("locate the user's home directory")?;
+    inspect_runtime_from(settings, &home).await
+}
+
+async fn inspect_runtime_from(
+    settings: &OpenAiTunnelConfig,
+    home: &Path,
+) -> anyhow::Result<TunnelRuntimeInspection> {
+    if let Some(path) = &settings.client_path {
+        validate_client(path, None).await?;
+        return Ok(TunnelRuntimeInspection::Ready(path.clone()));
+    }
+
+    let asset = release_asset()?;
+    let binary_path = managed_binary_path_from(home, &asset.binary_name);
+    let manifest_path = binary_path
+        .parent()
+        .context("managed tunnel-client path has no parent")?
+        .join("manifest.json");
+    match (binary_path.exists(), manifest_path.exists()) {
+        (true, true) => {
+            validate_managed_install(&binary_path, &manifest_path, &asset).await?;
+            Ok(TunnelRuntimeInspection::Ready(binary_path))
+        }
+        (false, false) => Ok(TunnelRuntimeInspection::MissingManaged(binary_path)),
+        _ => bail!(
+            "incomplete managed OpenAI tunnel installation under {}; remove that version directory and restart",
+            binary_path
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .display()
+        ),
+    }
+}
+
 async fn validate_managed_install(
     binary_path: &Path,
     manifest_path: &Path,
@@ -545,11 +594,14 @@ fn release_asset() -> anyhow::Result<ReleaseAsset> {
 fn managed_binary_path(binary_name: &str) -> anyhow::Result<PathBuf> {
     let home =
         home_dir().context("cannot install OpenAI tunnel runtime: home directory is unknown")?;
-    Ok(home
-        .join(".codexify")
+    Ok(managed_binary_path_from(&home, binary_name))
+}
+
+fn managed_binary_path_from(home: &Path, binary_name: &str) -> PathBuf {
+    home.join(".codexify")
         .join("openai-tunnel")
         .join(format!("v{TUNNEL_CLIENT_VERSION}"))
-        .join(binary_name))
+        .join(binary_name)
 }
 
 fn extract_binary(archive: &[u8], binary_name: &str) -> anyhow::Result<Vec<u8>> {
@@ -901,6 +953,45 @@ mod tests {
         assert!(validate_runtime_api_key("key with spaces").is_err());
         assert!(validate_runtime_api_key("key\nvalue").is_err());
         assert!(validate_runtime_api_key(&"a".repeat(MAX_KEY_BYTES as usize + 1)).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn doctor_key_reference_validation_checks_private_files_without_exposing_values() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("key");
+        std::fs::write(&path, "sk-valid_key-123\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(validate_key_reference(&format!("file:{}", path.display())).is_ok());
+
+        let secret = "secret value that must not leak";
+        std::fs::write(&path, secret).unwrap();
+        let error = validate_key_reference(&format!("file:{}", path.display()))
+            .unwrap_err()
+            .to_string();
+        assert!(!error.contains(secret));
+    }
+
+    #[tokio::test]
+    async fn doctor_runtime_inspection_distinguishes_missing_and_partial_managed_installs() {
+        let root = tempfile::tempdir().unwrap();
+        let inspection = inspect_runtime_from(&settings(), root.path())
+            .await
+            .unwrap();
+        let TunnelRuntimeInspection::MissingManaged(path) = inspection else {
+            panic!("expected a missing managed runtime");
+        };
+        assert!(!path.exists());
+
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"partial").unwrap();
+        let error = inspect_runtime_from(&settings(), root.path())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("incomplete managed OpenAI tunnel installation"));
     }
 
     #[test]

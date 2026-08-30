@@ -1,3 +1,4 @@
+use std::io::Write as _;
 use std::path::PathBuf;
 
 use clap::Parser;
@@ -8,6 +9,7 @@ use codexify::config::{
     Cli, CliCommand, ProjectsCommand, ProjectsListArgs, ServiceCommand, config_path_for_quickstart,
     config_path_for_service, load_config, load_project_catalog_for_cli,
 };
+use codexify::doctor;
 use codexify::legacy_migration;
 use codexify::logging;
 use codexify::project_catalog::{
@@ -126,6 +128,19 @@ async fn main() {
 async fn run(mut cli: Cli) -> anyhow::Result<()> {
     if let Some(command) = cli.command.take() {
         match command {
+            CliCommand::Doctor(args) => {
+                let report = doctor::run(cli).await;
+                if args.json {
+                    println!("{}", serde_json::to_string_pretty(&report)?);
+                } else {
+                    print!("{}", report.render_human());
+                }
+                std::io::stdout().flush()?;
+                if !report.ok {
+                    std::process::exit(1);
+                }
+                return Ok(());
+            }
             CliCommand::Projects {
                 command: ProjectsCommand::List(args),
             } => {

@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add a read-only `codexify doctor` command with deterministic human/JSON reports, meaningful exit status, and diagnostics for configuration, service, self-update, health, and native tunnel prerequisites.
+**Goal:** Add a read-only `codexify doctor` command with deterministic human/JSON reports, meaningful exit status, and diagnostics for configuration, command dependencies, service, self-update, health, and native tunnel prerequisites.
 
-**Architecture:** A new `doctor.rs` module owns report construction and rendering. Existing modules expose narrow read-only inspection APIs; config loading gains a quiet path so JSON output remains one document. Native service and tunnel checks reuse existing platform/runtime logic rather than duplicating mutation paths.
+**Architecture:** A new `doctor.rs` module owns report construction, executable resolution/probing, and rendering. Existing modules expose narrow read-only inspection APIs; config loading gains a quiet path plus Codex-CLI diagnostic metadata so JSON output remains one document. Native service and tunnel checks reuse existing platform/runtime logic rather than duplicating mutation paths.
 
 **Tech Stack:** Rust 2024, clap, serde/serde_json, reqwest, Tokio, native systemd/launchd/Task Scheduler commands, Cargo integration tests.
 
@@ -15,6 +15,7 @@
 - Create `src/doctor.rs`: report model, checks, rendering, loopback health probe.
 - Create `tests/doctor_cli.rs`: black-box command and exit-status coverage.
 - Modify `src/config.rs`: `doctor` arguments, public config-selection metadata, quiet loading.
+- Modify `src/exec_sessions.rs`: reuse the selected exec shell semantics from doctor.
 - Modify `src/service.rs`: read-only native-service status.
 - Modify `src/openai_tunnel.rs`: read-only credential/runtime inspection.
 - Modify `src/self_update.rs`: retained update-lock inspection.
@@ -318,7 +319,58 @@ partial, or incompatible configured state fails. Unconfigured tunnel mode skips
 both checks. Probe local health only when service status is running and config
 loading succeeded.
 
-### Task 5: Complete binary behavior, documentation, and verification
+### Task 5: Align external command diagnostics with Codex
+
+**Files:**
+- Modify: `src/config.rs`
+- Modify: `src/doctor.rs`
+- Test: `src/config.rs`
+- Test: `src/doctor.rs`
+- Test: `tests/doctor_cli.rs`
+
+- [ ] **Step 1: Add failing resolver and fixed-tool tests**
+
+Add unit tests for a PATH resolver using a temporary directory containing fake
+executables. Cover `git`, `rg`, and `gh` classification: usable tools pass, missing
+`rg` and `gh` warn, and missing `git` warns only when the selected work directory
+is inside a Git checkout. Version probes must be bounded and non-interactive.
+
+- [ ] **Step 2: Add failing config-dependent command tests**
+
+Add tests showing that a missing configured/default exec shell fails, optional
+Codex CLI enrichment warns when its executable is missing, `--codex-cli` makes the
+same condition fail, and CLI-disabled configuration skips the check. Add an MCP
+stdio fixture whose command is absent from its effective PATH and assert one
+`mcp_stdio` warning without launching the child.
+
+- [ ] **Step 3: Run the new tests and verify RED**
+
+Run:
+
+```bash
+cargo test doctor::tests::command_
+cargo test --test doctor_cli command_
+```
+
+Expected: failures because the new check IDs and command resolver do not exist.
+
+- [ ] **Step 4: Implement the shared executable diagnostics**
+
+In `doctor.rs`, add a platform-aware executable resolver for absolute paths,
+relative paths containing separators, and PATH lookups (including PATHEXT on
+Windows). Add bounded `--version` probes for `git`, `rg`, and `gh`; reuse
+`exec_sessions::resolve_shell` for the shell executable. In `config.rs`, expose a
+small read-only `CodexCliDiagnosticConfig` selected with the same `codexMcp` and
+CLI override precedence as normal discovery.
+
+- [ ] **Step 5: Implement resolved MCP stdio checks and verify GREEN**
+
+For each enabled resolved server with `command`, use its configured cwd (or process
+cwd) and environment PATH to resolve the executable without spawning it. Aggregate
+missing entries into one warning check. Run the focused command tests and ensure
+all new checks appear in deterministic report order.
+
+### Task 6: Complete binary behavior, documentation, and verification
 
 **Files:**
 - Modify: `tests/doctor_cli.rs`
@@ -335,6 +387,11 @@ Cover:
   when no effective `workDir` exists;
 - malformed tunnel credentials return failure without leaking the environment
   value;
+- missing `rg` and `gh` return warnings while leaving exit status 0;
+- missing `git` warns for Git work directories;
+- missing configured shells fail;
+- optional/required Codex CLI discovery produces warning/failure respectively;
+- missing enabled MCP stdio commands produce a warning without launching them;
 - human output uses `PASS`, `WARN`, `FAIL`, and `SKIP` records and a final summary.
 
 - [ ] **Step 2: Run end-to-end tests and verify RED**

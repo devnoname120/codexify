@@ -131,7 +131,7 @@ pub struct Cli {
 
     /// Require Codex CLI-backed MCP discovery. Without this flag, the CLI is
     /// used automatically when available and config.toml remains the fallback.
-    #[arg(long = "codex-cli")]
+    #[arg(long = "codex-cli", global = true)]
     pub codex_cli: bool,
 
     /// Append privacy-preserving tool activity events to a JSONL file.
@@ -170,6 +170,8 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum CliCommand {
+    /// Diagnose the local Codexify installation without changing it.
+    Doctor(DoctorArgs),
     /// Inspect the read-only project catalogue used by multi-project mode.
     Projects {
         #[command(subcommand)]
@@ -187,6 +189,13 @@ pub enum CliCommand {
     /// Migrate state from the pre-Codexify application name during installation.
     #[command(hide = true)]
     MigrateLegacyInstall,
+}
+
+#[derive(Args, Debug)]
+pub struct DoctorArgs {
+    /// Emit one stable machine-readable JSON document.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -600,8 +609,26 @@ fn codex_cli_command(settings: &CodexMcpConfig) -> OsString {
     }
 }
 
-fn print_discovery_report(header: &str, report: &[String]) {
-    if report.is_empty() {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodexCliDiagnosticConfig {
+    pub enabled: bool,
+    pub required: bool,
+    pub command: OsString,
+}
+
+pub fn codex_cli_diagnostic_config(cli: &Cli) -> Result<CodexCliDiagnosticConfig, String> {
+    let file = load_file_config(cli, false)?;
+    let settings = file.codex_mcp.unwrap_or_default();
+    let discovery_enabled = cli.codex_cli || settings.enabled();
+    Ok(CodexCliDiagnosticConfig {
+        enabled: discovery_enabled && (cli.codex_cli || settings.use_cli()),
+        required: cli.codex_cli,
+        command: codex_cli_command(&settings),
+    })
+}
+
+fn print_discovery_report(header: &str, report: &[String], announce: bool) {
+    if !announce || report.is_empty() {
         return;
     }
     println!("{header}");
@@ -613,8 +640,9 @@ fn print_discovery_report(header: &str, report: &[String]) {
 fn resolve_mcp_servers(
     file: &mut FileConfig,
     cli: &Cli,
+    announce: bool,
 ) -> Result<HashMap<String, McpServerSpec>, String> {
-    resolve_mcp_servers_from(file, cli, codex_config_path(), None)
+    resolve_mcp_servers_from(file, cli, codex_config_path(), None, announce)
 }
 
 fn resolve_mcp_servers_from(
@@ -622,13 +650,16 @@ fn resolve_mcp_servers_from(
     cli: &Cli,
     config_path_result: Result<PathBuf, String>,
     command_override: Option<OsString>,
+    announce: bool,
 ) -> Result<HashMap<String, McpServerSpec>, String> {
     let settings = file.codex_mcp.take().unwrap_or_default();
     let discovery_enabled = cli.codex_cli || settings.enabled();
     let explicit = file.mcp_servers.take().unwrap_or_default();
 
     if !discovery_enabled {
-        println!("Codex MCP discovery: disabled by codexMcp.enabled=false");
+        if announce {
+            println!("Codex MCP discovery: disabled by codexMcp.enabled=false");
+        }
         return Ok(merge_mcp_servers(HashMap::new(), explicit).0);
     }
 
@@ -636,7 +667,9 @@ fn resolve_mcp_servers_from(
     let config_path = match config_path_result {
         Ok(path) => Some(path),
         Err(error) => {
-            println!("Codex MCP config discovery: skipped ({error})");
+            if announce {
+                println!("Codex MCP config discovery: skipped ({error})");
+            }
             None
         }
     };
@@ -646,15 +679,18 @@ fn resolve_mcp_servers_from(
             Ok(Some(discovery)) => imported = discovery,
             Ok(None) => {}
             Err(error) => {
-                println!(
-                    "Codex MCP config discovery: failed for {} ({error})",
-                    path.display()
-                );
+                if announce {
+                    println!(
+                        "Codex MCP config discovery: failed for {} ({error})",
+                        path.display()
+                    );
+                }
             }
         }
         print_discovery_report(
             &format!("Codex MCP config discovery: {}", path.display()),
             &imported.report,
+            announce,
         );
     }
 
@@ -668,13 +704,16 @@ fn resolve_mcp_servers_from(
             Ok(cli_import) => {
                 let command_display = Path::new(&command).display();
                 if cli_import.report.is_empty() {
-                    println!(
-                        "Codex CLI MCP discovery: {command_display} (no additional MCP servers)"
-                    );
+                    if announce {
+                        println!(
+                            "Codex CLI MCP discovery: {command_display} (no additional MCP servers)"
+                        );
+                    }
                 } else {
                     print_discovery_report(
                         &format!("Codex CLI MCP discovery: {command_display}"),
                         &cli_import.report,
+                        announce,
                     );
                 }
                 for (name, spec) in cli_import.servers {
@@ -687,15 +726,17 @@ fn resolve_mcp_servers_from(
                 ));
             }
             Err(error) => {
-                eprintln!(
-                    "Warning: Codex CLI MCP discovery is unavailable ({error}). Continuing without CLI enrichment; only directly parsed config.toml MCP servers are available, so servers contributed by Codex plugins may be missing. Pass --codex-cli to make this a startup error."
-                );
+                if announce {
+                    eprintln!(
+                        "Warning: Codex CLI MCP discovery is unavailable ({error}). Continuing without CLI enrichment; only directly parsed config.toml MCP servers are available, so servers contributed by Codex plugins may be missing. Pass --codex-cli to make this a startup error."
+                    );
+                }
             }
         }
     }
 
     let (servers, overlay_report) = merge_mcp_servers(imported.servers, explicit);
-    print_discovery_report("Codex MCP overrides:", &overlay_report);
+    print_discovery_report("Codex MCP overrides:", &overlay_report, announce);
     Ok(servers)
 }
 
@@ -759,7 +800,7 @@ fn default_worktree_config() -> WorktreeConfig {
     }
 }
 
-fn native_worktree_settings() -> NativeWorktreeSettings {
+fn native_worktree_settings(announce: bool) -> NativeWorktreeSettings {
     let Ok(path) = codex_config_path() else {
         return NativeWorktreeSettings::default();
     };
@@ -769,20 +810,24 @@ fn native_worktree_settings() -> NativeWorktreeSettings {
             return NativeWorktreeSettings::default();
         }
         Err(_) => {
-            println!(
-                "Codex worktree settings: could not read {} — using built-in defaults",
-                path.display()
-            );
+            if announce {
+                println!(
+                    "Codex worktree settings: could not read {} — using built-in defaults",
+                    path.display()
+                );
+            }
             return NativeWorktreeSettings::default();
         }
     };
     let root: toml::Value = match toml::from_str(&raw) {
         Ok(root) => root,
         Err(_) => {
-            println!(
-                "Codex worktree settings: invalid TOML at {} — using built-in defaults",
-                path.display()
-            );
+            if announce {
+                println!(
+                    "Codex worktree settings: invalid TOML at {} — using built-in defaults",
+                    path.display()
+                );
+            }
             return NativeWorktreeSettings::default();
         }
     };
@@ -820,8 +865,12 @@ fn native_worktree_settings() -> NativeWorktreeSettings {
     }
 }
 
-fn resolve_worktree_config(file: Option<PartialWorktrees>, cli: &Cli) -> WorktreeConfig {
-    let native = native_worktree_settings();
+fn resolve_worktree_config(
+    file: Option<PartialWorktrees>,
+    cli: &Cli,
+    announce: bool,
+) -> WorktreeConfig {
+    let native = native_worktree_settings(announce);
     let file = file.unwrap_or_default();
     let mut config = default_worktree_config();
     config.mode = cli.worktree_mode.or(file.mode).unwrap_or_default();
@@ -936,7 +985,7 @@ fn resolve_project_clone_dir(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ConfigPathSource {
+pub enum ConfigPathSource {
     CommandLine,
     Environment,
     User,
@@ -944,9 +993,9 @@ enum ConfigPathSource {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct ConfigPathSelection {
-    path: Option<PathBuf>,
-    source: ConfigPathSource,
+pub struct ConfigPathSelection {
+    pub path: Option<PathBuf>,
+    pub source: ConfigPathSource,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1026,6 +1075,10 @@ fn select_config_path(cli: &Cli) -> Result<ConfigPathSelection, String> {
         &current_dir,
         home.as_deref(),
     ))
+}
+
+pub fn config_path_selection(cli: &Cli) -> Result<ConfigPathSelection, String> {
+    select_config_path(cli)
 }
 
 fn config_path_for_quickstart_with(
@@ -1330,8 +1383,8 @@ fn resolve_audit(file: Option<PartialAudit>, cli: &Cli) -> Result<AuditConfig, S
 
 /// Load and merge config. Errors are returned as strings for the caller to
 /// print and exit on, mirroring the TS which validates and `process.exit`s.
-pub fn load_config(cli: Cli) -> Result<AppConfig, String> {
-    let mut file = load_file_config(&cli, true)?;
+fn load_config_with_announcements(cli: Cli, announce: bool) -> Result<AppConfig, String> {
+    let mut file = load_file_config(&cli, announce)?;
     let work_dir = resolve_configured_work_dir(&cli, file.work_dir.as_deref())?;
     let project_clone_dir = resolve_project_clone_dir(
         &work_dir,
@@ -1384,11 +1437,11 @@ pub fn load_config(cli: Cli) -> Result<AppConfig, String> {
     }
 
     let project_catalog = resolve_project_catalog(&mut file);
-    let mcp_servers = resolve_mcp_servers(&mut file, &cli)?;
+    let mcp_servers = resolve_mcp_servers(&mut file, &cli, announce)?;
     let openai_tunnel = resolve_openai_tunnel(file.openai_tunnel, &cli)?;
     let tool_logging = resolve_tool_logging(file.tool_logging, &cli)?;
     let audit = resolve_audit(file.audit, &cli)?;
-    let worktrees = resolve_worktree_config(file.worktrees.take(), &cli);
+    let worktrees = resolve_worktree_config(file.worktrees.take(), &cli, announce);
     let api_key = cli.api_key.or(file.api_key);
     if api_key.is_some() && openai_tunnel.is_some() {
         return Err(
@@ -1431,6 +1484,14 @@ pub fn load_config(cli: Cli) -> Result<AppConfig, String> {
         mcp_servers,
         generated_skills_dir: None,
     })
+}
+
+pub fn load_config(cli: Cli) -> Result<AppConfig, String> {
+    load_config_with_announcements(cli, true)
+}
+
+pub fn load_config_quiet(cli: Cli) -> Result<AppConfig, String> {
+    load_config_with_announcements(cli, false)
 }
 
 pub fn load_project_catalog_for_cli(cli: &Cli) -> Result<ProjectCatalog, String> {
@@ -2189,6 +2250,7 @@ mod tests {
             &cli(root.path(), &root.path().join("codexify.config.json")),
             Ok(codex_config.clone()),
             Some(missing_cli.clone()),
+            true,
         )
         .unwrap();
         assert_eq!(
@@ -2213,6 +2275,7 @@ mod tests {
             &required_cli,
             Ok(codex_config),
             Some(missing_cli),
+            true,
         )
         .unwrap_err();
         assert!(error.contains("required by --codex-cli"));
@@ -2242,6 +2305,7 @@ mod tests {
             &cli(root.path(), &root.path().join("codexify.config.json")),
             Ok(codex_config),
             Some(root.path().join("missing-codex-cli").into_os_string()),
+            true,
         )
         .unwrap();
 
@@ -2311,6 +2375,64 @@ mod tests {
         };
         assert_eq!(args.query.as_deref(), Some("bridge"));
         assert!(args.json);
+    }
+
+    #[test]
+    fn doctor_cli_accepts_json_and_global_options() {
+        let parsed = Cli::try_parse_from([
+            "codexify",
+            "doctor",
+            "--json",
+            "--config",
+            "/tmp/codexify.config.json",
+        ])
+        .unwrap();
+
+        assert_eq!(parsed.config.as_deref(), Some("/tmp/codexify.config.json"));
+        let Some(CliCommand::Doctor(args)) = parsed.command else {
+            panic!("doctor subcommand was not parsed");
+        };
+        assert!(args.json);
+    }
+
+    #[test]
+    fn doctor_codex_cli_diagnostic_config_matches_discovery_precedence() {
+        let root = tempfile::tempdir().unwrap();
+        let work_dir = root.path().join("project");
+        std::fs::create_dir(&work_dir).unwrap();
+        let config_path = root.path().join("codexify.config.json");
+        std::fs::write(
+            &config_path,
+            format!(
+                r#"{{"workDir":{},"codexMcp":{{"enabled":true,"useCli":true,"cliPath":"custom-codex"}}}}"#,
+                serde_json::to_string(work_dir.to_str().unwrap()).unwrap()
+            ),
+        )
+        .unwrap();
+
+        let parsed = Cli::try_parse_from([
+            "codexify",
+            "doctor",
+            "--config",
+            config_path.to_str().unwrap(),
+        ])
+        .unwrap();
+        let diagnostic = codex_cli_diagnostic_config(&parsed).unwrap();
+        assert!(diagnostic.enabled);
+        assert!(!diagnostic.required);
+        assert_eq!(diagnostic.command, OsString::from("custom-codex"));
+
+        let parsed = Cli::try_parse_from([
+            "codexify",
+            "doctor",
+            "--codex-cli",
+            "--config",
+            config_path.to_str().unwrap(),
+        ])
+        .unwrap();
+        let diagnostic = codex_cli_diagnostic_config(&parsed).unwrap();
+        assert!(diagnostic.enabled);
+        assert!(diagnostic.required);
     }
 
     #[test]

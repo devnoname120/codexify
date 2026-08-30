@@ -96,6 +96,12 @@ struct UpdateWorkspace {
     clean_on_drop: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateLockInspection {
+    pub path: PathBuf,
+    pub update_id: Option<String>,
+}
+
 impl UpdateWorkspace {
     fn create(root: &Path, target: &Path) -> anyhow::Result<Self> {
         let update_dir = root.join("update");
@@ -171,6 +177,58 @@ impl Drop for UpdateWorkspace {
             let _ = fs::remove_file(path);
         }
     }
+}
+
+pub fn inspect_update_lock() -> anyhow::Result<Option<UpdateLockInspection>> {
+    let home = home_dir().context("locate the user's home directory")?;
+    inspect_update_lock_from(&home)
+}
+
+fn inspect_update_lock_from(home: &Path) -> anyhow::Result<Option<UpdateLockInspection>> {
+    const MAX_LOCK_BYTES: u64 = 4096;
+    const MAX_UPDATE_ID_BYTES: usize = 128;
+
+    let path = home.join(".codexify").join("update").join(UPDATE_LOCK_FILE);
+    let file = match File::open(&path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error).with_context(|| format!("open update lock {}", path.display()));
+        }
+    };
+    let metadata = file
+        .metadata()
+        .with_context(|| format!("inspect update lock {}", path.display()))?;
+    if !metadata.is_file() {
+        bail!(
+            "Codexify update lock is not a regular file: {}",
+            path.display()
+        );
+    }
+
+    let update_id = if metadata.len() > MAX_LOCK_BYTES {
+        None
+    } else {
+        let mut raw = String::new();
+        file.take(MAX_LOCK_BYTES + 1)
+            .read_to_string(&mut raw)
+            .with_context(|| format!("read update lock {}", path.display()))?;
+        if raw.len() as u64 > MAX_LOCK_BYTES {
+            return Ok(Some(UpdateLockInspection {
+                path,
+                update_id: None,
+            }));
+        }
+        let candidate = raw.trim();
+        (candidate.len() <= MAX_UPDATE_ID_BYTES
+            && !candidate.is_empty()
+            && candidate
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')))
+        .then(|| candidate.to_string())
+    };
+
+    Ok(Some(UpdateLockInspection { path, update_id }))
 }
 
 pub async fn trigger() -> anyhow::Result<SelfUpdateReceipt> {
@@ -1207,6 +1265,28 @@ mod tests {
             worker_path: root.join("worker"),
             clean_on_drop: false,
         }
+    }
+
+    #[test]
+    fn inspect_update_lock_reports_only_bounded_safe_identifiers() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(inspect_update_lock_from(root.path()).unwrap().is_none());
+
+        let update_dir = root.path().join(".codexify/update");
+        fs::create_dir_all(&update_dir).unwrap();
+        let lock_path = update_dir.join(UPDATE_LOCK_FILE);
+        fs::write(&lock_path, "0123456789abcdef01234567\n").unwrap();
+        let lock = inspect_update_lock_from(root.path()).unwrap().unwrap();
+        assert_eq!(lock.path, lock_path);
+        assert_eq!(lock.update_id.as_deref(), Some("0123456789abcdef01234567"));
+
+        fs::write(&lock.path, "unsafe owner text with spaces\n").unwrap();
+        let lock = inspect_update_lock_from(root.path()).unwrap().unwrap();
+        assert_eq!(lock.update_id, None);
+
+        fs::write(&lock.path, vec![b'a'; 5000]).unwrap();
+        let lock = inspect_update_lock_from(root.path()).unwrap().unwrap();
+        assert_eq!(lock.update_id, None);
     }
 
     #[test]

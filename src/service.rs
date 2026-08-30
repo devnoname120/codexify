@@ -7,6 +7,8 @@ use std::time::Duration;
 
 use anyhow::{Context, bail};
 use chrono::{SecondsFormat, Utc};
+#[cfg(any(target_os = "windows", test))]
+use serde::Deserialize;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command as TokioCommand;
 use tokio::time::Instant;
@@ -54,6 +56,134 @@ struct ServiceSpec {
     home: PathBuf,
     #[cfg(any(target_os = "linux", target_os = "macos", test))]
     path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceStatus {
+    pub installed: bool,
+    pub running: bool,
+    pub enabled: Option<bool>,
+    pub definition_path: Option<PathBuf>,
+    pub detail: String,
+}
+
+impl ServiceStatus {
+    fn not_installed(detail: impl Into<String>) -> Self {
+        Self {
+            installed: false,
+            running: false,
+            enabled: None,
+            definition_path: None,
+            detail: detail.into(),
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn status_word(value: &str) -> &str {
+    value
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("unknown")
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn parse_systemd_status(active: &str, enabled: &str, definition_path: PathBuf) -> ServiceStatus {
+    let active = status_word(active);
+    let enabled = status_word(enabled);
+    let running = active == "active";
+    let enabled_value = match enabled {
+        "enabled" | "enabled-runtime" | "linked" | "linked-runtime" | "static" | "indirect"
+        | "generated" | "alias" => Some(true),
+        "disabled" | "masked" | "masked-runtime" | "not-found" => Some(false),
+        _ => None,
+    };
+    ServiceStatus {
+        installed: true,
+        running,
+        enabled: enabled_value,
+        definition_path: Some(definition_path),
+        detail: format!("active={active}; enabled={enabled}"),
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn launchd_field<'a>(output: &'a str, key: &str) -> Option<&'a str> {
+    output.lines().map(str::trim).find_map(|line| {
+        let (field, value) = line.split_once(" = ")?;
+        (field == key).then_some(value.trim())
+    })
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn launchd_is_disabled(output: &str) -> bool {
+    output.lines().map(str::trim).any(|line| {
+        line.contains(SERVICE_LABEL)
+            && line
+                .split_once("=>")
+                .is_some_and(|(_, value)| value.trim() == "true")
+    })
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn parse_launchd_status(
+    loaded_output: Option<&str>,
+    disabled_output: &str,
+    definition_path: PathBuf,
+) -> ServiceStatus {
+    let state = loaded_output
+        .and_then(|output| launchd_field(output, "state"))
+        .unwrap_or("unloaded");
+    let pid = loaded_output
+        .and_then(|output| launchd_field(output, "pid"))
+        .and_then(|value| value.parse::<u32>().ok());
+    let running = state == "running" || pid.is_some_and(|pid| pid > 0);
+    let enabled = !launchd_is_disabled(disabled_output);
+    let pid_detail = pid
+        .map(|pid| pid.to_string())
+        .unwrap_or_else(|| "none".to_string());
+    ServiceStatus {
+        installed: true,
+        running,
+        enabled: Some(enabled),
+        definition_path: Some(definition_path),
+        detail: format!("state={state}; pid={pid_detail}; enabled={enabled}"),
+    }
+}
+
+#[cfg(any(target_os = "windows", test))]
+#[derive(Debug, Deserialize)]
+struct WindowsTaskStatus {
+    exists: bool,
+    state: Option<String>,
+    enabled: Option<bool>,
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn parse_windows_status(output: &str) -> anyhow::Result<ServiceStatus> {
+    let parsed: WindowsTaskStatus =
+        serde_json::from_str(output).context("parse the Codexify scheduled-task status")?;
+    if !parsed.exists {
+        return Ok(ServiceStatus::not_installed(
+            "Task Scheduler definition is absent",
+        ));
+    }
+    let state = parsed.state.unwrap_or_else(|| "Unknown".to_string());
+    let running = state.eq_ignore_ascii_case("Running");
+    let enabled = parsed.enabled;
+    Ok(ServiceStatus {
+        installed: true,
+        running,
+        enabled,
+        definition_path: None,
+        detail: format!(
+            "state={state}; enabled={}",
+            enabled
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "unknown".to_string())
+        ),
+    })
 }
 
 impl ServiceSpec {
@@ -255,6 +385,10 @@ pub fn is_installed() -> anyhow::Result<bool> {
     platform_is_installed()
 }
 
+pub fn status() -> anyhow::Result<ServiceStatus> {
+    platform_status()
+}
+
 fn ensure_log_directory(home: &Path) -> anyhow::Result<PathBuf> {
     let directory = home.join(".codexify").join("logs");
     fs::create_dir_all(&directory)
@@ -282,6 +416,25 @@ fn command_output(mut command: StdCommand, action: &str) -> anyhow::Result<Strin
     let stdout = bounded_command_text(&output.stdout);
     let detail = if !stderr.is_empty() { stderr } else { stdout };
     bail!("{action} failed with {}: {detail}", output.status)
+}
+
+fn probe_output(mut command: StdCommand, action: &str) -> anyhow::Result<std::process::Output> {
+    command.output().with_context(|| {
+        format!(
+            "{action}: start {}",
+            command.get_program().to_string_lossy()
+        )
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn probe_stdout(output: &std::process::Output, action: &str) -> anyhow::Result<String> {
+    let stdout = bounded_command_text(&output.stdout);
+    if !stdout.is_empty() {
+        return Ok(stdout);
+    }
+    let stderr = bounded_command_text(&output.stderr);
+    bail!("{action} failed with {}: {stderr}", output.status)
 }
 
 fn bounded_command_text(bytes: &[u8]) -> String {
@@ -594,6 +747,54 @@ fn platform_is_installed() -> anyhow::Result<bool> {
     Ok(systemd_path(&home).exists())
 }
 
+#[cfg(target_os = "linux")]
+fn platform_status() -> anyhow::Result<ServiceStatus> {
+    let home = service_root()?
+        .parent()
+        .context("service root has no home directory")?
+        .to_path_buf();
+    let unit_path = systemd_path(&home);
+    let metadata = match fs::metadata(&unit_path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(ServiceStatus::not_installed(format!(
+                "systemd user unit is absent at {}",
+                unit_path.display()
+            )));
+        }
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("inspect systemd unit {}", unit_path.display()));
+        }
+    };
+    if !metadata.is_file() {
+        bail!(
+            "systemd unit is not a regular file: {}",
+            unit_path.display()
+        );
+    }
+
+    let active = probe_output(
+        {
+            let mut command = StdCommand::new("systemctl");
+            command.args(["--user", "is-active", SYSTEMD_UNIT]);
+            command
+        },
+        "query the Codexify systemd active state",
+    )?;
+    let enabled = probe_output(
+        {
+            let mut command = StdCommand::new("systemctl");
+            command.args(["--user", "is-enabled", SYSTEMD_UNIT]);
+            command
+        },
+        "query the Codexify systemd enabled state",
+    )?;
+    let active = probe_stdout(&active, "query the Codexify systemd active state")?;
+    let enabled = probe_stdout(&enabled, "query the Codexify systemd enabled state")?;
+    Ok(parse_systemd_status(&active, &enabled, unit_path))
+}
+
 #[cfg(target_os = "macos")]
 fn launchd_is_loaded(target: &str) -> anyhow::Result<bool> {
     let status = StdCommand::new("launchctl")
@@ -753,6 +954,62 @@ fn platform_is_installed() -> anyhow::Result<bool> {
     Ok(launchd_path(&home).exists())
 }
 
+#[cfg(target_os = "macos")]
+fn platform_status() -> anyhow::Result<ServiceStatus> {
+    let home = service_root()?
+        .parent()
+        .context("service root has no home directory")?
+        .to_path_buf();
+    let plist_path = launchd_path(&home);
+    let metadata = match fs::metadata(&plist_path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(ServiceStatus::not_installed(format!(
+                "launchd agent is absent at {}",
+                plist_path.display()
+            )));
+        }
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("inspect launchd agent {}", plist_path.display()));
+        }
+    };
+    if !metadata.is_file() {
+        bail!(
+            "launchd agent is not a regular file: {}",
+            plist_path.display()
+        );
+    }
+
+    let target = launchd_target();
+    let loaded = probe_output(
+        {
+            let mut command = StdCommand::new("launchctl");
+            command.args(["print", &target]);
+            command
+        },
+        "query the Codexify launch agent",
+    )?;
+    let loaded_text = loaded
+        .status
+        .success()
+        .then(|| bounded_command_text(&loaded.stdout));
+
+    let disabled = command_output(
+        {
+            let mut command = StdCommand::new("launchctl");
+            command.args(["print-disabled", &launchd_domain()]);
+            command
+        },
+        "query the Codexify launch agent enabled state",
+    )?;
+    Ok(parse_launchd_status(
+        loaded_text.as_deref(),
+        &bounded_command_text(disabled.as_bytes()),
+        plist_path,
+    ))
+}
+
 #[cfg(target_os = "windows")]
 fn platform_install(spec: &ServiceSpec) -> anyhow::Result<()> {
     command_output(
@@ -817,6 +1074,19 @@ fn platform_is_installed() -> anyhow::Result<bool> {
     }
 }
 
+#[cfg(target_os = "windows")]
+fn platform_status() -> anyhow::Result<ServiceStatus> {
+    let task = powershell_quote(WINDOWS_TASK);
+    let script = format!(
+        "$ErrorActionPreference = 'Stop'\n$task = Get-ScheduledTask -TaskName {task} -ErrorAction SilentlyContinue\nif (-not $task) {{\n  [ordered]@{{ exists = $false; state = $null; enabled = $null }} | ConvertTo-Json -Compress\n  exit 0\n}}\n$state = [string]$task.State\n[ordered]@{{ exists = $true; state = $state; enabled = ($state -ne 'Disabled') }} | ConvertTo-Json -Compress\n"
+    );
+    let output = command_output(
+        powershell_command(&script),
+        "query the Codexify scheduled task status",
+    )?;
+    parse_windows_status(&bounded_command_text(output.as_bytes()))
+}
+
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 fn platform_install(_spec: &ServiceSpec) -> anyhow::Result<()> {
     bail!("Codexify services are supported on Linux, macOS, and Windows")
@@ -840,6 +1110,13 @@ fn platform_remove() -> anyhow::Result<()> {
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 fn platform_is_installed() -> anyhow::Result<bool> {
     Ok(false)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+fn platform_status() -> anyhow::Result<ServiceStatus> {
+    Ok(ServiceStatus::not_installed(
+        "native services are unsupported on this platform",
+    ))
 }
 
 struct RotatingLog {
@@ -1421,6 +1698,44 @@ mod tests {
             home: root.join("home"),
             path: "/usr/local/bin:/usr/bin:/bin".to_string(),
         }
+    }
+
+    #[test]
+    fn service_status_parsers_distinguish_running_enabled_and_stopped_states() {
+        let definition = PathBuf::from("/tmp/codexify.service");
+
+        let systemd = parse_systemd_status("active\n", "enabled\n", definition.clone());
+        assert!(systemd.installed);
+        assert!(systemd.running);
+        assert_eq!(systemd.enabled, Some(true));
+        assert_eq!(systemd.definition_path, Some(definition.clone()));
+
+        let launchd = parse_launchd_status(
+            Some("dev.codexify.service = {\n\tstate = running\n\tpid = 123\n}"),
+            "disabled services = {\n\t\"dev.codexify.service\" => false\n}",
+            definition.clone(),
+        );
+        assert!(launchd.running);
+        assert_eq!(launchd.enabled, Some(true));
+        assert!(launchd.detail.contains("pid=123"));
+
+        let stopped = parse_launchd_status(
+            None,
+            "disabled services = {\n\t\"dev.codexify.service\" => true\n}",
+            definition,
+        );
+        assert!(!stopped.running);
+        assert_eq!(stopped.enabled, Some(false));
+
+        let windows =
+            parse_windows_status(r#"{"exists":true,"state":"Running","enabled":true}"#).unwrap();
+        assert!(windows.running);
+        assert_eq!(windows.enabled, Some(true));
+
+        let missing =
+            parse_windows_status(r#"{"exists":false,"state":null,"enabled":null}"#).unwrap();
+        assert!(!missing.installed);
+        assert!(!missing.running);
     }
 
     #[test]

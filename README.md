@@ -284,6 +284,7 @@ Each release ships a compiled binary per platform — `windows-x64`, `linux-x64`
 
 | Command | Description |
 |---------|-------------|
+| `doctor` | Run read-only local diagnostics for configuration, command dependencies, service/update state, local health, and native tunnel prerequisites; add `--json` for machine-readable output |
 | `quickstart` | Interactively configure the project scope, native OpenAI tunnel credentials, JSON config, and ChatGPT developer-mode connector; restart the installed service or optionally start a foreground server |
 | `service install` | Install, enable, and start the native per-user service using the selected absolute config path |
 | `service enable` | Enable and start an installed service |
@@ -294,6 +295,33 @@ Each release ships a compiled binary per platform — `windows-x64`, `linux-x64`
 `quickstart` writes `~/.codexify/codexify.config.json` by default. It accepts
 `--config <PATH>` (or `CODEXIFY_CONFIG`) to select another file and
 `--work-dir <DIR>` as the initial project-directory prompt value.
+
+`doctor` is side-effect free and does not start MCP children, install or repair
+the native service, remove update state, download the managed tunnel runtime, or
+connect the tunnel. It validates the effective config and reports the resolved
+runtime plus the availability of Git, ripgrep (`rg`), GitHub CLI (`gh`), the
+`exec_command` shell, optional/required Codex CLI MCP enrichment, and enabled
+stdio MCP commands. Missing or unusable `rg` and `gh` are warnings; Git follows
+Codex semantics (a missing Git binary warns for a Git checkout, while a found but
+unusable Git binary always warns). A missing configured exec shell is a failure.
+Configured stdio MCP commands are resolved using their effective cwd and PATH but
+are never launched by the diagnostic.
+
+```bash
+codexify doctor
+codexify doctor --json
+codexify doctor --config /absolute/path/to/codexify.config.json
+codexify doctor --codex-cli --json
+```
+
+The report also checks retained self-update state, native-service running/enabled
+state, the loopback `/health` endpoint when that service is running, and configured
+OpenAI tunnel credentials/runtime integrity. An absent managed tunnel runtime is a
+warning because normal startup installs the pinned verified runtime; incomplete or
+corrupt configured tunnel state is a failure. Warnings and skipped optional checks
+still exit `0`; any failure exits `1` after printing the complete report. JSON mode
+emits exactly one JSON document on stdout and does not include resolved secret
+values.
 
 ### Server flags
 

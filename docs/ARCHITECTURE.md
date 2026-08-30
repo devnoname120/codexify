@@ -428,6 +428,29 @@ onboarding choice. If an existing config already contains a valid token, it
 preserves the token, protects the config as a private file on Unix, and prints the
 one-line instruction needed by an individual chat or ChatGPT Project.
 
+### `doctor` CLI (`doctor.rs`)
+
+`doctor` is a read-only preflight/support surface built on the same configuration
+resolver as server startup, with announcements suppressed so `--json` can emit one
+stable document. The report distinguishes pass, warning, failure, and skipped
+checks and exits nonzero only after the complete report has been written when a
+failure is present.
+
+The command owns a platform-aware executable resolver for absolute/relative
+command paths and PATH lookup (including PATHEXT on Windows). It follows Codex's
+diagnostics for Git and ripgrep, additionally warns when `gh` is unavailable,
+validates the resolved `exec_command` shell, classifies optional versus required
+Codex CLI enrichment, and checks enabled local stdio MCP commands without starting
+them. MCP resolution honors each server's cwd and PATH override.
+
+The remaining checks reuse narrow read-only helpers rather than lifecycle paths:
+`service.rs` reports native-manager state, `self_update.rs` inspects the bounded
+update lock, and `openai_tunnel.rs` validates credential references and installed
+runtime integrity without downloading or starting the tunnel. A local HTTP probe is
+made only for a running native service; it is fixed to IPv4 loopback, disables
+redirects, uses a short timeout, bounds the response to 64 KiB while reading it,
+and requires the server's `{ "status": "ok" }` health JSON.
+
 ### Native user service (`service.rs`)
 
 The public `service install|enable|disable|remove|logs` commands manage one
@@ -576,6 +599,7 @@ the original order and rejects duplicate names.
 | `tool.rs` | Mandatory titles and `ToolBehavior`, typed-schema helpers, startup descriptor checks, cached dialect-aware JSON Schema validators, masked input diagnostics, and successful structured-output validation. |
 | `memory.rs` | Working memory outside the repo, keyed by a hash of the normalized active root, with `O_EXCL` locking and atomic writes. In multi-project mode, a configured `memory.dir` is a base containing one hashed child per project. |
 | `quickstart.rs` | Interactive first-install wizard for project scope, native tunnel credentials, JSON config merging, preservation of preconfigured advanced conversation authorization, and the ChatGPT developer-mode connector handoff. |
+| `doctor.rs` | Read-only local diagnostic orchestration, deterministic human/JSON reports, Codex-aligned Git/ripgrep probes, GitHub CLI/shell/Codex CLI/MCP command resolution, bounded loopback health probing, and service/update/tunnel prerequisite checks. |
 | `service.rs` | Per-user systemd, launchd, and Windows Task Scheduler definitions; service lifecycle commands; bounded child restart supervision; private rotating stdout/stderr logs; and `service logs [-f]`. |
 | `openai_tunnel.rs` | Verified installation and lifecycle supervision for OpenAI's outbound Secure MCP Tunnel runtime. |
 | `process_env.rs` | Child-process environment boundaries: isolate the tunnel runtime and remove tunnel credentials from model-controlled and upstream subprocesses. |

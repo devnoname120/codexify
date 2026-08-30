@@ -4,6 +4,18 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project aims to
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `codexify doctor` for side-effect-free local diagnostics with deterministic
+  human and JSON reports and failure-aware exit status. It validates effective
+  configuration, Codex-aligned Git and ripgrep availability, GitHub CLI (`gh`),
+  the configured exec shell, Codex CLI enrichment, enabled stdio MCP commands,
+  self-update locks, native-service state and loopback health, and OpenAI tunnel
+  credentials/runtime integrity without starting MCP children or downloading the
+  managed tunnel runtime.
+
 ## [1.1.0] - 2026-08-30
 
 ### Added
