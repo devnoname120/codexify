@@ -39,6 +39,7 @@ mod redaction;
 pub mod registry;
 pub mod safe_path;
 pub mod self_update;
+pub mod self_update_ui;
 pub mod server;
 pub mod service;
 pub mod skills;

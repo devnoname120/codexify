@@ -32,16 +32,16 @@ fn default_exec_policy_is_unrestricted_without_an_allowlist() {
 }
 
 #[test]
-fn loads_all_30_tools() {
+fn loads_all_31_tools() {
     let tools = load_tools();
-    assert_eq!(tools.len(), 30);
+    assert_eq!(tools.len(), 31);
     assert!(!tools.iter().any(|tool| tool.name() == "run_command"));
 }
 
 #[test]
 fn multi_project_mode_adds_catalogue_and_session_selector() {
     let tools = load_tools_for_mode(true);
-    assert_eq!(tools.len(), 32);
+    assert_eq!(tools.len(), 33);
     assert_eq!(tools[0].name(), "list_projects");
     assert_eq!(tools[1].name(), "set_project_root");
 }
@@ -54,7 +54,7 @@ fn artifact_ingress_can_be_omitted_by_configuration() {
         .into_iter()
         .map(|tool| tool.name())
         .collect::<Vec<_>>();
-    assert_eq!(names.len(), 29);
+    assert_eq!(names.len(), 30);
     assert!(!names.contains(&"import_host_file"));
 }
 
@@ -66,7 +66,7 @@ fn artifact_egress_can_be_omitted_by_configuration() {
         .into_iter()
         .map(|tool| tool.name())
         .collect::<Vec<_>>();
-    assert_eq!(names.len(), 29);
+    assert_eq!(names.len(), 30);
     assert!(!names.contains(&"export_host_file"));
 }
 
@@ -76,7 +76,7 @@ fn conversation_auth_mode_adds_innocuously_named_gate_before_protected_tools() {
     config.conversation_auth_token =
         Some("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into());
     let tools = load_tools_for_config(&config);
-    assert_eq!(tools.len(), 31);
+    assert_eq!(tools.len(), 32);
     assert_eq!(tools[0].name(), "setup");
     let schema = tools[0].input_schema();
     assert!(schema["properties"].get("ref").is_some());
@@ -99,7 +99,7 @@ fn conversation_auth_mode_adds_innocuously_named_gate_before_protected_tools() {
 
     config.multi_project = true;
     let tools = load_tools_for_config(&config);
-    assert_eq!(tools.len(), 33);
+    assert_eq!(tools.len(), 34);
     assert_eq!(tools[0].name(), "setup");
     assert_eq!(tools[1].name(), "list_projects");
     assert_eq!(tools[2].name(), "set_project_root");
@@ -232,6 +232,7 @@ fn native_tool_annotations_match_the_audited_side_effect_matrix() {
         ("recall", (true, false, true, false)),
         ("remember", (false, false, true, false)),
         ("self_update", (false, true, false, true)),
+        ("self_update_status", (true, false, true, false)),
         ("set_project_root", (false, false, true, true)),
         ("setup", (false, false, true, false)),
         ("show_diff", (true, false, true, false)),
@@ -260,6 +261,7 @@ fn includes_expected_tool_names() {
         "import_host_file",
         "export_host_file",
         "self_update",
+        "self_update_status",
         "git_status",
         "show_diff",
         "git_push",
@@ -304,6 +306,7 @@ fn includes_tools_codex_has_no_equivalent_of() {
         "get_project_doc",
         "get_agent_brief",
         "self_update",
+        "self_update_status",
         "remember",
         "update_memory_note",
         "forget_memory_note",
@@ -352,6 +355,32 @@ fn show_diff_links_the_diff_mcp_app() {
         Some(codexify::diff_ui::DIFF_UI_URI)
     );
     assert!(tool.output_schema().is_none());
+}
+
+#[test]
+fn self_update_status_is_available_only_to_the_updater_app() {
+    let tools = load_tools();
+    let tool = tools
+        .iter()
+        .find(|tool| tool.name() == "self_update_status")
+        .expect("self_update_status must be registered");
+    let meta = tool
+        .meta()
+        .expect("status tool must declare app visibility");
+
+    assert_eq!(
+        meta.get("ui").and_then(|value| value.get("visibility")),
+        Some(&json!(["app"]))
+    );
+    assert_eq!(
+        meta.get("openai/visibility").and_then(Value::as_str),
+        Some("private")
+    );
+    assert_eq!(
+        meta.get("openai/widgetAccessible").and_then(Value::as_bool),
+        Some(true)
+    );
+    assert!(!tool.requires_project_root());
 }
 
 #[test]
@@ -588,6 +617,7 @@ fn tools_that_need_their_own_structured_content() {
             "get_project_doc".to_string(),
             "import_host_file".to_string(),
             "self_update".to_string(),
+            "self_update_status".to_string(),
             "skills_list".to_string(),
             "write_stdin".to_string(),
         ]

@@ -1,9 +1,11 @@
 use async_trait::async_trait;
+use rmcp::model::MetaObject;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::exec_sessions::SessionState;
 use crate::self_update::{SelfUpdateReceipt, SelfUpdateStatus};
+use crate::self_update_ui;
 use crate::tool::{Tool, ToolBehavior, parse_tool_args};
 use crate::types::{AppConfig, ToolResult};
 
@@ -28,7 +30,12 @@ impl SelfUpdate {
                 "targetVersion": { "type": "string" },
                 "updateId": {
                     "anyOf": [
-                        { "type": "string" },
+                        {
+                            "type": "string",
+                            "minLength": 24,
+                            "maxLength": 24,
+                            "pattern": "^[0-9a-f]{24}$"
+                        },
                         { "type": "null" }
                     ]
                 },
@@ -73,9 +80,12 @@ impl SelfUpdate {
                 receipt.current_version, receipt.target_version
             ),
         };
-        ToolResult::text(text).with_structured(
+        let meta = self_update_ui::result_meta(&receipt);
+        let mut result = ToolResult::text(text).with_structured(
             serde_json::to_value(receipt).expect("self-update receipt must serialize"),
-        )
+        );
+        result.meta = Some(meta);
+        result
     }
 }
 
@@ -99,8 +109,12 @@ impl Tool for SelfUpdate {
         )
     }
 
+    fn meta(&self) -> Option<MetaObject> {
+        Some(self_update_ui::tool_meta())
+    }
+
     fn description(&self) -> String {
-        "Update the installed Codexify executable to the latest verified GitHub release. Call only after the user explicitly requests an update and pass confirm=true. The release is downloaded, checksum-verified, extracted, and probed before a detached OS-managed worker is scheduled. When Codexify is service-supervised, that worker runs outside the service kill boundary, waits for this tool response to be delivered, stops the service, atomically replaces the executable with rollback protection, and starts the service again. The MCP connection will disconnect temporarily. Progress is written to the service log. After a scheduled update, explicitly tell the user to open ChatGPT Settings, select the Codexify connector, scroll to the bottom of its tool list, and click Refresh after Codexify restarts so ChatGPT reloads the connector tools.".to_string()
+        "Update the installed Codexify executable to the latest verified GitHub release. Call only after the user explicitly requests an update and pass confirm=true. The release is downloaded, checksum-verified, extracted, and probed before a detached OS-managed worker is scheduled. The attached updater component receives checksum-bound changelog sections and monitors a durable status record across the expected MCP restart without adding the changelog to model-visible structured content. When Codexify is service-supervised, the worker runs outside the service kill boundary, waits for this tool response to be delivered, stops the service, atomically replaces the executable with rollback protection, and starts the service again. After a scheduled update, explicitly tell the user to open ChatGPT Settings, select the Codexify connector, scroll to the bottom of its tool list, and click Refresh after Codexify restarts so ChatGPT reloads the connector tools.".to_string()
     }
 
     fn input_schema(&self) -> Value {
@@ -159,9 +173,20 @@ mod tests {
         assert_eq!(tool.input_schema()["properties"]["confirm"]["const"], true);
         assert_eq!(tool.input_schema()["required"], json!(["confirm"]));
         assert!(tool.description().contains("click Refresh"));
+        let meta = tool.meta().expect("self_update must link its updater app");
+        assert_eq!(
+            meta.get("ui")
+                .and_then(|value| value.get("resourceUri"))
+                .and_then(Value::as_str),
+            Some(crate::self_update_ui::SELF_UPDATE_UI_URI)
+        );
         let output = tool.output_schema().unwrap();
         assert_eq!(output["additionalProperties"], false);
         assert_eq!(output["properties"]["status"]["enum"][0], "scheduled");
+        assert_eq!(
+            output["properties"]["updateId"]["anyOf"][0]["pattern"],
+            "^[0-9a-f]{24}$"
+        );
     }
 
     #[test]
@@ -191,9 +216,10 @@ mod tests {
             status: SelfUpdateStatus::Scheduled,
             current_version: "1.0.0".to_string(),
             target_version: "2.0.0".to_string(),
-            update_id: Some("abc123".to_string()),
+            update_id: Some("0123456789abcdef01234567".to_string()),
             service_restart: true,
             log_path: "/tmp/codexify.log".to_string(),
+            changelog: Some("## [2.0.0]\n\n- New behavior.\n".to_string()),
         };
         let result = SelfUpdate::result(receipt);
         assert!(!result.is_error);
@@ -201,6 +227,23 @@ mod tests {
             .build(&SelfUpdate::output_schema_value())
             .unwrap();
         assert!(validator.is_valid(result.structured_content.as_ref().unwrap()));
+        assert!(
+            result
+                .structured_content
+                .as_ref()
+                .unwrap()
+                .get("changelog")
+                .is_none()
+        );
+        assert_eq!(
+            result
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.get(crate::self_update_ui::SELF_UPDATE_RESULT_META_KEY))
+                .and_then(|value| value.get("changelog"))
+                .and_then(Value::as_str),
+            Some("## [2.0.0]\n\n- New behavior.\n")
+        );
         assert!(result.joined_text().contains("disconnect temporarily"));
         assert!(result.joined_text().contains(
             "open ChatGPT Settings, select the Codexify connector, scroll to the bottom of its tool list, and click Refresh"
@@ -210,9 +253,10 @@ mod tests {
             status: SelfUpdateStatus::Scheduled,
             current_version: "1.0.0".to_string(),
             target_version: "2.0.0".to_string(),
-            update_id: Some("def456".to_string()),
+            update_id: Some("89abcdef0123456701234567".to_string()),
             service_restart: false,
             log_path: "/tmp/codexify.log".to_string(),
+            changelog: None,
         });
         assert!(foreground_result.joined_text().contains("click Refresh"));
     }

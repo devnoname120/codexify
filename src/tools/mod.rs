@@ -22,6 +22,7 @@ pub mod read_file;
 pub mod recall;
 pub mod remember;
 pub mod self_update;
+pub mod self_update_status;
 pub mod set_project_root;
 pub mod setup;
 pub mod show_diff;

@@ -6,7 +6,7 @@
 //! Generic clients keep resident commands in their transport [`SessionState`],
 //! while ChatGPT's stable conversation metadata selects server-owned command
 //! state and diff checkpoints that survive transport replacement. The embedded
-//! diff resource remains presentation-only.
+//! UI resources remain presentation-only.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -49,6 +49,7 @@ use crate::output_budget::{
 };
 use crate::project_bindings::{ConversationIdentity, ProjectBindingStore};
 use crate::registry::load_tools_for_config;
+use crate::self_update_ui;
 use crate::tool::{
     Tool, ToolCallIdentity, ToolRequestContext, validate_and_wrap_tool, validate_and_wrap_tools,
 };
@@ -217,6 +218,14 @@ fn advertised_tool(tool: &dyn Tool, config: &AppConfig) -> rmcp::model::Tool {
     advertised
 }
 
+fn builtin_ui_resources() -> Vec<rmcp::model::Resource> {
+    vec![diff_ui::resource(), self_update_ui::resource()]
+}
+
+fn builtin_ui_contents(uri: &str) -> Option<rmcp::model::ResourceContents> {
+    diff_ui::contents_for_uri(uri).or_else(|| self_update_ui::contents_for_uri(uri))
+}
+
 impl ServerHandler for CodexHandler {
     fn get_info(&self) -> ServerInfo {
         let mut capabilities = ServerCapabilities::builder()
@@ -255,9 +264,7 @@ impl ServerHandler for CodexHandler {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListResourcesResult, McpError> {
-        Ok(ListResourcesResult::with_all_items(vec![
-            diff_ui::resource(),
-        ]))
+        Ok(ListResourcesResult::with_all_items(builtin_ui_resources()))
     }
 
     async fn read_resource(
@@ -301,7 +308,7 @@ impl ServerHandler for CodexHandler {
                 None,
             ));
         }
-        let Some(contents) = diff_ui::contents_for_uri(&request.uri) else {
+        let Some(contents) = builtin_ui_contents(&request.uri) else {
             return Err(McpError::resource_not_found(
                 format!("Unknown resource: {}", request.uri),
                 None,
@@ -1604,7 +1611,7 @@ mod tests {
     }
 
     #[test]
-    fn advertises_diff_resources_and_mcp_apps_extension() {
+    fn advertises_all_mcp_apps_resources_and_extension() {
         let root = tempfile::tempdir().unwrap();
         let handler = CodexHandler {
             config: Arc::new(crate::config::default_config(root.path().to_path_buf())),
@@ -1634,6 +1641,25 @@ mod tests {
                 .is_some_and(|extensions| {
                     extensions.contains_key(diff_ui::MCP_APPS_EXTENSION_ID)
                 })
+        );
+
+        let resources = builtin_ui_resources();
+        assert_eq!(resources.len(), 2);
+        assert_eq!(resources[0].uri, diff_ui::DIFF_UI_URI);
+        assert_eq!(resources[1].uri, crate::self_update_ui::SELF_UPDATE_UI_URI);
+
+        let contents = builtin_ui_contents(crate::self_update_ui::SELF_UPDATE_UI_URI)
+            .expect("self-update MCP App resource must be readable");
+        let contents = serde_json::to_value(contents).unwrap();
+        assert_eq!(contents["uri"], crate::self_update_ui::SELF_UPDATE_UI_URI);
+        assert_eq!(
+            contents["mimeType"],
+            crate::self_update_ui::SELF_UPDATE_UI_MIME_TYPE
+        );
+        assert!(
+            contents["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("self_update_status"))
         );
     }
 

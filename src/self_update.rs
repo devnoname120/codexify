@@ -2,7 +2,7 @@
 
 use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
-use std::io::{Cursor, Read, Write};
+use std::io::{self, Cursor, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command as StdCommand, Stdio};
 use std::time::Duration;
@@ -27,10 +27,15 @@ const RELEASE_ROOT: &str = "https://github.com/devnoname120/codexify/releases/do
 const MAX_RELEASE_METADATA_BYTES: usize = 1024 * 1024;
 const MAX_ARCHIVE_BYTES: usize = 128 * 1024 * 1024;
 const MAX_BINARY_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_CHANGELOG_FILE_BYTES: u64 = 1024 * 1024;
+const MAX_SELECTED_CHANGELOG_BYTES: usize = 256 * 1024;
+const MAX_STATUS_FILE_BYTES: u64 = 8 * 1024;
+const MAX_STATUS_RECORDS: usize = 32;
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(180);
 const BINARY_PROBE_TIMEOUT: Duration = Duration::from_secs(20);
-const UPDATE_DELAY_SECONDS: u64 = 5;
+const UPDATE_DELAY_SECONDS: u64 = 10;
 const UPDATE_LOCK_FILE: &str = "update.lock";
+const UPDATE_STATUS_DIR: &str = "status";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -38,6 +43,44 @@ pub enum SelfUpdateStatus {
     Scheduled,
     UpToDate,
     AheadOfLatest,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UpdatePhase {
+    Scheduled,
+    Installing,
+    Validating,
+    Restarting,
+    Succeeded,
+    Failed,
+    RolledBack,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateStatusRecord {
+    pub update_id: String,
+    pub from_version: String,
+    pub target_version: String,
+    pub state: UpdatePhase,
+    pub updated_at: String,
+    pub failure_code: Option<String>,
+    pub failure_detail: Option<String>,
+}
+
+impl UpdateStatusRecord {
+    pub fn scheduled(update_id: &str, from_version: &str, target_version: &str) -> Self {
+        Self {
+            update_id: update_id.to_string(),
+            from_version: from_version.to_string(),
+            target_version: target_version.to_string(),
+            state: UpdatePhase::Scheduled,
+            updated_at: update_timestamp(),
+            failure_code: None,
+            failure_detail: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -49,6 +92,8 @@ pub struct SelfUpdateReceipt {
     pub update_id: Option<String>,
     pub service_restart: bool,
     pub log_path: String,
+    #[serde(skip_serializing)]
+    pub changelog: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -93,13 +138,17 @@ struct UpdateWorkspace {
     staged_path: PathBuf,
     backup_path: PathBuf,
     worker_path: PathBuf,
+    status_path: PathBuf,
     clean_on_drop: bool,
+    preserve_status: bool,
 }
 
 impl UpdateWorkspace {
     fn create(root: &Path, target: &Path) -> anyhow::Result<Self> {
         let update_dir = root.join("update");
         make_private_dir(&update_dir)?;
+        let status_dir = status_dir_for_root(root);
+        ensure_private_status_dir(&status_dir)?;
         let target_dir = target
             .parent()
             .context("installed Codexify executable has no parent directory")?;
@@ -141,6 +190,7 @@ impl UpdateWorkspace {
         let backup_path = target_dir.join(format!(".codexify-backup-{id}{executable_suffix}"));
         let worker_extension = if cfg!(windows) { "ps1" } else { "sh" };
         let worker_path = update_dir.join(format!("worker-{id}.{worker_extension}"));
+        let status_path = status_record_path(&status_dir, &id);
 
         Ok(Self {
             id,
@@ -148,12 +198,18 @@ impl UpdateWorkspace {
             staged_path,
             backup_path,
             worker_path,
+            status_path,
             clean_on_drop: true,
+            preserve_status: false,
         })
     }
 
     fn hand_off(&mut self) {
         self.clean_on_drop = false;
+    }
+
+    fn preserve_status(&mut self) {
+        self.preserve_status = true;
     }
 }
 
@@ -170,7 +226,268 @@ impl Drop for UpdateWorkspace {
         ] {
             let _ = fs::remove_file(path);
         }
+        if !self.preserve_status {
+            let _ = fs::remove_file(&self.status_path);
+        }
     }
+}
+
+fn update_timestamp() -> String {
+    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+}
+
+pub(crate) fn valid_update_id(value: &str) -> bool {
+    value.len() == 24
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn status_record_path(status_dir: &Path, update_id: &str) -> PathBuf {
+    status_dir.join(format!("{update_id}.json"))
+}
+
+fn status_dir_for_root(root: &Path) -> PathBuf {
+    root.join("update").join(UPDATE_STATUS_DIR)
+}
+
+fn ensure_private_status_dir(path: &Path) -> anyhow::Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if !metadata.file_type().is_dir() {
+                bail!("update status path is not a private directory");
+            }
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => make_private_dir(path)?,
+        Err(error) => return Err(error).context("inspect update status directory"),
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+fn validate_status_record(record: &UpdateStatusRecord) -> anyhow::Result<()> {
+    if !valid_update_id(&record.update_id) {
+        bail!("update status record has an invalid update id");
+    }
+    Version::parse(&record.from_version).context("parse update source version")?;
+    Version::parse(&record.target_version).context("parse update target version")?;
+    chrono::DateTime::parse_from_rfc3339(&record.updated_at)
+        .context("parse update status timestamp")?;
+
+    if record.failure_code.as_ref().is_some_and(|value| {
+        value.is_empty()
+            || value.len() > 64
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+    }) {
+        bail!("update status record has an invalid failure code");
+    }
+    if record.failure_detail.as_ref().is_some_and(|value| {
+        value.is_empty() || value.len() > 512 || value.chars().any(char::is_control)
+    }) {
+        bail!("update status record has an invalid failure detail");
+    }
+
+    let failed = matches!(record.state, UpdatePhase::Failed | UpdatePhase::RolledBack);
+    if failed != (record.failure_code.is_some() && record.failure_detail.is_some()) {
+        bail!("update status record has inconsistent failure fields");
+    }
+    Ok(())
+}
+
+fn replace_file_atomically(source: &Path, target: &Path) -> io::Result<()> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+        };
+
+        let source = source
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>();
+        let target = target
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>();
+        let result = unsafe {
+            MoveFileExW(
+                source.as_ptr(),
+                target.as_ptr(),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
+        };
+        if result == 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        fs::rename(source, target)
+    }
+}
+
+fn write_status_record_to(status_dir: &Path, record: &UpdateStatusRecord) -> anyhow::Result<()> {
+    ensure_private_status_dir(status_dir)?;
+    validate_status_record(record)?;
+    let bytes = serde_json::to_vec(record).context("serialize update status record")?;
+    if bytes.len() as u64 > MAX_STATUS_FILE_BYTES {
+        bail!("update status record exceeds its size limit");
+    }
+
+    let temporary = status_dir.join(format!(".{}.tmp-{}", record.update_id, random_id()?));
+    write_private_bytes(&temporary, &bytes, false)?;
+    let destination = status_record_path(status_dir, &record.update_id);
+    if let Err(error) = replace_file_atomically(&temporary, &destination) {
+        let _ = fs::remove_file(&temporary);
+        return Err(error).context("publish update status record");
+    }
+    #[cfg(unix)]
+    File::open(status_dir)?.sync_all()?;
+    Ok(())
+}
+
+fn read_status_record_from(
+    status_dir: &Path,
+    update_id: &str,
+) -> anyhow::Result<UpdateStatusRecord> {
+    if !valid_update_id(update_id) {
+        bail!("invalid update id");
+    }
+    let directory = fs::symlink_metadata(status_dir).context("open update status directory")?;
+    if !directory.file_type().is_dir() {
+        bail!("update status directory is unavailable");
+    }
+
+    let path = status_record_path(status_dir, update_id);
+    let metadata = fs::symlink_metadata(&path).context("locate update status record")?;
+    if !metadata.file_type().is_file() || metadata.len() > MAX_STATUS_FILE_BYTES {
+        bail!("update status record is unavailable");
+    }
+    let bytes = fs::read(&path).context("read update status record")?;
+    if bytes.len() as u64 > MAX_STATUS_FILE_BYTES {
+        bail!("update status record exceeds its size limit");
+    }
+    let record: UpdateStatusRecord =
+        serde_json::from_slice(&bytes).context("parse update status record")?;
+    validate_status_record(&record)?;
+    if record.update_id != update_id {
+        bail!("update status record id does not match its filename");
+    }
+    Ok(record)
+}
+
+pub fn read_update_status(update_id: &str) -> anyhow::Result<UpdateStatusRecord> {
+    let home = home_dir().context("locate the user's home directory")?;
+    read_status_record_from(&status_dir_for_root(&home.join(".codexify")), update_id)
+}
+
+fn cleanup_status_records(status_dir: &Path, active_update_id: &str) -> anyhow::Result<()> {
+    ensure_private_status_dir(status_dir)?;
+    let mut records = Vec::new();
+    for entry in fs::read_dir(status_dir).context("list update status records")? {
+        let entry = entry.context("read update status directory entry")?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let Some(update_id) = name.strip_suffix(".json") else {
+            continue;
+        };
+        if !valid_update_id(update_id) {
+            continue;
+        }
+        let metadata = fs::symlink_metadata(entry.path())?;
+        if !metadata.file_type().is_file() {
+            continue;
+        }
+        records.push((
+            metadata
+                .modified()
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+            update_id.to_string(),
+            entry.path(),
+        ));
+    }
+    records.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+
+    let mut remaining = records.len();
+    for (_, update_id, path) in records {
+        if remaining <= MAX_STATUS_RECORDS {
+            break;
+        }
+        if update_id == active_update_id {
+            continue;
+        }
+        match fs::remove_file(&path) {
+            Ok(()) => remaining -= 1,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => remaining -= 1,
+            Err(error) => return Err(error).context("remove old update status record"),
+        }
+    }
+    Ok(())
+}
+
+fn select_changelog_sections(
+    changelog: &str,
+    current_version: &Version,
+    target_version: &Version,
+) -> Option<String> {
+    if target_version <= current_version {
+        return None;
+    }
+
+    let mut headings = Vec::new();
+    let mut offset = 0;
+    for line in changelog.split_inclusive('\n') {
+        if let Some(rest) = line.strip_prefix("## [") {
+            let version = rest
+                .split_once(']')
+                .and_then(|(value, _)| Version::parse(value).ok());
+            headings.push((offset, version));
+        }
+        offset += line.len();
+    }
+    if offset < changelog.len() {
+        let line = &changelog[offset..];
+        if let Some(rest) = line.strip_prefix("## [") {
+            let version = rest
+                .split_once(']')
+                .and_then(|(value, _)| Version::parse(value).ok());
+            headings.push((offset, version));
+        }
+    }
+
+    let mut selected = String::new();
+    for (index, (start, version)) in headings.iter().enumerate() {
+        let Some(version) = version else {
+            continue;
+        };
+        if version <= current_version || version > target_version {
+            continue;
+        }
+        let end = headings
+            .get(index + 1)
+            .map_or(changelog.len(), |(offset, _)| *offset);
+        let section = &changelog[*start..end];
+        if selected.len().saturating_add(section.len()) > MAX_SELECTED_CHANGELOG_BYTES {
+            return None;
+        }
+        selected.push_str(section);
+    }
+
+    let selected = selected.trim_end();
+    (!selected.is_empty()).then(|| format!("{selected}\n"))
 }
 
 pub async fn trigger() -> anyhow::Result<SelfUpdateReceipt> {
@@ -220,6 +537,7 @@ async fn trigger_from(
             update_id: None,
             service_restart: false,
             log_path: log_path.to_string_lossy().into_owned(),
+            changelog: None,
         });
     }
 
@@ -251,8 +569,11 @@ async fn trigger_from(
         );
     }
 
-    let binary = extract_binary(&archive, &latest)?;
-    write_staged_binary(&workspace.staged_path, &binary)?;
+    let extracted = extract_release(&archive, &latest)?;
+    let changelog = extracted.changelog.as_deref().and_then(|contents| {
+        select_changelog_sections(contents, &current_version, &latest.version)
+    });
+    write_staged_binary(&workspace.staged_path, &extracted.binary)?;
     validate_staged_binary(&workspace.staged_path).await?;
     make_log_available(&log_path)?;
 
@@ -260,10 +581,31 @@ async fn trigger_from(
         &workspace,
         &target,
         &log_path,
+        &current_version,
         &latest.version,
         service_restart,
     )?;
     write_private_bytes(&workspace.worker_path, worker.as_bytes(), false)?;
+
+    let status_dir = workspace
+        .status_path
+        .parent()
+        .context("update status record has no parent directory")?;
+    let scheduled = UpdateStatusRecord::scheduled(
+        &workspace.id,
+        &current_version.to_string(),
+        &latest.version.to_string(),
+    );
+    write_status_record_to(status_dir, &scheduled)?;
+    if let Err(error) = cleanup_status_records(status_dir, &workspace.id) {
+        let _ = append_update_event(
+            &log_path,
+            &format!(
+                "could not remove old update status records before update {}: {error:#}",
+                workspace.id
+            ),
+        );
+    }
     append_update_event(
         &log_path,
         &format!(
@@ -273,6 +615,15 @@ async fn trigger_from(
     )?;
 
     if let Err(error) = schedule_worker(&workspace.worker_path, &workspace.id, service_restart) {
+        let failed = UpdateStatusRecord {
+            state: UpdatePhase::Failed,
+            updated_at: update_timestamp(),
+            failure_code: Some("schedule_failed".to_string()),
+            failure_detail: Some("The detached updater could not be scheduled.".to_string()),
+            ..scheduled
+        };
+        let _ = write_status_record_to(status_dir, &failed);
+        workspace.preserve_status();
         let _ = append_update_event(
             &log_path,
             &format!("could not schedule update {}: {error:#}", workspace.id),
@@ -289,6 +640,7 @@ async fn trigger_from(
         update_id: Some(update_id),
         service_restart,
         log_path: log_path.to_string_lossy().into_owned(),
+        changelog,
     })
 }
 
@@ -452,81 +804,135 @@ fn checksum_for(checksums: &[u8], archive_name: &str) -> anyhow::Result<String> 
     }
 }
 
-fn extract_binary(archive: &[u8], asset: &ReleaseAsset) -> anyhow::Result<Vec<u8>> {
+#[derive(Debug, PartialEq, Eq)]
+struct ExtractedRelease {
+    binary: Vec<u8>,
+    changelog: Option<String>,
+}
+
+fn extract_release(archive: &[u8], asset: &ReleaseAsset) -> anyhow::Result<ExtractedRelease> {
     match asset.kind {
-        ArchiveKind::TarGz => extract_tar_binary(archive, asset.binary_name),
-        ArchiveKind::Zip => extract_zip_binary(archive, asset.binary_name),
+        ArchiveKind::TarGz => extract_tar_release(archive, asset.binary_name),
+        ArchiveKind::Zip => extract_zip_release(archive, asset.binary_name),
     }
 }
 
-fn extract_tar_binary(archive: &[u8], binary_name: &str) -> anyhow::Result<Vec<u8>> {
+fn extract_tar_release(archive: &[u8], binary_name: &str) -> anyhow::Result<ExtractedRelease> {
     let decoder = GzDecoder::new(Cursor::new(archive));
     let mut archive = Archive::new(decoder);
     let mut binary = None;
+    let mut changelog = None;
+    let mut changelog_seen = false;
     for entry in archive.entries().context("read release tar archive")? {
-        let entry = entry.context("read release tar entry")?;
+        let mut entry = entry.context("read release tar entry")?;
         if !entry.header().entry_type().is_file() {
             continue;
         }
-        let is_binary = entry
+        let path = entry
             .path()
             .context("read release tar entry path")?
-            .file_name()
-            .is_some_and(|name| name == OsStr::new(binary_name));
-        if !is_binary {
+            .into_owned();
+        let Some(file_name) = path.file_name() else {
             continue;
+        };
+        if file_name == OsStr::new(binary_name) {
+            if binary.is_some() {
+                bail!("release tar archive contains more than one {binary_name}");
+            }
+            if entry.size() > MAX_BINARY_BYTES {
+                bail!("release executable exceeds the {MAX_BINARY_BYTES}-byte limit");
+            }
+            let mut bytes = Vec::with_capacity(entry.size() as usize);
+            entry
+                .by_ref()
+                .take(MAX_BINARY_BYTES + 1)
+                .read_to_end(&mut bytes)
+                .context("read release executable from tar archive")?;
+            if bytes.len() as u64 > MAX_BINARY_BYTES {
+                bail!("release executable exceeds the {MAX_BINARY_BYTES}-byte limit");
+            }
+            binary = Some(bytes);
+        } else if file_name == OsStr::new("CHANGELOG.md") {
+            if changelog_seen {
+                changelog = None;
+                continue;
+            }
+            changelog_seen = true;
+            if entry.size() > MAX_CHANGELOG_FILE_BYTES {
+                continue;
+            }
+            let mut bytes = Vec::with_capacity(entry.size() as usize);
+            entry
+                .by_ref()
+                .take(MAX_CHANGELOG_FILE_BYTES + 1)
+                .read_to_end(&mut bytes)
+                .context("read release changelog from tar archive")?;
+            if bytes.len() as u64 <= MAX_CHANGELOG_FILE_BYTES {
+                changelog = String::from_utf8(bytes).ok();
+            }
         }
-        if binary.is_some() {
-            bail!("release tar archive contains more than one {binary_name}");
-        }
-        if entry.size() > MAX_BINARY_BYTES {
-            bail!("release executable exceeds the {MAX_BINARY_BYTES}-byte limit");
-        }
-        let mut bytes = Vec::with_capacity(entry.size() as usize);
-        entry
-            .take(MAX_BINARY_BYTES + 1)
-            .read_to_end(&mut bytes)
-            .context("read release executable from tar archive")?;
-        if bytes.len() as u64 > MAX_BINARY_BYTES {
-            bail!("release executable exceeds the {MAX_BINARY_BYTES}-byte limit");
-        }
-        binary = Some(bytes);
     }
-    binary.with_context(|| format!("release tar archive does not contain {binary_name}"))
+    Ok(ExtractedRelease {
+        binary: binary
+            .with_context(|| format!("release tar archive does not contain {binary_name}"))?,
+        changelog,
+    })
 }
 
-fn extract_zip_binary(archive: &[u8], binary_name: &str) -> anyhow::Result<Vec<u8>> {
+fn extract_zip_release(archive: &[u8], binary_name: &str) -> anyhow::Result<ExtractedRelease> {
     let mut archive = ZipArchive::new(Cursor::new(archive)).context("open release ZIP")?;
     let mut binary = None;
+    let mut changelog = None;
+    let mut changelog_seen = false;
     for index in 0..archive.len() {
         let mut entry = archive
             .by_index(index)
             .with_context(|| format!("read release ZIP entry {index}"))?;
-        if !entry.is_file()
-            || !Path::new(entry.name())
-                .file_name()
-                .is_some_and(|name| name == OsStr::new(binary_name))
-        {
+        if !entry.is_file() {
             continue;
         }
-        if binary.is_some() {
-            bail!("release ZIP contains more than one {binary_name}");
+        let file_name = Path::new(entry.name()).file_name().map(OsStr::to_owned);
+        if file_name.as_deref() == Some(OsStr::new(binary_name)) {
+            if binary.is_some() {
+                bail!("release ZIP contains more than one {binary_name}");
+            }
+            if entry.size() > MAX_BINARY_BYTES {
+                bail!("release executable exceeds the {MAX_BINARY_BYTES}-byte limit");
+            }
+            let mut bytes = Vec::with_capacity(entry.size() as usize);
+            entry
+                .by_ref()
+                .take(MAX_BINARY_BYTES + 1)
+                .read_to_end(&mut bytes)
+                .context("read release executable from ZIP")?;
+            if bytes.len() as u64 > MAX_BINARY_BYTES {
+                bail!("release executable exceeds the {MAX_BINARY_BYTES}-byte limit");
+            }
+            binary = Some(bytes);
+        } else if file_name.as_deref() == Some(OsStr::new("CHANGELOG.md")) {
+            if changelog_seen {
+                changelog = None;
+                continue;
+            }
+            changelog_seen = true;
+            if entry.size() > MAX_CHANGELOG_FILE_BYTES {
+                continue;
+            }
+            let mut bytes = Vec::with_capacity(entry.size() as usize);
+            entry
+                .by_ref()
+                .take(MAX_CHANGELOG_FILE_BYTES + 1)
+                .read_to_end(&mut bytes)
+                .context("read release changelog from ZIP")?;
+            if bytes.len() as u64 <= MAX_CHANGELOG_FILE_BYTES {
+                changelog = String::from_utf8(bytes).ok();
+            }
         }
-        if entry.size() > MAX_BINARY_BYTES {
-            bail!("release executable exceeds the {MAX_BINARY_BYTES}-byte limit");
-        }
-        let mut bytes = Vec::with_capacity(entry.size() as usize);
-        entry
-            .by_ref()
-            .take(MAX_BINARY_BYTES + 1)
-            .read_to_end(&mut bytes)
-            .context("read release executable from ZIP")?;
-        if bytes.len() as u64 > MAX_BINARY_BYTES {
-            bail!("release executable exceeds the {MAX_BINARY_BYTES}-byte limit");
-        }
-        binary = Some(bytes);
     }
-    binary.with_context(|| format!("release ZIP does not contain {binary_name}"))
+    Ok(ExtractedRelease {
+        binary: binary.with_context(|| format!("release ZIP does not contain {binary_name}"))?,
+        changelog,
+    })
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -661,6 +1067,7 @@ fn worker_script(
     workspace: &UpdateWorkspace,
     target: &Path,
     log_path: &Path,
+    from_version: &Version,
     version: &Version,
     restart_service: bool,
 ) -> anyhow::Result<String> {
@@ -675,6 +1082,7 @@ fn worker_script(
             workspace,
             target,
             log_path,
+            from_version,
             version,
             restart_service,
             &launchd_label,
@@ -686,6 +1094,7 @@ fn worker_script(
             workspace,
             target,
             log_path,
+            from_version,
             version,
             restart_service,
             &windows_task_name(&workspace.id),
@@ -693,7 +1102,14 @@ fn worker_script(
     }
     #[cfg(not(any(unix, windows)))]
     {
-        let _ = (workspace, target, log_path, version, restart_service);
+        let _ = (
+            workspace,
+            target,
+            log_path,
+            from_version,
+            version,
+            restart_service,
+        );
         bail!("Codexify self-update is supported only on Linux, macOS, and Windows")
     }
 }
@@ -703,6 +1119,7 @@ fn unix_worker_script(
     workspace: &UpdateWorkspace,
     target: &Path,
     log_path: &Path,
+    from_version: &Version,
     version: &Version,
     restart_service: bool,
     launchd_label: &str,
@@ -712,7 +1129,10 @@ fn unix_worker_script(
     let backup = sh_path(&workspace.backup_path)?;
     let lock = sh_path(&workspace.lock_path)?;
     let script = sh_path(&workspace.worker_path)?;
+    let status = sh_path(&workspace.status_path)?;
     let log = sh_path(log_path)?;
+    let update_id = sh_quote(&workspace.id);
+    let from_version = sh_quote(&from_version.to_string());
     let version = sh_quote(&version.to_string());
     let launchd_label = sh_quote(launchd_label);
     let restart_service = if restart_service { 1 } else { 0 };
@@ -728,15 +1148,43 @@ STAGED={staged}
 BACKUP={backup}
 LOCK={lock}
 SCRIPT={script}
+STATUS={status}
 LOG={log}
+UPDATE_ID={update_id}
+FROM_VERSION={from_version}
 VERSION={version}
 RESTART_SERVICE={restart_service}
 LAUNCHD_LABEL={launchd_label}
 STOPPED=0
 UPDATED=0
+ROLLED_BACK=0
+FAILURE_CODE=worker_failed
+FAILURE_DETAIL='The detached updater stopped unexpectedly.'
 
 log() {{
     printf '\n[%s] [self-update] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >> "$LOG"
+}}
+
+write_status() {{
+    state=$1
+    failure_code=$2
+    failure_detail=$3
+    timestamp=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+    temporary="$STATUS.tmp.$$"
+    if [ -n "$failure_code" ]; then
+        persisted=$(printf '{{"updateId":"%s","fromVersion":"%s","targetVersion":"%s","state":"%s","updatedAt":"%s","failureCode":"%s","failureDetail":"%s"}}' \
+            "$UPDATE_ID" "$FROM_VERSION" "$VERSION" "$state" "$timestamp" "$failure_code" "$failure_detail")
+    else
+        persisted=$(printf '{{"updateId":"%s","fromVersion":"%s","targetVersion":"%s","state":"%s","updatedAt":"%s","failureCode":null,"failureDetail":null}}' \
+            "$UPDATE_ID" "$FROM_VERSION" "$VERSION" "$state" "$timestamp")
+    fi
+    if printf '%s' "$persisted" > "$temporary" && chmod 600 "$temporary" && mv -f "$temporary" "$STATUS"; then
+        :
+    else
+        rm -f "$temporary"
+        log "could not persist update status $state"
+    fi
+    return 0
 }}
 
 finish() {{
@@ -747,14 +1195,18 @@ finish() {{
     if [ "$UPDATED" -ne 1 ] && [ -e "$BACKUP" ]; then
         rm -f "$TARGET"
         if mv -f "$BACKUP" "$TARGET"; then
+            ROLLED_BACK=1
             log 'restored the previous Codexify executable'
         else
+            FAILURE_CODE=rollback_failed
+            FAILURE_DETAIL='The previous Codexify executable could not be restored.'
             log 'failed to restore the previous Codexify executable'
             status=1
         fi
     fi
 
     if [ "$RESTART_SERVICE" -eq 1 ] && [ "$STOPPED" -eq 1 ]; then
+        write_status restarting '' ''
         service_executable=$TARGET
         if [ ! -x "$service_executable" ] && [ -x "$BACKUP" ]; then
             service_executable=$BACKUP
@@ -763,10 +1215,14 @@ finish() {{
             if "$service_executable" service enable >> "$LOG" 2>&1; then
                 log 'restarted the Codexify service'
             else
+                FAILURE_CODE=service_restart_failed
+                FAILURE_DETAIL='The Codexify service could not be restarted.'
                 log 'failed to restart the Codexify service; run `codexify service enable` manually'
                 status=1
             fi
         else
+            FAILURE_CODE=executable_missing
+            FAILURE_DETAIL='No Codexify executable was available to restart the service.'
             log 'cannot restart the Codexify service because no executable is available'
             status=1
         fi
@@ -779,8 +1235,13 @@ finish() {{
     fi
     rm -f "$STAGED" "$LOCK" "$SCRIPT"
     if [ "$status" -eq 0 ]; then
+        write_status succeeded '' ''
         log "Codexify $VERSION self-update completed"
+    elif [ "$ROLLED_BACK" -eq 1 ] && [ "$FAILURE_CODE" != service_restart_failed ]; then
+        write_status rolled_back "$FAILURE_CODE" "$FAILURE_DETAIL"
+        log "Codexify $VERSION self-update rolled back"
     else
+        write_status failed "$FAILURE_CODE" "$FAILURE_DETAIL"
         log "Codexify $VERSION self-update failed"
     fi
 
@@ -793,26 +1254,48 @@ trap finish 0 HUP INT TERM
 
 log "update worker started for Codexify $VERSION"
 sleep {UPDATE_DELAY_SECONDS}
+write_status installing '' ''
 
 if [ "$RESTART_SERVICE" -eq 1 ]; then
     STOPPED=1
     if ! "$TARGET" service disable >> "$LOG" 2>&1; then
+        FAILURE_CODE=service_stop_failed
+        FAILURE_DETAIL='The Codexify service could not be stopped.'
         log 'failed to stop the Codexify service'
         exit 1
     fi
     log 'stopped the Codexify service'
 fi
 
-rm -f "$BACKUP"
-if ! ln "$TARGET" "$BACKUP" 2>/dev/null; then
-    cp -p "$TARGET" "$BACKUP"
+if ! rm -f "$BACKUP"; then
+    FAILURE_CODE=backup_failed
+    FAILURE_DETAIL='The previous Codexify executable backup could not be prepared.'
+    exit 1
 fi
-mv -f "$STAGED" "$TARGET"
-chmod 755 "$TARGET"
+if ! ln "$TARGET" "$BACKUP" 2>/dev/null; then
+    if ! cp -p "$TARGET" "$BACKUP"; then
+        FAILURE_CODE=backup_failed
+        FAILURE_DETAIL='The previous Codexify executable could not be backed up.'
+        exit 1
+    fi
+fi
+if ! mv -f "$STAGED" "$TARGET"; then
+    FAILURE_CODE=replacement_failed
+    FAILURE_DETAIL='The installed Codexify executable could not be replaced.'
+    exit 1
+fi
+if ! chmod 755 "$TARGET"; then
+    FAILURE_CODE=install_failed
+    FAILURE_DETAIL='The installed Codexify executable permissions could not be set.'
+    exit 1
+fi
 if [ "$(uname -s)" = Darwin ]; then
     xattr -d com.apple.quarantine "$TARGET" >/dev/null 2>&1 || true
 fi
+write_status validating '' ''
 if ! "$TARGET" --help >/dev/null 2>&1; then
+    FAILURE_CODE=validation_failed
+    FAILURE_DETAIL='The replacement Codexify executable failed validation.'
     log 'the replacement executable failed its validation probe'
     exit 1
 fi
@@ -835,11 +1318,12 @@ fn sh_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 fn windows_worker_script(
     workspace: &UpdateWorkspace,
     target: &Path,
     log_path: &Path,
+    from_version: &Version,
     version: &Version,
     restart_service: bool,
     task_name: &str,
@@ -849,7 +1333,10 @@ fn windows_worker_script(
     let backup = powershell_path(&workspace.backup_path)?;
     let lock = powershell_path(&workspace.lock_path)?;
     let script = powershell_path(&workspace.worker_path)?;
+    let status = powershell_path(&workspace.status_path)?;
     let log = powershell_path(log_path)?;
+    let update_id = powershell_quote(&workspace.id);
+    let from_version = powershell_quote(&from_version.to_string());
     let version = powershell_quote(&version.to_string());
     let task_name = powershell_quote(task_name);
     let restart_service = if restart_service { "$true" } else { "$false" };
@@ -863,14 +1350,20 @@ $Staged = {staged}
 $Backup = {backup}
 $Lock = {lock}
 $ScriptPath = {script}
+$Status = {status}
 $Log = {log}
+$UpdateId = {update_id}
+$FromVersion = {from_version}
 $Version = {version}
 $TaskName = {task_name}
 $RestartService = {restart_service}
 $Stopped = $false
 $Updated = $false
+$RolledBack = $false
 $ExitCode = 0
 $FailedReplacement = "$Target.failed.$PID"
+$FailureCode = 'worker_failed'
+$FailureDetail = 'The detached updater stopped unexpectedly.'
 
 function Write-UpdateLog([string]$Message) {{
     try {{
@@ -879,18 +1372,52 @@ function Write-UpdateLog([string]$Message) {{
     }} catch {{}}
 }}
 
+function Write-UpdateStatus([string]$State, [string]$Code, [string]$Detail) {{
+    $Temporary = "$Status.tmp.$PID"
+    try {{
+        $Timestamp = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+        $Record = [ordered]@{{
+            updateId = $UpdateId
+            fromVersion = $FromVersion
+            targetVersion = $Version
+            state = $State
+            updatedAt = $Timestamp
+            failureCode = $(if ($Code) {{ $Code }} else {{ $null }})
+            failureDetail = $(if ($Detail) {{ $Detail }} else {{ $null }})
+        }}
+        $Json = $Record | ConvertTo-Json -Compress
+        $Encoding = New-Object System.Text.UTF8Encoding($false)
+        [IO.File]::WriteAllText($Temporary, $Json, $Encoding)
+        if (Test-Path -LiteralPath $Status) {{
+            [IO.File]::Replace($Temporary, $Status, $null, $true)
+        }} else {{
+            [IO.File]::Move($Temporary, $Status)
+        }}
+    }} catch {{
+        Remove-Item -LiteralPath $Temporary -Force -ErrorAction SilentlyContinue
+        Write-UpdateLog "could not persist update status $State"
+    }}
+}}
+
 try {{
     Write-UpdateLog "update worker started for Codexify $Version"
     Start-Sleep -Seconds {UPDATE_DELAY_SECONDS}
+    Write-UpdateStatus 'installing' '' ''
 
     if ($RestartService) {{
         $Stopped = $true
+        $FailureCode = 'service_stop_failed'
+        $FailureDetail = 'The Codexify service could not be stopped.'
         & $Target service disable *>> $Log
         if ($LASTEXITCODE -ne 0) {{ throw 'failed to stop the Codexify service' }}
         Write-UpdateLog 'stopped the Codexify service'
     }}
 
+    $FailureCode = 'backup_failed'
+    $FailureDetail = 'The previous Codexify executable could not be backed up.'
     Remove-Item -LiteralPath $Backup, $FailedReplacement -Force -ErrorAction SilentlyContinue
+    $FailureCode = 'replacement_failed'
+    $FailureDetail = 'The installed Codexify executable could not be replaced.'
     $ReplaceError = $null
     for ($Attempt = 0; $Attempt -lt 60; $Attempt++) {{
         try {{
@@ -904,6 +1431,9 @@ try {{
     }}
     if ($ReplaceError) {{ throw "could not atomically replace the installed executable: $($ReplaceError.Exception.Message)" }}
 
+    $FailureCode = 'validation_failed'
+    $FailureDetail = 'The replacement Codexify executable failed validation.'
+    Write-UpdateStatus 'validating' '' ''
     & $Target --help *> $null
     if ($LASTEXITCODE -ne 0) {{ throw 'the replacement executable failed its validation probe' }}
     $Updated = $true
@@ -915,29 +1445,39 @@ try {{
         try {{
             [IO.File]::Replace($Backup, $Target, $FailedReplacement, $true)
             Remove-Item -LiteralPath $FailedReplacement -Force -ErrorAction SilentlyContinue
+            $RolledBack = $true
             Write-UpdateLog 'restored the previous Codexify executable'
         }} catch {{
             try {{
                 Remove-Item -LiteralPath $Target -Force -ErrorAction SilentlyContinue
                 Move-Item -LiteralPath $Backup -Destination $Target -Force
+                $RolledBack = $true
                 Write-UpdateLog 'restored the previous Codexify executable'
             }} catch {{
+                $FailureCode = 'rollback_failed'
+                $FailureDetail = 'The previous Codexify executable could not be restored.'
                 Write-UpdateLog "failed to restore the previous executable: $($_.Exception.Message)"
             }}
         }}
     }}
 }} finally {{
     if ($RestartService -and $Stopped) {{
+        Write-UpdateStatus 'restarting' '' ''
         $ServiceExecutable = if (Test-Path -LiteralPath $Target) {{ $Target }} elseif (Test-Path -LiteralPath $Backup) {{ $Backup }} else {{ $null }}
         if ($ServiceExecutable) {{
-            & $ServiceExecutable service enable *>> $Log
-            if ($LASTEXITCODE -eq 0) {{
+            try {{
+                & $ServiceExecutable service enable *>> $Log
+                if ($LASTEXITCODE -ne 0) {{ throw 'service enable returned a failure status' }}
                 Write-UpdateLog 'restarted the Codexify service'
-            }} else {{
+            }} catch {{
+                $FailureCode = 'service_restart_failed'
+                $FailureDetail = 'The Codexify service could not be restarted.'
                 Write-UpdateLog 'failed to restart the Codexify service; run `codexify service enable` manually'
                 $ExitCode = 1
             }}
         }} else {{
+            $FailureCode = 'executable_missing'
+            $FailureDetail = 'No Codexify executable was available to restart the service.'
             Write-UpdateLog 'cannot restart the Codexify service because no executable is available'
             $ExitCode = 1
         }}
@@ -952,8 +1492,13 @@ try {{
     Remove-Item -LiteralPath $FailedReplacement -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $Lock -Force -ErrorAction SilentlyContinue
     if ($ExitCode -eq 0) {{
+        Write-UpdateStatus 'succeeded' '' ''
         Write-UpdateLog "Codexify $Version self-update completed"
+    }} elseif ($RolledBack -and $FailureCode -ne 'service_restart_failed') {{
+        Write-UpdateStatus 'rolled_back' $FailureCode $FailureDetail
+        Write-UpdateLog "Codexify $Version self-update rolled back"
     }} else {{
+        Write-UpdateStatus 'failed' $FailureCode $FailureDetail
         Write-UpdateLog "Codexify $Version self-update failed"
     }}
     Remove-Item -LiteralPath $ScriptPath -Force -ErrorAction SilentlyContinue
@@ -964,7 +1509,7 @@ exit $ExitCode
     ))
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 fn powershell_path(path: &Path) -> anyhow::Result<String> {
     let value = path
         .to_str()
@@ -1205,7 +1750,9 @@ mod tests {
             staged_path: root.join("codexify.new"),
             backup_path: root.join("codexify.old"),
             worker_path: root.join("worker"),
+            status_path: root.join("status/0123456789abcdef01234567.json"),
             clean_on_drop: false,
+            preserve_status: false,
         }
     }
 
@@ -1235,6 +1782,107 @@ mod tests {
     }
 
     #[test]
+    fn changelog_selection_includes_every_release_in_the_upgrade_interval() {
+        let changelog = "# Changelog\n\n## [1.3.0] - 2026-08-31\n\n- Three.\n\n## [1.2.0] - 2026-08-30\n\n- Two.\n\n## [1.1.0] - 2026-08-29\n\n- One.\n\n## [1.0.0] - 2026-08-28\n\n- Initial.\n";
+        let selected =
+            select_changelog_sections(changelog, &Version::new(1, 0, 0), &Version::new(1, 2, 0))
+                .unwrap();
+
+        assert!(selected.starts_with("## [1.2.0]"));
+        assert!(selected.contains("## [1.1.0]"));
+        assert!(!selected.contains("## [1.3.0]"));
+        assert!(!selected.contains("## [1.0.0]"));
+    }
+
+    #[test]
+    fn changelog_selection_returns_none_for_missing_or_oversized_notes() {
+        assert!(
+            select_changelog_sections(
+                "# Changelog\n\n## [1.0.0]\n\n- Initial.\n",
+                &Version::new(1, 0, 0),
+                &Version::new(1, 1, 0),
+            )
+            .is_none()
+        );
+
+        let oversized = format!(
+            "# Changelog\n\n## [2.0.0]\n\n{}",
+            "x".repeat(MAX_SELECTED_CHANGELOG_BYTES + 1)
+        );
+        assert!(
+            select_changelog_sections(&oversized, &Version::new(1, 0, 0), &Version::new(2, 0, 0),)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn status_record_round_trips_through_a_private_atomic_file() {
+        let root = tempfile::tempdir().unwrap();
+        let status_dir = root.path().join("status");
+        let record = UpdateStatusRecord::scheduled("0123456789abcdef01234567", "1.0.0", "2.0.0");
+
+        write_status_record_to(&status_dir, &record).unwrap();
+        assert_eq!(
+            read_status_record_from(&status_dir, &record.update_id).unwrap(),
+            record
+        );
+        assert_eq!(
+            fs::read_dir(&status_dir).unwrap().count(),
+            1,
+            "the atomic temporary file must not remain"
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&status_dir).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+            assert_eq!(
+                fs::metadata(status_record_path(&status_dir, &record.update_id))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+    }
+
+    #[test]
+    fn status_record_reader_rejects_malformed_ids_and_corrupt_records() {
+        let root = tempfile::tempdir().unwrap();
+        let status_dir = root.path().join("status");
+        make_private_dir(&status_dir).unwrap();
+
+        assert!(read_status_record_from(&status_dir, "../update").is_err());
+
+        let id = "0123456789abcdef01234567";
+        fs::write(status_record_path(&status_dir, id), b"not json").unwrap();
+        assert!(read_status_record_from(&status_dir, id).is_err());
+    }
+
+    #[test]
+    fn status_record_cleanup_keeps_the_active_and_newest_records() {
+        let root = tempfile::tempdir().unwrap();
+        let status_dir = root.path().join("status");
+        for index in 0..(MAX_STATUS_RECORDS + 3) {
+            let id = format!("{index:024x}");
+            let record = UpdateStatusRecord::scheduled(&id, "1.0.0", "2.0.0");
+            write_status_record_to(&status_dir, &record).unwrap();
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let active = format!("{:024x}", MAX_STATUS_RECORDS + 2);
+
+        cleanup_status_records(&status_dir, &active).unwrap();
+
+        assert!(status_record_path(&status_dir, &active).is_file());
+        assert!(fs::read_dir(&status_dir).unwrap().count() <= MAX_STATUS_RECORDS);
+        assert!(!status_record_path(&status_dir, &format!("{:024x}", 0)).exists());
+    }
+
+    #[test]
     fn extracts_one_bounded_binary_from_tar_gzip() {
         let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
         {
@@ -1246,12 +1894,23 @@ mod tests {
             builder
                 .append_data(&mut header, "codexify-v9/bin/codexify", &b"test"[..])
                 .unwrap();
+            let changelog = b"# Changelog\n\n## [9.8.7]\n\n- Test release.\n";
+            let mut header = tar::Header::new_gnu();
+            header.set_mode(0o644);
+            header.set_size(changelog.len() as u64);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, "codexify-v9/CHANGELOG.md", &changelog[..])
+                .unwrap();
             builder.finish().unwrap();
         }
         let archive = encoder.finish().unwrap();
+        let release =
+            extract_release(&archive, &test_asset(ArchiveKind::TarGz, "codexify")).unwrap();
+        assert_eq!(release.binary, b"test");
         assert_eq!(
-            extract_binary(&archive, &test_asset(ArchiveKind::TarGz, "codexify")).unwrap(),
-            b"test"
+            release.changelog.as_deref(),
+            Some("# Changelog\n\n## [9.8.7]\n\n- Test release.\n")
         );
     }
 
@@ -1263,11 +1922,47 @@ mod tests {
             .start_file("codexify-v9/bin/codexify.exe", SimpleFileOptions::default())
             .unwrap();
         writer.write_all(b"test").unwrap();
+        writer
+            .start_file("codexify-v9/CHANGELOG.md", SimpleFileOptions::default())
+            .unwrap();
+        writer
+            .write_all(b"# Changelog\n\n## [9.8.7]\n\n- Test release.\n")
+            .unwrap();
         let archive = writer.finish().unwrap().into_inner();
+        let release =
+            extract_release(&archive, &test_asset(ArchiveKind::Zip, "codexify.exe")).unwrap();
+        assert_eq!(release.binary, b"test");
         assert_eq!(
-            extract_binary(&archive, &test_asset(ArchiveKind::Zip, "codexify.exe")).unwrap(),
-            b"test"
+            release.changelog.as_deref(),
+            Some("# Changelog\n\n## [9.8.7]\n\n- Test release.\n")
         );
+    }
+
+    #[test]
+    fn duplicate_or_invalid_changelog_does_not_block_binary_extraction() {
+        let cursor = Cursor::new(Vec::new());
+        let mut writer = zip::ZipWriter::new(cursor);
+        writer
+            .start_file("codexify-v9/codexify.exe", SimpleFileOptions::default())
+            .unwrap();
+        writer.write_all(b"test").unwrap();
+        writer
+            .start_file("codexify-v9/CHANGELOG.md", SimpleFileOptions::default())
+            .unwrap();
+        writer.write_all(b"first").unwrap();
+        writer
+            .start_file(
+                "codexify-v9/docs/CHANGELOG.md",
+                SimpleFileOptions::default(),
+            )
+            .unwrap();
+        writer.write_all(b"second").unwrap();
+        let archive = writer.finish().unwrap().into_inner();
+
+        let release =
+            extract_release(&archive, &test_asset(ArchiveKind::Zip, "codexify.exe")).unwrap();
+        assert_eq!(release.binary, b"test");
+        assert!(release.changelog.is_none());
     }
 
     #[cfg(unix)]
@@ -1279,6 +1974,7 @@ mod tests {
             &workspace,
             &root.join("codexify"),
             &root.join("codexify.log"),
+            &Version::new(1, 0, 0),
             &Version::new(2, 0, 0),
             true,
             "dev.codexify.update.test",
@@ -1291,7 +1987,34 @@ mod tests {
         assert!(script.contains(&format!("sleep {UPDATE_DELAY_SECONDS}")));
         assert!(script.contains("xattr -d com.apple.quarantine"));
         assert!(script.contains("launchctl remove \"$LAUNCHD_LABEL\""));
+        assert!(script.contains("write_status installing"));
+        assert!(script.contains("write_status validating"));
+        assert!(script.contains("write_status restarting"));
+        assert!(script.contains("write_status succeeded"));
+        assert!(script.contains("write_status rolled_back"));
         assert!(!script.contains("codex-free"));
+    }
+
+    #[test]
+    fn windows_worker_persists_restart_safe_status_transitions() {
+        let root = Path::new(r"C:\Users\Paul\Codexify Update");
+        let workspace = workspace(root);
+        let script = windows_worker_script(
+            &workspace,
+            &root.join("codexify.exe"),
+            &root.join("codexify.log"),
+            &Version::new(1, 0, 0),
+            &Version::new(2, 0, 0),
+            true,
+            "Codexify Update test",
+        )
+        .unwrap();
+
+        assert!(script.contains("Write-UpdateStatus 'installing'"));
+        assert!(script.contains("Write-UpdateStatus 'validating'"));
+        assert!(script.contains("Write-UpdateStatus 'restarting'"));
+        assert!(script.contains("Write-UpdateStatus 'succeeded'"));
+        assert!(script.contains("Write-UpdateStatus 'rolled_back'"));
     }
 
     #[test]
@@ -1324,6 +2047,7 @@ mod tests {
             &workspace,
             &root.path().join("codexify.exe"),
             &root.path().join("codexify.log"),
+            &Version::new(1, 0, 0),
             &Version::new(2, 0, 0),
             true,
             &task_name,
