@@ -18,6 +18,14 @@ pub fn tool_meta() -> MetaObject {
     .expect("static setup tool metadata must be an object")
 }
 
+pub fn app_callable_tool_meta() -> MetaObject {
+    serde_json::from_value(json!({
+        "ui": { "visibility": ["model", "app"] },
+        "openai/widgetAccessible": true
+    }))
+    .expect("static setup app-callable tool metadata must be an object")
+}
+
 pub fn resource_meta() -> MetaObject {
     serde_json::from_value(json!({
         "ui": {

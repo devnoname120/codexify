@@ -56,7 +56,9 @@ use crate::tool::{
     Tool, ToolCallIdentity, ToolRequestContext, validate_and_wrap_tool, validate_and_wrap_tools,
 };
 use crate::tool_logging::ToolCallLogger;
-use crate::tools::set_project_root::{SetProjectRoot, select_and_render};
+use crate::tools::set_project_root::{
+    ProjectSelection, ProjectSelectionRequest, SetProjectRoot, select_and_render,
+};
 use crate::types::{AppConfig, ToolContent, ToolResult};
 use crate::widget_debug;
 
@@ -513,10 +515,19 @@ impl ServerHandler for CodexHandler {
                 None => ToolResult::error(format!("Unknown tool: {name}")),
                 Some(tool) if name == SetProjectRoot::NAME => {
                     if let Some(identity) = conversation.as_ref() {
-                        select_and_render(&args, |path| async move {
-                            self.project_bindings
-                                .select_project_root(&self.config, identity, &path)
-                                .await
+                        select_and_render(&args, |request| async move {
+                            match request {
+                                ProjectSelectionRequest::Project(path) => self
+                                    .project_bindings
+                                    .select_project_root(&self.config, identity, &path)
+                                    .await
+                                    .map(ProjectSelection::Project),
+                                ProjectSelectionRequest::WithoutProject => self
+                                    .project_bindings
+                                    .select_without_project(&self.config, identity)
+                                    .await
+                                    .map(ProjectSelection::WithoutProject),
+                            }
                         })
                         .await
                     } else {

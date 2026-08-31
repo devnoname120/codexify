@@ -415,6 +415,30 @@ fn check_for_updates_is_available_only_to_the_setup_app() {
 }
 
 #[test]
+fn project_picker_tools_are_available_to_the_model_and_setup_app() {
+    let mut config = default_config(PathBuf::from("/tmp"));
+    config.multi_project = true;
+    let tools = load_tools_for_config(&config);
+    for name in ["list_projects", "set_project_root"] {
+        let tool = tools
+            .iter()
+            .find(|tool| tool.name() == name)
+            .unwrap_or_else(|| panic!("{name} must be registered in multi-project mode"));
+        let meta = tool
+            .meta()
+            .unwrap_or_else(|| panic!("{name} must declare setup-app visibility"));
+        assert_eq!(
+            meta.get("ui").and_then(|value| value.get("visibility")),
+            Some(&json!(["model", "app"]))
+        );
+        assert_eq!(
+            meta.get("openai/widgetAccessible").and_then(Value::as_bool),
+            Some(true)
+        );
+    }
+}
+
+#[test]
 fn mutating_tools_are_classified_for_checkpoint_fail_closed_behavior() {
     let mut names = load_tools()
         .into_iter()

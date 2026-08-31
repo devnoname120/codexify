@@ -6,6 +6,7 @@ use crate::exec_sessions::SessionState;
 use crate::project_catalog::{
     DEFAULT_PROJECT_LIMIT, MAX_PROJECT_LIMIT, ProjectListOutput, discover_project_catalog,
 };
+use crate::setup_ui;
 use crate::tool::{Tool, ToolBehavior, parse_tool_args};
 use crate::types::{AppConfig, ToolResult};
 
@@ -78,6 +79,10 @@ impl Tool for ListProjects {
             false,
             "Discovers configured local project candidates without binding or modifying them.",
         )
+    }
+
+    fn meta(&self) -> Option<rmcp::model::MetaObject> {
+        Some(setup_ui::app_callable_tool_meta())
     }
 
     fn description(&self) -> String {

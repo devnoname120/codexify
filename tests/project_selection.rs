@@ -405,6 +405,22 @@ async fn project_selection_is_idempotent_but_cannot_switch() {
         first
             .structured_content
             .as_ref()
+            .and_then(|value| value.get("mode"))
+            .and_then(|value| value.as_str()),
+        Some("project")
+    );
+    assert_eq!(
+        first
+            .structured_content
+            .as_ref()
+            .and_then(|value| value.get("project_name"))
+            .and_then(|value| value.as_str()),
+        Some("alpha")
+    );
+    assert_eq!(
+        first
+            .structured_content
+            .as_ref()
             .and_then(|value| value.get("newly_selected"))
             .and_then(|value| value.as_bool()),
         Some(true)
@@ -436,6 +452,66 @@ async fn project_selection_is_idempotent_but_cannot_switch() {
         .await;
     assert!(switched.is_error);
     assert!(switched.joined_text().contains("cannot switch"));
+}
+
+#[test]
+fn set_project_root_schema_accepts_exactly_one_project_or_scratch_choice() {
+    let schema = SetProjectRoot.input_schema();
+    let validator = jsonschema::options().build(&schema).unwrap();
+
+    assert!(validator.is_valid(&json!({ "path": "alpha" })));
+    assert!(validator.is_valid(&json!({ "withoutProject": true })));
+    for invalid in [
+        json!({}),
+        json!({ "path": "" }),
+        json!({ "withoutProject": false }),
+        json!({ "path": "alpha", "withoutProject": true }),
+        json!({ "path": "alpha", "unknown": true }),
+    ] {
+        assert!(
+            !validator.is_valid(&invalid),
+            "unexpectedly valid: {invalid}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn set_project_root_without_project_returns_a_scratch_workspace_receipt() {
+    let root = TempDir::new().unwrap();
+    let access = root.path().join("projects");
+    fs::create_dir_all(&access).unwrap();
+    let config = multi_project_config(&access);
+    let session = SessionState::new();
+
+    let result = SetProjectRoot
+        .call(json!({ "withoutProject": true }), &config, &session)
+        .await;
+    assert!(!result.is_error, "{}", result.joined_text());
+    let structured = result.structured_content.as_ref().unwrap();
+    assert_eq!(structured["mode"], "without_project");
+    assert_eq!(structured["project_name"], "Chat without a project");
+    assert!(structured["source_project_root"].is_null());
+    assert!(structured["repository_url"].is_null());
+    assert_eq!(structured["managed_worktree"], false);
+    assert!(structured["worktree_mode"].is_null());
+    assert_eq!(structured["binding_scope"], "mcp_transport_session");
+
+    assert!(structured["project_root"].is_null());
+    let scratch_root = std::path::PathBuf::from(structured["scratch_root"].as_str().unwrap());
+    assert_eq!(structured["active_root"], structured["scratch_root"]);
+    assert!(scratch_root.is_dir());
+    assert_eq!(
+        session.effective_config(&config).unwrap().work_dir,
+        scratch_root
+    );
+
+    let output_schema = SetProjectRoot.output_schema().unwrap();
+    assert!(
+        jsonschema::options()
+            .build(&output_schema)
+            .unwrap()
+            .is_valid(structured)
+    );
 }
 
 #[tokio::test]
