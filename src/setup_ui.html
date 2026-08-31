@@ -1,0 +1,955 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Codexify status</title>
+<style>
+:root {
+  color-scheme: light dark;
+  --bg: var(--color-background-primary, light-dark(#ffffff, #171717));
+  --panel: var(--color-background-secondary, light-dark(#f5f6f7, #222222));
+  --panel-strong: light-dark(#eceef0, #2b2b2b);
+  --text: var(--color-text-primary, light-dark(#171717, #f4f4f4));
+  --muted: var(--color-text-secondary, light-dark(#62666d, #a7a7a7));
+  --border: var(--color-border-primary, light-dark(#d9dce1, #3a3a3a));
+  --accent: light-dark(#111111, #f5f5f5);
+  --accent-text: light-dark(#ffffff, #171717);
+  --good: light-dark(#18794e, #58c991);
+  --warn: light-dark(#8a5a00, #e8b44f);
+  --bad: light-dark(#b42318, #ff7b72);
+  --focus: light-dark(#4c8bf5, #70a5ff);
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; background: transparent; color: var(--text); }
+body {
+  font-family: var(--font-sans, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
+  font-size: 13px;
+  line-height: 1.4;
+}
+button { font: inherit; }
+#root {
+  display: flex;
+  width: 100%;
+  justify-content: center;
+}
+.card {
+  width: 100%;
+  max-width: 500px;
+  padding: 11px 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg);
+  box-shadow: 0 1px 2px light-dark(rgba(0, 0, 0, .04), rgba(0, 0, 0, .20));
+}
+.status-list { display: grid; gap: 5px; }
+.status-row {
+  display: flex;
+  min-width: 0;
+  min-height: 30px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.status-copy {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  flex: 1 1 auto;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+.status-label { font-weight: 650; letter-spacing: -.01em; }
+.status-version {
+  font: 600 12px/1.2 var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+}
+.status-state { font-size: 12px; font-weight: 650; }
+.status-pass { color: var(--good); }
+.status-warning { color: var(--warn); }
+.status-failure { color: var(--bad); }
+.status-skipped, .status-muted { color: var(--muted); }
+.row-actions, .utility-actions, .doctor-actions {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+.button {
+  display: inline-flex;
+  min-height: 29px;
+  align-items: center;
+  justify-content: center;
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--text);
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+.button:hover:not(:disabled) { background: var(--panel-strong); }
+.button:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.button.primary { border-color: var(--accent); background: var(--accent); color: var(--accent-text); }
+.button.primary:hover:not(:disabled) { background: var(--accent); opacity: .88; }
+.button.warning { border-color: color-mix(in srgb, var(--warn) 55%, var(--border)); color: var(--warn); }
+.button.failure { border-color: color-mix(in srgb, var(--bad) 55%, var(--border)); color: var(--bad); }
+.button:disabled { cursor: wait; opacity: .55; }
+.utility-actions {
+  justify-content: flex-start;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+.doctor-panel {
+  margin-top: 8px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--panel);
+}
+.doctor-panel.warning {
+  border-color: color-mix(in srgb, var(--warn) 45%, var(--border));
+  background: color-mix(in srgb, var(--warn) 6%, var(--bg));
+}
+.doctor-panel.failure {
+  border-color: color-mix(in srgb, var(--bad) 45%, var(--border));
+  background: color-mix(in srgb, var(--bad) 6%, var(--bg));
+}
+.doctor-summary {
+  display: flex;
+  min-height: 34px;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 8px;
+}
+.doctor-summary-text { flex: 1 1 auto; font-size: 12px; font-weight: 650; }
+.doctor-details {
+  display: grid;
+  gap: 7px;
+  max-height: 290px;
+  overflow: auto;
+  padding: 8px;
+  border-top: 1px solid var(--border);
+}
+.doctor-check { min-width: 0; }
+.check-heading {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 6px;
+}
+.check-status {
+  flex: 0 0 auto;
+  font: 700 10px/1.2 var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+}
+.check-copy { min-width: 0; overflow-wrap: anywhere; }
+.check-id {
+  font: 600 11px/1.3 var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+}
+.check-detail, .check-remediation {
+  margin: 2px 0 0 48px;
+  color: var(--muted);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+.feedback {
+  margin-top: 8px;
+  padding: 7px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--muted);
+  font-size: 11px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.feedback.warning { border-color: color-mix(in srgb, var(--warn) 45%, var(--border)); color: var(--warn); }
+.feedback.failure { border-color: color-mix(in srgb, var(--bad) 45%, var(--border)); color: var(--bad); }
+.debug {
+  display: none;
+  margin-top: 8px;
+  padding-top: 7px;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font: 10px/1.4 var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  overflow-wrap: anywhere;
+}
+.debug.visible { display: block; }
+.initialization-error {
+  width: 100%;
+  max-width: 500px;
+  padding: 9px 10px;
+  border: 1px solid color-mix(in srgb, var(--bad) 45%, var(--border));
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--bad) 6%, var(--bg));
+  color: var(--bad);
+}
+@media (max-width: 420px) {
+  .card { padding: 10px; }
+  .status-row { align-items: flex-start; flex-direction: column; gap: 5px; }
+  .row-actions { justify-content: flex-start; }
+  .doctor-summary { align-items: flex-start; flex-wrap: wrap; }
+  .doctor-actions { justify-content: flex-start; }
+  .check-detail, .check-remediation { margin-left: 0; }
+}
+</style>
+</head>
+<body>
+<div id="root" aria-live="polite"></div>
+<script>
+(() => {
+  "use strict";
+
+  const DEBUG_META_KEY = "io.github.devnoname120/codexify/debug";
+  const REFRESH_PROMPT = `The Codexify connector schema is outdated and needs to be refreshed.
+
+Build a clickable relative ChatGPT settings link for the user:
+- If the current conversation context exposes a connector URI containing \`plugin://dev-<slug>@...\`, extract \`<slug>\` and use exactly \`#settings/Plugins/plugin_asdk_app_<slug>\`.
+- Otherwise use exactly \`#settings/Plugins\`.
+- Never invent or guess a slug.
+
+Tell the user to open that link, select the Codexify plugin if necessary, scroll below the list of tools, and click Refresh. Keep the response concise.`;
+  const root = document.getElementById("root");
+  const pending = new Map();
+  let nextId = 1;
+  let resizeObserver;
+  let initialized = false;
+  let currentData = null;
+  let currentMetadata = null;
+  let updateState = null;
+  let updateChecking = false;
+  let upgradeRunning = false;
+  let doctorState = {
+    phase: "idle",
+    report: null,
+    error: null,
+    expanded: false,
+    showAll: false,
+    manual: false
+  };
+  let actionState = { kind: null, message: null, tone: null, pending: false };
+  let automaticDoctorStarted = false;
+  let debugEntries = [];
+
+  function post(message) {
+    window.parent.postMessage(message, "*");
+  }
+
+  function request(method, params) {
+    const id = nextId++;
+    post({ jsonrpc: "2.0", id, method, params });
+    return new Promise((resolve, reject) => pending.set(id, { resolve, reject }));
+  }
+
+  function notify(method, params) {
+    post({ jsonrpc: "2.0", method, params });
+  }
+
+  function el(tag, className, text) {
+    const node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text !== undefined) node.textContent = String(text);
+    return node;
+  }
+
+  function actionButton(label, className, handler, disabled) {
+    const button = el("button", `button${className ? ` ${className}` : ""}`, label);
+    button.type = "button";
+    button.disabled = Boolean(disabled);
+    button.addEventListener("click", handler);
+    return button;
+  }
+
+  function objectFrom(value, selector) {
+    const queue = [value];
+    const seen = new Set();
+    const nestedKeys = [
+      "_meta", "meta", "result", "call_tool_result", "callToolResult",
+      "mcp_tool_result", "mcpToolResult", "toolOutput", "toolResponseMetadata",
+      "invoked_resource", "invokedResource"
+    ];
+    while (queue.length) {
+      const candidate = queue.shift();
+      if (!candidate || typeof candidate !== "object" || seen.has(candidate)) continue;
+      seen.add(candidate);
+      const selected = selector(candidate);
+      if (selected) return selected;
+      for (const key of nestedKeys) {
+        if (candidate[key] && typeof candidate[key] === "object") queue.push(candidate[key]);
+      }
+    }
+    return null;
+  }
+
+  function setupPayload(value) {
+    return objectFrom(value, candidate => {
+      const payload = candidate.structuredContent || candidate.structured_content;
+      if (payload && payload.update && payload.connectorSchema) return payload;
+      if (candidate.update && candidate.connectorSchema) return candidate;
+      return null;
+    });
+  }
+
+  function structuredPayload(value, predicate) {
+    return objectFrom(value, candidate => {
+      const payload = candidate.structuredContent || candidate.structured_content;
+      if (payload && typeof payload === "object" && predicate(payload)) return payload;
+      return predicate(candidate) ? candidate : null;
+    });
+  }
+
+  function debugPayload(value) {
+    return objectFrom(value, candidate => {
+      const payload = candidate[DEBUG_META_KEY];
+      return payload && typeof payload === "object" ? payload : null;
+    });
+  }
+
+  function toolText(value) {
+    return objectFrom(value, candidate => {
+      if (!Array.isArray(candidate.content)) return null;
+      const text = candidate.content
+        .map(item => item && typeof item.text === "string" ? item.text : "")
+        .filter(Boolean)
+        .join("\n");
+      return text || null;
+    }) || "The tool returned no text output.";
+  }
+
+  function errorText(error) {
+    const value = error && typeof error === "object"
+      ? error.message || (error.data && error.data.message) || JSON.stringify(error)
+      : String(error);
+    return String(value || "Unknown error").replace(/\s+/g, " ").trim().slice(0, 512);
+  }
+
+  function accepted(result, label) {
+    if (result && (result.isError === true || result.is_error === true)) {
+      throw new Error(`${label} was rejected by the host.`);
+    }
+    return result;
+  }
+
+  async function callTool(name, args) {
+    if (initialized) {
+      try {
+        return await request("tools/call", { name, arguments: args || {} });
+      } catch (error) {
+        if (!(window.openai && typeof window.openai.callTool === "function")) throw error;
+      }
+    }
+    if (window.openai && typeof window.openai.callTool === "function") {
+      return window.openai.callTool(name, args || {});
+    }
+    throw new Error("This host does not expose widget tool calls.");
+  }
+
+  async function sendFollowUpMessage(prompt) {
+    if (initialized) {
+      try {
+        const result = await request("ui/message", {
+          role: "user",
+          content: [{ type: "text", text: prompt }]
+        });
+        return accepted(result, "Follow-up message");
+      } catch (error) {
+        if (!(window.openai && typeof window.openai.sendFollowUpMessage === "function")) {
+          throw error;
+        }
+      }
+    }
+    if (window.openai && typeof window.openai.sendFollowUpMessage === "function") {
+      const result = await window.openai.sendFollowUpMessage({
+        prompt,
+        scrollToBottom: true
+      });
+      return accepted(result, "Follow-up message");
+    }
+    throw new Error("This host does not expose follow-up messages.");
+  }
+
+  function addDebugEntry(entry) {
+    if (!entry || debugEntries.includes(entry)) return;
+    debugEntries.push(entry);
+  }
+
+  function captureTiming(name, result, startedAt) {
+    if (!currentData || !currentData.debug) return;
+    const metadata = debugPayload(result);
+    if (metadata && Number.isFinite(metadata.durationMs)) {
+      addDebugEntry(`${name}: server ${metadata.durationMs} ms`);
+    }
+    const roundTrip = Math.max(0, Math.round(performance.now() - startedAt));
+    addDebugEntry(`${name}: widget round trip ${roundTrip} ms`);
+  }
+
+  function reportSize() {
+    notify("ui/notifications/size-changed", {
+      width: Math.ceil(document.documentElement.clientWidth || root.getBoundingClientRect().width),
+      height: Math.ceil(document.documentElement.scrollHeight)
+    });
+  }
+
+  function scheduleSizeReport() {
+    if (typeof requestAnimationFrame === "function") {
+      requestAnimationFrame(reportSize);
+    } else {
+      setTimeout(reportSize, 0);
+    }
+  }
+
+  function ensureResizeObserver() {
+    if (resizeObserver || !("ResizeObserver" in window)) return;
+    resizeObserver = new ResizeObserver(reportSize);
+    resizeObserver.observe(document.documentElement);
+  }
+
+  function applyHostContext(context) {
+    if (!context || typeof context !== "object") return;
+    if (context.theme) document.documentElement.dataset.theme = context.theme;
+  }
+
+  function plural(count, singular, pluralForm) {
+    return `${count} ${count === 1 ? singular : pluralForm}`;
+  }
+
+  function updateView() {
+    const update = updateState || (currentData && currentData.update) || {};
+    const current = update.currentVersion || (currentData && currentData.serverVersion) || "unknown";
+    if (updateChecking) {
+      return { current, label: "checking…", tone: "status-muted", latest: null };
+    }
+    switch (update.status) {
+      case "update_available":
+        return {
+          current,
+          label: update.latestVersion ? `v${update.latestVersion} available` : "update available",
+          tone: "status-warning",
+          latest: update.latestVersion || null
+        };
+      case "up_to_date":
+        return { current, label: "✓", tone: "status-pass", latest: null };
+      case "ahead_of_latest":
+        return { current, label: "ahead of latest release", tone: "status-pass", latest: null };
+      case "check_failed":
+        return { current, label: "update status unknown", tone: "status-warning", latest: null };
+      default:
+        return { current, label: "status unknown", tone: "status-warning", latest: null };
+    }
+  }
+
+  function renderUpdateRow() {
+    const view = updateView();
+    const row = el("div", "status-row");
+    const copy = el("div", "status-copy");
+    copy.append(
+      el("span", "status-label", "Codexify:"),
+      el("span", "status-version", `v${view.current}`),
+      el("span", `status-state ${view.tone}`, view.label)
+    );
+
+    const actions = el("div", "row-actions");
+    if (view.latest) {
+      actions.append(actionButton(
+        `Upgrade to v${view.latest}`,
+        "primary",
+        () => { void startUpgrade(); },
+        upgradeRunning
+      ));
+    }
+    actions.append(actionButton(
+      updateChecking ? "Checking…" : "Check for updates",
+      "",
+      () => { void runUpdateCheck(); },
+      updateChecking || upgradeRunning
+    ));
+    row.append(copy, actions);
+    return row;
+  }
+
+  function renderSchemaRow() {
+    const schema = currentData.connectorSchema || {};
+    const row = el("div", "status-row");
+    const copy = el("div", "status-copy");
+    copy.append(el("span", "status-label", "Connector schema:"));
+
+    if (schema.status === "current") {
+      copy.append(
+        el("span", "status-version", `v${schema.observedVersion || schema.advertisedVersion || "unknown"}`),
+        el("span", "status-state status-pass", "✓")
+      );
+    } else if (schema.status === "stale") {
+      copy.append(
+        el("span", "status-version", `v${schema.observedVersion || "unknown"}`),
+        el("span", "status-state status-warning", "refresh required")
+      );
+    } else {
+      copy.append(el("span", "status-state status-warning", "version unknown"));
+    }
+
+    const actions = el("div", "row-actions");
+    if (schema.refreshRecommended) {
+      actions.append(actionButton(
+        actionState.pending && actionState.kind === "refresh" ? "Sending…" : "Refresh",
+        "primary",
+        () => { void sendRefreshPrompt(); },
+        actionState.pending
+      ));
+    }
+    row.append(copy, actions);
+    return row;
+  }
+
+  function problemChecks(report) {
+    if (!report || !Array.isArray(report.checks)) return [];
+    return report.checks
+      .filter(check => check && (check.status === "failure" || check.status === "warning"))
+      .sort((left, right) => {
+        const rank = { failure: 0, warning: 1 };
+        return (rank[left.status] || 0) - (rank[right.status] || 0);
+      });
+  }
+
+  function doctorSummary(report) {
+    const summary = report && report.summary ? report.summary : {};
+    const failures = Number(summary.failures || 0);
+    const warnings = Number(summary.warnings || 0);
+    if (failures > 0) {
+      return {
+        text: `Doctor: ${plural(failures, "failure", "failures")}${warnings ? ` · ${plural(warnings, "warning", "warnings")}` : ""}`,
+        tone: "failure"
+      };
+    }
+    if (warnings > 0) {
+      return { text: `Doctor: ${plural(warnings, "warning", "warnings")}`, tone: "warning" };
+    }
+    return { text: "Doctor: healthy", tone: "pass" };
+  }
+
+  function renderDoctorCheck(check) {
+    const status = ["pass", "warning", "failure", "skipped"].includes(check.status)
+      ? check.status
+      : "skipped";
+    const node = el("div", "doctor-check");
+    const heading = el("div", "check-heading");
+    const copy = el("div", "check-copy");
+    copy.append(
+      el("span", "check-id", check.id || "check"),
+      document.createTextNode(` — ${check.summary || "No summary"}`)
+    );
+    heading.append(
+      el("span", `check-status status-${status}`, status.toUpperCase()),
+      copy
+    );
+    node.append(heading);
+    if (check.detail) node.append(el("div", "check-detail", check.detail));
+    if (check.remediation) {
+      node.append(el("div", "check-remediation", `Remediation: ${check.remediation}`));
+    }
+    return node;
+  }
+
+  function toggleDoctorDetails() {
+    if (!doctorState.expanded) {
+      doctorState.expanded = true;
+    } else if (!doctorState.showAll) {
+      doctorState.showAll = true;
+    } else {
+      doctorState.expanded = false;
+      doctorState.showAll = false;
+    }
+    renderCurrent();
+  }
+
+  function renderDoctorPanel() {
+    if (doctorState.phase === "idle") return null;
+    if (doctorState.phase === "running" && !doctorState.manual) return null;
+
+    if (doctorState.phase === "error") {
+      const panel = el("section", "doctor-panel failure");
+      const summary = el("div", "doctor-summary");
+      summary.append(
+        el("div", "doctor-summary-text status-failure", "Doctor could not run"),
+        el("div", "status-failure", doctorState.error || "Unknown error")
+      );
+      panel.append(summary);
+      return panel;
+    }
+
+    if (doctorState.phase === "running") {
+      const panel = el("section", "doctor-panel");
+      const summary = el("div", "doctor-summary");
+      summary.append(el("div", "doctor-summary-text status-muted", "Doctor: running…"));
+      panel.append(summary);
+      return panel;
+    }
+
+    const report = doctorState.report;
+    if (!report) return null;
+    const summaryView = doctorSummary(report);
+    const problems = problemChecks(report);
+    if (!doctorState.manual && problems.length === 0) return null;
+
+    const panelTone = summaryView.tone === "failure"
+      ? " failure"
+      : summaryView.tone === "warning" ? " warning" : "";
+    const panel = el("section", `doctor-panel${panelTone}`);
+    const summary = el("div", "doctor-summary");
+    const actions = el("div", "doctor-actions");
+    summary.append(el("div", `doctor-summary-text status-${summaryView.tone}`, summaryView.text));
+
+    if (problems.length) {
+      actions.append(actionButton(
+        actionState.pending && actionState.kind === "autofix" ? "Sending…" : "Autofix",
+        summaryView.tone === "failure" ? "failure" : "warning",
+        () => { void sendAutofixPrompt(); },
+        actionState.pending
+      ));
+    }
+    const detailsLabel = !doctorState.expanded
+      ? "Details"
+      : doctorState.showAll ? "Hide details" : "Show all checks";
+    actions.append(actionButton(detailsLabel, "", toggleDoctorDetails, false));
+    summary.append(actions);
+    panel.append(summary);
+
+    if (doctorState.expanded) {
+      const details = el("div", "doctor-details");
+      const checks = doctorState.showAll || doctorState.manual
+        ? report.checks || []
+        : problems;
+      for (const check of checks) details.append(renderDoctorCheck(check));
+      panel.append(details);
+    }
+    return panel;
+  }
+
+  function renderFeedback() {
+    if (!actionState.message) return null;
+    const tone = actionState.tone ? ` ${actionState.tone}` : "";
+    return el("div", `feedback${tone}`, actionState.message);
+  }
+
+  function refreshDebugFooter() {
+    const debug = document.getElementById("debug");
+    if (!debug || !currentData || !currentData.debug) return;
+    debug.textContent = debugEntries.join(" · ");
+    debug.classList.toggle("visible", debugEntries.length > 0);
+  }
+
+  function renderCurrent() {
+    if (!currentData) return;
+    root.replaceChildren();
+    const card = el("section", "card");
+    const statuses = el("div", "status-list");
+    statuses.append(renderUpdateRow(), renderSchemaRow());
+    card.append(statuses);
+
+    const doctorPanel = renderDoctorPanel();
+    if (doctorPanel) card.append(doctorPanel);
+
+    const utility = el("div", "utility-actions");
+    const doctorRunningManually = doctorState.phase === "running" && doctorState.manual;
+    utility.append(actionButton(
+      doctorRunningManually ? "Running doctor…" : "Doctor",
+      "",
+      () => {
+        if (doctorState.phase === "running") {
+          doctorState.manual = true;
+          doctorState.expanded = true;
+          doctorState.showAll = true;
+          renderCurrent();
+          return;
+        }
+        void runDoctor(true);
+      },
+      doctorRunningManually
+    ));
+    card.append(utility);
+
+    const feedback = renderFeedback();
+    if (feedback) card.append(feedback);
+    const debug = el("div", "debug");
+    debug.id = "debug";
+    card.append(debug);
+    root.append(card);
+    refreshDebugFooter();
+    scheduleSizeReport();
+  }
+
+  function isUpdatePayload(payload) {
+    return payload
+      && typeof payload.status === "string"
+      && typeof payload.currentVersion === "string"
+      && Object.prototype.hasOwnProperty.call(payload, "latestVersion");
+  }
+
+  function isDoctorPayload(payload) {
+    return payload
+      && typeof payload.ok === "boolean"
+      && Array.isArray(payload.checks)
+      && payload.summary
+      && typeof payload.summary === "object";
+  }
+
+  async function runUpdateCheck() {
+    if (updateChecking || upgradeRunning) return;
+    updateChecking = true;
+    actionState = { kind: "updates", message: null, tone: null, pending: false };
+    renderCurrent();
+    const startedAt = performance.now();
+    try {
+      const result = await callTool("check_for_updates", {});
+      const payload = structuredPayload(result, isUpdatePayload);
+      if (!payload) throw new Error("Update check returned no structured status.");
+      captureTiming("check_for_updates", result, startedAt);
+      updateState = payload;
+    } catch (error) {
+      const currentVersion = updateState && updateState.currentVersion
+        ? updateState.currentVersion
+        : currentData.serverVersion || "unknown";
+      updateState = {
+        status: "check_failed",
+        currentVersion,
+        latestVersion: null,
+        source: null,
+        detail: errorText(error)
+      };
+      actionState = {
+        kind: "updates",
+        message: `Update check failed: ${errorText(error)}`,
+        tone: "warning",
+        pending: false
+      };
+    } finally {
+      updateChecking = false;
+      renderCurrent();
+    }
+  }
+
+  async function startUpgrade() {
+    if (upgradeRunning || updateChecking) return;
+    upgradeRunning = true;
+    actionState = {
+      kind: "upgrade",
+      message: "Preparing verified update…",
+      tone: null,
+      pending: true
+    };
+    renderCurrent();
+    const startedAt = performance.now();
+    try {
+      const result = await callTool("self_update", { confirm: true });
+      captureTiming("self_update", result, startedAt);
+      actionState = {
+        kind: "upgrade",
+        message: toolText(result),
+        tone: null,
+        pending: false
+      };
+    } catch (error) {
+      actionState = {
+        kind: "upgrade",
+        message: `Update failed: ${errorText(error)}`,
+        tone: "failure",
+        pending: false
+      };
+    } finally {
+      upgradeRunning = false;
+      renderCurrent();
+    }
+  }
+
+  async function runDoctor(manual) {
+    if (doctorState.phase === "running") {
+      if (manual) {
+        doctorState.manual = true;
+        doctorState.expanded = true;
+        doctorState.showAll = true;
+        renderCurrent();
+      }
+      return;
+    }
+    doctorState = {
+      phase: "running",
+      report: doctorState.report,
+      error: null,
+      expanded: manual || doctorState.expanded,
+      showAll: manual || doctorState.showAll,
+      manual
+    };
+    renderCurrent();
+    const startedAt = performance.now();
+    try {
+      const result = await callTool("doctor", {});
+      const report = structuredPayload(result, isDoctorPayload);
+      if (!report) throw new Error("Doctor returned no structured report.");
+      captureTiming("doctor", result, startedAt);
+      const showManual = doctorState.manual || manual;
+      doctorState = {
+        phase: "ready",
+        report,
+        error: null,
+        expanded: showManual || Number(report.summary.failures || 0) > 0,
+        showAll: showManual,
+        manual: showManual
+      };
+    } catch (error) {
+      doctorState = {
+        phase: "error",
+        report: null,
+        error: errorText(error),
+        expanded: true,
+        showAll: false,
+        manual: doctorState.manual || manual
+      };
+    }
+    renderCurrent();
+  }
+
+  function boundedField(value, maxLength) {
+    if (value === null || value === undefined) return null;
+    return String(value).replace(/\s+/g, " ").trim().slice(0, maxLength);
+  }
+
+  function autofixFindings(report) {
+    const findings = [];
+    for (const check of problemChecks(report).slice(0, 32)) {
+      const candidate = {
+        id: boundedField(check.id, 128),
+        status: check.status,
+        summary: boundedField(check.summary, 512),
+        detail: boundedField(check.detail, 768),
+        remediation: boundedField(check.remediation, 768)
+      };
+      const next = JSON.stringify([...findings, candidate], null, 2);
+      if (next.length > 8000) break;
+      findings.push(candidate);
+    }
+    return JSON.stringify(findings, null, 2);
+  }
+
+  function buildAutofixPrompt(report) {
+    return `Codexify Doctor found the following warnings/failures:\n\n\`\`\`json\n${autofixFindings(report)}\n\`\`\`\n\nInvestigate the underlying causes and fix everything that is appropriate to fix. Do not blindly apply a remediation if investigation indicates a different root cause. Verify the fixes and rerun Codexify Doctor afterward.`;
+  }
+
+  async function sendPrompt(kind, prompt, successMessage) {
+    if (actionState.pending) return;
+    actionState = { kind, message: "Sending request to ChatGPT…", tone: null, pending: true };
+    renderCurrent();
+    try {
+      await sendFollowUpMessage(prompt);
+      actionState = { kind, message: successMessage, tone: null, pending: false };
+    } catch (error) {
+      actionState = {
+        kind,
+        message: `Could not send the request: ${errorText(error)}`,
+        tone: "failure",
+        pending: false
+      };
+    }
+    renderCurrent();
+  }
+
+  async function sendRefreshPrompt() {
+    await sendPrompt("refresh", REFRESH_PROMPT, "Refresh instructions sent to ChatGPT.");
+  }
+
+  async function sendAutofixPrompt() {
+    if (!doctorState.report || !problemChecks(doctorState.report).length) return;
+    await sendPrompt(
+      "autofix",
+      buildAutofixPrompt(doctorState.report),
+      "Diagnostic findings sent to ChatGPT for repair."
+    );
+  }
+
+  function maybeStartAutomaticDoctor() {
+    const canCall = initialized || (window.openai && typeof window.openai.callTool === "function");
+    if (!currentData || !canCall || automaticDoctorStarted) return;
+    automaticDoctorStarted = true;
+    void runDoctor(false);
+  }
+
+  function acceptSetupResult(value) {
+    const payload = setupPayload(value);
+    if (!payload) return;
+    const firstPayload = !currentData;
+    currentData = payload;
+    currentMetadata = value || currentMetadata;
+    if (firstPayload || !updateState) updateState = payload.update || null;
+    if (firstPayload) {
+      debugEntries = [];
+      if (payload.debug && Number.isFinite(payload.debug.updateCheckMs)) {
+        addDebugEntry(`setup release check: ${payload.debug.updateCheckMs} ms`);
+      }
+      const initialTiming = debugPayload(currentMetadata);
+      if (initialTiming && Number.isFinite(initialTiming.durationMs)) {
+        addDebugEntry(`setup: server ${initialTiming.durationMs} ms`);
+      }
+    }
+    renderCurrent();
+    maybeStartAutomaticDoctor();
+  }
+
+  window.addEventListener("message", event => {
+    if (event.source !== window.parent) return;
+    const message = event.data;
+    if (!message || message.jsonrpc !== "2.0") return;
+    const hasResult = Object.prototype.hasOwnProperty.call(message, "result");
+    const hasError = Object.prototype.hasOwnProperty.call(message, "error");
+    if (Object.prototype.hasOwnProperty.call(message, "id") && (hasResult || hasError)) {
+      const waiter = pending.get(message.id);
+      if (!waiter) return;
+      pending.delete(message.id);
+      hasError ? waiter.reject(message.error) : waiter.resolve(message.result);
+      return;
+    }
+    if (message.method === "ui/notifications/tool-result") {
+      acceptSetupResult(message.params);
+    } else if (message.method === "ui/notifications/host-context-changed") {
+      applyHostContext(message.params);
+    } else if (message.method === "ui/resource-teardown" && message.id !== undefined) {
+      post({ jsonrpc: "2.0", id: message.id, result: {} });
+    }
+  });
+
+  const legacyPayload = setupPayload(window.openai && (
+    window.openai.toolResponseMetadata || window.openai.toolOutput
+  ));
+  if (legacyPayload) {
+    acceptSetupResult(window.openai.toolResponseMetadata || window.openai.toolOutput);
+  }
+
+  window.addEventListener("openai:set_globals", event => {
+    const globals = event.detail && event.detail.globals;
+    if (!globals) return;
+    acceptSetupResult(globals.toolResponseMetadata || globals.toolOutput);
+  });
+
+  ensureResizeObserver();
+  request("ui/initialize", {
+    protocolVersion: "2026-01-26",
+    appInfo: { name: "codexify-setup", version: "2.0.0" },
+    appCapabilities: {}
+  }).then(result => {
+    initialized = true;
+    applyHostContext(result && result.hostContext);
+    notify("ui/notifications/initialized", {});
+    maybeStartAutomaticDoctor();
+    reportSize();
+  }).catch(error => {
+    if (!currentData) {
+      root.replaceChildren(el("div", "initialization-error", `Setup UI could not initialize: ${errorText(error)}`));
+    }
+    maybeStartAutomaticDoctor();
+    reportSize();
+  });
+})();
+</script>
+</body>
+</html>

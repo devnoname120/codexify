@@ -49,7 +49,6 @@ struct ConnectorSchemaInfo {
     advertised_version: String,
     observed_version: Option<String>,
     refresh_recommended: bool,
-    settings_url: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -74,7 +73,6 @@ fn setup_result(
     next_step: &str,
     observed_connector_version: Option<&str>,
     update_result: Result<LatestVersionInspection, String>,
-    settings_url: Option<&str>,
     debug: bool,
     update_check_ms: u64,
 ) -> ToolResult {
@@ -90,7 +88,6 @@ fn setup_result(
         advertised_version: advertised_version.to_string(),
         observed_version: observed_connector_version.map(ToOwned::to_owned),
         refresh_recommended: schema_status != ConnectorSchemaStatus::Current,
-        settings_url: settings_url.map(ToOwned::to_owned),
     };
 
     let update = output_from_result(update_result);
@@ -113,9 +110,6 @@ fn setup_result(
         text.push_str(
             " ChatGPT's cached Codexify connector schema could not be confirmed as current. Open ChatGPT Settings, select the Codexify connector, scroll to the bottom of its tool list, and click Refresh.",
         );
-        if let Some(url) = connector_schema.settings_url.as_deref() {
-            text.push_str(&format!(" Open the connector settings directly: {url}"));
-        }
     }
 
     let output = SetupOutput {
@@ -154,19 +148,12 @@ impl ConversationAuthorization {
                             ]
                         },
                         "refreshRecommended": { "type": "boolean" },
-                        "settingsUrl": {
-                            "anyOf": [
-                                { "type": "string" },
-                                { "type": "null" }
-                            ]
-                        }
                     },
                     "required": [
                         "status",
                         "advertisedVersion",
                         "observedVersion",
-                        "refreshRecommended",
-                        "settingsUrl"
+                        "refreshRecommended"
                     ],
                     "additionalProperties": false
                 },
@@ -244,18 +231,11 @@ impl ConversationAuthorization {
         let update_result = update_check().await;
         let update_check_ms =
             u64::try_from(update_started.elapsed().as_millis()).unwrap_or(u64::MAX);
-        let settings_url = config.chatgpt_connector_settings_url.clone().or_else(|| {
-            context
-                .connector_id
-                .as_deref()
-                .and_then(setup_ui::connector_settings_url)
-        });
         setup_result(
             scope.description(),
             next_step,
             connector_version.as_deref(),
             update_result,
-            settings_url.as_deref(),
             config.debug,
             update_check_ms,
         )
@@ -360,7 +340,6 @@ mod tests {
     use crate::conversation_auth::ConversationAuthorizationStore;
     use crate::diff::DiffCheckpointManager;
     use crate::project_bindings::ConversationIdentity;
-    use crate::self_update::{LatestVersionSource, LatestVersionStatus};
 
     fn assert_model_facing_setup_vocabulary(text: &str) {
         let text = text.to_ascii_lowercase();
@@ -404,7 +383,6 @@ mod tests {
                 latest: Version::new(1, 2, 0),
                 source: crate::self_update::LatestVersionSource::GithubCli,
             }),
-            Some("https://chatgpt.com/g/example/project#settings/Plugins/plugin_example"),
             true,
             17,
         );
@@ -420,6 +398,13 @@ mod tests {
         assert_eq!(structured["update"]["source"], "github_cli");
         assert_eq!(structured["connectorSchema"]["status"], "stale");
         assert_eq!(structured["connectorSchema"]["refreshRecommended"], true);
+        assert!(structured["connectorSchema"].get("settingsUrl").is_none());
+        assert!(
+            ConversationAuthorization::output_schema_value()["properties"]["connectorSchema"]
+                ["properties"]
+                .get("settingsUrl")
+                .is_none()
+        );
         assert_eq!(structured["debug"]["updateCheckMs"], 17);
         assert!(result.joined_text().contains("click Refresh"));
     }
@@ -437,7 +422,6 @@ mod tests {
             "Call `get_agent_brief` before using project tools.",
             None,
             Err("offline".to_string()),
-            None,
             false,
             9,
         );
@@ -455,7 +439,6 @@ mod tests {
     ) -> ToolRequestContext {
         ToolRequestContext {
             conversation: identity,
-            connector_id: None,
             conversation_authorizations: authorizations,
             diff_checkpoints: Arc::new(DiffCheckpointManager::new()),
             artifact_egress: Arc::new(crate::artifact_egress::ArtifactEgressStore::new_at(
@@ -464,43 +447,6 @@ mod tests {
             )),
             cancellation: tokio_util::sync::CancellationToken::new(),
         }
-    }
-
-    #[tokio::test]
-    async fn request_connector_id_supplies_a_direct_settings_link() {
-        let root = tempfile::tempdir().unwrap();
-        let mut config = default_config(root.path().to_path_buf());
-        let auth_token = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-        config.conversation_auth_token = Some(auth_token.into());
-        let store = Arc::new(ConversationAuthorizationStore::new());
-        let session = SessionState::new();
-        let mut request_context = context(None, store, root.path());
-        request_context.connector_id = Some("asdk_app_abc123".to_string());
-
-        let result = ConversationAuthorization
-            .call_with_context_and_update_check(
-                json!({
-                    "ref": auth_token,
-                    "connectorVersion": env!("CARGO_PKG_VERSION")
-                }),
-                &config,
-                &session,
-                &request_context,
-                || async {
-                    Ok(LatestVersionInspection {
-                        status: LatestVersionStatus::UpToDate,
-                        current: Version::parse(env!("CARGO_PKG_VERSION")).unwrap(),
-                        latest: Version::parse(env!("CARGO_PKG_VERSION")).unwrap(),
-                        source: LatestVersionSource::GithubApi,
-                    })
-                },
-            )
-            .await;
-
-        assert_eq!(
-            result.structured_content.as_ref().unwrap()["connectorSchema"]["settingsUrl"],
-            "https://chatgpt.com/#settings/Plugins/plugin_asdk_app_abc123"
-        );
     }
 
     #[tokio::test]

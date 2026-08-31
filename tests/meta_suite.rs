@@ -643,6 +643,7 @@ fn tools_that_need_their_own_structured_content() {
         vec![
             "check_for_updates".to_string(),
             "clock_curr_time".to_string(),
+            "doctor".to_string(),
             "exec_command".to_string(),
             "export_host_file".to_string(),
             "get_environment".to_string(),

@@ -24,7 +24,6 @@ use crate::types::{AppConfig, ToolResult};
 #[derive(Clone)]
 pub struct ToolRequestContext {
     pub conversation: Option<ConversationIdentity>,
-    pub connector_id: Option<String>,
     pub conversation_authorizations: Arc<ConversationAuthorizationStore>,
     pub diff_checkpoints: Arc<DiffCheckpointManager>,
     pub artifact_egress: Arc<ArtifactEgressStore>,

@@ -20,7 +20,7 @@ use rmcp::{
         CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock,
         ExtensionCapabilities, Implementation, InitializeResult, ListResourcesResult,
         ListToolsResult, PaginatedRequestParams, ReadResourceRequestParams, ReadResourceResponse,
-        ReadResourceResult, RequestMetaObject, ServerCapabilities, ServerInfo,
+        ReadResourceResult, ServerCapabilities, ServerInfo,
     },
     service::{RequestContext, RoleServer},
     transport::streamable_http_server::{
@@ -60,23 +60,6 @@ use crate::types::{AppConfig, ToolContent, ToolResult};
 use crate::widget_debug;
 
 const HTTP_SERVER_STOP_TIMEOUT: Duration = Duration::from_secs(10);
-
-fn connector_id_from_request_meta(meta: &RequestMetaObject) -> Option<String> {
-    [
-        "openai/connectorId",
-        "openai/connector_id",
-        "openai/pluginId",
-        "openai/plugin_id",
-        "connectorId",
-        "connector_id",
-        "pluginId",
-        "plugin_id",
-    ]
-    .into_iter()
-    .filter_map(|key| meta.get(key).and_then(Value::as_str))
-    .find(|value| setup_ui::connector_settings_url(value).is_some())
-    .map(str::to_string)
-}
 
 fn should_emit_ordinary_tool_completion(
     tool_log_call: Option<&crate::tool_logging::ToolLogCall>,
@@ -359,12 +342,6 @@ impl ServerHandler for CodexHandler {
                 .as_ref()
                 .and_then(ConversationIdentity::from_request_meta)
         });
-        let connector_id = connector_id_from_request_meta(&context.meta).or_else(|| {
-            request
-                .meta
-                .as_ref()
-                .and_then(connector_id_from_request_meta)
-        });
         let name = request.name.as_ref().to_string();
         let args = request
             .arguments
@@ -373,7 +350,6 @@ impl ServerHandler for CodexHandler {
         let call_id = self.next_tool_call_id.fetch_add(1, Ordering::Relaxed);
         let tool_context = ToolRequestContext {
             conversation: conversation.clone(),
-            connector_id,
             conversation_authorizations: self.conversation_authorizations.clone(),
             diff_checkpoints: self.diff_checkpoints.clone(),
             artifact_egress: self.artifact_egress.clone(),
@@ -1188,22 +1164,6 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn connector_id_is_feature_detected_from_request_metadata() {
-        let meta: RequestMetaObject = serde_json::from_value(json!({
-            "openai/connectorId": "asdk_app_abc123"
-        }))
-        .unwrap();
-        assert_eq!(
-            connector_id_from_request_meta(&meta).as_deref(),
-            Some("asdk_app_abc123")
-        );
-
-        let unrelated: RequestMetaObject =
-            serde_json::from_value(json!({ "openai/session": "session" })).unwrap();
-        assert!(connector_id_from_request_meta(&unrelated).is_none());
-    }
-
     struct NewlyRegisteredTool {
         name: &'static str,
         answer: &'static str,
@@ -1729,7 +1689,9 @@ mod tests {
         assert!(
             setup_contents["text"]
                 .as_str()
-                .is_some_and(|text| text.contains("Run doctor"))
+                .is_some_and(|text| {
+                    text.contains("Check for updates") && text.contains("\"Doctor\"")
+                })
         );
     }
 

@@ -529,7 +529,6 @@ impl PartialMcpServerSpec {
 struct FileConfig {
     work_dir: Option<String>,
     debug: Option<bool>,
-    chatgpt_connector_settings_url: Option<String>,
     api_key: Option<String>,
     conversation_auth_token: Option<String>,
     port: Option<u16>,
@@ -762,7 +761,6 @@ pub fn default_config(work_dir: std::path::PathBuf) -> AppConfig {
         project_clone_dir: work_dir.clone(),
         work_dir,
         debug: false,
-        chatgpt_connector_settings_url: None,
         multi_project: false,
         project_catalog: ProjectCatalogConfig::default(),
         worktrees: default_worktree_config(),
@@ -787,32 +785,6 @@ pub fn default_config(work_dir: std::path::PathBuf) -> AppConfig {
         mcp_servers: HashMap::new(),
         generated_skills_dir: None,
     }
-}
-
-fn resolve_chatgpt_connector_settings_url(value: Option<String>) -> Result<Option<String>, String> {
-    let Some(value) = value else {
-        return Ok(None);
-    };
-    let value = value.trim();
-    if value.is_empty() {
-        return Ok(None);
-    }
-    let parsed = reqwest::Url::parse(value).map_err(|error| {
-        format!("chatgptConnectorSettingsUrl must be an HTTPS URL on https://chatgpt.com: {error}")
-    })?;
-    let supported_host = matches!(parsed.host_str(), Some("chatgpt.com" | "www.chatgpt.com"));
-    if parsed.scheme() != "https"
-        || !supported_host
-        || !parsed.username().is_empty()
-        || parsed.password().is_some()
-        || parsed.port().is_some()
-    {
-        return Err(
-            "chatgptConnectorSettingsUrl must be an HTTPS URL on https://chatgpt.com without credentials or a custom port"
-                .to_string(),
-        );
-    }
-    Ok(Some(value.to_string()))
 }
 
 #[derive(Debug, Default)]
@@ -1498,13 +1470,10 @@ fn load_config_with_announcements(cli: Cli, announce: bool) -> Result<AppConfig,
     artifact_egress.validate()?;
     let output = file.output.unwrap_or_default();
     output.validate()?;
-    let chatgpt_connector_settings_url =
-        resolve_chatgpt_connector_settings_url(file.chatgpt_connector_settings_url)?;
 
     Ok(AppConfig {
         work_dir,
         debug: file.debug.unwrap_or(false),
-        chatgpt_connector_settings_url,
         multi_project: cli.multi_project || file.multi_project.unwrap_or(false),
         project_clone_dir,
         project_catalog,
@@ -1698,7 +1667,7 @@ mod tests {
     }
 
     #[test]
-    fn widget_debug_and_chatgpt_connector_settings_url_are_configurable() {
+    fn widget_debug_is_configurable_and_legacy_settings_url_is_ignored() {
         let root = tempfile::tempdir().unwrap();
         let config_path = root.path().join("codexify.config.json");
         std::fs::write(
@@ -1717,10 +1686,6 @@ mod tests {
         args.work_dir = None;
         let config = load_config(args).unwrap();
         assert!(config.debug);
-        assert_eq!(
-            config.chatgpt_connector_settings_url.as_deref(),
-            Some("https://chatgpt.com/g/example/project#settings/Plugins/plugin_example")
-        );
 
         std::fs::write(
             &config_path,
@@ -1734,9 +1699,7 @@ mod tests {
         .unwrap();
         let mut args = cli(root.path(), &config_path);
         args.work_dir = None;
-        let error = load_config(args).unwrap_err();
-        assert!(error.contains("chatgptConnectorSettingsUrl"));
-        assert!(error.contains("https://chatgpt.com"));
+        assert!(load_config(args).is_ok());
     }
 
     #[test]
