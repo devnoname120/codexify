@@ -13,6 +13,9 @@ env:
 jobs:
   check:
     runs-on: ubuntu-latest
+    env:
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@v5
 
@@ -21,6 +24,8 @@ jobs:
           components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: false
 
       - name: Verify tag matches Cargo.toml version
         run: |
@@ -43,7 +48,6 @@ jobs:
         run: cargo test --all
 
   build:
-    needs: check
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -90,7 +94,9 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.target }}
+          shared-key: release-${{ matrix.target }}
+          cache-bin: false
+          save-if: false
 
       - name: Install cross linker (linux-arm64)
         if: matrix.apt_packages != ''
@@ -136,7 +142,7 @@ jobs:
           path: ${{ env.ARCHIVE }}
 
   deploy-installers:
-    needs: build
+    needs: [check, build]
     permissions:
       contents: read
       pages: write

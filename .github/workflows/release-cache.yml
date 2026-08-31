@@ -1,0 +1,81 @@
+name: Warm release dependency caches
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain
+      - rust-toolchain.toml
+      - .cargo/**
+      - .github/workflows/release.yml
+      - .github/workflows/release-cache.yml
+  schedule:
+    - cron: "17 4 * * 1,4"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-cache-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  warm:
+    name: Warm release dependencies (${{ matrix.name }})
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - name: linux-arm64
+            os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            cross_linker: aarch64-linux-gnu-gcc
+            apt_packages: gcc-aarch64-linux-gnu
+          - name: darwin-x64
+            os: macos-14
+            target: x86_64-apple-darwin
+          - name: darwin-arm64
+            os: macos-14
+            target: aarch64-apple-darwin
+          - name: windows-x64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        id: cache
+        with:
+          shared-key: release-${{ matrix.target }}
+          cache-bin: false
+          lookup-only: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Install cross linker (linux-arm64)
+        if: matrix.apt_packages != '' && steps.cache.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ${{ matrix.apt_packages }}
+
+      - name: Build release dependencies on cache miss
+        if: steps.cache.outputs.cache-hit != 'true'
+        shell: bash
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ matrix.cross_linker }}
+        run: cargo build --release --locked --target ${{ matrix.target }}

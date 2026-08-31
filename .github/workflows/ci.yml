@@ -8,6 +8,8 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
 
 jobs:
   check:
@@ -67,9 +69,6 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Compile platform service integration
-        run: cargo check --all-targets
-
       - name: Test POSIX installer on macOS
         if: runner.os == 'macOS'
         run: ./scripts/test-posix-installer.sh
@@ -80,7 +79,7 @@ jobs:
         run: ./scripts/test-windows-installer.ps1
 
       - name: Test service contracts
-        run: cargo test service
+        run: cargo test --all-targets service
 
       - name: Test self-update contracts
         run: cargo test self_update
