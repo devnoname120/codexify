@@ -52,13 +52,13 @@ impl SelfUpdate {
             SelfUpdateStatus::Scheduled => {
                 if receipt.service_restart {
                     format!(
-                        "Codexify {} is verified and staged. Detached update {} will stop and restart the service after this response is delivered; the MCP connection will disconnect temporarily. Follow progress with `codexify service logs -f`.",
+                        "Codexify {} is verified and staged. Detached update {} will stop and restart the service after this response is delivered; the MCP connection will disconnect temporarily. Follow progress with `codexify service logs -f`. After Codexify restarts, open ChatGPT Settings, select the Codexify connector, scroll to the bottom of its tool list, and click Refresh so ChatGPT reloads the connector tools.",
                         receipt.target_version,
                         receipt.update_id.as_deref().unwrap_or("<unknown>")
                     )
                 } else {
                     format!(
-                        "Codexify {} is verified and staged. Detached update {} will replace the installed executable after this response is delivered. The current foreground process will continue running the previous version until it is restarted.",
+                        "Codexify {} is verified and staged. Detached update {} will replace the installed executable after this response is delivered. The current foreground process will continue running the previous version until it is restarted. After restarting Codexify, open ChatGPT Settings, select the Codexify connector, scroll to the bottom of its tool list, and click Refresh so ChatGPT reloads the connector tools.",
                         receipt.target_version,
                         receipt.update_id.as_deref().unwrap_or("<unknown>")
                     )
@@ -100,7 +100,7 @@ impl Tool for SelfUpdate {
     }
 
     fn description(&self) -> String {
-        "Update the installed Codexify executable to the latest verified GitHub release. Call only after the user explicitly requests an update and pass confirm=true. The release is downloaded, checksum-verified, extracted, and probed before a detached OS-managed worker is scheduled. When Codexify is service-supervised, that worker runs outside the service kill boundary, waits for this tool response to be delivered, stops the service, atomically replaces the executable with rollback protection, and starts the service again. The MCP connection will disconnect temporarily. Progress is written to the service log.".to_string()
+        "Update the installed Codexify executable to the latest verified GitHub release. Call only after the user explicitly requests an update and pass confirm=true. The release is downloaded, checksum-verified, extracted, and probed before a detached OS-managed worker is scheduled. When Codexify is service-supervised, that worker runs outside the service kill boundary, waits for this tool response to be delivered, stops the service, atomically replaces the executable with rollback protection, and starts the service again. The MCP connection will disconnect temporarily. Progress is written to the service log. After a scheduled update, explicitly tell the user to open ChatGPT Settings, select the Codexify connector, scroll to the bottom of its tool list, and click Refresh after Codexify restarts so ChatGPT reloads the connector tools.".to_string()
     }
 
     fn input_schema(&self) -> Value {
@@ -158,6 +158,7 @@ mod tests {
         let tool = SelfUpdate;
         assert_eq!(tool.input_schema()["properties"]["confirm"]["const"], true);
         assert_eq!(tool.input_schema()["required"], json!(["confirm"]));
+        assert!(tool.description().contains("click Refresh"));
         let output = tool.output_schema().unwrap();
         assert_eq!(output["additionalProperties"], false);
         assert_eq!(output["properties"]["status"]["enum"][0], "scheduled");
@@ -201,5 +202,18 @@ mod tests {
             .unwrap();
         assert!(validator.is_valid(result.structured_content.as_ref().unwrap()));
         assert!(result.joined_text().contains("disconnect temporarily"));
+        assert!(result.joined_text().contains(
+            "open ChatGPT Settings, select the Codexify connector, scroll to the bottom of its tool list, and click Refresh"
+        ));
+
+        let foreground_result = SelfUpdate::result(SelfUpdateReceipt {
+            status: SelfUpdateStatus::Scheduled,
+            current_version: "1.0.0".to_string(),
+            target_version: "2.0.0".to_string(),
+            update_id: Some("def456".to_string()),
+            service_restart: false,
+            log_path: "/tmp/codexify.log".to_string(),
+        });
+        assert!(foreground_result.joined_text().contains("click Refresh"));
     }
 }

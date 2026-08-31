@@ -396,6 +396,10 @@ starts the service again. A failed replacement is rolled back before restart. Th
 MCP connection therefore disconnects temporarily after a successful scheduling
 response.
 
+After Codexify restarts, open ChatGPT Settings, select the Codexify connector,
+scroll to the bottom of its tool list, and click **Refresh** so ChatGPT reloads
+the connector tools exposed by the updated server.
+
 Progress and failures are appended to the normal rotating service log and can be
 followed with `codexify service logs -f`. A fixed update lock rejects concurrent
 updates. Self-update refuses source-tree or nonstandard executable locations;
