@@ -10,10 +10,10 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use axum::{Router, extract::State, response::Json, routing::get};
+use axum::{Router, extract::State, http::StatusCode, response::Json, routing::get};
 use rmcp::{
     ErrorData as McpError, ServerHandler,
     model::{
@@ -610,8 +610,24 @@ impl ServerHandler for CodexHandler {
     }
 }
 
-async fn health(State(tool_count): State<usize>) -> Json<Value> {
-    Json(json!({ "status": "ok", "tools": tool_count }))
+#[derive(Clone)]
+struct HealthState {
+    tool_count: usize,
+    ready: Arc<AtomicBool>,
+}
+
+async fn health(State(state): State<HealthState>) -> (StatusCode, Json<Value>) {
+    if state.ready.load(Ordering::Acquire) {
+        (
+            StatusCode::OK,
+            Json(json!({ "status": "ok", "tools": state.tool_count })),
+        )
+    } else {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "status": "starting", "tools": state.tool_count })),
+        )
+    }
 }
 
 /// Build the axum app and serve it. Ports `startHttpServer`.
@@ -696,6 +712,7 @@ pub async fn start_http_server(mut config: AppConfig) -> anyhow::Result<()> {
 
     let tools = Arc::new(all_tools);
     let tool_count = tools.len();
+    let ready = Arc::new(AtomicBool::new(!native_tunnel));
 
     // Streamable HTTP transport config. `json_response` mirrors the TS
     // `enableJsonResponse: true` so simple request/response tools return
@@ -751,7 +768,10 @@ pub async fn start_http_server(mut config: AppConfig) -> anyhow::Result<()> {
 
     let app = Router::new()
         .route("/health", get(health))
-        .with_state(tool_count)
+        .with_state(HealthState {
+            tool_count,
+            ready: ready.clone(),
+        })
         .nest_service("/mcp", service)
         .layer(axum::middleware::from_fn_with_state(
             config.clone(),
@@ -847,7 +867,7 @@ pub async fn start_http_server(mut config: AppConfig) -> anyhow::Result<()> {
     }
 
     println!("Exposure: loopback only; starting OpenAI Secure MCP Tunnel");
-    run_with_openai_tunnel(listener, app, config, mcp_cancellation).await
+    run_with_openai_tunnel(listener, app, config, mcp_cancellation, ready).await
 }
 
 /// What ended a supervision cycle for a running tunnel. Terminal events (server
@@ -878,6 +898,7 @@ async fn run_with_openai_tunnel(
     app: Router,
     config: Arc<AppConfig>,
     mcp_cancellation: CancellationToken,
+    ready: Arc<AtomicBool>,
 ) -> anyhow::Result<()> {
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     let mut shutdown_tx = Some(shutdown_tx);
@@ -922,6 +943,7 @@ async fn run_with_openai_tunnel(
         }
     };
 
+    ready.store(true, Ordering::Release);
     println!("OpenAI Secure MCP Tunnel: ready");
     if config
         .openai_tunnel
@@ -984,9 +1006,11 @@ async fn run_with_openai_tunnel(
             SuperviseEvent::HealthTick => match tunnel.check_health(&health_client).await {
                 TunnelHealth::Healthy => {
                     consecutive_failures = 0;
+                    ready.store(true, Ordering::Release);
                     continue;
                 }
                 TunnelHealth::Unhealthy(detail) | TunnelHealth::Unreachable(detail) => {
+                    ready.store(false, Ordering::Release);
                     consecutive_failures += 1;
                     tracing::warn!(
                         "OpenAI tunnel health probe failed ({consecutive_failures}/{TUNNEL_HEALTH_FAIL_THRESHOLD}): {detail}"
@@ -1003,6 +1027,7 @@ async fn run_with_openai_tunnel(
 
         // Restart, bounded by the circuit breaker.
         consecutive_failures = 0;
+        ready.store(false, Ordering::Release);
         let _ = tunnel.shutdown().await;
         tracing::warn!("OpenAI tunnel down; restarting: {restart_reason}");
 
@@ -1051,6 +1076,7 @@ async fn run_with_openai_tunnel(
                     Ok(new_tunnel) => {
                         tunnel = new_tunnel;
                         health_interval.reset();
+                        ready.store(true, Ordering::Release);
                         println!(
                             "OpenAI Secure MCP Tunnel: restarted; readiness {}/readyz",
                             tunnel.health_url()
@@ -1945,5 +1971,23 @@ mod tests {
         assert_eq!(restart_backoff(4), Duration::from_secs(4));
         assert_eq!(restart_backoff(5), TUNNEL_RESTART_BACKOFF_MAX);
         assert_eq!(restart_backoff(100), TUNNEL_RESTART_BACKOFF_MAX);
+    }
+
+    #[tokio::test]
+    async fn health_reports_tunnel_readiness() {
+        let ready = Arc::new(AtomicBool::new(false));
+        let state = HealthState {
+            tool_count: 38,
+            ready: ready.clone(),
+        };
+
+        let (status, Json(payload)) = health(State(state.clone())).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(payload, json!({ "status": "starting", "tools": 38 }));
+
+        ready.store(true, Ordering::Release);
+        let (status, Json(payload)) = health(State(state)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(payload, json!({ "status": "ok", "tools": 38 }));
     }
 }

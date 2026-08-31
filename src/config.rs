@@ -219,6 +219,9 @@ pub enum ServiceCommand {
     /// Run the service supervisor under the native service manager.
     #[command(hide = true)]
     Run,
+    /// Wait until the restarted service and its tunnel are ready.
+    #[command(hide = true)]
+    WaitReady(ServiceWaitReadyArgs),
 }
 
 #[derive(Args, Debug)]
@@ -226,6 +229,15 @@ pub struct ServiceLogsArgs {
     /// Continue printing new log output until interrupted.
     #[arg(short = 'f', long)]
     pub follow: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct ServiceWaitReadyArgs {
+    #[arg(long)]
+    pub port: u16,
+
+    #[arg(long = "timeout-ms")]
+    pub timeout_ms: u64,
 }
 
 #[derive(Args, Debug)]
@@ -2521,6 +2533,28 @@ mod tests {
             panic!("service logs subcommand was not parsed");
         };
         assert!(args.follow);
+    }
+
+    #[test]
+    fn service_wait_ready_cli_accepts_internal_readiness_arguments() {
+        let parsed = Cli::try_parse_from([
+            "codexify",
+            "service",
+            "wait-ready",
+            "--port",
+            "43123",
+            "--timeout-ms",
+            "60000",
+        ])
+        .unwrap();
+        let Some(CliCommand::Service {
+            command: ServiceCommand::WaitReady(args),
+        }) = parsed.command
+        else {
+            panic!("service wait-ready subcommand was not parsed");
+        };
+        assert_eq!(args.port, 43123);
+        assert_eq!(args.timeout_ms, 60_000);
     }
 
     #[test]

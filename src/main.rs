@@ -215,5 +215,8 @@ async fn run_service(cli: &Cli, command: ServiceCommand) -> anyhow::Result<()> {
             let config = config_path_for_service(cli).map_err(anyhow::Error::msg)?;
             service::run_supervisor(config).await
         }
+        ServiceCommand::WaitReady(args) => {
+            service::wait_ready(args.port, std::time::Duration::from_millis(args.timeout_ms)).await
+        }
     }
 }

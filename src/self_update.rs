@@ -40,6 +40,7 @@ const LATEST_VERSION_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 const LATEST_VERSION_ERROR_CACHE_TTL: Duration = Duration::from_secs(30);
 const BINARY_PROBE_TIMEOUT: Duration = Duration::from_secs(20);
 const UPDATE_DELAY_SECONDS: u64 = 10;
+const SERVICE_READY_TIMEOUT_MS: u64 = 60_000;
 const UPDATE_LOCK_FILE: &str = "update.lock";
 const UPDATE_STATUS_DIR: &str = "status";
 
@@ -722,13 +723,19 @@ fn select_changelog_sections(
     (!selected.is_empty()).then(|| format!("{selected}\n"))
 }
 
-pub async fn trigger() -> anyhow::Result<SelfUpdateReceipt> {
-    trigger_from(ReleaseSource::default(), env!("CARGO_PKG_VERSION")).await
+pub async fn trigger(service_port: u16) -> anyhow::Result<SelfUpdateReceipt> {
+    trigger_from(
+        ReleaseSource::default(),
+        env!("CARGO_PKG_VERSION"),
+        service_port,
+    )
+    .await
 }
 
 async fn trigger_from(
     source: ReleaseSource,
     current_version_text: &str,
+    service_port: u16,
 ) -> anyhow::Result<SelfUpdateReceipt> {
     let current_version =
         Version::parse(current_version_text).context("parse the running Codexify version")?;
@@ -815,7 +822,10 @@ async fn trigger_from(
         &log_path,
         &current_version,
         &latest.version,
-        service_restart,
+        ServiceRestartConfig {
+            enabled: service_restart,
+            port: service_port,
+        },
     )?;
     write_private_bytes(&workspace.worker_path, worker.as_bytes(), false)?;
 
@@ -1300,13 +1310,19 @@ fn append_update_event(path: &Path, message: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ServiceRestartConfig {
+    enabled: bool,
+    port: u16,
+}
+
 fn worker_script(
     workspace: &UpdateWorkspace,
     target: &Path,
     log_path: &Path,
     from_version: &Version,
     version: &Version,
-    restart_service: bool,
+    service_restart: ServiceRestartConfig,
 ) -> anyhow::Result<String> {
     #[cfg(unix)]
     {
@@ -1321,7 +1337,7 @@ fn worker_script(
             log_path,
             from_version,
             version,
-            restart_service,
+            service_restart,
             &launchd_label,
         )
     }
@@ -1333,7 +1349,7 @@ fn worker_script(
             log_path,
             from_version,
             version,
-            restart_service,
+            service_restart,
             &windows_task_name(&workspace.id),
         )
     }
@@ -1345,7 +1361,7 @@ fn worker_script(
             log_path,
             from_version,
             version,
-            restart_service,
+            service_restart,
         );
         bail!("Codexify self-update is supported only on Linux, macOS, and Windows")
     }
@@ -1358,7 +1374,7 @@ fn unix_worker_script(
     log_path: &Path,
     from_version: &Version,
     version: &Version,
-    restart_service: bool,
+    service_restart: ServiceRestartConfig,
     launchd_label: &str,
 ) -> anyhow::Result<String> {
     let target = sh_path(target)?;
@@ -1372,7 +1388,8 @@ fn unix_worker_script(
     let from_version = sh_quote(&from_version.to_string());
     let version = sh_quote(&version.to_string());
     let launchd_label = sh_quote(launchd_label);
-    let restart_service = if restart_service { 1 } else { 0 };
+    let restart_service_enabled = if service_restart.enabled { 1 } else { 0 };
+    let service_port = service_restart.port;
 
     Ok(format!(
         r#"#!/bin/sh
@@ -1390,7 +1407,9 @@ LOG={log}
 UPDATE_ID={update_id}
 FROM_VERSION={from_version}
 VERSION={version}
-RESTART_SERVICE={restart_service}
+RESTART_SERVICE={restart_service_enabled}
+SERVICE_PORT={service_port}
+SERVICE_READY_TIMEOUT_MS={SERVICE_READY_TIMEOUT_MS}
 LAUNCHD_LABEL={launchd_label}
 STOPPED=0
 UPDATED=0
@@ -1450,7 +1469,14 @@ finish() {{
         fi
         if [ -x "$service_executable" ]; then
             if "$service_executable" service enable >> "$LOG" 2>&1; then
-                log 'restarted the Codexify service'
+                if "$service_executable" service wait-ready --port "$SERVICE_PORT" --timeout-ms "$SERVICE_READY_TIMEOUT_MS" >> "$LOG" 2>&1; then
+                    log 'restarted the Codexify service and verified readiness'
+                else
+                    FAILURE_CODE=service_restart_failed
+                    FAILURE_DETAIL='The Codexify service did not restart and become healthy.'
+                    log 'the restarted Codexify service did not become healthy; run `codexify service enable` manually'
+                    status=1
+                fi
             else
                 FAILURE_CODE=service_restart_failed
                 FAILURE_DETAIL='The Codexify service could not be restarted.'
@@ -1562,7 +1588,7 @@ fn windows_worker_script(
     log_path: &Path,
     from_version: &Version,
     version: &Version,
-    restart_service: bool,
+    service_restart: ServiceRestartConfig,
     task_name: &str,
 ) -> anyhow::Result<String> {
     let target = powershell_path(target)?;
@@ -1576,7 +1602,12 @@ fn windows_worker_script(
     let from_version = powershell_quote(&from_version.to_string());
     let version = powershell_quote(&version.to_string());
     let task_name = powershell_quote(task_name);
-    let restart_service = if restart_service { "$true" } else { "$false" };
+    let restart_service_enabled = if service_restart.enabled {
+        "$true"
+    } else {
+        "$false"
+    };
+    let service_port = service_restart.port;
 
     Ok(format!(
         r#"Set-StrictMode -Version Latest
@@ -1593,7 +1624,9 @@ $UpdateId = {update_id}
 $FromVersion = {from_version}
 $Version = {version}
 $TaskName = {task_name}
-$RestartService = {restart_service}
+$RestartService = {restart_service_enabled}
+$ServicePort = {service_port}
+$ServiceReadyTimeoutMs = {SERVICE_READY_TIMEOUT_MS}
 $Stopped = $false
 $Updated = $false
 $RolledBack = $false
@@ -1705,11 +1738,13 @@ try {{
             try {{
                 & $ServiceExecutable service enable *>> $Log
                 if ($LASTEXITCODE -ne 0) {{ throw 'service enable returned a failure status' }}
-                Write-UpdateLog 'restarted the Codexify service'
+                & $ServiceExecutable service wait-ready --port $ServicePort --timeout-ms $ServiceReadyTimeoutMs *>> $Log
+                if ($LASTEXITCODE -ne 0) {{ throw 'service readiness probe returned a failure status' }}
+                Write-UpdateLog 'restarted the Codexify service and verified readiness'
             }} catch {{
                 $FailureCode = 'service_restart_failed'
-                $FailureDetail = 'The Codexify service could not be restarted.'
-                Write-UpdateLog 'failed to restart the Codexify service; run `codexify service enable` manually'
+                $FailureDetail = 'The Codexify service did not restart and become healthy.'
+                Write-UpdateLog 'failed to restart or verify the Codexify service; run `codexify service enable` manually'
                 $ExitCode = 1
             }}
         }} else {{
@@ -2334,12 +2369,20 @@ mod tests {
             &root.join("codexify.log"),
             &Version::new(1, 0, 0),
             &Version::new(2, 0, 0),
-            true,
+            ServiceRestartConfig {
+                enabled: true,
+                port: 43123,
+            },
             "dev.codexify.update.test",
         )
         .unwrap();
         assert!(script.contains("service disable"));
         assert!(script.contains("service enable"));
+        assert!(script.contains("SERVICE_PORT=43123"));
+        assert!(script.contains("SERVICE_READY_TIMEOUT_MS=60000"));
+        assert!(script.contains(
+            "service wait-ready --port \"$SERVICE_PORT\" --timeout-ms \"$SERVICE_READY_TIMEOUT_MS\""
+        ));
         assert!(script.contains("mv -f \"$STAGED\" \"$TARGET\""));
         assert!(script.contains("restored the previous Codexify executable"));
         assert!(script.contains(&format!("sleep {UPDATE_DELAY_SECONDS}")));
@@ -2363,11 +2406,19 @@ mod tests {
             &root.join("codexify.log"),
             &Version::new(1, 0, 0),
             &Version::new(2, 0, 0),
-            true,
+            ServiceRestartConfig {
+                enabled: true,
+                port: 43123,
+            },
             "Codexify Update test",
         )
         .unwrap();
 
+        assert!(script.contains("$ServicePort = 43123"));
+        assert!(script.contains("$ServiceReadyTimeoutMs = 60000"));
+        assert!(script.contains(
+            "service wait-ready --port $ServicePort --timeout-ms $ServiceReadyTimeoutMs"
+        ));
         assert!(script.contains("Write-UpdateStatus 'installing'"));
         assert!(script.contains("Write-UpdateStatus 'validating'"));
         assert!(script.contains("Write-UpdateStatus 'restarting'"));
@@ -2407,7 +2458,10 @@ mod tests {
             &root.path().join("codexify.log"),
             &Version::new(1, 0, 0),
             &Version::new(2, 0, 0),
-            true,
+            ServiceRestartConfig {
+                enabled: true,
+                port: 3000,
+            },
             &task_name,
         )
         .unwrap();

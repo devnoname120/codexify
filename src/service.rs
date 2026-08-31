@@ -32,6 +32,16 @@ const RESTART_MIN_DELAY: Duration = Duration::from_secs(2);
 const RESTART_MAX_DELAY: Duration = Duration::from_secs(60);
 const STABLE_RUNTIME: Duration = Duration::from_secs(60);
 const CONFIG_RETRY_DELAY: Duration = Duration::from_secs(5);
+const SERVICE_READY_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const SERVICE_READY_REQUEST_TIMEOUT: Duration = Duration::from_millis(500);
+const SERVICE_READY_MAX_BODY_BYTES: usize = 4096;
+const SERVICE_READY_MAX_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+#[cfg(target_os = "macos")]
+const LAUNCHD_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
+#[cfg(target_os = "macos")]
+const LAUNCHD_TRANSITION_RETRY_DELAY: Duration = Duration::from_millis(250);
+#[cfg(target_os = "macos")]
+const LAUNCHD_TRANSITION_MAX_ATTEMPTS: usize = 80;
 
 #[derive(Debug, Clone, Copy)]
 struct SupervisorPolicy {
@@ -39,6 +49,13 @@ struct SupervisorPolicy {
     restart_max_delay: Duration,
     stable_runtime: Duration,
     config_retry_delay: Duration,
+}
+
+#[cfg(any(target_os = "macos", test))]
+#[derive(Debug, PartialEq, Eq)]
+enum LaunchctlAttempt {
+    Complete(String),
+    InProgress(String),
 }
 
 const SUPERVISOR_POLICY: SupervisorPolicy = SupervisorPolicy {
@@ -389,6 +406,89 @@ pub fn status() -> anyhow::Result<ServiceStatus> {
     platform_status()
 }
 
+pub async fn wait_ready(port: u16, timeout: Duration) -> anyhow::Result<()> {
+    if timeout.is_zero() || timeout > SERVICE_READY_MAX_TIMEOUT {
+        bail!(
+            "service readiness timeout must be between 1 millisecond and {} seconds",
+            SERVICE_READY_MAX_TIMEOUT.as_secs()
+        );
+    }
+
+    let url = format!("http://127.0.0.1:{port}/health");
+    let client = crate::tls::client_builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(SERVICE_READY_REQUEST_TIMEOUT)
+        .build()
+        .context("build the service readiness client")?;
+    let deadline = Instant::now() + timeout;
+    let mut last_detail = "the health endpoint has not responded".to_string();
+
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            bail!(
+                "Codexify service did not become healthy at {url} within {} milliseconds: {last_detail}",
+                timeout.as_millis()
+            );
+        }
+
+        let probe = async {
+            let mut response = client.get(&url).send().await?;
+            if !response.status().is_success() {
+                return Ok::<Result<(), String>, reqwest::Error>(Err(format!(
+                    "health endpoint returned {}",
+                    response.status()
+                )));
+            }
+
+            let mut body = Vec::new();
+            while let Some(chunk) = response.chunk().await? {
+                if body.len().saturating_add(chunk.len()) > SERVICE_READY_MAX_BODY_BYTES {
+                    return Ok(Err(format!(
+                        "health endpoint response exceeds {SERVICE_READY_MAX_BODY_BYTES} bytes"
+                    )));
+                }
+                body.extend_from_slice(&chunk);
+            }
+            let payload: serde_json::Value = match serde_json::from_slice(&body) {
+                Ok(payload) => payload,
+                Err(error) => {
+                    return Ok(Err(format!(
+                        "health endpoint returned invalid JSON: {error}"
+                    )));
+                }
+            };
+            if payload.get("status").and_then(serde_json::Value::as_str) == Some("ok") {
+                Ok(Ok(()))
+            } else {
+                Ok(Err(
+                    "health endpoint has not reported status `ok`".to_string()
+                ))
+            }
+        };
+
+        match tokio::time::timeout(remaining.min(SERVICE_READY_REQUEST_TIMEOUT), probe).await {
+            Ok(Ok(Ok(()))) => return Ok(()),
+            Ok(Ok(Err(detail))) => {
+                last_detail = detail;
+            }
+            Ok(Err(error)) => {
+                last_detail = error.to_string();
+            }
+            Err(_) => {
+                last_detail = "health probe timed out".to_string();
+            }
+        }
+
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            continue;
+        }
+        tokio::time::sleep(remaining.min(SERVICE_READY_POLL_INTERVAL)).await;
+    }
+}
+
 fn ensure_log_directory(home: &Path) -> anyhow::Result<PathBuf> {
     let directory = home.join(".codexify").join("logs");
     fs::create_dir_all(&directory)
@@ -450,6 +550,141 @@ fn bounded_command_text(bytes: &[u8]) -> String {
 fn best_effort(mut command: StdCommand) {
     command.stdout(Stdio::null()).stderr(Stdio::null());
     let _ = command.status();
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn launchd_bootout_arguments(target: &str) -> Vec<&str> {
+    vec!["bootout", "--wait", target]
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn retry_launchctl_transition<Run, Pause>(
+    action: &str,
+    max_attempts: usize,
+    retry_delay: Duration,
+    mut run: Run,
+    mut pause: Pause,
+) -> anyhow::Result<String>
+where
+    Run: FnMut() -> anyhow::Result<LaunchctlAttempt>,
+    Pause: FnMut(Duration),
+{
+    if max_attempts == 0 {
+        bail!("{action} has no permitted launchctl attempts");
+    }
+
+    for attempt in 1..=max_attempts {
+        match run()? {
+            LaunchctlAttempt::Complete(output) => return Ok(output),
+            LaunchctlAttempt::InProgress(_) if attempt < max_attempts => {
+                pause(retry_delay);
+            }
+            LaunchctlAttempt::InProgress(detail) => {
+                bail!("{action} is still in progress after {max_attempts} attempts: {detail}");
+            }
+        }
+    }
+    unreachable!()
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn start_launchd_service<Loaded, Restart, Bootstrap>(
+    mut is_loaded: Loaded,
+    mut restart: Restart,
+    mut bootstrap: Bootstrap,
+) -> anyhow::Result<()>
+where
+    Loaded: FnMut() -> anyhow::Result<bool>,
+    Restart: FnMut() -> anyhow::Result<()>,
+    Bootstrap: FnMut() -> anyhow::Result<()>,
+{
+    if is_loaded()? {
+        match restart() {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                if is_loaded()? {
+                    return Err(error);
+                }
+            }
+        }
+    }
+
+    match bootstrap() {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            if !is_loaded()? {
+                return Err(error);
+            }
+            restart().with_context(|| {
+                format!("restart after a concurrent launchd bootstrap ({error:#})")
+            })
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn command_output_with_timeout(
+    mut command: StdCommand,
+    action: &str,
+    timeout: Duration,
+) -> anyhow::Result<std::process::Output> {
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let program = command.get_program().to_string_lossy().into_owned();
+    let mut child = command
+        .spawn()
+        .with_context(|| format!("{action}: start {program}"))?;
+    let deadline = std::time::Instant::now() + timeout;
+
+    loop {
+        if child
+            .try_wait()
+            .with_context(|| format!("{action}: wait for {program}"))?
+            .is_some()
+        {
+            return child
+                .wait_with_output()
+                .with_context(|| format!("{action}: collect {program} output"));
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!("{action} timed out after {} seconds", timeout.as_secs_f64());
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn launchctl_output<Configure>(action: &str, configure: Configure) -> anyhow::Result<String>
+where
+    Configure: Fn(&mut StdCommand),
+{
+    retry_launchctl_transition(
+        action,
+        LAUNCHD_TRANSITION_MAX_ATTEMPTS,
+        LAUNCHD_TRANSITION_RETRY_DELAY,
+        || {
+            let mut command = StdCommand::new("launchctl");
+            configure(&mut command);
+            let output = command_output_with_timeout(command, action, LAUNCHD_COMMAND_TIMEOUT)?;
+            let stdout = bounded_command_text(&output.stdout);
+            if output.status.success() {
+                return Ok(LaunchctlAttempt::Complete(stdout));
+            }
+            let stderr = bounded_command_text(&output.stderr);
+            let detail = if !stderr.is_empty() { stderr } else { stdout };
+            let detail = if detail.is_empty() {
+                "launchctl returned no diagnostic output".to_string()
+            } else {
+                detail
+            };
+            if output.status.code() == Some(libc::EALREADY) {
+                return Ok(LaunchctlAttempt::InProgress(detail));
+            }
+            bail!("{action} failed with {}: {detail}", output.status)
+        },
+        std::thread::sleep,
+    )
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -797,13 +1032,27 @@ fn platform_status() -> anyhow::Result<ServiceStatus> {
 
 #[cfg(target_os = "macos")]
 fn launchd_is_loaded(target: &str) -> anyhow::Result<bool> {
-    let status = StdCommand::new("launchctl")
-        .args(["print", target])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .context("query the Codexify launch agent")?;
-    Ok(status.success())
+    for attempt in 1..=LAUNCHD_TRANSITION_MAX_ATTEMPTS {
+        let status = StdCommand::new("launchctl")
+            .args(["print", target])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .context("query the Codexify launch agent")?;
+        if status.success() {
+            return Ok(true);
+        }
+        if status.code() != Some(libc::EALREADY) {
+            return Ok(false);
+        }
+        if attempt == LAUNCHD_TRANSITION_MAX_ATTEMPTS {
+            bail!(
+                "query the Codexify launch agent is still in progress after {LAUNCHD_TRANSITION_MAX_ATTEMPTS} attempts"
+            );
+        }
+        std::thread::sleep(LAUNCHD_TRANSITION_RETRY_DELAY);
+    }
+    unreachable!()
 }
 
 #[cfg(target_os = "macos")]
@@ -811,15 +1060,43 @@ fn launchd_bootout_if_loaded(target: &str) -> anyhow::Result<()> {
     if !launchd_is_loaded(target)? {
         return Ok(());
     }
-    command_output(
-        {
-            let mut command = StdCommand::new("launchctl");
-            command.args(["bootout", target]);
-            command
-        },
-        "stop the Codexify launch agent",
-    )?;
+    let result = launchctl_output("stop the Codexify launch agent", |command| {
+        command.args(launchd_bootout_arguments(target));
+    });
+    if let Err(error) = result
+        && launchd_is_loaded(target)?
+    {
+        return Err(error);
+    }
+    if launchd_is_loaded(target)? {
+        bail!("the Codexify launch agent remained loaded after bootout completed");
+    }
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn launchd_enable_and_start(plist_path: &Path, target: &str) -> anyhow::Result<()> {
+    launchctl_output("enable the Codexify launch agent", |command| {
+        command.args(["enable", target]);
+    })?;
+    start_launchd_service(
+        || launchd_is_loaded(target),
+        || {
+            launchctl_output("restart the Codexify launch agent", |command| {
+                command.args(["kickstart", "-k", target]);
+            })
+            .map(drop)
+        },
+        || {
+            launchctl_output("load the Codexify launch agent", |command| {
+                command
+                    .arg("bootstrap")
+                    .arg(launchd_domain())
+                    .arg(plist_path);
+            })
+            .map(drop)
+        },
+    )
 }
 
 #[cfg(target_os = "macos")]
@@ -828,34 +1105,7 @@ fn platform_install(spec: &ServiceSpec) -> anyhow::Result<()> {
     let target = launchd_target();
     launchd_bootout_if_loaded(&target)?;
     write_definition(&plist_path, &launchd_plist(spec), 0o600)?;
-
-    command_output(
-        {
-            let mut command = StdCommand::new("launchctl");
-            command.args(["enable", &target]);
-            command
-        },
-        "enable the Codexify launch agent",
-    )?;
-    command_output(
-        {
-            let mut command = StdCommand::new("launchctl");
-            command
-                .arg("bootstrap")
-                .arg(launchd_domain())
-                .arg(&plist_path);
-            command
-        },
-        "load the Codexify launch agent",
-    )?;
-    command_output(
-        {
-            let mut command = StdCommand::new("launchctl");
-            command.args(["kickstart", "-k", &target]);
-            command
-        },
-        "start the Codexify launch agent",
-    )?;
+    launchd_enable_and_start(&plist_path, &target)?;
     Ok(())
 }
 
@@ -870,36 +1120,7 @@ fn platform_enable() -> anyhow::Result<()> {
         bail!("Codexify service is not installed; run `codexify service install`");
     }
     let target = launchd_target();
-    command_output(
-        {
-            let mut command = StdCommand::new("launchctl");
-            command.args(["enable", &target]);
-            command
-        },
-        "enable the Codexify launch agent",
-    )?;
-
-    if !launchd_is_loaded(&target)? {
-        command_output(
-            {
-                let mut command = StdCommand::new("launchctl");
-                command
-                    .arg("bootstrap")
-                    .arg(launchd_domain())
-                    .arg(&plist_path);
-                command
-            },
-            "load the Codexify launch agent",
-        )?;
-    }
-    command_output(
-        {
-            let mut command = StdCommand::new("launchctl");
-            command.args(["kickstart", "-k", &target]);
-            command
-        },
-        "start the Codexify launch agent",
-    )?;
+    launchd_enable_and_start(&plist_path, &target)?;
     Ok(())
 }
 
@@ -914,14 +1135,9 @@ fn platform_disable() -> anyhow::Result<()> {
         bail!("Codexify service is not installed");
     }
     let target = launchd_target();
-    command_output(
-        {
-            let mut command = StdCommand::new("launchctl");
-            command.args(["disable", &target]);
-            command
-        },
-        "disable the Codexify launch agent",
-    )?;
+    launchctl_output("disable the Codexify launch agent", |command| {
+        command.args(["disable", &target]);
+    })?;
     launchd_bootout_if_loaded(&target)?;
     Ok(())
 }
@@ -1774,6 +1990,200 @@ mod tests {
         assert!(unit.contains("codexify & test"));
         assert!(unit.contains("$$HOME"));
         assert_eq!(powershell_quote("a'b"), "'a''b'");
+    }
+
+    #[tokio::test]
+    async fn service_readiness_accepts_healthy_loopback_endpoint() {
+        let app = axum::Router::new().route(
+            "/health",
+            axum::routing::get(|| async { axum::Json(serde_json::json!({ "status": "ok" })) }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        wait_ready(port, Duration::from_secs(1)).await.unwrap();
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn service_readiness_rejects_unready_health_payload() {
+        let app = axum::Router::new().route(
+            "/health",
+            axum::routing::get(|| async {
+                axum::Json(serde_json::json!({ "status": "starting" }))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let error = wait_ready(port, Duration::from_millis(100))
+            .await
+            .unwrap_err()
+            .to_string();
+        server.abort();
+        assert!(error.contains("did not become healthy"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn service_readiness_timeout_is_bounded_when_endpoint_never_responds() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let started = Instant::now();
+
+        let error = wait_ready(port, Duration::from_millis(100))
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(error.contains("did not become healthy"), "{error}");
+    }
+
+    #[test]
+    fn launchd_bootout_waits_for_teardown_completion() {
+        let target = "gui/501/dev.codexify.service";
+        assert_eq!(
+            launchd_bootout_arguments(target),
+            vec!["bootout", "--wait", target]
+        );
+    }
+
+    #[test]
+    fn launchctl_transition_retries_operation_in_progress() {
+        let mut attempts = 0;
+        let mut pauses = 0;
+        let result = retry_launchctl_transition(
+            "load the Codexify launch agent",
+            4,
+            Duration::from_millis(1),
+            || {
+                attempts += 1;
+                if attempts < 3 {
+                    Ok(LaunchctlAttempt::InProgress(
+                        "Operation already in progress".to_string(),
+                    ))
+                } else {
+                    Ok(LaunchctlAttempt::Complete("loaded".to_string()))
+                }
+            },
+            |_| pauses += 1,
+        )
+        .unwrap();
+
+        assert_eq!(result, "loaded");
+        assert_eq!(attempts, 3);
+        assert_eq!(pauses, 2);
+    }
+
+    #[test]
+    fn launchctl_transition_is_bounded() {
+        let mut attempts = 0;
+        let error = retry_launchctl_transition(
+            "load the Codexify launch agent",
+            3,
+            Duration::ZERO,
+            || {
+                attempts += 1;
+                Ok(LaunchctlAttempt::InProgress(
+                    "Operation already in progress".to_string(),
+                ))
+            },
+            |_| {},
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert_eq!(attempts, 3);
+        assert!(
+            error.contains("still in progress after 3 attempts"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn launchctl_transition_does_not_retry_terminal_failure() {
+        let mut attempts = 0;
+        let error = retry_launchctl_transition(
+            "load the Codexify launch agent",
+            4,
+            Duration::ZERO,
+            || {
+                attempts += 1;
+                bail!("permission denied")
+            },
+            |_| {},
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert_eq!(attempts, 1);
+        assert!(error.contains("permission denied"), "{error}");
+    }
+
+    #[test]
+    fn launchd_start_bootstraps_after_an_in_progress_bootout_finishes() {
+        let states = std::cell::RefCell::new(vec![true, false].into_iter());
+        let restarts = std::cell::Cell::new(0);
+        let bootstraps = std::cell::Cell::new(0);
+
+        start_launchd_service(
+            || Ok(states.borrow_mut().next().unwrap()),
+            || {
+                restarts.set(restarts.get() + 1);
+                bail!("service disappeared during restart")
+            },
+            || {
+                bootstraps.set(bootstraps.get() + 1);
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(restarts.get(), 1);
+        assert_eq!(bootstraps.get(), 1);
+    }
+
+    #[test]
+    fn launchd_start_restarts_after_a_concurrent_bootstrap() {
+        let states = std::cell::RefCell::new(vec![false, true].into_iter());
+        let restarts = std::cell::Cell::new(0);
+        let bootstraps = std::cell::Cell::new(0);
+
+        start_launchd_service(
+            || Ok(states.borrow_mut().next().unwrap()),
+            || {
+                restarts.set(restarts.get() + 1);
+                Ok(())
+            },
+            || {
+                bootstraps.set(bootstraps.get() + 1);
+                bail!("service appeared during bootstrap")
+            },
+        )
+        .unwrap();
+
+        assert_eq!(restarts.get(), 1);
+        assert_eq!(bootstraps.get(), 1);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn launchctl_command_timeout_terminates_a_hung_process() {
+        let mut command = StdCommand::new("/bin/sleep");
+        command.arg("5");
+        let started = std::time::Instant::now();
+        let error = command_output_with_timeout(
+            command,
+            "test a bounded launchctl operation",
+            Duration::from_millis(50),
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(error.contains("timed out"), "{error}");
     }
 
     #[cfg(target_os = "macos")]

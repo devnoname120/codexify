@@ -468,7 +468,9 @@ The public `service install|enable|disable|remove|logs` commands manage one
 per-user native definition: an XDG-aware systemd user unit on Linux, a launchd agent on
 macOS, or an at-logon Scheduled Task on Windows. Installation stores the current
 executable path and the selected config path as absolute arguments. The hidden
-`service run` command is the native manager's entry point.
+`service run` command is the native manager's entry point. The updater also uses
+the hidden `service wait-ready` command to poll the loopback health endpoint under
+a deadline after a restart.
 
 The service runner does not construct a second server configuration. It waits if
 the selected file does not exist, then starts the ordinary Codexify executable
@@ -479,6 +481,12 @@ restart the runner if the runner itself fails. On shutdown, the runner terminate
 the server process group/tree before exiting. Windows children are assigned to a
 kill-on-close Job Object so Task Scheduler termination cannot orphan the server
 or its descendants.
+
+macOS lifecycle changes are state-aware. `bootout --wait` is itself bounded so a
+wedged launchd operation cannot hang an update, exit status 37 is treated as a
+transitional `EALREADY` result and retried within a fixed window, and enable/start
+re-evaluates whether the agent is loaded when a concurrent bootout or bootstrap
+completes between commands.
 
 ---
 
@@ -545,6 +553,11 @@ Startup is ordered and fail-closed:
 5. Require the runtime-only surfaces it actually exports: `/readyz` must return
    success and the labeled
    `commands_poll_last_successful_timestamp_seconds` metric must be non-zero.
+
+The Codexify `/health` endpoint returns success only after this startup sequence
+has completed. It returns `503 Service Unavailable` while the native tunnel is
+starting or is known to be unhealthy, and returns to success after supervision
+restores the tunnel. Non-tunnel mode is ready as soon as the HTTP listener starts.
 
 Codexify watches the HTTP server, tunnel child, `SIGINT`, and `SIGTERM`
 concurrently. Failure of either process shuts down the other. Normal shutdown
@@ -618,7 +631,7 @@ the original order and rejects duplicate names.
 | `memory.rs` | Working memory outside the repo, keyed by a hash of the normalized active root, with `O_EXCL` locking and atomic writes. In multi-project mode, a configured `memory.dir` is a base containing one hashed child per project. |
 | `quickstart.rs` | Interactive first-install wizard for project scope, native tunnel credentials, JSON config merging, preservation of preconfigured advanced conversation authorization, and the ChatGPT developer-mode connector handoff. |
 | `doctor.rs` | Read-only local diagnostic orchestration, deterministic human/JSON reports, Codex-aligned Git/ripgrep probes, GitHub CLI/shell/Codex CLI/MCP command resolution, bounded GitHub release-freshness and loopback health probes, and service/update/tunnel prerequisite checks. |
-| `service.rs` | Per-user systemd, launchd, and Windows Task Scheduler definitions; service lifecycle commands; bounded child restart supervision; private rotating stdout/stderr logs; and `service logs [-f]`. |
+| `service.rs` | Per-user systemd, launchd, and Windows Task Scheduler definitions; state-aware launchd transitions; bounded child restart and readiness supervision; private rotating stdout/stderr logs; and `service logs [-f]`. |
 | `openai_tunnel.rs` | Verified installation and lifecycle supervision for OpenAI's outbound Secure MCP Tunnel runtime. |
 | `process_env.rs` | Child-process environment boundaries: isolate the tunnel runtime and remove tunnel credentials from model-controlled and upstream subprocesses. |
 | `project_doc.rs` | `AGENTS.md` discovery from project root down to the work dir under a byte budget. Multi-project mode treats the selected directory as the exact project root and never walks into the common access-root parent. |

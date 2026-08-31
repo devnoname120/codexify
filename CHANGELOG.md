@@ -35,6 +35,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   seconds before service interruption so ChatGPT can receive and initialize the
   updater resource.
 
+### Fixed
+
+- macOS self-update now waits for launchd teardown, retries bounded
+  `EALREADY` lifecycle transitions, recovers when a bootout or bootstrap finishes
+  between commands, and verifies server plus native-tunnel readiness before
+  declaring the restarted update successful.
+
 ## [1.1.0] - 2026-08-30
 
 ### Added

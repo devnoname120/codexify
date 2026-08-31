@@ -114,7 +114,7 @@ impl Tool for SelfUpdate {
     }
 
     fn description(&self) -> String {
-        "Update the installed Codexify executable to the latest verified GitHub release. Call only after the user explicitly requests an update and pass confirm=true. The release is downloaded, checksum-verified, extracted, and probed before a detached OS-managed worker is scheduled. The attached updater component receives checksum-bound changelog sections and monitors a durable status record across the expected MCP restart without adding the changelog to model-visible structured content. When Codexify is service-supervised, the worker runs outside the service kill boundary, waits for this tool response to be delivered, stops the service, atomically replaces the executable with rollback protection, and starts the service again. After a scheduled update, explicitly tell the user to open ChatGPT Settings, select the Codexify connector, scroll to the bottom of its tool list, and click Refresh after Codexify restarts so ChatGPT reloads the connector tools.".to_string()
+        "Update the installed Codexify executable to the latest verified GitHub release. Call only after the user explicitly requests an update and pass confirm=true. The release is downloaded, checksum-verified, extracted, and probed before a detached OS-managed worker is scheduled. The attached updater component receives checksum-bound changelog sections and monitors a durable status record across the expected MCP restart without adding the changelog to model-visible structured content. When Codexify is service-supervised, the worker runs outside the service kill boundary, waits for this tool response to be delivered, stops the service, atomically replaces the executable with rollback protection, starts the service again, and verifies server plus native-tunnel readiness before marking the durable update record successful. After a scheduled update, explicitly tell the user to open ChatGPT Settings, select the Codexify connector, scroll to the bottom of its tool list, and click Refresh after Codexify restarts so ChatGPT reloads the connector tools.".to_string()
     }
 
     fn input_schema(&self) -> Value {
@@ -144,7 +144,7 @@ impl Tool for SelfUpdate {
         false
     }
 
-    async fn call(&self, args: Value, _config: &AppConfig, _session: &SessionState) -> ToolResult {
+    async fn call(&self, args: Value, config: &AppConfig, _session: &SessionState) -> ToolResult {
         let args: SelfUpdateArgs = match parse_tool_args(args) {
             Ok(args) => args,
             Err(error) => return *error,
@@ -154,7 +154,7 @@ impl Tool for SelfUpdate {
                 "Self-update was not confirmed. Call self_update only after an explicit user request and pass confirm=true.",
             );
         }
-        match crate::self_update::trigger().await {
+        match crate::self_update::trigger(config.port).await {
             Ok(receipt) => Self::result(receipt),
             Err(error) => ToolResult::error(format!(
                 "Codexify self-update could not be prepared or scheduled: {error:#}"

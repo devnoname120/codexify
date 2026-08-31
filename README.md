@@ -451,9 +451,13 @@ the service's process tree: a transient systemd user unit on Linux, a submitted
 launchd job on macOS, or an on-demand Task Scheduler task on Windows. The worker
 waits 10 seconds for the MCP response and updater resource to be delivered, stops
 the service, atomically replaces the executable while retaining a rollback copy,
-validates the replacement, and starts the service again. A failed replacement is
-rolled back before restart. The MCP connection therefore disconnects temporarily
-after a successful scheduling response.
+validates the replacement, and starts the service again. On macOS, launchd
+teardown is awaited under a deadline and transition-state failures are retried
+within a fixed bound. Before recording success, the worker waits for the
+restarted server's health endpoint; in native tunnel mode that endpoint becomes
+healthy only after the OpenAI tunnel is ready. A failed replacement is rolled
+back before restart. The MCP connection therefore disconnects temporarily after
+a successful scheduling response.
 
 Before handing off, Codexify writes a private status record under
 `~/.codexify/update/status/<update-id>.json`. The worker atomically advances that
