@@ -20,7 +20,7 @@ use rmcp::{
         CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock,
         ExtensionCapabilities, Implementation, InitializeResult, ListResourcesResult,
         ListToolsResult, PaginatedRequestParams, ReadResourceRequestParams, ReadResourceResponse,
-        ReadResourceResult, ServerCapabilities, ServerInfo,
+        ReadResourceResult, RequestMetaObject, ServerCapabilities, ServerInfo,
     },
     service::{RequestContext, RoleServer},
     transport::streamable_http_server::{
@@ -50,14 +50,39 @@ use crate::output_budget::{
 use crate::project_bindings::{ConversationIdentity, ProjectBindingStore};
 use crate::registry::load_tools_for_config;
 use crate::self_update_ui;
+use crate::setup_ui;
 use crate::tool::{
     Tool, ToolCallIdentity, ToolRequestContext, validate_and_wrap_tool, validate_and_wrap_tools,
 };
 use crate::tool_logging::ToolCallLogger;
 use crate::tools::set_project_root::{SetProjectRoot, select_and_render};
 use crate::types::{AppConfig, ToolContent, ToolResult};
+use crate::widget_debug;
 
 const HTTP_SERVER_STOP_TIMEOUT: Duration = Duration::from_secs(10);
+
+fn connector_id_from_request_meta(meta: &RequestMetaObject) -> Option<String> {
+    [
+        "openai/connectorId",
+        "openai/connector_id",
+        "openai/pluginId",
+        "openai/plugin_id",
+        "connectorId",
+        "connector_id",
+        "pluginId",
+        "plugin_id",
+    ]
+    .into_iter()
+    .filter_map(|key| meta.get(key).and_then(Value::as_str))
+    .find(|value| setup_ui::connector_settings_url(value).is_some())
+    .map(str::to_string)
+}
+
+fn should_emit_ordinary_tool_completion(
+    tool_log_call: Option<&crate::tool_logging::ToolLogCall>,
+) -> bool {
+    !tool_log_call.is_some_and(crate::tool_logging::ToolLogCall::events_enabled)
+}
 
 // Tunnel supervision (native OpenAI tunnel mode). The HTTP server stays up across
 // tunnel restarts; only the outbound tunnel-client process is replaced.
@@ -219,11 +244,17 @@ fn advertised_tool(tool: &dyn Tool, config: &AppConfig) -> rmcp::model::Tool {
 }
 
 fn builtin_ui_resources() -> Vec<rmcp::model::Resource> {
-    vec![diff_ui::resource(), self_update_ui::resource()]
+    vec![
+        diff_ui::resource(),
+        self_update_ui::resource(),
+        setup_ui::resource(),
+    ]
 }
 
 fn builtin_ui_contents(uri: &str) -> Option<rmcp::model::ResourceContents> {
-    diff_ui::contents_for_uri(uri).or_else(|| self_update_ui::contents_for_uri(uri))
+    diff_ui::contents_for_uri(uri)
+        .or_else(|| self_update_ui::contents_for_uri(uri))
+        .or_else(|| setup_ui::contents_for_uri(uri))
 }
 
 impl ServerHandler for CodexHandler {
@@ -328,6 +359,12 @@ impl ServerHandler for CodexHandler {
                 .as_ref()
                 .and_then(ConversationIdentity::from_request_meta)
         });
+        let connector_id = connector_id_from_request_meta(&context.meta).or_else(|| {
+            request
+                .meta
+                .as_ref()
+                .and_then(connector_id_from_request_meta)
+        });
         let name = request.name.as_ref().to_string();
         let args = request
             .arguments
@@ -336,6 +373,7 @@ impl ServerHandler for CodexHandler {
         let call_id = self.next_tool_call_id.fetch_add(1, Ordering::Relaxed);
         let tool_context = ToolRequestContext {
             conversation: conversation.clone(),
+            connector_id,
             conversation_authorizations: self.conversation_authorizations.clone(),
             diff_checkpoints: self.diff_checkpoints.clone(),
             artifact_egress: self.artifact_egress.clone(),
@@ -529,13 +567,11 @@ impl ServerHandler for CodexHandler {
         }
 
         let duration_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+        widget_debug::attach_configured_tool_timing(&self.config, &mut result, &name, duration_ms);
         if let (Some(logger), Some(call)) = (&self.tool_logging, tool_log_call.as_ref()) {
             logger.finish(call, &call_identity, &result, duration_ms);
         }
-        if !tool_log_call
-            .as_ref()
-            .is_some_and(|call| call.events_enabled())
-        {
+        if should_emit_ordinary_tool_completion(tool_log_call.as_ref()) {
             tracing::info!(
                 target: "codexify::tool",
                 call_id,
@@ -1118,12 +1154,29 @@ mod tests {
     use async_trait::async_trait;
     use rmcp::ServiceExt;
     use tracing::field::{Field, Visit};
-    use tracing::{Event, Subscriber};
+    use tracing::subscriber::Interest;
+    use tracing::{Event, Metadata, Subscriber};
     use tracing_subscriber::filter::LevelFilter;
     use tracing_subscriber::layer::{Context, SubscriberExt};
     use tracing_subscriber::{Layer, Registry};
 
     use super::*;
+
+    #[test]
+    fn connector_id_is_feature_detected_from_request_metadata() {
+        let meta: RequestMetaObject = serde_json::from_value(json!({
+            "openai/connectorId": "asdk_app_abc123"
+        }))
+        .unwrap();
+        assert_eq!(
+            connector_id_from_request_meta(&meta).as_deref(),
+            Some("asdk_app_abc123")
+        );
+
+        let unrelated: RequestMetaObject =
+            serde_json::from_value(json!({ "openai/session": "session" })).unwrap();
+        assert!(connector_id_from_request_meta(&unrelated).is_none());
+    }
 
     struct NewlyRegisteredTool {
         name: &'static str,
@@ -1306,6 +1359,10 @@ mod tests {
     where
         S: Subscriber,
     {
+        fn register_callsite(&self, _metadata: &'static Metadata<'static>) -> Interest {
+            Interest::sometimes()
+        }
+
         fn on_event(&self, event: &Event<'_>, _context: Context<'_, S>) {
             if event.metadata().target() == "codexify::tool"
                 && *event.metadata().level() == tracing::Level::INFO
@@ -1378,6 +1435,9 @@ mod tests {
 
     #[test]
     fn common_dispatch_boundary_observes_new_tools_and_preserves_results() {
+        let _tracing_guard = crate::tool_logging::TEST_TRACING_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let root = tempfile::tempdir().unwrap();
         let handler = handler_with_tools(
             root.path(),
@@ -1405,6 +1465,7 @@ mod tests {
             .unwrap();
 
         let (success, failure) = tracing::subscriber::with_default(subscriber, || {
+            crate::tool_logging::rebuild_test_interest_cache();
             runtime.block_on(async move {
                 let (server_transport, client_transport) = tokio::io::duplex(16 * 1024);
                 let server_task = tokio::spawn(async move {
@@ -1557,61 +1618,29 @@ mod tests {
 
     #[test]
     fn filtered_payload_level_falls_back_to_the_ordinary_completion_event() {
+        let _tracing_guard = crate::tool_logging::TEST_TRACING_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let root = tempfile::tempdir().unwrap();
-        let handler = handler_with_tools(
-            root.path(),
-            vec![Box::new(NewlyRegisteredTool {
-                name: "filtered_payload_fixture",
-                answer: "ordinary completion remains visible",
-                is_error: false,
-            })],
-            crate::types::ToolLogLevel::Debug,
-        );
+        let mut config = crate::config::default_config(root.path().to_path_buf());
+        config.tool_logging.mode = crate::types::ToolLogMode::All;
+        config.tool_logging.level = crate::types::ToolLogLevel::Debug;
+        let logger = ToolCallLogger::new(&config).unwrap();
         let capture = ToolPayloadCapture::default();
         let events = capture.events.clone();
-        let ordinary_info_completions = capture.ordinary_info_completions.clone();
         let subscriber = Registry::default().with(capture).with(LevelFilter::INFO);
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-
-        let result = tracing::subscriber::with_default(subscriber, || {
-            runtime.block_on(async move {
-                let (server_transport, client_transport) = tokio::io::duplex(16 * 1024);
-                let server_task = tokio::spawn(async move {
-                    handler
-                        .serve(server_transport)
-                        .await
-                        .unwrap()
-                        .waiting()
-                        .await
-                        .unwrap();
-                });
-                let client = ().serve(client_transport).await.unwrap();
-                let arguments = json!({ "value": "visible request" })
-                    .as_object()
-                    .unwrap()
-                    .clone();
-                let result = client
-                    .call_tool(
-                        CallToolRequestParams::new("filtered_payload_fixture")
-                            .with_arguments(arguments),
-                    )
-                    .await
-                    .unwrap();
-                client.cancel().await.unwrap();
-                server_task.await.unwrap();
-                result
-            })
+        let call = tracing::subscriber::with_default(subscriber, || {
+            crate::tool_logging::rebuild_test_interest_cache();
+            logger.begin(
+                1,
+                &ToolCallIdentity::native("filtered_payload_fixture"),
+                &json!({ "value": "visible request" }),
+                None,
+            )
         });
 
-        assert_eq!(result.is_error, Some(false));
         assert!(events.lock().unwrap().is_empty());
-        assert_eq!(
-            ordinary_info_completions.load(std::sync::atomic::Ordering::Relaxed),
-            1
-        );
+        assert!(should_emit_ordinary_tool_completion(Some(&call)));
     }
 
     #[test]
@@ -1649,9 +1678,10 @@ mod tests {
         );
 
         let resources = builtin_ui_resources();
-        assert_eq!(resources.len(), 2);
+        assert_eq!(resources.len(), 3);
         assert_eq!(resources[0].uri, diff_ui::DIFF_UI_URI);
         assert_eq!(resources[1].uri, crate::self_update_ui::SELF_UPDATE_UI_URI);
+        assert_eq!(resources[2].uri, crate::setup_ui::SETUP_UI_URI);
 
         let contents = builtin_ui_contents(crate::self_update_ui::SELF_UPDATE_UI_URI)
             .expect("self-update MCP App resource must be readable");
@@ -1665,6 +1695,15 @@ mod tests {
             contents["text"]
                 .as_str()
                 .is_some_and(|text| text.contains("self_update_status"))
+        );
+
+        let setup_contents = builtin_ui_contents(crate::setup_ui::SETUP_UI_URI)
+            .expect("setup MCP App resource must be readable");
+        let setup_contents = serde_json::to_value(setup_contents).unwrap();
+        assert!(
+            setup_contents["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("Run doctor"))
         );
     }
 

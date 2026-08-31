@@ -788,6 +788,68 @@ async fn tunnel_runtime_check(config: &AppConfig) -> DoctorCheck {
     }
 }
 
+fn effective_configuration_check(config: &AppConfig) -> DoctorCheck {
+    let mode = if config.multi_project {
+        "multi-project"
+    } else {
+        "single-project"
+    };
+    DoctorCheck::pass("configuration", "Effective configuration is valid").with_detail(format!(
+        "workDir={}; port={}; mode={mode}; mcpServers={}",
+        config.work_dir.display(),
+        config.port,
+        config.mcp_servers.len()
+    ))
+}
+
+async fn finish_report(
+    mut checks: Vec<DoctorCheck>,
+    config: Option<&AppConfig>,
+    codex_cli: DoctorCheck,
+) -> DoctorReport {
+    let git_dir = config
+        .map(|config| config.work_dir.as_path())
+        .unwrap_or_else(|| Path::new("."));
+    checks.push(git_check(git_dir).await);
+    checks.push(fixed_tool_check("rg", "ripgrep", "rg").await);
+    checks.push(fixed_tool_check("gh", "GitHub CLI", "gh").await);
+    checks.push(codex_cli);
+
+    if let Some(config) = config {
+        checks.push(shell_check(config));
+        checks.push(mcp_stdio_check(config));
+    } else {
+        checks.push(DoctorCheck::skipped(
+            "shell",
+            "exec_command shell could not be checked because configuration is invalid",
+        ));
+        checks.push(DoctorCheck::skipped(
+            "mcp_stdio",
+            "MCP stdio commands could not be checked because configuration is invalid",
+        ));
+    }
+
+    checks.push(update_check());
+    checks.push(latest_version_check().await);
+    let (service_check, service_status) = service_check();
+    checks.push(service_check);
+    checks.push(health_check(config, service_status.as_ref()).await);
+    if let Some(config) = config {
+        checks.push(tunnel_credential_check(config));
+        checks.push(tunnel_runtime_check(config).await);
+    } else {
+        checks.push(DoctorCheck::skipped(
+            "openai_tunnel_credential",
+            "OpenAI tunnel credential could not be checked because configuration is invalid",
+        ));
+        checks.push(DoctorCheck::skipped(
+            "openai_tunnel_runtime",
+            "OpenAI tunnel runtime could not be checked because configuration is invalid",
+        ));
+    }
+    DoctorReport::new(checks)
+}
+
 pub async fn run(cli: Cli) -> DoctorReport {
     let codex_cli_settings = codex_cli_diagnostic_config(&cli);
     let mut checks = vec![runtime_check()];
@@ -806,21 +868,7 @@ pub async fn run(cli: Cli) -> DoctorReport {
 
     let config = match load_config_quiet(cli) {
         Ok(config) => {
-            let mode = if config.multi_project {
-                "multi-project"
-            } else {
-                "single-project"
-            };
-            checks.push(
-                DoctorCheck::pass("configuration", "Effective configuration is valid").with_detail(
-                    format!(
-                        "workDir={}; port={}; mode={mode}; mcpServers={}",
-                        config.work_dir.display(),
-                        config.port,
-                        config.mcp_servers.len()
-                    ),
-                ),
-            );
+            checks.push(effective_configuration_check(&config));
             Some(config)
         }
         Err(error) => {
@@ -832,55 +880,30 @@ pub async fn run(cli: Cli) -> DoctorReport {
             None
         }
     };
+    finish_report(checks, config.as_ref(), codex_cli_check(codex_cli_settings)).await
+}
 
-    let git_dir = config
-        .as_ref()
-        .map(|config| config.work_dir.as_path())
-        .unwrap_or_else(|| Path::new("."));
-    checks.push(git_check(git_dir).await);
-    checks.push(fixed_tool_check("rg", "ripgrep", "rg").await);
-    checks.push(fixed_tool_check("gh", "GitHub CLI", "gh").await);
-    checks.push(codex_cli_check(codex_cli_settings));
-
-    if let Some(config) = config.as_ref() {
-        checks.push(shell_check(config));
-        checks.push(mcp_stdio_check(config));
-    } else {
-        checks.push(DoctorCheck::skipped(
-            "shell",
-            "exec_command shell could not be checked because configuration is invalid",
-        ));
-        checks.push(DoctorCheck::skipped(
-            "mcp_stdio",
-            "MCP stdio commands could not be checked because configuration is invalid",
-        ));
-    }
-
-    checks.push(update_check());
-    checks.push(latest_version_check().await);
-    let (service_check, service_status) = service_check();
-    checks.push(service_check);
-    checks.push(health_check(config.as_ref(), service_status.as_ref()).await);
-    if let Some(config) = config.as_ref() {
-        checks.push(tunnel_credential_check(config));
-        checks.push(tunnel_runtime_check(config).await);
-    } else {
-        checks.push(DoctorCheck::skipped(
-            "openai_tunnel_credential",
-            "OpenAI tunnel credential could not be checked because configuration is invalid",
-        ));
-        checks.push(DoctorCheck::skipped(
-            "openai_tunnel_runtime",
-            "OpenAI tunnel runtime could not be checked because configuration is invalid",
-        ));
-    }
-    DoctorReport::new(checks)
+pub async fn run_for_config(config: &AppConfig) -> DoctorReport {
+    let checks = vec![
+        runtime_check(),
+        DoctorCheck::pass("config_path", "Using the running server configuration"),
+        effective_configuration_check(config),
+    ];
+    finish_report(
+        checks,
+        Some(config),
+        DoctorCheck::skipped(
+            "codex_cli",
+            "Codex CLI discovery was already resolved when the server started",
+        ),
+    )
+    .await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::self_update::{LatestVersionInspection, LatestVersionStatus};
+    use crate::self_update::{LatestVersionInspection, LatestVersionSource, LatestVersionStatus};
     use semver::Version;
     use std::path::Path;
 
@@ -936,6 +959,7 @@ mod tests {
             status: LatestVersionStatus::UpdateAvailable,
             current: Version::new(1, 1, 0),
             latest: Version::new(1, 2, 0),
+            source: LatestVersionSource::GithubApi,
         }));
         assert_eq!(available.status, DoctorStatus::Pass);
         assert!(available.summary.contains("1.2.0"));

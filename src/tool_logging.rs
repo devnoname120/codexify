@@ -4,6 +4,7 @@ use std::io::{self, Write};
 use serde::ser::{SerializeMap, SerializeSeq};
 use serde::{Serialize, Serializer};
 use serde_json::Value;
+use tracing_core::callsite::Callsite;
 
 use crate::redaction::SecretRedactor;
 use crate::tool::ToolCallIdentity;
@@ -11,6 +12,14 @@ use crate::types::{AppConfig, ToolContent, ToolLogLevel, ToolLogMode, ToolResult
 
 const TRUNCATION_MARKER: &str = "...[truncated]...";
 const SERIALIZATION_FAILURE: &str = "[unserializable payload]";
+
+#[cfg(test)]
+pub(crate) static TEST_TRACING_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
+pub(crate) fn rebuild_test_interest_cache() {
+    tracing_core::callsite::rebuild_interest_cache();
+}
 
 macro_rules! tool_payload_event {
     ($level:expr, $($fields:tt)*) => {
@@ -230,28 +239,49 @@ impl ToolCallLogger {
     }
 
     fn events_enabled(&self) -> bool {
-        match self.level {
-            ToolLogLevel::Trace => tracing::event_enabled!(
+        let metadata = match self.level {
+            ToolLogLevel::Trace => tracing::callsite!(
+                name: "codexify tool payload availability",
+                kind: tracing_core::metadata::Kind::EVENT,
                 target: "codexify::tool_payload",
-                tracing::Level::TRACE
-            ),
-            ToolLogLevel::Debug => tracing::event_enabled!(
+                level: tracing::Level::TRACE,
+                fields:
+            )
+            .metadata(),
+            ToolLogLevel::Debug => tracing::callsite!(
+                name: "codexify tool payload availability",
+                kind: tracing_core::metadata::Kind::EVENT,
                 target: "codexify::tool_payload",
-                tracing::Level::DEBUG
-            ),
-            ToolLogLevel::Info => tracing::event_enabled!(
+                level: tracing::Level::DEBUG,
+                fields:
+            )
+            .metadata(),
+            ToolLogLevel::Info => tracing::callsite!(
+                name: "codexify tool payload availability",
+                kind: tracing_core::metadata::Kind::EVENT,
                 target: "codexify::tool_payload",
-                tracing::Level::INFO
-            ),
-            ToolLogLevel::Warn => tracing::event_enabled!(
+                level: tracing::Level::INFO,
+                fields:
+            )
+            .metadata(),
+            ToolLogLevel::Warn => tracing::callsite!(
+                name: "codexify tool payload availability",
+                kind: tracing_core::metadata::Kind::EVENT,
                 target: "codexify::tool_payload",
-                tracing::Level::WARN
-            ),
-            ToolLogLevel::Error => tracing::event_enabled!(
+                level: tracing::Level::WARN,
+                fields:
+            )
+            .metadata(),
+            ToolLogLevel::Error => tracing::callsite!(
+                name: "codexify tool payload availability",
+                kind: tracing_core::metadata::Kind::EVENT,
                 target: "codexify::tool_payload",
-                tracing::Level::ERROR
-            ),
-        }
+                level: tracing::Level::ERROR,
+                fields:
+            )
+            .metadata(),
+        };
+        tracing::dispatcher::get_default(|dispatcher| dispatcher.enabled(metadata))
     }
 }
 
@@ -732,6 +762,9 @@ mod tests {
 
     #[test]
     fn request_and_response_toggles_keep_paired_lifecycle_events() {
+        let _tracing_guard = TEST_TRACING_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         for (mode, request_present, response_present) in [
             (ToolLogMode::Requests, true, false),
             (ToolLogMode::Responses, false, true),
@@ -746,6 +779,7 @@ mod tests {
             let subscriber = Registry::default().with(capture);
 
             tracing::subscriber::with_default(subscriber, || {
+                rebuild_test_interest_cache();
                 let identity = ToolCallIdentity::native("fixture");
                 let call = logger.begin(1, &identity, &json!({ "value": 7 }), None);
                 logger.finish(&call, &identity, &ToolResult::text("answer"), 3);
@@ -770,6 +804,9 @@ mod tests {
 
     #[test]
     fn emitted_events_pair_payloads_with_resolved_mcp_identity_and_level() {
+        let _tracing_guard = TEST_TRACING_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let root = tempfile::tempdir().unwrap();
         let mut config = default_config(root.path().to_path_buf());
         config.tool_logging.mode = ToolLogMode::All;
@@ -786,6 +823,7 @@ mod tests {
         let subscriber = Registry::default().with(capture);
 
         tracing::subscriber::with_default(subscriber, || {
+            rebuild_test_interest_cache();
             let call = logger.begin(
                 1,
                 &identity,
@@ -816,6 +854,9 @@ mod tests {
 
     #[test]
     fn direct_gateway_and_catalog_modes_log_the_upstream_target() {
+        let _tracing_guard = TEST_TRACING_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let root = tempfile::tempdir().unwrap();
         let mut config = default_config(root.path().to_path_buf());
         config.tool_logging.mode = ToolLogMode::All;
@@ -834,6 +875,7 @@ mod tests {
         let subscriber = Registry::default().with(capture);
 
         tracing::subscriber::with_default(subscriber, || {
+            rebuild_test_interest_cache();
             for (index, identity) in cases.iter().enumerate() {
                 let call = logger.begin(
                     index as u64 + 1,
@@ -858,6 +900,9 @@ mod tests {
 
     #[test]
     fn error_logging_does_not_change_the_tool_result() {
+        let _tracing_guard = TEST_TRACING_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let root = tempfile::tempdir().unwrap();
         let mut config = default_config(root.path().to_path_buf());
         config.tool_logging.mode = ToolLogMode::All;
@@ -870,6 +915,7 @@ mod tests {
         let subscriber = Registry::default().with(capture);
 
         tracing::subscriber::with_default(subscriber, || {
+            rebuild_test_interest_cache();
             let call = logger.begin(1, &identity, &Value::Null, None);
             logger.finish(&call, &identity, &result, 9);
         });
@@ -883,6 +929,9 @@ mod tests {
 
     #[test]
     fn concurrent_invocations_have_unique_paired_call_ids() {
+        let _tracing_guard = TEST_TRACING_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let root = tempfile::tempdir().unwrap();
         let mut config = default_config(root.path().to_path_buf());
         config.tool_logging.mode = ToolLogMode::All;

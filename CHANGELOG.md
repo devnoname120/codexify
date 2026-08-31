@@ -15,6 +15,14 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   latest-release freshness, self-update locks, native-service state and loopback
   health, and OpenAI tunnel credentials/runtime integrity without starting MCP
   children or downloading the managed tunnel runtime.
+- The per-conversation `setup` tool now returns a cached `gh`-first latest-release
+  check and connector-schema version comparison in its original response. Its MCP
+  App shows Update and Doctor buttons, warns when ChatGPT should refresh its cached
+  tools, and opens a connector-settings link when a connector ID or configured
+  `chatgptConnectorSettingsUrl` is available. The doctor action is app-only.
+- Top-level `debug` configuration now adds bounded component-only tool execution
+  timings. The setup, diff, and updater widgets render server timings, and
+  widget-originated calls also report their observed round-trip duration.
 - `self_update` now attaches an MCP App that renders every checksum-bound
   changelog section in the upgrade interval and monitors the detached update
   across service restart. A private atomic record under

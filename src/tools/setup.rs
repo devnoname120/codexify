@@ -1,5 +1,8 @@
+use std::future::Future;
+use std::time::Instant;
+
 use async_trait::async_trait;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::conversation_auth::{
@@ -7,6 +10,8 @@ use crate::conversation_auth::{
     conversation_auth_tokens_match, validate_conversation_auth_token,
 };
 use crate::exec_sessions::SessionState;
+use crate::self_update::{LatestVersionInspection, LatestVersionSource, LatestVersionStatus};
+use crate::setup_ui;
 use crate::tool::{Tool, ToolBehavior, ToolRequestContext, parse_tool_args};
 use crate::types::{AppConfig, ToolResult};
 
@@ -21,81 +26,273 @@ pub struct ConversationAuthorization;
 #[serde(deny_unknown_fields)]
 struct SetupArgs {
     r#ref: String,
+    #[serde(rename = "connectorVersion")]
+    connector_version: Option<String>,
 }
 
-#[async_trait]
-impl Tool for ConversationAuthorization {
-    fn name(&self) -> &'static str {
-        AUTHORIZATION_TOOL_WIRE_NAME
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum SetupUpdateStatus {
+    UpdateAvailable,
+    UpToDate,
+    AheadOfLatest,
+    CheckFailed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ConnectorSchemaStatus {
+    Current,
+    Stale,
+    Unknown,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SetupUpdateInfo {
+    status: SetupUpdateStatus,
+    current_version: String,
+    latest_version: Option<String>,
+    source: Option<LatestVersionSource>,
+    detail: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ConnectorSchemaInfo {
+    status: ConnectorSchemaStatus,
+    advertised_version: String,
+    observed_version: Option<String>,
+    refresh_recommended: bool,
+    settings_url: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SetupDebugInfo {
+    update_check_ms: u64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SetupOutput {
+    content: String,
+    server_version: String,
+    next_step: String,
+    update: SetupUpdateInfo,
+    connector_schema: ConnectorSchemaInfo,
+    debug: Option<SetupDebugInfo>,
+}
+
+fn compact_error(error: &str) -> String {
+    error
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(512)
+        .collect()
+}
+
+fn setup_result(
+    scope_description: &str,
+    next_step: &str,
+    observed_connector_version: Option<&str>,
+    update_result: Result<LatestVersionInspection, String>,
+    settings_url: Option<&str>,
+    debug: bool,
+    update_check_ms: u64,
+) -> ToolResult {
+    let advertised_version = env!("CARGO_PKG_VERSION");
+    let observed_connector_version = observed_connector_version.map(str::trim);
+    let schema_status = match observed_connector_version {
+        Some(observed) if observed == advertised_version => ConnectorSchemaStatus::Current,
+        Some(_) => ConnectorSchemaStatus::Stale,
+        None => ConnectorSchemaStatus::Unknown,
+    };
+    let connector_schema = ConnectorSchemaInfo {
+        status: schema_status,
+        advertised_version: advertised_version.to_string(),
+        observed_version: observed_connector_version.map(ToOwned::to_owned),
+        refresh_recommended: schema_status != ConnectorSchemaStatus::Current,
+        settings_url: settings_url.map(ToOwned::to_owned),
+    };
+
+    let update = match update_result {
+        Ok(inspection) => SetupUpdateInfo {
+            status: match inspection.status {
+                LatestVersionStatus::UpdateAvailable => SetupUpdateStatus::UpdateAvailable,
+                LatestVersionStatus::UpToDate => SetupUpdateStatus::UpToDate,
+                LatestVersionStatus::AheadOfLatest => SetupUpdateStatus::AheadOfLatest,
+            },
+            current_version: inspection.current.to_string(),
+            latest_version: Some(inspection.latest.to_string()),
+            source: Some(inspection.source),
+            detail: None,
+        },
+        Err(error) => SetupUpdateInfo {
+            status: SetupUpdateStatus::CheckFailed,
+            current_version: advertised_version.to_string(),
+            latest_version: None,
+            source: None,
+            detail: Some(compact_error(&error)),
+        },
+    };
+
+    let mut text = format!("Setup completed for {scope_description}. {next_step}");
+    match update.status {
+        SetupUpdateStatus::UpdateAvailable => {
+            if let Some(latest) = update.latest_version.as_deref() {
+                text.push_str(&format!(
+                    " Codexify {latest} is available; the setup panel can start the update."
+                ));
+            }
+        }
+        SetupUpdateStatus::CheckFailed => {
+            text.push_str(" The latest Codexify release could not be checked quickly.");
+        }
+        SetupUpdateStatus::UpToDate | SetupUpdateStatus::AheadOfLatest => {}
+    }
+    if connector_schema.refresh_recommended {
+        text.push_str(
+            " ChatGPT's cached Codexify connector schema could not be confirmed as current. Open ChatGPT Settings, select the Codexify connector, scroll to the bottom of its tool list, and click Refresh.",
+        );
+        if let Some(url) = connector_schema.settings_url.as_deref() {
+            text.push_str(&format!(" Open the connector settings directly: {url}"));
+        }
     }
 
-    fn title(&self) -> String {
-        "Set up connector".to_string()
-    }
+    let output = SetupOutput {
+        content: text.clone(),
+        server_version: advertised_version.to_string(),
+        next_step: next_step.to_string(),
+        update,
+        connector_schema,
+        debug: debug.then_some(SetupDebugInfo { update_check_ms }),
+    };
+    ToolResult::text(text)
+        .with_structured(serde_json::to_value(output).expect("setup output must serialize"))
+}
 
-    fn behavior(&self) -> ToolBehavior {
-        ToolBehavior::new(
-            false,
-            false,
-            true,
-            false,
-            "Adds an authorization grant for the current conversation or transport without changing project or external state.",
-        )
-    }
-
-    fn description(&self) -> String {
-        "Call this function once when using the codexify connector for the first time in a conversation. Provide the SHA-256-shaped `ref` supplied by the user or system prompt. After setup completes, continue as directed. The submitted value is not retained.".into()
-    }
-
-    fn input_schema(&self) -> Value {
+impl ConversationAuthorization {
+    fn output_schema_value() -> Value {
         json!({
             "type": "object",
             "properties": {
-                "ref": {
-                    "type": "string",
-                    "description": "The 64-character lowercase hexadecimal reference supplied for codexify setup.",
-                    "minLength": CONVERSATION_AUTH_TOKEN_HEX_LENGTH,
-                    "maxLength": CONVERSATION_AUTH_TOKEN_HEX_LENGTH,
-                    "pattern": "^[0-9a-f]{64}$",
-                    "writeOnly": true
+                "content": { "type": "string" },
+                "serverVersion": { "type": "string" },
+                "nextStep": { "type": "string" },
+                "update": {
+                    "type": "object",
+                    "properties": {
+                        "status": {
+                            "type": "string",
+                            "enum": ["update_available", "up_to_date", "ahead_of_latest", "check_failed"]
+                        },
+                        "currentVersion": { "type": "string" },
+                        "latestVersion": {
+                            "anyOf": [
+                                { "type": "string" },
+                                { "type": "null" }
+                            ]
+                        },
+                        "source": {
+                            "anyOf": [
+                                {
+                                    "type": "string",
+                                    "enum": ["github_cli", "github_api"]
+                                },
+                                { "type": "null" }
+                            ]
+                        },
+                        "detail": {
+                            "anyOf": [
+                                { "type": "string" },
+                                { "type": "null" }
+                            ]
+                        }
+                    },
+                    "required": ["status", "currentVersion", "latestVersion", "source", "detail"],
+                    "additionalProperties": false
+                },
+                "connectorSchema": {
+                    "type": "object",
+                    "properties": {
+                        "status": {
+                            "type": "string",
+                            "enum": ["current", "stale", "unknown"]
+                        },
+                        "advertisedVersion": { "type": "string" },
+                        "observedVersion": {
+                            "anyOf": [
+                                { "type": "string" },
+                                { "type": "null" }
+                            ]
+                        },
+                        "refreshRecommended": { "type": "boolean" },
+                        "settingsUrl": {
+                            "anyOf": [
+                                { "type": "string" },
+                                { "type": "null" }
+                            ]
+                        }
+                    },
+                    "required": [
+                        "status",
+                        "advertisedVersion",
+                        "observedVersion",
+                        "refreshRecommended",
+                        "settingsUrl"
+                    ],
+                    "additionalProperties": false
+                },
+                "debug": {
+                    "anyOf": [
+                        {
+                            "type": "object",
+                            "properties": {
+                                "updateCheckMs": {
+                                    "type": "integer",
+                                    "minimum": 0
+                                }
+                            },
+                            "required": ["updateCheckMs"],
+                            "additionalProperties": false
+                        },
+                        { "type": "null" }
+                    ]
                 }
             },
-            "required": ["ref"],
+            "required": [
+                "content",
+                "serverVersion",
+                "nextStep",
+                "update",
+                "connectorSchema",
+                "debug"
+            ],
             "additionalProperties": false
         })
     }
 
-    fn output_schema(&self) -> Option<Value> {
-        Some(json!({
-            "type": "object",
-            "properties": {
-                "content": { "type": "string" }
-            },
-            "required": ["content"],
-            "additionalProperties": false
-        }))
-    }
-
-    fn requires_project_root(&self) -> bool {
-        false
-    }
-
-    async fn call(&self, _args: Value, _config: &AppConfig, _session: &SessionState) -> ToolResult {
-        ToolResult::error("Setup requires request metadata.")
-    }
-
-    async fn call_with_context(
+    async fn call_with_context_and_update_check<F, Fut>(
         &self,
         args: Value,
         config: &AppConfig,
         session: &SessionState,
         context: &ToolRequestContext,
-    ) -> ToolResult {
+        update_check: F,
+    ) -> ToolResult
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<LatestVersionInspection, String>>,
+    {
         let Some(expected_token) = config.conversation_auth_token.as_deref() else {
             return ToolResult::error("Conversation setup is not enabled.");
         };
         let SetupArgs {
             r#ref: provided_ref,
+            connector_version,
         } = match parse_tool_args(args) {
             Ok(args) => args,
             Err(_) => return ToolResult::error("Setup failed."),
@@ -119,16 +316,120 @@ impl Tool for ConversationAuthorization {
         } else {
             "Call `get_agent_brief` before using project tools."
         };
-        ToolResult::text(format!(
-            "Setup completed for {}. {next_step}",
-            scope.description()
-        ))
+        let update_started = Instant::now();
+        let update_result = update_check().await;
+        let update_check_ms =
+            u64::try_from(update_started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let settings_url = config.chatgpt_connector_settings_url.clone().or_else(|| {
+            context
+                .connector_id
+                .as_deref()
+                .and_then(setup_ui::connector_settings_url)
+        });
+        setup_result(
+            scope.description(),
+            next_step,
+            connector_version.as_deref(),
+            update_result,
+            settings_url.as_deref(),
+            config.debug,
+            update_check_ms,
+        )
+    }
+}
+
+#[async_trait]
+impl Tool for ConversationAuthorization {
+    fn name(&self) -> &'static str {
+        AUTHORIZATION_TOOL_WIRE_NAME
+    }
+
+    fn title(&self) -> String {
+        "Set up connector".to_string()
+    }
+
+    fn behavior(&self) -> ToolBehavior {
+        ToolBehavior::new(
+            false,
+            false,
+            true,
+            true,
+            "Adds an authorization grant for the current conversation or transport and performs a bounded public GitHub release check without changing project state.",
+        )
+    }
+
+    fn meta(&self) -> Option<rmcp::model::MetaObject> {
+        Some(setup_ui::tool_meta())
+    }
+
+    fn description(&self) -> String {
+        format!(
+            "Call this function once when using the codexify connector for the first time in a conversation. Provide the SHA-256-shaped `ref` supplied by the user or system prompt. Connector version marker: `{}`; when the `connectorVersion` argument is available, copy this marker into it unchanged. After setup completes, continue as directed. The submitted reference is not retained.",
+            env!("CARGO_PKG_VERSION")
+        )
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "ref": {
+                    "type": "string",
+                    "description": "The 64-character lowercase hexadecimal reference supplied for codexify setup.",
+                    "minLength": CONVERSATION_AUTH_TOKEN_HEX_LENGTH,
+                    "maxLength": CONVERSATION_AUTH_TOKEN_HEX_LENGTH,
+                    "pattern": "^[0-9a-f]{64}$",
+                    "writeOnly": true
+                },
+                "connectorVersion": {
+                    "type": "string",
+                    "description": "Copy the connector version marker from this tool's advertised description unchanged. Omit only when the cached connector schema does not provide this argument.",
+                    "minLength": 1,
+                    "maxLength": 64
+                }
+            },
+            "required": ["ref"],
+            "additionalProperties": false
+        })
+    }
+
+    fn output_schema(&self) -> Option<Value> {
+        Some(Self::output_schema_value())
+    }
+
+    fn fills_structured_content(&self) -> bool {
+        false
+    }
+
+    fn requires_project_root(&self) -> bool {
+        false
+    }
+
+    async fn call(&self, _args: Value, _config: &AppConfig, _session: &SessionState) -> ToolResult {
+        ToolResult::error("Setup requires request metadata.")
+    }
+
+    async fn call_with_context(
+        &self,
+        args: Value,
+        config: &AppConfig,
+        session: &SessionState,
+        context: &ToolRequestContext,
+    ) -> ToolResult {
+        self.call_with_context_and_update_check(args, config, session, context, || async {
+            crate::self_update::inspect_latest_version()
+                .await
+                .map_err(|error| format!("{error:#}"))
+        })
+        .await
     }
 }
 
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+
+    use semver::Version;
 
     use super::*;
     use crate::config::default_config;
@@ -154,6 +455,74 @@ mod tests {
         }
     }
 
+    #[test]
+    fn setup_descriptor_carries_a_backward_compatible_connector_version_marker() {
+        let tool = ConversationAuthorization;
+        let description = tool.description();
+        assert!(description.contains(env!("CARGO_PKG_VERSION")));
+        assert!(description.contains("connectorVersion"));
+
+        let schema = tool.input_schema();
+        assert!(schema["properties"].get("connectorVersion").is_some());
+        assert_eq!(schema["required"], json!(["ref"]));
+    }
+
+    #[test]
+    fn setup_result_reports_update_and_connector_schema_status_directly() {
+        let result = setup_result(
+            "this ChatGPT conversation",
+            "Call `get_agent_brief` before using project tools.",
+            Some("1.0.0"),
+            Ok(crate::self_update::LatestVersionInspection {
+                status: crate::self_update::LatestVersionStatus::UpdateAvailable,
+                current: Version::new(1, 1, 0),
+                latest: Version::new(1, 2, 0),
+                source: crate::self_update::LatestVersionSource::GithubCli,
+            }),
+            Some("https://chatgpt.com/g/example/project#settings/Plugins/plugin_example"),
+            true,
+            17,
+        );
+
+        assert!(!result.is_error);
+        let structured = result.structured_content.as_ref().unwrap();
+        let validator = jsonschema::options()
+            .build(&ConversationAuthorization::output_schema_value())
+            .unwrap();
+        assert!(validator.is_valid(structured));
+        assert_eq!(structured["update"]["status"], "update_available");
+        assert_eq!(structured["update"]["latestVersion"], "1.2.0");
+        assert_eq!(structured["update"]["source"], "github_cli");
+        assert_eq!(structured["connectorSchema"]["status"], "stale");
+        assert_eq!(structured["connectorSchema"]["refreshRecommended"], true);
+        assert_eq!(structured["debug"]["updateCheckMs"], 17);
+        assert!(result.joined_text().contains("click Refresh"));
+    }
+
+    #[test]
+    fn missing_connector_marker_is_unknown_and_old_cached_calls_remain_valid() {
+        let args: SetupArgs = serde_json::from_value(json!({
+            "ref": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        }))
+        .unwrap();
+        assert!(args.connector_version.is_none());
+
+        let result = setup_result(
+            "this MCP transport session",
+            "Call `get_agent_brief` before using project tools.",
+            None,
+            Err("offline".to_string()),
+            None,
+            false,
+            9,
+        );
+        let structured = result.structured_content.as_ref().unwrap();
+        assert_eq!(structured["connectorSchema"]["status"], "unknown");
+        assert_eq!(structured["connectorSchema"]["refreshRecommended"], true);
+        assert_eq!(structured["update"]["status"], "check_failed");
+        assert_eq!(structured["debug"], Value::Null);
+    }
+
     fn context(
         identity: Option<ConversationIdentity>,
         authorizations: Arc<ConversationAuthorizationStore>,
@@ -161,6 +530,7 @@ mod tests {
     ) -> ToolRequestContext {
         ToolRequestContext {
             conversation: identity,
+            connector_id: None,
             conversation_authorizations: authorizations,
             diff_checkpoints: Arc::new(DiffCheckpointManager::new()),
             artifact_egress: Arc::new(crate::artifact_egress::ArtifactEgressStore::new_at(
@@ -169,6 +539,43 @@ mod tests {
             )),
             cancellation: tokio_util::sync::CancellationToken::new(),
         }
+    }
+
+    #[tokio::test]
+    async fn request_connector_id_supplies_a_direct_settings_link() {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = default_config(root.path().to_path_buf());
+        let auth_token = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        config.conversation_auth_token = Some(auth_token.into());
+        let store = Arc::new(ConversationAuthorizationStore::new());
+        let session = SessionState::new();
+        let mut request_context = context(None, store, root.path());
+        request_context.connector_id = Some("asdk_app_abc123".to_string());
+
+        let result = ConversationAuthorization
+            .call_with_context_and_update_check(
+                json!({
+                    "ref": auth_token,
+                    "connectorVersion": env!("CARGO_PKG_VERSION")
+                }),
+                &config,
+                &session,
+                &request_context,
+                || async {
+                    Ok(LatestVersionInspection {
+                        status: LatestVersionStatus::UpToDate,
+                        current: Version::parse(env!("CARGO_PKG_VERSION")).unwrap(),
+                        latest: Version::parse(env!("CARGO_PKG_VERSION")).unwrap(),
+                        source: LatestVersionSource::GithubApi,
+                    })
+                },
+            )
+            .await;
+
+        assert_eq!(
+            result.structured_content.as_ref().unwrap()["connectorSchema"]["settingsUrl"],
+            "https://chatgpt.com/#settings/Plugins/plugin_asdk_app_abc123"
+        );
     }
 
     #[tokio::test]
@@ -184,11 +591,12 @@ mod tests {
         let request_context = context(Some(first.clone()), store.clone(), root.path());
 
         let result = ConversationAuthorization
-            .call_with_context(
+            .call_with_context_and_update_check(
                 json!({ "ref": auth_token }),
                 &config,
                 &session,
                 &request_context,
+                || async { Err("offline fixture".to_string()) },
             )
             .await;
 
@@ -237,11 +645,12 @@ mod tests {
         let request_context = context(None, store.clone(), root.path());
 
         ConversationAuthorization
-            .call_with_context(
+            .call_with_context_and_update_check(
                 json!({ "ref": auth_token }),
                 &config,
                 &first_session,
                 &request_context,
+                || async { Err("offline fixture".to_string()) },
             )
             .await;
 

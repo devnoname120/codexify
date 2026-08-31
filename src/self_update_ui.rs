@@ -11,10 +11,11 @@ pub fn tool_meta() -> MetaObject {
     serde_json::from_value(json!({
         "ui": {
             "resourceUri": SELF_UPDATE_UI_URI,
-            "visibility": ["model"]
+            "visibility": ["model", "app"]
         },
         "ui/resourceUri": SELF_UPDATE_UI_URI,
         "openai/outputTemplate": SELF_UPDATE_UI_URI,
+        "openai/widgetAccessible": true,
         "openai/toolInvocation/invoking": "Downloading and verifying Codexify...",
         "openai/toolInvocation/invoked": "Codexify update prepared"
     }))
@@ -194,6 +195,7 @@ h1 { margin: 0; font-size: 16px; line-height: 1.3; letter-spacing: -.01em; }
 .notes-body ul { margin: 6px 0 9px; padding-left: 20px; }
 .notes-body li { margin: 4px 0; font-size: 12px; line-height: 1.5; }
 .notes-unavailable { padding: 0 18px 16px; color: var(--muted); font-size: 12px; line-height: 1.45; }
+.debug-timing { padding: 9px 18px 12px; border-top: 1px solid var(--border); color: var(--muted); font: 10px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; text-align: right; overflow-wrap: anywhere; }
 @keyframes spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) {
   .indicator.running::before { animation: none; }
@@ -211,6 +213,7 @@ h1 { margin: 0; font-size: 16px; line-height: 1.3; letter-spacing: -.01em; }
 <script>
 (() => {
   const META_KEY = "io.github.devnoname120/codexify/self-update";
+  const DEBUG_META_KEY = "io.github.devnoname120/codexify/debug";
   const STATUS_TOOL = "self_update_status";
   const TIMEOUT_MS = 60_000;
   const REQUEST_TIMEOUT_MS = 5_000;
@@ -231,6 +234,8 @@ h1 { margin: 0; font-size: 16px; line-height: 1.3; letter-spacing: -.01em; }
   let pollTimer = null;
   let elapsedTimer = null;
   let resizeObserver = null;
+  let initialTiming = null;
+  let statusTiming = null;
   let persistedState = normalizeWidgetState(window.openai && window.openai.widgetState);
 
   function post(message) {
@@ -301,6 +306,23 @@ h1 { margin: 0; font-size: 16px; line-height: 1.3; letter-spacing: -.01em; }
       seen.add(candidate);
       const found = candidate[META_KEY];
       if (found && typeof found === "object") return found;
+      for (const key of nestedKeys) {
+        if (candidate[key] && typeof candidate[key] === "object") queue.push(candidate[key]);
+      }
+    }
+    return null;
+  }
+
+  function debugFromMetadata(value) {
+    const queue = [value];
+    const seen = new Set();
+    const nestedKeys = ["_meta", "meta", "call_tool_result", "callToolResult", "mcp_tool_result", "mcpToolResult", "result"];
+    while (queue.length) {
+      const candidate = queue.shift();
+      if (!candidate || typeof candidate !== "object" || seen.has(candidate)) continue;
+      seen.add(candidate);
+      const found = candidate[DEBUG_META_KEY];
+      if (found && typeof found === "object" && Number.isFinite(found.durationMs)) return found;
       for (const key of nestedKeys) {
         if (candidate[key] && typeof candidate[key] === "object") queue.push(candidate[key]);
       }
@@ -508,6 +530,13 @@ h1 { margin: 0; font-size: 16px; line-height: 1.3; letter-spacing: -.01em; }
       notes.append(el("div", "notes-unavailable", "Release notes were unavailable in this release archive."));
       root.append(notes);
     }
+    const timings = [];
+    if (initialTiming) timings.push(`self_update: server ${initialTiming.durationMs} ms`);
+    if (statusTiming) {
+      timings.push(`self_update_status: server ${statusTiming.serverMs} ms`);
+      timings.push(`round trip ${statusTiming.roundTripMs} ms`);
+    }
+    if (timings.length) root.append(el("div", "debug-timing", timings.join(" · ")));
 
     if (terminal || timedOut || payload.status !== "scheduled") stopElapsedTimer();
     else startElapsedTimer();
@@ -543,11 +572,19 @@ h1 { margin: 0; font-size: 16px; line-height: 1.3; letter-spacing: -.01em; }
       return;
     }
     polling = true;
+    const startedAt = performance.now();
     try {
       const result = await request("tools/call", {
         name: STATUS_TOOL,
         arguments: { updateId: payload.updateId }
       }, REQUEST_TIMEOUT_MS);
+      const debug = debugFromMetadata(result);
+      if (debug) {
+        statusTiming = {
+          serverMs: debug.durationMs,
+          roundTripMs: Math.max(0, Math.round(performance.now() - startedAt))
+        };
+      }
       const nextStatus = statusFromToolResult(result);
       if (!nextStatus || nextStatus.updateId !== payload.updateId || nextStatus.targetVersion !== payload.targetVersion) {
         throw new Error("invalid update status response");
@@ -585,8 +622,10 @@ h1 { margin: 0; font-size: 16px; line-height: 1.3; letter-spacing: -.01em; }
     pollStatus();
   }
 
-  function adoptPayload(nextPayload) {
+  function adoptPayload(nextPayload, metadata) {
     if (!nextPayload || typeof nextPayload !== "object") return;
+    const debug = debugFromMetadata(metadata);
+    if (debug) initialTiming = debug;
     const changedUpdate = !payload || payload.updateId !== nextPayload.updateId;
     payload = nextPayload;
     if (changedUpdate) {
@@ -646,7 +685,7 @@ h1 { margin: 0; font-size: 16px; line-height: 1.3; letter-spacing: -.01em; }
       return;
     }
     if (message.method === "ui/notifications/tool-result") {
-      adoptPayload(payloadFromMetadata(message.params) || legacyPayload(message.params));
+      adoptPayload(payloadFromMetadata(message.params) || legacyPayload(message.params), message.params);
     } else if (message.method === "ui/notifications/host-context-changed") {
       applyHostContext(message.params);
     } else if (message.method === "ui/resource-teardown" && message.id !== undefined) {
@@ -657,10 +696,11 @@ h1 { margin: 0; font-size: 16px; line-height: 1.3; letter-spacing: -.01em; }
     }
   });
 
+  const legacyMetadata = window.openai && window.openai.toolResponseMetadata;
   const legacy = window.openai && (
-    payloadFromMetadata(window.openai.toolResponseMetadata) || legacyPayload(window.openai.toolOutput)
+    payloadFromMetadata(legacyMetadata) || legacyPayload(window.openai.toolOutput)
   );
-  if (legacy) adoptPayload(legacy);
+  if (legacy) adoptPayload(legacy, legacyMetadata);
   window.addEventListener("openai:set_globals", event => {
     const globals = event.detail && event.detail.globals;
     if (!globals) return;
@@ -668,7 +708,7 @@ h1 { margin: 0; font-size: 16px; line-height: 1.3; letter-spacing: -.01em; }
       persistedState = normalizeWidgetState(globals.widgetState);
     }
     const nextPayload = payloadFromMetadata(globals.toolResponseMetadata) || (!payload ? legacyPayload(globals.toolOutput) : null);
-    if (nextPayload) adoptPayload(nextPayload);
+    if (nextPayload) adoptPayload(nextPayload, globals.toolResponseMetadata);
   });
 
   request("ui/initialize", {
@@ -710,7 +750,7 @@ mod tests {
     }
 
     #[test]
-    fn metadata_links_the_model_tool_to_a_borderless_app_resource() {
+    fn metadata_links_the_user_confirmed_tool_to_a_borderless_app_resource() {
         let meta = tool_meta();
         assert_eq!(
             meta.get("ui")
@@ -720,12 +760,12 @@ mod tests {
         );
         assert_eq!(
             meta.get("ui").and_then(|value| value.get("visibility")),
-            Some(&json!(["model"]))
+            Some(&json!(["model", "app"]))
         );
         assert_eq!(
             meta.get("openai/widgetAccessible"),
-            None,
-            "the destructive update tool must not be callable by the widget"
+            Some(&json!(true)),
+            "the setup card invokes the update only from its explicit user action"
         );
 
         let resource = resource();
@@ -781,6 +821,8 @@ mod tests {
         assert!(SELF_UPDATE_UI_HTML.contains("ui/notifications/size-changed"));
         assert!(SELF_UPDATE_UI_HTML.contains("tools/call"));
         assert!(SELF_UPDATE_UI_HTML.contains("self_update_status"));
+        assert!(SELF_UPDATE_UI_HTML.contains("io.github.devnoname120/codexify/debug"));
+        assert!(SELF_UPDATE_UI_HTML.contains("round trip ${statusTiming.roundTripMs} ms"));
         assert!(SELF_UPDATE_UI_HTML.contains("60_000"));
         assert!(SELF_UPDATE_UI_HTML.contains("setWidgetState"));
         assert!(SELF_UPDATE_UI_HTML.contains("Check again"));

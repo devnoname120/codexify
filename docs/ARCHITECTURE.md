@@ -89,9 +89,11 @@ Five integration surfaces are exposed to the client:
 - **Conversation authorization** — an optional authentication-token gate whose
   durable grant is keyed by ChatGPT's stable conversation metadata rather than
   by the replaceable MCP transport.
-- **Resources / MCP App** — the self-contained diff resource linked from
-  `show_diff`, whose complete diff arrives through component-only result
-  metadata, plus opaque exported-file resources linked from `export_host_file`
+- **Resources / MCP Apps** — the self-contained diff resource linked from
+  `show_diff`, the setup status/dashboard resource linked from `setup`, and the
+  restart-tolerant updater resource linked from `self_update`. Their private
+  payloads and operational timing arrive through component-only result metadata,
+  alongside opaque exported-file resources linked from `export_host_file`
   and opaque capabilities replacing resource links returned by bridged MCP tools.
   `resources/read` resolves durable native records to retained immutable disk
   snapshots or a safely revalidated current source path, while bridged references
@@ -118,8 +120,8 @@ Five integration surfaces are exposed to the client:
    rmcp `Tool` definitions, including mandatory titles, complete behavioral annotations,
    icons, input/output schemas, OpenAI file-parameter metadata, and MCP Apps
    resource metadata. Transitive definitions held by the private MCP catalog are
-   deliberately absent from this registry. `resources/list` exposes only the
-   embedded diff HTML. `resources/read` serves that static resource, resolves
+   deliberately absent from this registry. `resources/list` exposes the embedded
+   diff, setup, and updater HTML resources. `resources/read` serves those static resources, resolves
    opaque exported-file capabilities returned by `export_host_file`, and proxies
    opaque capabilities created from bridged upstream `resource_link` results;
    those dynamic references are intentionally not enumerable.
@@ -128,7 +130,10 @@ Five integration surfaces are exposed to the client:
    before dispatch, so the typed tool parameters are not the authoritative source.
 5. When conversation authorization is configured, the intentionally innocuous
    `setup` wire tool compares the authentication token submitted as `ref` without
-   echoing it and records only the authorization decision. Every other tool fails
+   echoing it and records only the authorization decision. Its same response also
+   carries the cached connector-version echo, running server version, and a
+   bounded `gh`-first/GitHub-API-fallback release check for the setup MCP App.
+   Every other model-visible tool fails
    before project resolution or dispatch until the hashed ChatGPT conversation is
    authorized. The marker survives server restarts and is namespaced by the
    canonical work directory and current token, so rotation invalidates prior
@@ -168,14 +173,17 @@ Five integration surfaces are exposed to the client:
    `ToolCallIdentity`. Native tools retain their
    downstream name; direct, gateway, and catalog MCP proxies map the call to the
    raw configured upstream server/tool before execution. Dispatch then supplies a
-   request context containing the stable conversation identity, shared
+   request context containing the stable conversation identity, any
+   feature-detected ChatGPT connector identifier, shared
    authorization store, and shared diff manager; tools that do not need it use
    the default context-free implementation. The server applies the model-output
    policy to textual `content` and explicit `structuredContent`, then fills default
    structured text mirrors within the same ceiling. A successful result is checked
    against the tool's cached output validator before it leaves the server. Component-only
    result `_meta` is deliberately excluded. Every tracing lifecycle event includes the resolved
-   identity. Dispatch assigns one server-wide call ID before observers run.
+   identity. Dispatch assigns one server-wide call ID before observers run. When
+   top-level `debug` is enabled it also appends bounded tool name/version/duration
+   metadata for MCP Apps without exposing arguments or result payloads.
    Optional `toolLogging` tracing emits one correlated start and completion record
    for every tool class, with independently selectable request
    and response payloads, configurable severity, lazy redaction, and work-bounded
@@ -548,7 +556,7 @@ a private per-run temporary directory and are removed after shutdown.
 
 ---
 
-## 5. Native tools (30 default, 32 multi-project)
+## 5. Native tools (32 advertised default, 34 multi-project)
 
 | Group | Tools |
 |-------|-------|
@@ -556,15 +564,16 @@ a private per-run temporary directory and are removed after shutdown.
 | Commands | `exec_command` / `write_stdin` (one-shot or resident shell sessions) |
 | Git / diff | `git_status`, `show_diff`, `git_push`, `git_commit`, `git_log` |
 | Environment / project | `get_environment`, `get_project_doc`, `get_agent_brief` |
+| Diagnostics / updates | `self_update`; app-only `doctor`, `self_update_status` |
 | Task state | `update_plan`, `remember`, `update_memory_note`, `forget_memory_note`, `recall` |
 | Skills | `skills_list`, `skills_read` |
 | Timing | `clock_curr_time`, `clock_sleep` |
 | Project selection (multi-project only) | `list_projects`, `set_project_root` |
 
-Conversation authorization prepends the ChatGPT-facing `setup` wire tool; multi-project mode then
-prepends `list_projects` and `set_project_root`. The optional tools are omitted
-from the ordinary single-project registry, preserving the 30-tool default surface
-and behaviour. Enabling the gate raises the applicable count by one.
+The default registry has 30 model-visible tools plus the app-only `doctor` and
+`self_update_status` tools. Multi-project mode prepends `list_projects` and
+`set_project_root`. Conversation authorization prepends the ChatGPT-facing
+`setup` wire tool, raising both advertised and model-visible counts by one.
 `artifactIngress.enabled = false` independently removes `import_host_file`, while
 `artifactEgress.enabled = false` independently removes `export_host_file`; each
 reduces the applicable count by one. Project-catalogue discovery and
@@ -600,8 +609,10 @@ the original order and rejects duplicate names.
 | `exec_sessions.rs` | Generic-client transport fallback plus conversation-owned unified-exec sessions and transport-local diff state: trusted configured-shell resolution, Codex-compatible model shell-type selection by basename, PowerShell exit-code wrapping, background stdout/stderr drain tasks, process-group kill, idle cleanup, and output truncation (UTF-16 units to match the TS). |
 | `diff.rs` | Project-scoped Git snapshots, persistent conversation refs, transport-local fallbacks, incremental comparisons whose emitted snapshot can advance the private diff cursor through compare-and-swap, legacy review-ref migration, diff parsing and component-payload budgets. |
 | `diff_ui.rs` | Embedded MCP Apps resource, component-only diff-result metadata, legacy review-card compatibility, and persisted private interaction state for the interactive `show_diff` card. |
+| `setup_ui.rs` | Embedded setup/status MCP App with update and doctor actions, connector-schema refresh guidance, optional connector-settings navigation, and debug timing display. |
 | `self_update.rs` | Verified release resolution, checksum validation, bounded executable/changelog extraction, private durable updater records, and generated rollback-capable OS worker scripts. |
 | `self_update_ui.rs` | Embedded updater MCP App, component-only changelog payload, restart-tolerant polling, absolute timeout state, and app-only status-tool integration. |
+| `widget_debug.rs` | Small component-only timing metadata shared by all tool results when top-level debug mode is enabled. |
 | `apply_patch.rs` | The Codex patch format: verify the whole patch, then apply file operations sequentially with Codex-compatible partial-failure behavior, fuzzy context matching and CRLF preservation. |
 | `tool.rs` | Mandatory titles and `ToolBehavior`, typed-schema helpers, startup descriptor checks, cached dialect-aware JSON Schema validators, masked input diagnostics, and successful structured-output validation. |
 | `memory.rs` | Working memory outside the repo, keyed by a hash of the normalized active root, with `O_EXCL` locking and atomic writes. In multi-project mode, a configured `memory.dir` is a base containing one hashed child per project. |
@@ -810,8 +821,33 @@ each start) documenting every function and its argument schema. That directory i
 added to the skill roots, so the generated skill is discovered like any other and
 read through `skills_read`. Scope `plugin`.
 
+### 8.4 Setup status MCP App
 
-### 8.4 Detached self-update
+When conversation authorization is enabled, `setup` accepts the historical
+`ref` argument plus an optional `connectorVersion` echo. The advertised tool
+description embeds the running package version. A freshly refreshed connector
+copies that marker into the call; a cached schema from before an upgrade cannot
+supply the newer field, so the running server classifies the schema as unknown
+and recommends Refresh without rejecting the backward-compatible call.
+
+After recording the authorization grant, `setup` performs one bounded release
+check. It invokes `gh api --hostname github.com` with a 2-second timeout and falls
+back to an unauthenticated rustls GitHub API request with a 2-second timeout.
+Successful results are cached for 5 minutes and failures for 30 seconds. The
+structured result includes current/latest versions, source, connector-schema
+classification, and the normal next agent step. `setup_ui.rs` renders that one
+result without a second model call and exposes user-driven Update and Doctor
+actions.
+
+The app-only `doctor` MCP tool reuses `doctor.rs` against the already-resolved
+running `AppConfig`, rather than locating and spawning another executable. The
+component may construct `https://chatgpt.com/#settings/Plugins/<plugin-id>` when
+an `asdk_app_...`/`plugin_...` identifier is feature-detected in request or host
+metadata. Because that identifier is not a documented MCP request field, the
+validated `chatgptConnectorSettingsUrl` config field is the deterministic
+deployment-specific override.
+
+### 8.5 Detached self-update
 
 `self_update.rs` implements the global `self_update` MCP tool. The tool requires
 `confirm=true`, verifies that the running process belongs to the standard
@@ -875,6 +911,8 @@ latter.
 ```jsonc
 {
   "workDir": "/absolute/path/to/project", // required when --work-dir is omitted
+  "debug": false,                         // component-only tool timing footers
+  "chatgptConnectorSettingsUrl": null,    // optional full https://chatgpt.com settings URL
   "port": 3000,
   "apiKey": "…",                      // or --api-key; bearer token
   "conversationAuthToken": "0123456789abcdef…", // exactly 64 lowercase hex characters
@@ -977,9 +1015,13 @@ Audit command previews: disabled
   internal bearer are never printed.
 - Multi-project startup also prints `Project access root:`, `Project mode:
   persistent ChatGPT conversation binding`, and the conversation-binding state
-  directory; its native count is 30 because the selectors are present.
+  directory; its native count is 34 without conversation authorization and 35
+  with it because the two selectors and optional `setup` tool are present.
 - Conversation authorization adds one native tool and prints only whether the
   gate is enabled; neither the token nor its derived namespace is printed.
+- Top-level `debug` does not alter tracing or payload logging. It adds only the
+  tool name, running version, and measured server duration to component-only
+  result metadata; widgets may separately measure their own round-trip duration.
 - Tool completion diagnostics always include the resolved raw MCP server/tool when
   a direct proxy, gateway dispatcher, or catalog dispatcher selected one.
 - `-v` and `-vv` increase Codexify diagnostics without dumping raw tool payloads;

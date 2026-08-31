@@ -137,6 +137,7 @@ main { display: grid; width: 100%; min-width: 0; gap: 6px; padding: 6px; }
 .empty, .notice { padding: 12px 9px; color: var(--muted); font-size: 10px; text-align: center; }
 .omitted { border-top: 1px solid var(--border); }
 .warning { border: 1px solid var(--border); border-radius: 9px; padding: 7px 9px; color: var(--muted); font-size: 10px; line-height: 1.35; }
+.debug-timing { padding: 0 2px; color: var(--muted); font: 9px/1.35 var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace); text-align: right; }
 .diff-body { width: 100%; min-width: 0; max-width: 100%; overflow: hidden; border-top: 1px solid var(--border); }
 .diff-table { display: grid; width: 100%; min-width: 0; max-width: 100%; grid-template-columns: minmax(3.5em, auto) minmax(3.5em, auto) minmax(0, 1fr); font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace); font-size: var(--diff-font-size); font-variant-ligatures: none; line-height: 1.4; tab-size: 4; }
 .diff-row { display: contents; }
@@ -257,11 +258,13 @@ window.Prism = { manual: true };
   });
   const DIFF_META_KEY = "io.github.devnoname120/codexify/diff";
   const LEGACY_REVIEW_META_KEY = "io.github.devnoname120/codexify/review";
+  const DEBUG_META_KEY = "io.github.devnoname120/codexify/debug";
   const WIDGET_STATE_VERSION = 1;
   let nextId = 1;
   const pending = new Map();
   let resizeObserver;
   let currentData;
+  let currentDebug;
   let uiState = normalizeWidgetState(window.openai && window.openai.widgetState);
 
   function post(message) {
@@ -335,6 +338,23 @@ window.Prism = { manual: true };
       if (!candidate || typeof candidate !== "object" || seen.has(candidate)) continue;
       seen.add(candidate);
       const payload = candidate[DIFF_META_KEY] || candidate[LEGACY_REVIEW_META_KEY];
+      if (payload && typeof payload === "object") return payload;
+      for (const key of nestedKeys) {
+        if (candidate[key] && typeof candidate[key] === "object") queue.push(candidate[key]);
+      }
+    }
+    return null;
+  }
+
+  function debugPayloadFromMetadata(value) {
+    const queue = [value];
+    const seen = new Set();
+    const nestedKeys = ["_meta", "meta", "call_tool_result", "callToolResult", "mcp_tool_result", "mcpToolResult", "result"];
+    while (queue.length) {
+      const candidate = queue.shift();
+      if (!candidate || typeof candidate !== "object" || seen.has(candidate)) continue;
+      seen.add(candidate);
+      const payload = candidate[DEBUG_META_KEY];
       if (payload && typeof payload === "object") return payload;
       for (const key of nestedKeys) {
         if (candidate[key] && typeof candidate[key] === "object") queue.push(candidate[key]);
@@ -1019,9 +1039,10 @@ window.Prism = { manual: true };
     }
   }
 
-  function render(data) {
+  function render(data, debug) {
     if (!data || typeof data !== "object") return;
     currentData = data;
+    if (debug) currentDebug = debug;
     root.replaceChildren();
     const summary = data.summary || {};
     const diff = el("details", "diff");
@@ -1060,6 +1081,9 @@ window.Prism = { manual: true };
       root.append(el("div", "warning", `Patch not shown: ${data.patchOmittedReason || "no textual patch was returned"}`));
     }
     for (const warning of data.warnings || []) root.append(el("div", "warning", warning));
+    if (currentDebug && Number.isFinite(currentDebug.durationMs)) {
+      root.append(el("div", "debug-timing", `${currentDebug.tool || "show_diff"}: server ${currentDebug.durationMs} ms`));
+    }
     reportSize();
   }
 
@@ -1082,7 +1106,7 @@ window.Prism = { manual: true };
     }
     if (message.method === "ui/notifications/tool-result") {
       const output = toolResultPayload(message.params);
-      if (output) render(output);
+      if (output) render(output, debugPayloadFromMetadata(message.params));
     } else if (message.method === "ui/notifications/host-context-changed") {
       applyHostContext(message.params);
     } else if (message.method === "ui/resource-teardown" && message.id !== undefined) {
@@ -1109,11 +1133,12 @@ window.Prism = { manual: true };
     reportSize();
   }
 
+  const legacyMetadata = window.openai && window.openai.toolResponseMetadata;
   const legacy = window.openai && (
-    diffPayloadFromMetadata(window.openai.toolResponseMetadata)
+    diffPayloadFromMetadata(legacyMetadata)
     || legacyStructuredPayload(window.openai.toolOutput)
   );
-  if (legacy) render(legacy);
+  if (legacy) render(legacy, debugPayloadFromMetadata(legacyMetadata));
   window.addEventListener("openai:set_globals", event => {
     const globals = event.detail && event.detail.globals;
     if (!globals) return;
@@ -1127,9 +1152,10 @@ window.Prism = { manual: true };
       || (!currentData ? legacyStructuredPayload(globals.toolOutput) : null);
     if (output && !currentData) {
       currentData = output;
+      currentDebug = debugPayloadFromMetadata(globals.toolResponseMetadata);
       shouldRender = true;
     }
-    if (shouldRender) render(currentData);
+    if (shouldRender) render(currentData, currentDebug);
   });
 
   request("ui/initialize", {
@@ -1251,6 +1277,8 @@ mod tests {
         assert!(DIFF_UI_HTML.contains("window.openai.toolResponseMetadata"));
         assert!(DIFF_UI_HTML.contains(DIFF_RESULT_META_KEY));
         assert!(DIFF_UI_HTML.contains(LEGACY_REVIEW_RESULT_META_KEY));
+        assert!(DIFF_UI_HTML.contains("io.github.devnoname120/codexify/debug"));
+        assert!(DIFF_UI_HTML.contains("server ${currentDebug.durationMs} ms"));
         assert!(
             DIFF_UI_HTML
                 .contains("diffPayloadFromMetadata(params) || legacyStructuredPayload(params)")

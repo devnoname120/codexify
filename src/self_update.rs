@@ -2,10 +2,12 @@
 
 use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
+use std::future::Future;
 use std::io::{self, Cursor, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command as StdCommand, Stdio};
-use std::time::Duration;
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, bail};
 use flate2::read::GzDecoder;
@@ -32,7 +34,10 @@ const MAX_SELECTED_CHANGELOG_BYTES: usize = 256 * 1024;
 const MAX_STATUS_FILE_BYTES: u64 = 8 * 1024;
 const MAX_STATUS_RECORDS: usize = 32;
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(180);
-const LATEST_VERSION_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
+const GH_LATEST_VERSION_CHECK_TIMEOUT: Duration = Duration::from_secs(2);
+const LATEST_VERSION_CHECK_TIMEOUT: Duration = Duration::from_secs(2);
+const LATEST_VERSION_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
+const LATEST_VERSION_ERROR_CACHE_TTL: Duration = Duration::from_secs(30);
 const BINARY_PROBE_TIMEOUT: Duration = Duration::from_secs(20);
 const UPDATE_DELAY_SECONDS: u64 = 10;
 const UPDATE_LOCK_FILE: &str = "update.lock";
@@ -157,12 +162,29 @@ pub enum LatestVersionStatus {
     AheadOfLatest,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LatestVersionSource {
+    GithubCli,
+    GithubApi,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LatestVersionInspection {
     pub status: LatestVersionStatus,
     pub current: Version,
     pub latest: Version,
+    pub source: LatestVersionSource,
 }
+
+#[derive(Debug, Clone)]
+struct CachedLatestVersionInspection {
+    checked_at: Instant,
+    result: Result<LatestVersionInspection, String>,
+}
+
+static LATEST_VERSION_CACHE: OnceLock<tokio::sync::Mutex<Option<CachedLatestVersionInspection>>> =
+    OnceLock::new();
 
 impl UpdateWorkspace {
     fn create(root: &Path, target: &Path) -> anyhow::Result<Self> {
@@ -259,23 +281,64 @@ pub fn inspect_update_lock() -> anyhow::Result<Option<UpdateLockInspection>> {
 }
 
 pub async fn inspect_latest_version() -> anyhow::Result<LatestVersionInspection> {
-    inspect_latest_version_from(
-        ReleaseSource::default(),
+    let cache = LATEST_VERSION_CACHE.get_or_init(|| tokio::sync::Mutex::new(None));
+    let mut cache = cache.lock().await;
+    if let Some(cached) = cache.as_ref() {
+        let ttl = if cached.result.is_ok() {
+            LATEST_VERSION_CACHE_TTL
+        } else {
+            LATEST_VERSION_ERROR_CACHE_TTL
+        };
+        if cached.checked_at.elapsed() < ttl {
+            return cached.result.clone().map_err(anyhow::Error::msg);
+        }
+    }
+
+    let result = inspect_latest_version_with(
         env!("CARGO_PKG_VERSION"),
-        LATEST_VERSION_CHECK_TIMEOUT,
+        || latest_release_tag_via_gh(GH_LATEST_VERSION_CHECK_TIMEOUT),
+        || latest_release_tag_via_api(ReleaseSource::default(), LATEST_VERSION_CHECK_TIMEOUT),
     )
     .await
+    .map_err(|error| format!("{error:#}"));
+    *cache = Some(CachedLatestVersionInspection {
+        checked_at: Instant::now(),
+        result: result.clone(),
+    });
+    result.map_err(anyhow::Error::msg)
 }
 
-async fn inspect_latest_version_from(
-    source: ReleaseSource,
+async fn inspect_latest_version_with<G, GFut, A, AFut>(
     current_version_text: &str,
-    request_timeout: Duration,
+    gh: G,
+    api: A,
+) -> anyhow::Result<LatestVersionInspection>
+where
+    G: FnOnce() -> GFut,
+    GFut: Future<Output = anyhow::Result<String>>,
+    A: FnOnce() -> AFut,
+    AFut: Future<Output = anyhow::Result<String>>,
+{
+    let (tag, source) = match gh().await {
+        Ok(tag) => (tag, LatestVersionSource::GithubCli),
+        Err(gh_error) => match api().await {
+            Ok(tag) => (tag, LatestVersionSource::GithubApi),
+            Err(api_error) => bail!(
+                "GitHub CLI release check failed: {gh_error:#}; unauthenticated GitHub API release check failed: {api_error:#}"
+            ),
+        },
+    };
+    classify_latest_version(current_version_text, &tag, source)
+}
+
+fn classify_latest_version(
+    current_version_text: &str,
+    latest_tag: &str,
+    source: LatestVersionSource,
 ) -> anyhow::Result<LatestVersionInspection> {
     let current =
         Version::parse(current_version_text).context("parse the running Codexify version")?;
-    let client = release_metadata_client(request_timeout)?;
-    let latest = latest_release(&client, &source).await?.version;
+    let latest = release_asset(latest_tag.trim())?.version;
     let status = if latest > current {
         LatestVersionStatus::UpdateAvailable
     } else if latest == current {
@@ -287,7 +350,71 @@ async fn inspect_latest_version_from(
         status,
         current,
         latest,
+        source,
     })
+}
+
+async fn latest_release_tag_via_gh(request_timeout: Duration) -> anyhow::Result<String> {
+    let mut command = Command::new("gh");
+    command
+        .args([
+            "api",
+            "--hostname",
+            "github.com",
+            "repos/devnoname120/codexify/releases/latest",
+            "--jq",
+            ".tag_name",
+            "--cache",
+            "5m",
+        ])
+        .env("GH_PROMPT_DISABLED", "1")
+        .env("GH_PAGER", "cat")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let output = tokio::time::timeout(request_timeout, command.output())
+        .await
+        .map_err(|_| anyhow::anyhow!("gh release check timed out"))?
+        .context("run gh release check")?;
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr)
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .unwrap_or("gh api failed")
+            .chars()
+            .take(256)
+            .collect::<String>();
+        bail!("gh api exited with {}: {detail}", output.status);
+    }
+    if output.stdout.len() > 256 {
+        bail!("gh release tag output exceeded 256 bytes");
+    }
+    let tag = String::from_utf8(output.stdout).context("decode gh release tag output")?;
+    let tag = tag.trim();
+    if tag.is_empty() || tag.lines().count() != 1 {
+        bail!("gh returned an invalid latest-release tag");
+    }
+    Ok(tag.to_string())
+}
+
+async fn latest_release_tag_via_api(
+    source: ReleaseSource,
+    request_timeout: Duration,
+) -> anyhow::Result<String> {
+    let client = release_metadata_client(request_timeout)?;
+    Ok(latest_release(&client, &source).await?.tag)
+}
+
+#[cfg(test)]
+async fn inspect_latest_version_from(
+    source: ReleaseSource,
+    current_version_text: &str,
+    request_timeout: Duration,
+) -> anyhow::Result<LatestVersionInspection> {
+    let tag = latest_release_tag_via_api(source, request_timeout).await?;
+    classify_latest_version(current_version_text, &tag, LatestVersionSource::GithubApi)
 }
 
 fn inspect_update_lock_from(home: &Path) -> anyhow::Result<Option<UpdateLockInspection>> {
@@ -1941,7 +2068,36 @@ mod tests {
             assert_eq!(inspection.status, expected);
             assert_eq!(inspection.current, Version::parse(current).unwrap());
             assert_eq!(inspection.latest, Version::new(1, 2, 3));
+            assert_eq!(inspection.source, LatestVersionSource::GithubApi);
         }
+    }
+
+    #[tokio::test]
+    async fn quick_latest_version_check_prefers_gh_and_falls_back_to_github_api() {
+        let from_gh = inspect_latest_version_with(
+            "1.2.2",
+            || async { Ok("v1.2.3".to_string()) },
+            || async { anyhow::bail!("fallback must not run") },
+        )
+        .await
+        .unwrap();
+        assert_eq!(from_gh.source, LatestVersionSource::GithubCli);
+        assert_eq!(from_gh.status, LatestVersionStatus::UpdateAvailable);
+
+        let from_api = inspect_latest_version_with(
+            "1.2.3",
+            || async { anyhow::bail!("gh unavailable") },
+            || async { Ok("v1.2.3".to_string()) },
+        )
+        .await
+        .unwrap();
+        assert_eq!(from_api.source, LatestVersionSource::GithubApi);
+        assert_eq!(from_api.status, LatestVersionStatus::UpToDate);
+    }
+
+    #[test]
+    fn setup_gh_release_check_timeout_is_two_seconds() {
+        assert_eq!(GH_LATEST_VERSION_CHECK_TIMEOUT, Duration::from_secs(2));
     }
 
     #[tokio::test]

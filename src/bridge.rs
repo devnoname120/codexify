@@ -1164,7 +1164,7 @@ mod tests {
                 .unwrap_or_default()
                 .to_string();
             if request.name.as_ref() == "slow" {
-                tokio::time::sleep(Duration::from_millis(200)).await;
+                tokio::time::sleep(Duration::from_secs(1)).await;
             }
             Ok(CallToolResult::success(vec![ContentBlock::text(text)]).into())
         }
@@ -2496,7 +2496,7 @@ mod tests {
             http_headers: HashMap::from([("X-Static".to_string(), "static-value".to_string())]),
             env_http_headers: HashMap::from([("X-Env".to_string(), "REMOTE_HEADER".to_string())]),
             startup_timeout_sec: Some(5.0),
-            tool_timeout_sec: Some(0.05),
+            tool_timeout_sec: Some(0.25),
             ..Default::default()
         };
         let config = crate::config::default_config(std::env::temp_dir());

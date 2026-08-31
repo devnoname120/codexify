@@ -1,5 +1,7 @@
 {
   "workDir": null,
+  "debug": false,
+  "chatgptConnectorSettingsUrl": null,
   "conversationAuthToken": null,
   "port": 3000,
   "tree": {

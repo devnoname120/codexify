@@ -3,6 +3,7 @@
 pub mod apply_patch;
 pub mod clock_curr_time;
 pub mod clock_sleep;
+pub mod doctor;
 pub mod exec_command;
 pub mod export_host_file;
 pub mod forget_memory_note;

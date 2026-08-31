@@ -789,6 +789,10 @@ pub struct WorktreeConfig {
 #[derive(Debug, Clone)]
 pub struct AppConfig {
     pub work_dir: std::path::PathBuf,
+    /// Expose bounded operational timing metadata to MCP App widgets.
+    pub debug: bool,
+    /// Optional direct navigation target for this deployment's ChatGPT connector.
+    pub chatgpt_connector_settings_url: Option<String>,
     pub multi_project: bool,
     pub project_clone_dir: std::path::PathBuf,
     pub project_catalog: ProjectCatalogConfig,
