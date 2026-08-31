@@ -97,6 +97,10 @@ fn valid_json_report_is_clean_and_successful() {
     assert_eq!(report["ok"], true);
     assert_eq!(check(&report, "config_path")["status"], "pass");
     assert_eq!(check(&report, "configuration")["status"], "pass");
+    assert!(matches!(
+        check(&report, "updates")["status"].as_str(),
+        Some("pass" | "warning")
+    ));
     assert_eq!(check(&report, "service")["status"], "skipped");
 }
 

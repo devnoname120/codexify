@@ -314,14 +314,18 @@ codexify doctor --config /absolute/path/to/codexify.config.json
 codexify doctor --codex-cli --json
 ```
 
-The report also checks retained self-update state, native-service running/enabled
-state, the loopback `/health` endpoint when that service is running, and configured
-OpenAI tunnel credentials/runtime integrity. An absent managed tunnel runtime is a
-warning because normal startup installs the pinned verified runtime; incomplete or
-corrupt configured tunnel state is a failure. Warnings and skipped optional checks
-still exit `0`; any failure exits `1` after printing the complete report. JSON mode
-emits exactly one JSON document on stdout and does not include resolved secret
-values.
+The report also checks the latest published GitHub release with a bounded five-second
+probe. It reports whether the running version is current, newer than the latest
+release, or has a newer release available; update availability is informational and
+does not make the installation unhealthy, while inability to determine the latest
+release is a warning. Doctor also checks retained self-update state, native-service
+running/enabled state, the loopback `/health` endpoint when that service is running,
+and configured OpenAI tunnel credentials/runtime integrity. An absent managed tunnel
+runtime is a warning because normal startup installs the pinned verified runtime;
+incomplete or corrupt configured tunnel state is a failure. Warnings and skipped
+optional checks still exit `0`; any failure exits `1` after printing the complete
+report. JSON mode emits exactly one JSON document on stdout and does not include
+resolved secret values.
 
 ### Server flags
 

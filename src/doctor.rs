@@ -11,6 +11,7 @@ use crate::config::{
 };
 use crate::exec_sessions::resolve_shell;
 use crate::openai_tunnel::{self, TunnelRuntimeInspection};
+use crate::self_update::{LatestVersionInspection, LatestVersionStatus};
 use crate::service;
 use crate::types::AppConfig;
 
@@ -582,6 +583,43 @@ fn update_check() -> DoctorCheck {
     }
 }
 
+fn latest_version_check_from_result(
+    result: anyhow::Result<LatestVersionInspection>,
+) -> DoctorCheck {
+    match result {
+        Ok(inspection) => {
+            let detail = format!(
+                "current={}; latest={}",
+                inspection.current, inspection.latest
+            );
+            match inspection.status {
+                LatestVersionStatus::UpdateAvailable => DoctorCheck::pass(
+                    "updates",
+                    format!("New Codexify version {} is available", inspection.latest),
+                )
+                .with_detail(detail),
+                LatestVersionStatus::UpToDate => {
+                    DoctorCheck::pass("updates", "Codexify is up to date").with_detail(detail)
+                }
+                LatestVersionStatus::AheadOfLatest => DoctorCheck::pass(
+                    "updates",
+                    "Running Codexify is newer than the latest published release",
+                )
+                .with_detail(detail),
+            }
+        }
+        Err(error) => {
+            DoctorCheck::warning("updates", "Latest Codexify release could not be checked")
+                .with_detail(format!("{error:#}"))
+                .with_remediation("Check network access to GitHub and rerun `codexify doctor`")
+        }
+    }
+}
+
+async fn latest_version_check() -> DoctorCheck {
+    latest_version_check_from_result(crate::self_update::inspect_latest_version().await)
+}
+
 fn service_check() -> (DoctorCheck, Option<service::ServiceStatus>) {
     match service::status() {
         Ok(status) if !status.installed => (
@@ -819,6 +857,7 @@ pub async fn run(cli: Cli) -> DoctorReport {
     }
 
     checks.push(update_check());
+    checks.push(latest_version_check().await);
     let (service_check, service_status) = service_check();
     checks.push(service_check);
     checks.push(health_check(config.as_ref(), service_status.as_ref()).await);
@@ -841,6 +880,8 @@ pub async fn run(cli: Cli) -> DoctorReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::self_update::{LatestVersionInspection, LatestVersionStatus};
+    use semver::Version;
     use std::path::Path;
 
     #[test]
@@ -887,6 +928,21 @@ mod tests {
         assert_eq!(value["summary"]["warnings"], 0);
         assert_eq!(value["summary"]["failures"], 0);
         assert_eq!(value["summary"]["skipped"], 0);
+    }
+
+    #[test]
+    fn version_check_keeps_update_availability_informational_but_probe_failures_warn() {
+        let available = latest_version_check_from_result(Ok(LatestVersionInspection {
+            status: LatestVersionStatus::UpdateAvailable,
+            current: Version::new(1, 1, 0),
+            latest: Version::new(1, 2, 0),
+        }));
+        assert_eq!(available.status, DoctorStatus::Pass);
+        assert!(available.summary.contains("1.2.0"));
+
+        let failed = latest_version_check_from_result(Err(anyhow::anyhow!("offline")));
+        assert_eq!(failed.status, DoctorStatus::Warning);
+        assert!(failed.detail.as_deref().unwrap().contains("offline"));
     }
 
     #[cfg(unix)]

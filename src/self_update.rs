@@ -28,6 +28,7 @@ const MAX_RELEASE_METADATA_BYTES: usize = 1024 * 1024;
 const MAX_ARCHIVE_BYTES: usize = 128 * 1024 * 1024;
 const MAX_BINARY_BYTES: u64 = 64 * 1024 * 1024;
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(180);
+const LATEST_VERSION_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
 const BINARY_PROBE_TIMEOUT: Duration = Duration::from_secs(20);
 const UPDATE_DELAY_SECONDS: u64 = 5;
 const UPDATE_LOCK_FILE: &str = "update.lock";
@@ -100,6 +101,20 @@ struct UpdateWorkspace {
 pub struct UpdateLockInspection {
     pub path: PathBuf,
     pub update_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LatestVersionStatus {
+    UpdateAvailable,
+    UpToDate,
+    AheadOfLatest,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LatestVersionInspection {
+    pub status: LatestVersionStatus,
+    pub current: Version,
+    pub latest: Version,
 }
 
 impl UpdateWorkspace {
@@ -182,6 +197,38 @@ impl Drop for UpdateWorkspace {
 pub fn inspect_update_lock() -> anyhow::Result<Option<UpdateLockInspection>> {
     let home = home_dir().context("locate the user's home directory")?;
     inspect_update_lock_from(&home)
+}
+
+pub async fn inspect_latest_version() -> anyhow::Result<LatestVersionInspection> {
+    inspect_latest_version_from(
+        ReleaseSource::default(),
+        env!("CARGO_PKG_VERSION"),
+        LATEST_VERSION_CHECK_TIMEOUT,
+    )
+    .await
+}
+
+async fn inspect_latest_version_from(
+    source: ReleaseSource,
+    current_version_text: &str,
+    request_timeout: Duration,
+) -> anyhow::Result<LatestVersionInspection> {
+    let current =
+        Version::parse(current_version_text).context("parse the running Codexify version")?;
+    let client = release_metadata_client(request_timeout)?;
+    let latest = latest_release(&client, &source).await?.version;
+    let status = if latest > current {
+        LatestVersionStatus::UpdateAvailable
+    } else if latest == current {
+        LatestVersionStatus::UpToDate
+    } else {
+        LatestVersionStatus::AheadOfLatest
+    };
+    Ok(LatestVersionInspection {
+        status,
+        current,
+        latest,
+    })
 }
 
 fn inspect_update_lock_from(home: &Path) -> anyhow::Result<Option<UpdateLockInspection>> {
@@ -391,15 +438,20 @@ fn service_supervised() -> bool {
 }
 
 fn update_client() -> anyhow::Result<Client> {
-    crate::tls::client_builder()
-        .redirect(Policy::limited(5))
-        .timeout(DOWNLOAD_TIMEOUT)
-        .user_agent(format!(
-            "codexify-self-update/{}",
-            env!("CARGO_PKG_VERSION")
-        ))
-        .build()
+    release_client(DOWNLOAD_TIMEOUT, "codexify-self-update")
         .context("build Codexify self-update client")
+}
+
+fn release_metadata_client(timeout: Duration) -> anyhow::Result<Client> {
+    release_client(timeout, "codexify-doctor").context("build Codexify release metadata client")
+}
+
+fn release_client(timeout: Duration, user_agent: &str) -> anyhow::Result<Client> {
+    Ok(crate::tls::client_builder()
+        .redirect(Policy::limited(5))
+        .timeout(timeout)
+        .user_agent(format!("{user_agent}/{}", env!("CARGO_PKG_VERSION")))
+        .build()?)
 }
 
 async fn latest_release(client: &Client, source: &ReleaseSource) -> anyhow::Result<ReleaseAsset> {
@@ -1240,7 +1292,29 @@ fn bounded_command_output(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
     use flate2::{Compression, write::GzEncoder};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
     use zip::write::SimpleFileOptions;
+
+    async fn release_server(body: &'static str, delay: Duration) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 4096];
+            let _ = stream.read(&mut request).await.unwrap();
+            if !delay.is_zero() {
+                tokio::time::sleep(delay).await;
+            }
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+        format!("http://{address}/latest")
+    }
 
     fn test_asset(kind: ArchiveKind, binary_name: &'static str) -> ReleaseAsset {
         ReleaseAsset {
@@ -1300,6 +1374,54 @@ mod tests {
         }));
         assert!(release_asset("1.2.3").is_err());
         assert!(release_asset("vnot-a-version").is_err());
+    }
+
+    #[tokio::test]
+    async fn doctor_latest_version_inspection_compares_current_and_published_versions() {
+        for (current, expected) in [
+            ("1.2.2", LatestVersionStatus::UpdateAvailable),
+            ("1.2.3", LatestVersionStatus::UpToDate),
+            ("1.2.4", LatestVersionStatus::AheadOfLatest),
+        ] {
+            let source = ReleaseSource {
+                latest_release_url: release_server(r#"{"tag_name":"v1.2.3"}"#, Duration::ZERO)
+                    .await,
+                release_root: "http://unused.invalid".to_string(),
+            };
+            let inspection = inspect_latest_version_from(source, current, Duration::from_secs(1))
+                .await
+                .unwrap();
+            assert_eq!(inspection.status, expected);
+            assert_eq!(inspection.current, Version::parse(current).unwrap());
+            assert_eq!(inspection.latest, Version::new(1, 2, 3));
+        }
+    }
+
+    #[tokio::test]
+    async fn doctor_latest_version_inspection_is_bounded_and_rejects_bad_metadata() {
+        let malformed = ReleaseSource {
+            latest_release_url: release_server(r#"{"tag_name":7}"#, Duration::ZERO).await,
+            release_root: "http://unused.invalid".to_string(),
+        };
+        let error = inspect_latest_version_from(malformed, "1.2.3", Duration::from_secs(1))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("parse latest Codexify release metadata"));
+
+        let slow = ReleaseSource {
+            latest_release_url: release_server(
+                r#"{"tag_name":"v1.2.3"}"#,
+                Duration::from_millis(250),
+            )
+            .await,
+            release_root: "http://unused.invalid".to_string(),
+        };
+        let error = inspect_latest_version_from(slow, "1.2.3", Duration::from_millis(50))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("download latest-release metadata"));
     }
 
     #[test]

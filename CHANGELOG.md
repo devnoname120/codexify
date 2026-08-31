@@ -12,9 +12,9 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   human and JSON reports and failure-aware exit status. It validates effective
   configuration, Codex-aligned Git and ripgrep availability, GitHub CLI (`gh`),
   the configured exec shell, Codex CLI enrichment, enabled stdio MCP commands,
-  self-update locks, native-service state and loopback health, and OpenAI tunnel
-  credentials/runtime integrity without starting MCP children or downloading the
-  managed tunnel runtime.
+  latest-release freshness, self-update locks, native-service state and loopback
+  health, and OpenAI tunnel credentials/runtime integrity without starting MCP
+  children or downloading the managed tunnel runtime.
 
 ## [1.1.0] - 2026-08-30
 

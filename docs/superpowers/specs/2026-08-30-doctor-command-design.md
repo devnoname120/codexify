@@ -117,20 +117,25 @@ The JSON shape is:
    warning because it can represent either an active detached updater or residue
    from a failed update; remediation points to `codexify service logs -f` and does
    not remove anything.
-11. **Native service** is skipped when no service definition is installed. An
+11. **Release freshness** fetches bounded metadata from Codexify's latest GitHub
+   release endpoint with a short timeout and compares semantic versions using the
+   same parser as self-update. Up-to-date, update-available, and ahead-of-latest
+   states are informational passes; network or malformed-metadata errors are
+   warnings because they do not make the local installation unusable.
+12. **Native service** is skipped when no service definition is installed. An
    installed and running service passes. An installed service that is disabled,
    unloaded, stopped, or failed is a failure with `codexify service enable` as the
    remediation. Native-manager query errors are failures.
-12. **Local health** is skipped unless the service is running and effective
+13. **Local health** is skipped unless the service is running and effective
    configuration is valid. It performs a bounded HTTP request to
    `http://127.0.0.1:<port>/health`, rejects redirects, and requires Codexify's
    `status: "ok"` JSON response. Failure suggests inspecting service logs and
    verifying that `doctor` selected the service's config.
-13. **OpenAI tunnel credential** is skipped when native tunnel mode is not
+14. **OpenAI tunnel credential** is skipped when native tunnel mode is not
    configured. Otherwise it validates the referenced environment variable or
    private key file using the runtime's existing secret checks and never includes
    the value in the report.
-14. **OpenAI tunnel runtime** is skipped when native tunnel mode is not configured.
+15. **OpenAI tunnel runtime** is skipped when native tunnel mode is not configured.
    An explicit client must pass the existing version and compatibility probes. A
    complete managed installation must pass its manifest, hash, and compatibility
    checks. A not-yet-installed managed runtime is a warning because normal startup
