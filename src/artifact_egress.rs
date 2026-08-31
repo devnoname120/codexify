@@ -68,7 +68,7 @@ impl ArtifactEgressStore {
         Ok(Self { config, store })
     }
 
-    #[cfg(test)]
+    #[doc(hidden)]
     pub fn new_at(config: ArtifactEgressConfig, root: PathBuf) -> Self {
         Self {
             config,

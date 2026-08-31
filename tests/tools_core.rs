@@ -494,7 +494,10 @@ async fn clock_sleep_ends_early_when_the_mcp_request_is_cancelled() {
         conversation: None,
         conversation_authorizations: Arc::new(ConversationAuthorizationStore::new()),
         diff_checkpoints: Arc::new(DiffCheckpointManager::new()),
-        artifact_egress: Arc::new(ArtifactEgressStore::new(ArtifactEgressConfig::default())),
+        artifact_egress: Arc::new(ArtifactEgressStore::new_at(
+            ArtifactEgressConfig::default(),
+            dir.path().join("artifact-state"),
+        )),
         cancellation: cancellation.clone(),
     };
 
