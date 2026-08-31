@@ -6,6 +6,21 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-09-01
+
+### Changed
+
+- GitHub Actions now warms target-specific release dependency caches on `main`,
+  restores them for tagged builds, runs release validation in parallel with the
+  platform build matrix, and avoids retaining release-tag caches that cannot
+  benefit subsequent releases.
+
+### Fixed
+
+- The landing page now automatically selects the Windows install command on
+  Windows browsers while preserving the macOS/Linux default for those platforms
+  and unknown clients; the operating-system tabs remain manually switchable.
+
 ## [1.2.0] - 2026-08-31
 
 ### Added
