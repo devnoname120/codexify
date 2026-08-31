@@ -3,10 +3,72 @@ use rmcp::model::MetaObject;
 use serde_json::{Value, json};
 
 use crate::exec_sessions::SessionState;
-use crate::tool::{Tool, ToolBehavior, empty_object_schema, text_output_schema};
+use crate::tool::{Tool, ToolBehavior, empty_object_schema};
 use crate::types::{AppConfig, ToolResult};
 
 pub struct Doctor;
+
+impl Doctor {
+    fn output_schema_value() -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "ok": { "type": "boolean" },
+                "version": { "type": "string" },
+                "platform": {
+                    "type": "object",
+                    "properties": {
+                        "os": { "type": "string" },
+                        "arch": { "type": "string" }
+                    },
+                    "required": ["os", "arch"],
+                    "additionalProperties": false
+                },
+                "checks": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": { "type": "string" },
+                            "status": {
+                                "type": "string",
+                                "enum": ["pass", "warning", "failure", "skipped"]
+                            },
+                            "summary": { "type": "string" },
+                            "detail": {
+                                "anyOf": [
+                                    { "type": "string" },
+                                    { "type": "null" }
+                                ]
+                            },
+                            "remediation": {
+                                "anyOf": [
+                                    { "type": "string" },
+                                    { "type": "null" }
+                                ]
+                            }
+                        },
+                        "required": ["id", "status", "summary", "detail", "remediation"],
+                        "additionalProperties": false
+                    }
+                },
+                "summary": {
+                    "type": "object",
+                    "properties": {
+                        "passed": { "type": "integer", "minimum": 0 },
+                        "warnings": { "type": "integer", "minimum": 0 },
+                        "failures": { "type": "integer", "minimum": 0 },
+                        "skipped": { "type": "integer", "minimum": 0 }
+                    },
+                    "required": ["passed", "warnings", "failures", "skipped"],
+                    "additionalProperties": false
+                }
+            },
+            "required": ["ok", "version", "platform", "checks", "summary"],
+            "additionalProperties": false
+        })
+    }
+}
 
 #[async_trait]
 impl Tool for Doctor {
@@ -50,7 +112,11 @@ impl Tool for Doctor {
     }
 
     fn output_schema(&self) -> Option<Value> {
-        Some(text_output_schema())
+        Some(Self::output_schema_value())
+    }
+
+    fn fills_structured_content(&self) -> bool {
+        false
     }
 
     fn requires_project_root(&self) -> bool {
@@ -58,13 +124,18 @@ impl Tool for Doctor {
     }
 
     async fn call(&self, _args: Value, config: &AppConfig, _session: &SessionState) -> ToolResult {
-        ToolResult::text(crate::doctor::run_for_config(config).await.render_human())
+        let report = crate::doctor::run_for_config(config).await;
+        let text = report.render_human();
+        let structured =
+            serde_json::to_value(&report).expect("doctor report must serialize as structured data");
+        ToolResult::text(text).with_structured(structured)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::doctor::{DoctorCheck, DoctorReport};
 
     #[test]
     fn doctor_is_read_only_and_app_only() {
@@ -82,5 +153,39 @@ mod tests {
         );
         assert_eq!(meta.get("openai/visibility"), Some(&json!("private")));
         assert_eq!(meta.get("openai/widgetAccessible"), Some(&json!(true)));
+    }
+
+    #[test]
+    fn doctor_schema_accepts_the_structured_report_shape() {
+        let report = DoctorReport::new(vec![
+            DoctorCheck::pass("runtime", "Runtime is usable"),
+            DoctorCheck::warning("release", "Release check unavailable")
+                .with_detail("offline")
+                .with_remediation("Try again later"),
+            DoctorCheck::failure("service", "Service is stopped"),
+            DoctorCheck::skipped("tunnel", "Tunnel is not configured"),
+        ]);
+        let structured = serde_json::to_value(report).unwrap();
+        let schema = Doctor.output_schema().unwrap();
+        let validator = jsonschema::options().build(&schema).unwrap();
+
+        assert!(validator.is_valid(&structured));
+        assert!(!Doctor.fills_structured_content());
+    }
+
+    #[tokio::test]
+    async fn doctor_call_returns_structured_content_matching_its_schema() {
+        let root = tempfile::tempdir().unwrap();
+        let config = crate::config::default_config(root.path().to_path_buf());
+        let result = Doctor.call(json!({}), &config, &SessionState::new()).await;
+        let structured = result
+            .structured_content
+            .as_ref()
+            .expect("doctor must return structured content");
+        let schema = Doctor.output_schema().unwrap();
+        let validator = jsonschema::options().build(&schema).unwrap();
+
+        assert!(validator.is_valid(structured));
+        assert!(result.joined_text().starts_with("Codexify doctor "));
     }
 }

@@ -32,16 +32,16 @@ fn default_exec_policy_is_unrestricted_without_an_allowlist() {
 }
 
 #[test]
-fn loads_all_32_tools_including_app_only_diagnostics() {
+fn loads_all_33_tools_including_app_only_diagnostics() {
     let tools = load_tools();
-    assert_eq!(tools.len(), 32);
+    assert_eq!(tools.len(), 33);
     assert!(!tools.iter().any(|tool| tool.name() == "run_command"));
 }
 
 #[test]
 fn multi_project_mode_adds_catalogue_and_session_selector() {
     let tools = load_tools_for_mode(true);
-    assert_eq!(tools.len(), 34);
+    assert_eq!(tools.len(), 35);
     assert_eq!(tools[0].name(), "list_projects");
     assert_eq!(tools[1].name(), "set_project_root");
 }
@@ -54,7 +54,7 @@ fn artifact_ingress_can_be_omitted_by_configuration() {
         .into_iter()
         .map(|tool| tool.name())
         .collect::<Vec<_>>();
-    assert_eq!(names.len(), 31);
+    assert_eq!(names.len(), 32);
     assert!(!names.contains(&"import_host_file"));
 }
 
@@ -66,7 +66,7 @@ fn artifact_egress_can_be_omitted_by_configuration() {
         .into_iter()
         .map(|tool| tool.name())
         .collect::<Vec<_>>();
-    assert_eq!(names.len(), 31);
+    assert_eq!(names.len(), 32);
     assert!(!names.contains(&"export_host_file"));
 }
 
@@ -76,7 +76,7 @@ fn conversation_auth_mode_adds_innocuously_named_gate_before_protected_tools() {
     config.conversation_auth_token =
         Some("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into());
     let tools = load_tools_for_config(&config);
-    assert_eq!(tools.len(), 33);
+    assert_eq!(tools.len(), 34);
     assert_eq!(tools[0].name(), "setup");
     let schema = tools[0].input_schema();
     assert!(schema["properties"].get("ref").is_some());
@@ -99,7 +99,7 @@ fn conversation_auth_mode_adds_innocuously_named_gate_before_protected_tools() {
 
     config.multi_project = true;
     let tools = load_tools_for_config(&config);
-    assert_eq!(tools.len(), 35);
+    assert_eq!(tools.len(), 36);
     assert_eq!(tools[0].name(), "setup");
     assert_eq!(tools[1].name(), "list_projects");
     assert_eq!(tools[2].name(), "set_project_root");
@@ -211,6 +211,7 @@ fn native_tool_annotations_match_the_audited_side_effect_matrix() {
         .collect::<std::collections::BTreeMap<_, _>>();
     let expected = [
         ("apply_patch", (false, true, false, false)),
+        ("check_for_updates", (true, false, true, true)),
         ("clock_curr_time", (true, false, true, false)),
         ("clock_sleep", (true, false, true, false)),
         ("doctor", (true, false, true, true)),
@@ -261,6 +262,7 @@ fn includes_expected_tool_names() {
         "write_file",
         "import_host_file",
         "export_host_file",
+        "check_for_updates",
         "doctor",
         "self_update",
         "self_update_status",
@@ -307,6 +309,7 @@ fn includes_tools_codex_has_no_equivalent_of() {
         "get_environment",
         "get_project_doc",
         "get_agent_brief",
+        "check_for_updates",
         "self_update",
         "self_update_status",
         "remember",
@@ -369,6 +372,32 @@ fn self_update_status_is_available_only_to_the_updater_app() {
     let meta = tool
         .meta()
         .expect("status tool must declare app visibility");
+
+    assert_eq!(
+        meta.get("ui").and_then(|value| value.get("visibility")),
+        Some(&json!(["app"]))
+    );
+    assert_eq!(
+        meta.get("openai/visibility").and_then(Value::as_str),
+        Some("private")
+    );
+    assert_eq!(
+        meta.get("openai/widgetAccessible").and_then(Value::as_bool),
+        Some(true)
+    );
+    assert!(!tool.requires_project_root());
+}
+
+#[test]
+fn check_for_updates_is_available_only_to_the_setup_app() {
+    let tools = load_tools();
+    let tool = tools
+        .iter()
+        .find(|tool| tool.name() == "check_for_updates")
+        .expect("check_for_updates must be registered");
+    let meta = tool
+        .meta()
+        .expect("update-check tool must declare app visibility");
 
     assert_eq!(
         meta.get("ui").and_then(|value| value.get("visibility")),
@@ -612,6 +641,7 @@ fn tools_that_need_their_own_structured_content() {
     assert_eq!(
         needs_own,
         vec![
+            "check_for_updates".to_string(),
             "clock_curr_time".to_string(),
             "exec_command".to_string(),
             "export_host_file".to_string(),

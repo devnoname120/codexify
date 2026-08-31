@@ -10,9 +10,13 @@ use crate::conversation_auth::{
     conversation_auth_tokens_match, validate_conversation_auth_token,
 };
 use crate::exec_sessions::SessionState;
-use crate::self_update::{LatestVersionInspection, LatestVersionSource, LatestVersionStatus};
+use crate::self_update::LatestVersionInspection;
 use crate::setup_ui;
 use crate::tool::{Tool, ToolBehavior, ToolRequestContext, parse_tool_args};
+use crate::tools::check_for_updates::{
+    UpdateCheckOutput, UpdateCheckStatus, output_from_result,
+    output_schema_value as update_output_schema_value,
+};
 use crate::types::{AppConfig, ToolResult};
 
 // This is an authentication and authorization tool despite its deliberately
@@ -32,29 +36,10 @@ struct SetupArgs {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-enum SetupUpdateStatus {
-    UpdateAvailable,
-    UpToDate,
-    AheadOfLatest,
-    CheckFailed,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
 enum ConnectorSchemaStatus {
     Current,
     Stale,
     Unknown,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct SetupUpdateInfo {
-    status: SetupUpdateStatus,
-    current_version: String,
-    latest_version: Option<String>,
-    source: Option<LatestVersionSource>,
-    detail: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -79,19 +64,9 @@ struct SetupOutput {
     content: String,
     server_version: String,
     next_step: String,
-    update: SetupUpdateInfo,
+    update: UpdateCheckOutput,
     connector_schema: ConnectorSchemaInfo,
     debug: Option<SetupDebugInfo>,
-}
-
-fn compact_error(error: &str) -> String {
-    error
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .chars()
-        .take(512)
-        .collect()
 }
 
 fn setup_result(
@@ -118,40 +93,21 @@ fn setup_result(
         settings_url: settings_url.map(ToOwned::to_owned),
     };
 
-    let update = match update_result {
-        Ok(inspection) => SetupUpdateInfo {
-            status: match inspection.status {
-                LatestVersionStatus::UpdateAvailable => SetupUpdateStatus::UpdateAvailable,
-                LatestVersionStatus::UpToDate => SetupUpdateStatus::UpToDate,
-                LatestVersionStatus::AheadOfLatest => SetupUpdateStatus::AheadOfLatest,
-            },
-            current_version: inspection.current.to_string(),
-            latest_version: Some(inspection.latest.to_string()),
-            source: Some(inspection.source),
-            detail: None,
-        },
-        Err(error) => SetupUpdateInfo {
-            status: SetupUpdateStatus::CheckFailed,
-            current_version: advertised_version.to_string(),
-            latest_version: None,
-            source: None,
-            detail: Some(compact_error(&error)),
-        },
-    };
+    let update = output_from_result(update_result);
 
     let mut text = format!("Setup completed for {scope_description}. {next_step}");
     match update.status {
-        SetupUpdateStatus::UpdateAvailable => {
+        UpdateCheckStatus::UpdateAvailable => {
             if let Some(latest) = update.latest_version.as_deref() {
                 text.push_str(&format!(
                     " Codexify {latest} is available; the setup panel can start the update."
                 ));
             }
         }
-        SetupUpdateStatus::CheckFailed => {
+        UpdateCheckStatus::CheckFailed => {
             text.push_str(" The latest Codexify release could not be checked quickly.");
         }
-        SetupUpdateStatus::UpToDate | SetupUpdateStatus::AheadOfLatest => {}
+        UpdateCheckStatus::UpToDate | UpdateCheckStatus::AheadOfLatest => {}
     }
     if connector_schema.refresh_recommended {
         text.push_str(
@@ -182,39 +138,7 @@ impl ConversationAuthorization {
                 "content": { "type": "string" },
                 "serverVersion": { "type": "string" },
                 "nextStep": { "type": "string" },
-                "update": {
-                    "type": "object",
-                    "properties": {
-                        "status": {
-                            "type": "string",
-                            "enum": ["update_available", "up_to_date", "ahead_of_latest", "check_failed"]
-                        },
-                        "currentVersion": { "type": "string" },
-                        "latestVersion": {
-                            "anyOf": [
-                                { "type": "string" },
-                                { "type": "null" }
-                            ]
-                        },
-                        "source": {
-                            "anyOf": [
-                                {
-                                    "type": "string",
-                                    "enum": ["github_cli", "github_api"]
-                                },
-                                { "type": "null" }
-                            ]
-                        },
-                        "detail": {
-                            "anyOf": [
-                                { "type": "string" },
-                                { "type": "null" }
-                            ]
-                        }
-                    },
-                    "required": ["status", "currentVersion", "latestVersion", "source", "detail"],
-                    "additionalProperties": false
-                },
+                "update": update_output_schema_value(),
                 "connectorSchema": {
                     "type": "object",
                     "properties": {
@@ -436,6 +360,7 @@ mod tests {
     use crate::conversation_auth::ConversationAuthorizationStore;
     use crate::diff::DiffCheckpointManager;
     use crate::project_bindings::ConversationIdentity;
+    use crate::self_update::{LatestVersionSource, LatestVersionStatus};
 
     fn assert_model_facing_setup_vocabulary(text: &str) {
         let text = text.to_ascii_lowercase();
