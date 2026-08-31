@@ -23,6 +23,7 @@ pub const OPENAI_SESSION_META_KEY: &str = "openai/session";
 
 const BINDING_VERSION: u32 = 2;
 const LEGACY_BINDING_VERSION: u32 = 1;
+const WITHOUT_PROJECT_BINDING_VERSION: u32 = 1;
 const OPENAI_SESSION_HASH_DOMAIN: &[u8] = b"codexify/openai-session/v1\0";
 const LEGACY_OPENAI_SESSION_HASH_DOMAIN: &[u8] = b"codex-free/openai-session/v1\0";
 const ACCESS_ROOT_HASH_DOMAIN: &[u8] = b"codexify/access-root/v1\0";
@@ -111,9 +112,32 @@ pub struct ProjectRootSelection {
     pub scope: ProjectBindingScope,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WithoutProjectSelection {
+    pub access_root: PathBuf,
+    pub scratch_root: PathBuf,
+    pub newly_selected: bool,
+    pub scope: ProjectBindingScope,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProjectBindingState {
+    Unselected {
+        access_root: PathBuf,
+        scope: ProjectBindingScope,
+    },
+    Project(ProjectRootSelection),
+    WithoutProject {
+        access_root: PathBuf,
+        scratch_root: PathBuf,
+        scope: ProjectBindingScope,
+    },
+}
+
 #[derive(Debug, Clone)]
 pub struct ProjectBindingStore {
     base_dir: PathBuf,
+    scratch_dir: PathBuf,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -134,6 +158,14 @@ struct StoredProjectBinding {
     worktrees_root: Option<String>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredWithoutProjectBinding {
+    version: u32,
+    access_root: String,
+    scratch_root: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ResolvedProjectBinding {
     source_project_root: PathBuf,
@@ -142,6 +174,12 @@ struct ResolvedProjectBinding {
     managed_worktree: bool,
     worktree_git_root: Option<PathBuf>,
     worktrees_root: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ResolvedBindingState {
+    Project(ResolvedProjectBinding),
+    WithoutProject(PathBuf),
 }
 
 #[derive(Debug, Clone)]
@@ -173,11 +211,22 @@ impl Drop for BindingLock {
 impl ProjectBindingStore {
     pub fn for_current_user() -> Self {
         let home = home_dir().unwrap_or_else(|| PathBuf::from("."));
-        Self::new(home.join(".codexify").join("conversation-projects"))
+        Self::new_with_scratch_dir(
+            home.join(".codexify").join("conversation-projects"),
+            home.join(".codexify").join("scratch").join("conversations"),
+        )
     }
 
     pub fn new(base_dir: PathBuf) -> Self {
-        Self { base_dir }
+        let scratch_dir = base_dir.join("scratch");
+        Self::new_with_scratch_dir(base_dir, scratch_dir)
+    }
+
+    fn new_with_scratch_dir(base_dir: PathBuf, scratch_dir: PathBuf) -> Self {
+        Self {
+            base_dir,
+            scratch_dir,
+        }
     }
 
     pub fn base_dir(&self) -> &Path {
@@ -193,11 +242,19 @@ impl ProjectBindingStore {
             return Ok(config.clone());
         }
 
-        let Some(binding) = self.selected_binding(config, identity)? else {
-            return Err(format!(
-                "No project root is selected for this ChatGPT conversation. Call `set_project_root` with an existing directory beneath the access root `{}`, an HTTPS/SSH Git repository URL ending in `.git`, or an exact GitHub repository, branch, pull-request, or commit URL. Repository URLs reuse a matching checkout or clone into the configured clone directory. If only a project name or purpose is known, call `list_projects` first. Then call `get_agent_brief` before using project tools. The selection is stored by ChatGPT conversation ID and will survive MCP reconnects and server restarts.",
-                config.work_dir.display()
-            ));
+        let binding = match self.resolved_binding_state(config, identity)? {
+            Some(ResolvedBindingState::Project(binding)) => binding,
+            Some(ResolvedBindingState::WithoutProject(scratch_root)) => {
+                let mut effective = config.clone();
+                effective.work_dir = scratch_root;
+                return Ok(effective);
+            }
+            None => {
+                return Err(format!(
+                    "No project root is selected for this ChatGPT conversation. Call `set_project_root` with an existing directory beneath the access root `{}`, an HTTPS/SSH Git repository URL ending in `.git`, or an exact GitHub repository, branch, pull-request, or commit URL. Repository URLs reuse a matching checkout or clone into the configured clone directory. If only a project name or purpose is known, call `list_projects` first. To continue without a project, call `set_project_root` with `withoutProject=true`. Then call `get_agent_brief` before using project tools. The selection is stored by ChatGPT conversation ID and will survive MCP reconnects and server restarts.",
+                    config.work_dir.display()
+                ));
+            }
         };
 
         let mut effective = config.clone();
@@ -205,14 +262,54 @@ impl ProjectBindingStore {
         Ok(effective)
     }
 
+    pub fn binding_state(
+        &self,
+        config: &AppConfig,
+        identity: &ConversationIdentity,
+    ) -> Result<ProjectBindingState, String> {
+        if !config.multi_project {
+            return Err(
+                "Project-root selection is disabled. Start codexify with `--multi-project` or set `multiProject` to true."
+                    .to_string(),
+            );
+        }
+        let access_root = canonical_access_root(config)?;
+        match self.resolved_binding_state_at(identity, &access_root)? {
+            Some(ResolvedBindingState::Project(binding)) => {
+                Ok(ProjectBindingState::Project(selection_from_binding(
+                    access_root,
+                    binding,
+                    config.worktrees.mode,
+                    false,
+                    false,
+                    ProjectBindingScope::ChatGptConversation,
+                    Vec::new(),
+                )))
+            }
+            Some(ResolvedBindingState::WithoutProject(scratch_root)) => {
+                Ok(ProjectBindingState::WithoutProject {
+                    access_root,
+                    scratch_root,
+                    scope: ProjectBindingScope::ChatGptConversation,
+                })
+            }
+            None => Ok(ProjectBindingState::Unselected {
+                access_root,
+                scope: ProjectBindingScope::ChatGptConversation,
+            }),
+        }
+    }
+
     pub fn selected_project_root(
         &self,
         config: &AppConfig,
         identity: &ConversationIdentity,
     ) -> Result<Option<PathBuf>, String> {
-        Ok(self
-            .selected_binding(config, identity)?
-            .map(|binding| binding.project_root))
+        Ok(match self.resolved_binding_state(config, identity)? {
+            Some(ResolvedBindingState::Project(binding)) => Some(binding.project_root),
+            Some(ResolvedBindingState::WithoutProject(scratch_root)) => Some(scratch_root),
+            None => None,
+        })
     }
 
     pub async fn select_project_root(
@@ -232,36 +329,45 @@ impl ProjectBindingStore {
         let binding_path = self.binding_path(&access_root, identity);
         let binding_lock = acquire_lock(&binding_path).await?;
 
-        if let Some(mut current) = self.selected_binding(config, identity)? {
-            if project_reference_matches(
-                config,
-                &reference,
-                &current.source_project_root,
-                current.repository_url.as_deref(),
-            )
-            .await?
-            {
-                if current.repository_url.is_none()
-                    && let ProjectReference::Git(repository) = &reference
+        match self.resolved_binding_state_at(identity, &access_root)? {
+            Some(ResolvedBindingState::Project(mut current)) => {
+                if project_reference_matches(
+                    config,
+                    &reference,
+                    &current.source_project_root,
+                    current.repository_url.as_deref(),
+                )
+                .await?
                 {
-                    current.repository_url = Some(repository.web_url().to_string());
+                    if current.repository_url.is_none()
+                        && let ProjectReference::Git(repository) = &reference
+                    {
+                        current.repository_url = Some(repository.web_url().to_string());
+                    }
+                    return Ok(selection_from_binding(
+                        access_root,
+                        current,
+                        config.worktrees.mode,
+                        false,
+                        false,
+                        ProjectBindingScope::ChatGptConversation,
+                        Vec::new(),
+                    ));
                 }
-                return Ok(selection_from_binding(
-                    access_root,
-                    current,
-                    config.worktrees.mode,
-                    false,
-                    false,
-                    ProjectBindingScope::ChatGptConversation,
-                    Vec::new(),
+
+                return Err(format!(
+                    "This ChatGPT conversation is already bound to source project `{}` and cannot switch to `{}`. Start a new chat for another project.",
+                    current.source_project_root.display(),
+                    reference.display()
                 ));
             }
-
-            return Err(format!(
-                "This ChatGPT conversation is already bound to source project `{}` and cannot switch to `{}`. Start a new chat for another project.",
-                current.source_project_root.display(),
-                reference.display()
-            ));
+            Some(ResolvedBindingState::WithoutProject(_)) => {
+                return Err(format!(
+                    "This ChatGPT conversation is already configured to chat without a project and cannot switch to `{}`. Start a new chat to attach a project.",
+                    reference.display()
+                ));
+            }
+            None => {}
         }
 
         let prepared = prepare_project_root(config, &reference).await?;
@@ -354,6 +460,63 @@ impl ProjectBindingStore {
         ))
     }
 
+    pub async fn select_without_project(
+        &self,
+        config: &AppConfig,
+        identity: &ConversationIdentity,
+    ) -> Result<WithoutProjectSelection, String> {
+        if !config.multi_project {
+            return Err(
+                "Project-root selection is disabled. Start codexify with `--multi-project` or set `multiProject` to true."
+                    .to_string(),
+            );
+        }
+        let access_root = canonical_access_root(config)?;
+        let binding_path = self.binding_path(&access_root, identity);
+        let binding_lock = acquire_lock(&binding_path).await?;
+
+        match self.resolved_binding_state_at(identity, &access_root)? {
+            Some(ResolvedBindingState::WithoutProject(scratch_root)) => {
+                return Ok(WithoutProjectSelection {
+                    access_root,
+                    scratch_root,
+                    newly_selected: false,
+                    scope: ProjectBindingScope::ChatGptConversation,
+                });
+            }
+            Some(ResolvedBindingState::Project(binding)) => {
+                return Err(format!(
+                    "This ChatGPT conversation is already bound to source project `{}` and cannot switch to chat without a project. Start a new chat for another choice.",
+                    binding.source_project_root.display()
+                ));
+            }
+            None => {}
+        }
+
+        let (scratch_root, created) = self.create_scratch_root(&access_root, identity)?;
+        let marker = StoredWithoutProjectBinding {
+            version: WITHOUT_PROJECT_BINDING_VERSION,
+            access_root: access_root.to_string_lossy().into_owned(),
+            scratch_root: scratch_root.to_string_lossy().into_owned(),
+        };
+        if let Err(error) = self.write_without_project_binding(
+            &self.without_project_path(&access_root, identity),
+            &marker,
+        ) {
+            if created {
+                let _ = std::fs::remove_dir_all(&scratch_root);
+            }
+            return Err(error);
+        }
+        drop(binding_lock);
+        Ok(WithoutProjectSelection {
+            access_root,
+            scratch_root,
+            newly_selected: true,
+            scope: ProjectBindingScope::ChatGptConversation,
+        })
+    }
+
     pub fn referenced_managed_project_roots(
         &self,
         config: &AppConfig,
@@ -373,18 +536,44 @@ impl ProjectBindingStore {
         Ok(roots)
     }
 
-    fn selected_binding(
+    fn resolved_binding_state(
         &self,
         config: &AppConfig,
         identity: &ConversationIdentity,
-    ) -> Result<Option<ResolvedProjectBinding>, String> {
+    ) -> Result<Option<ResolvedBindingState>, String> {
         let access_root = canonical_access_root(config)?;
-        let path = self.binding_path(&access_root, identity);
-        if let Some(binding) = self.read_binding(&path, &access_root)? {
-            return Ok(Some(binding));
+        self.resolved_binding_state_at(identity, &access_root)
+    }
+
+    fn resolved_binding_state_at(
+        &self,
+        identity: &ConversationIdentity,
+        access_root: &Path,
+    ) -> Result<Option<ResolvedBindingState>, String> {
+        let path = self.binding_path(access_root, identity);
+        let project = match self.read_binding(&path, access_root)? {
+            Some(binding) => Some(binding),
+            None => self.read_binding(
+                &self.legacy_binding_path(access_root, identity),
+                access_root,
+            )?,
+        };
+        let without_project = self.read_without_project_binding(
+            &self.without_project_path(access_root, identity),
+            access_root,
+            identity,
+        )?;
+        match (project, without_project) {
+            (Some(_), Some(_)) => Err(format!(
+                "This ChatGPT conversation has inconsistent project-selection state under {}. Start a new chat or remove the conflicting binding records.",
+                self.access_root_dir(access_root).display()
+            )),
+            (Some(binding), None) => Ok(Some(ResolvedBindingState::Project(binding))),
+            (None, Some(scratch_root)) => {
+                Ok(Some(ResolvedBindingState::WithoutProject(scratch_root)))
+            }
+            (None, None) => Ok(None),
         }
-        let legacy_path = self.legacy_binding_path(&access_root, identity);
-        self.read_binding(&legacy_path, &access_root)
     }
 
     fn scan_source_assignments(
@@ -447,6 +636,55 @@ impl ProjectBindingStore {
         self.base_dir
             .join(access_root_key(access_root))
             .join(format!("{}.json", identity.stable_key()))
+    }
+
+    fn without_project_path(&self, access_root: &Path, identity: &ConversationIdentity) -> PathBuf {
+        self.access_root_dir(access_root)
+            .join(format!("{}.no-project", identity.stable_key()))
+    }
+
+    fn create_scratch_root(
+        &self,
+        access_root: &Path,
+        identity: &ConversationIdentity,
+    ) -> Result<(PathBuf, bool), String> {
+        let (scratch_dir, _) = ensure_private_directory(&self.scratch_dir, "scratch root")?;
+        let namespace_path = scratch_dir.join(access_root_key(access_root));
+        let (namespace, _) = ensure_private_directory(&namespace_path, "scratch namespace")?;
+        if !namespace.starts_with(&scratch_dir) {
+            return Err(format!(
+                "The Codexify scratch namespace resolves outside its private root: {}",
+                namespace.display()
+            ));
+        }
+
+        let scratch_path = namespace.join(identity.stable_key());
+        let (scratch_root, created) = ensure_private_directory(&scratch_path, "scratch workspace")?;
+        validate_scratch_location(&scratch_root, &namespace, access_root)?;
+        Ok((scratch_root, created))
+    }
+
+    fn resolve_scratch_root(
+        &self,
+        stored: &Path,
+        access_root: &Path,
+        identity: &ConversationIdentity,
+    ) -> Result<PathBuf, String> {
+        let scratch_dir = validate_private_directory(&self.scratch_dir, "scratch root")?;
+        let namespace = validate_private_directory(
+            &scratch_dir.join(access_root_key(access_root)),
+            "scratch namespace",
+        )?;
+        let expected = namespace.join(identity.stable_key());
+        if stored != expected {
+            return Err(format!(
+                "The stored ChatGPT conversation scratch path does not match its conversation namespace: {}",
+                stored.display()
+            ));
+        }
+        let scratch_root = validate_private_directory(&expected, "scratch workspace")?;
+        validate_scratch_location(&scratch_root, &namespace, access_root)?;
+        Ok(scratch_root)
     }
 
     fn legacy_binding_path(&self, access_root: &Path, identity: &ConversationIdentity) -> PathBuf {
@@ -640,6 +878,45 @@ impl ProjectBindingStore {
         }))
     }
 
+    fn read_without_project_binding(
+        &self,
+        path: &Path,
+        access_root: &Path,
+        identity: &ConversationIdentity,
+    ) -> Result<Option<PathBuf>, String> {
+        let raw = match std::fs::read_to_string(path) {
+            Ok(raw) => raw,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(format!(
+                    "Could not read the stored ChatGPT conversation no-project binding at {}: {error}",
+                    path.display()
+                ));
+            }
+        };
+        let binding: StoredWithoutProjectBinding = serde_json::from_str(&raw).map_err(|error| {
+            format!(
+                "The stored ChatGPT conversation no-project binding at {} is invalid: {error}. Start a new chat or remove that binding file.",
+                path.display()
+            )
+        })?;
+        if binding.version != WITHOUT_PROJECT_BINDING_VERSION {
+            return Err(format!(
+                "The stored ChatGPT conversation no-project binding at {} uses unsupported version {}. Start a new chat or remove that binding file.",
+                path.display(),
+                binding.version
+            ));
+        }
+        if Path::new(&binding.access_root) != access_root {
+            return Err(format!(
+                "The stored ChatGPT conversation no-project binding at {} belongs to a different access root. Start a new chat or remove that binding file.",
+                path.display()
+            ));
+        }
+        self.resolve_scratch_root(Path::new(&binding.scratch_root), access_root, identity)
+            .map(Some)
+    }
+
     fn write_binding(&self, target: &Path, binding: &StoredProjectBinding) -> Result<(), String> {
         let parent = target.parent().ok_or_else(|| {
             format!(
@@ -683,6 +960,55 @@ impl ProjectBindingStore {
             ));
         }
 
+        Ok(())
+    }
+
+    fn write_without_project_binding(
+        &self,
+        target: &Path,
+        binding: &StoredWithoutProjectBinding,
+    ) -> Result<(), String> {
+        let parent = target.parent().ok_or_else(|| {
+            format!(
+                "Could not determine the directory for no-project binding {}",
+                target.display()
+            )
+        })?;
+        std::fs::create_dir_all(parent).map_err(|error| {
+            format!(
+                "Could not create project-binding directory {}: {error}",
+                parent.display()
+            )
+        })?;
+
+        let counter = ATOMIC_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let mut temporary = target.as_os_str().to_os_string();
+        temporary.push(format!(".tmp.{}.{}", std::process::id(), counter));
+        let temporary = PathBuf::from(temporary);
+        let json = serde_json::to_string_pretty(binding)
+            .map_err(|error| format!("Could not serialize no-project binding: {error}"))?;
+
+        let result = (|| -> std::io::Result<()> {
+            {
+                let mut file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&temporary)?;
+                file.write_all(json.as_bytes())?;
+                file.write_all(b"\n")?;
+                file.sync_all()?;
+            }
+            std::fs::rename(&temporary, target)?;
+            Ok(())
+        })();
+
+        if let Err(error) = result {
+            let _ = std::fs::remove_file(&temporary);
+            return Err(format!(
+                "Could not persist the ChatGPT conversation no-project binding at {}: {error}",
+                target.display()
+            ));
+        }
         Ok(())
     }
 }
@@ -895,6 +1221,89 @@ fn canonical_access_root(config: &AppConfig) -> Result<PathBuf, String> {
             config.work_dir.display()
         )
     })
+}
+
+fn ensure_private_directory(path: &Path, label: &str) -> Result<(PathBuf, bool), String> {
+    let created = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(format!(
+                    "The Codexify {label} is not a private directory: {}",
+                    path.display()
+                ));
+            }
+            false
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::create_dir_all(path).map_err(|error| {
+                format!(
+                    "Could not create Codexify {label} {}: {error}",
+                    path.display()
+                )
+            })?;
+            true
+        }
+        Err(error) => {
+            return Err(format!(
+                "Could not inspect Codexify {label} {}: {error}",
+                path.display()
+            ));
+        }
+    };
+    validate_private_directory(path, label).map(|canonical| (canonical, created))
+}
+
+fn validate_private_directory(path: &Path, label: &str) -> Result<PathBuf, String> {
+    let metadata = std::fs::symlink_metadata(path).map_err(|error| {
+        format!(
+            "Could not inspect Codexify {label} {}: {error}",
+            path.display()
+        )
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(format!(
+            "The Codexify {label} is not a private directory: {}",
+            path.display()
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).map_err(
+            |error| {
+                format!(
+                    "Could not protect Codexify {label} {}: {error}",
+                    path.display()
+                )
+            },
+        )?;
+    }
+    std::fs::canonicalize(path).map_err(|error| {
+        format!(
+            "Could not resolve Codexify {label} {}: {error}",
+            path.display()
+        )
+    })
+}
+
+fn validate_scratch_location(
+    scratch_root: &Path,
+    namespace: &Path,
+    access_root: &Path,
+) -> Result<(), String> {
+    if scratch_root.parent() != Some(namespace) || !scratch_root.starts_with(namespace) {
+        return Err(format!(
+            "The Codexify scratch workspace resolves outside its conversation namespace: {}",
+            scratch_root.display()
+        ));
+    }
+    if scratch_root == access_root || scratch_root.starts_with(access_root) {
+        return Err(format!(
+            "The Codexify scratch workspace must not be inside the configured project access root: {}",
+            scratch_root.display()
+        ));
+    }
+    Ok(())
 }
 
 fn access_root_key(access_root: &Path) -> String {

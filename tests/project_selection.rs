@@ -6,7 +6,9 @@ use codexify::config::{Cli, default_config, load_config};
 use codexify::exec_sessions::SessionState;
 use codexify::instructions::{build_initial_instructions, build_instructions};
 use codexify::memory::memory_dir;
-use codexify::project_bindings::{ConversationIdentity, ProjectBindingScope, ProjectBindingStore};
+use codexify::project_bindings::{
+    ConversationIdentity, ProjectBindingScope, ProjectBindingState, ProjectBindingStore,
+};
 use codexify::tool::Tool;
 use codexify::tools::exec_command::ExecCommand;
 use codexify::tools::git_status::GitStatus;
@@ -436,6 +438,69 @@ async fn project_selection_is_idempotent_but_cannot_switch() {
     assert!(switched.joined_text().contains("cannot switch"));
 }
 
+#[tokio::test]
+async fn transport_without_project_binding_uses_a_private_ephemeral_scratch_root() {
+    let root = TempDir::new().unwrap();
+    let access = root.path().join("projects");
+    fs::create_dir_all(access.join("alpha")).unwrap();
+    let config = multi_project_config(&access);
+    let session = SessionState::new();
+
+    let first = session.select_without_project(&config).await.unwrap();
+    assert!(first.newly_selected);
+    assert_eq!(first.scope, ProjectBindingScope::McpTransportSession);
+    assert!(first.scratch_root.is_dir());
+    assert!(
+        !first
+            .scratch_root
+            .starts_with(fs::canonicalize(&access).unwrap())
+    );
+    assert!(matches!(
+        session.binding_state(&config).unwrap(),
+        ProjectBindingState::WithoutProject { ref scratch_root, .. }
+            if scratch_root == &first.scratch_root
+    ));
+
+    let effective = session.effective_config(&config).unwrap();
+    assert_eq!(effective.work_dir, first.scratch_root);
+    fs::write(
+        effective.work_dir.join("scratch.txt"),
+        "transport scratch\n",
+    )
+    .unwrap();
+    assert_eq!(
+        fs::read_to_string(effective.work_dir.join("scratch.txt")).unwrap(),
+        "transport scratch\n"
+    );
+
+    let repeated = session.select_without_project(&config).await.unwrap();
+    assert!(!repeated.newly_selected);
+    assert_eq!(repeated.scratch_root, effective.work_dir);
+
+    let switch = session
+        .select_project_root(&config, "alpha")
+        .await
+        .unwrap_err();
+    assert!(switch.contains("cannot switch"), "{switch}");
+
+    let scratch_root = effective.work_dir;
+    drop(session);
+    assert!(!scratch_root.exists());
+}
+
+#[tokio::test]
+async fn transport_project_binding_rejects_switching_to_without_project() {
+    let root = TempDir::new().unwrap();
+    let access = root.path().join("projects");
+    fs::create_dir_all(access.join("alpha")).unwrap();
+    let config = multi_project_config(&access);
+    let session = SessionState::new();
+    session.select_project_root(&config, "alpha").await.unwrap();
+
+    let error = session.select_without_project(&config).await.unwrap_err();
+    assert!(error.contains("cannot switch"), "{error}");
+}
+
 #[test]
 fn openai_conversation_identity_is_read_from_request_metadata() {
     let mut meta = RequestMetaObject::new();
@@ -483,6 +548,82 @@ async fn chatgpt_project_binding_survives_transport_reconnect_and_server_restart
         .await
         .unwrap();
     assert!(!repeated.newly_selected);
+}
+
+#[tokio::test]
+async fn chatgpt_without_project_binding_persists_a_private_scratch_root() {
+    let root = TempDir::new().unwrap();
+    let access = root.path().join("projects");
+    fs::create_dir_all(access.join("alpha")).unwrap();
+    let config = multi_project_config(&access);
+    let state_dir = root.path().join("bindings");
+    let identity = conversation_identity("without-project-restart");
+
+    let first_store = ProjectBindingStore::new(state_dir.clone());
+    let selected = first_store
+        .select_without_project(&config, &identity)
+        .await
+        .unwrap();
+    assert!(selected.newly_selected);
+    assert_eq!(selected.scope, ProjectBindingScope::ChatGptConversation);
+    assert!(selected.scratch_root.is_dir());
+    assert!(
+        !selected
+            .scratch_root
+            .starts_with(fs::canonicalize(&access).unwrap())
+    );
+    fs::write(
+        selected.scratch_root.join("scratch.txt"),
+        "durable scratch\n",
+    )
+    .unwrap();
+
+    drop(first_store);
+    let restarted = ProjectBindingStore::new(state_dir);
+    assert!(matches!(
+        restarted.binding_state(&config, &identity).unwrap(),
+        ProjectBindingState::WithoutProject { ref scratch_root, .. }
+            if scratch_root == &selected.scratch_root
+    ));
+    let effective = restarted.effective_config(&config, &identity).unwrap();
+    assert_eq!(effective.work_dir, selected.scratch_root);
+    assert_eq!(
+        fs::read_to_string(effective.work_dir.join("scratch.txt")).unwrap(),
+        "durable scratch\n"
+    );
+
+    let repeated = restarted
+        .select_without_project(&config, &identity)
+        .await
+        .unwrap();
+    assert!(!repeated.newly_selected);
+    assert_eq!(repeated.scratch_root, effective.work_dir);
+
+    let switch = restarted
+        .select_project_root(&config, &identity, "alpha")
+        .await
+        .unwrap_err();
+    assert!(switch.contains("cannot switch"), "{switch}");
+}
+
+#[tokio::test]
+async fn chatgpt_project_binding_rejects_switching_to_without_project() {
+    let root = TempDir::new().unwrap();
+    let access = root.path().join("projects");
+    fs::create_dir_all(access.join("alpha")).unwrap();
+    let config = multi_project_config(&access);
+    let store = ProjectBindingStore::new(root.path().join("bindings"));
+    let identity = conversation_identity("project-before-without-project");
+    store
+        .select_project_root(&config, &identity, "alpha")
+        .await
+        .unwrap();
+
+    let error = store
+        .select_without_project(&config, &identity)
+        .await
+        .unwrap_err();
+    assert!(error.contains("cannot switch"), "{error}");
 }
 
 #[tokio::test]
@@ -580,6 +721,77 @@ async fn concurrent_chatgpt_bindings_choose_one_project_without_overwriting() {
     assert!(
         selected == fs::canonicalize(alpha).unwrap() || selected == fs::canonicalize(beta).unwrap()
     );
+}
+
+#[tokio::test]
+async fn concurrent_project_and_without_project_choices_have_one_winner() {
+    let root = TempDir::new().unwrap();
+    let access = root.path().join("projects");
+    let alpha = access.join("alpha");
+    fs::create_dir_all(&alpha).unwrap();
+    let config = multi_project_config(&access);
+    let state_dir = root.path().join("bindings");
+    let identity = conversation_identity("project-or-no-project-race");
+    let barrier = Arc::new(tokio::sync::Barrier::new(3));
+
+    let project_attempt = {
+        let store = ProjectBindingStore::new(state_dir.clone());
+        let config = config.clone();
+        let identity = identity.clone();
+        let barrier = barrier.clone();
+        tokio::spawn(async move {
+            barrier.wait().await;
+            store
+                .select_project_root(&config, &identity, "alpha")
+                .await
+                .map(|_| "project")
+        })
+    };
+    let without_project_attempt = {
+        let store = ProjectBindingStore::new(state_dir.clone());
+        let config = config.clone();
+        let identity = identity.clone();
+        let barrier = barrier.clone();
+        tokio::spawn(async move {
+            barrier.wait().await;
+            store
+                .select_without_project(&config, &identity)
+                .await
+                .map(|_| "without_project")
+        })
+    };
+    barrier.wait().await;
+
+    let project_result = project_attempt.await.unwrap();
+    let without_project_result = without_project_attempt.await.unwrap();
+    assert_eq!(
+        [project_result.is_ok(), without_project_result.is_ok()]
+            .into_iter()
+            .filter(|succeeded| *succeeded)
+            .count(),
+        1
+    );
+
+    let state = ProjectBindingStore::new(state_dir)
+        .binding_state(&config, &identity)
+        .unwrap();
+    match (project_result, without_project_result, state) {
+        (Ok("project"), Err(_), ProjectBindingState::Project(selection)) => {
+            assert_eq!(
+                selection.source_project_root,
+                fs::canonicalize(alpha).unwrap()
+            );
+        }
+        (
+            Err(_),
+            Ok("without_project"),
+            ProjectBindingState::WithoutProject { scratch_root, .. },
+        ) => {
+            assert!(scratch_root.is_dir());
+            assert!(!scratch_root.starts_with(fs::canonicalize(access).unwrap()));
+        }
+        unexpected => panic!("selection result and stored state disagree: {unexpected:?}"),
+    }
 }
 
 #[tokio::test]
