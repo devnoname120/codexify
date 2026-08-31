@@ -91,7 +91,27 @@ Connector schema: v1.1.0 · refresh required   [Refresh]
 - never invent or guess a slug;
 - tell the user to open the link, select Codexify if necessary, scroll below the list of tools, and click **Refresh**.
 
+The follow-up prompt is fixed and explicit:
+
+```text
+The Codexify connector schema is outdated and needs to be refreshed.
+Build a clickable relative ChatGPT settings link for the user:
+
+- If the current conversation context exposes a connector URI containing
+  `plugin://dev-<slug>@...`, extract `<slug>` and use exactly:
+  `#settings/Plugins/plugin_asdk_app_<slug>`
+- Otherwise use exactly:
+  `#settings/Plugins`
+- Never invent or guess a slug.
+
+Tell the user to open that link, select the Codexify plugin if necessary,
+scroll to the bottom past the list of tools, and click Refresh.
+Keep the response concise.
+```
+
 This conversational handoff deliberately relies on context available to ChatGPT rather than duplicating fragile connector-ID discovery inside the server or widget.
+
+Because this handoff replaces widget-side settings routing, remove the deployment-specific `chatgptConnectorSettingsUrl` setting, connector-ID request plumbing, and widget/server helpers that existed only to construct a settings destination.
 
 ## Doctor behavior
 
@@ -185,6 +205,7 @@ The setup widget should not duplicate restart monitoring.
 - Doctor has warnings/failures: show `Autofix`.
 - `Autofix` follow-up message fails: report the failure in the widget and retain the doctor findings.
 - `Refresh` follow-up message fails: report the failure in the widget and retain the stale-schema state.
+- Self-update failures retain the updater's existing durable failure/rollback status UI.
 
 ## Testing
 
@@ -195,6 +216,7 @@ The setup widget should not duplicate restart monitoring.
 - manual update-check tool is app-only/private, read-only, and returns the same status vocabulary as setup;
 - setup output continues to contain the agent `nextStep` even though the widget no longer renders it;
 - connector stale/current/unknown states preserve existing schema comparison behavior.
+- setup output no longer returns a connector settings URL, and the obsolete settings-link configuration/request plumbing is absent.
 
 ### Widget tests
 
