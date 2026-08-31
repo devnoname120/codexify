@@ -164,6 +164,7 @@ Add a dedicated app-only/private changelog-preview action. It receives or derive
 Requirements:
 
 - fetch from the exact published target tag, never an unversioned branch tip;
+- validate requested versions as release versions and require the target to match the latest release already established by the setup/update cache, so the preview action cannot become an arbitrary repository fetch primitive;
 - enforce the existing changelog file and selected-output byte limits;
 - reuse `select_changelog_sections` semantics rather than duplicating interval logic;
 - cache successful preview data with the latest-release inspection so repeatedly opening the disclosure is cheap;
@@ -174,7 +175,7 @@ The post-download self-update changelog remains independent. It is still useful 
 
 ## Changelog Markdown subset
 
-Render Markdown into DOM nodes; do not insert generated HTML with `innerHTML` and do not allow raw HTML from the source.
+Use a real CommonMark-capable parser rather than extending the current line-oriented renderer with ad hoc regular expressions. Raw HTML from the source remains disabled. Prefer parsing into a safe token/event tree and constructing DOM nodes from those tokens; do not inject unsanitized generated HTML with `innerHTML`.
 
 Supported block syntax:
 
