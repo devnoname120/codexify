@@ -157,13 +157,15 @@ mod tests {
     fn context(
         identity: Option<ConversationIdentity>,
         authorizations: Arc<ConversationAuthorizationStore>,
+        state_root: &std::path::Path,
     ) -> ToolRequestContext {
         ToolRequestContext {
             conversation: identity,
             conversation_authorizations: authorizations,
             diff_checkpoints: Arc::new(DiffCheckpointManager::new()),
-            artifact_egress: Arc::new(crate::artifact_egress::ArtifactEgressStore::new(
+            artifact_egress: Arc::new(crate::artifact_egress::ArtifactEgressStore::new_at(
                 crate::types::ArtifactEgressConfig::default(),
+                state_root.join("artifacts"),
             )),
             cancellation: tokio_util::sync::CancellationToken::new(),
         }
@@ -179,7 +181,7 @@ mod tests {
         let session = SessionState::new();
         let first = ConversationIdentity::from_openai_session("first").unwrap();
         let second = ConversationIdentity::from_openai_session("second").unwrap();
-        let request_context = context(Some(first.clone()), store.clone());
+        let request_context = context(Some(first.clone()), store.clone(), root.path());
 
         let result = ConversationAuthorization
             .call_with_context(
@@ -205,7 +207,7 @@ mod tests {
         let store = Arc::new(ConversationAuthorizationStore::new());
         let session = SessionState::new();
         let identity = ConversationIdentity::from_openai_session("first").unwrap();
-        let request_context = context(Some(identity.clone()), store.clone());
+        let request_context = context(Some(identity.clone()), store.clone(), root.path());
         let invalid = "abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd";
 
         let result = ConversationAuthorization
@@ -232,7 +234,7 @@ mod tests {
         let store = Arc::new(ConversationAuthorizationStore::new());
         let first_session = SessionState::new();
         let second_session = SessionState::new();
-        let request_context = context(None, store.clone());
+        let request_context = context(None, store.clone(), root.path());
 
         ConversationAuthorization
             .call_with_context(

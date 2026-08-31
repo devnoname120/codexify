@@ -1013,7 +1013,14 @@ mod tests {
         // the server path still refuses to start when it is missing — the
         // requirement is now enforced while the configuration is loaded rather
         // than at argument-parse time.
-        let cli = Cli::try_parse_from(["codexify"]).unwrap();
+        let root = TempDir::new().unwrap();
+        let config = root.path().join("isolated-config.json");
+        fs::write(
+            &config,
+            r#"{"codexMcp":{"enabled":false,"useCli":false},"projectCatalog":{"codexConfig":{"enabled":false}}}"#,
+        )
+        .unwrap();
+        let cli = Cli::try_parse_from(["codexify", "--config", config.to_str().unwrap()]).unwrap();
         assert!(cli.command.is_none());
         assert!(cli.work_dir.is_none());
         let error = crate::config::load_config(cli).unwrap_err();

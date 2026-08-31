@@ -297,7 +297,7 @@ impl ServerHandler for CodexHandler {
         }
         if request.uri.starts_with(ARTIFACT_RESOURCE_URI_PREFIX) {
             return Err(McpError::resource_not_found(
-                "Unknown or expired exported-file resource".to_string(),
+                "Unknown or unavailable exported-file resource".to_string(),
                 None,
             ));
         }
@@ -595,7 +595,10 @@ pub async fn start_http_server(mut config: AppConfig) -> anyhow::Result<()> {
     conversation_exec_sessions
         .spawn_idle_reaper(Duration::from_millis(config.exec.idle_timeout_ms));
     let diff_checkpoints = Arc::new(DiffCheckpointManager::new());
-    let artifact_egress = Arc::new(ArtifactEgressStore::new(config.artifact_egress.clone()));
+    let artifact_egress = Arc::new(
+        ArtifactEgressStore::new(config.artifact_egress.clone())
+            .map_err(|error| anyhow::anyhow!("initialize artifact egress: {error}"))?,
+    );
     let conversation_authorizations =
         Arc::new(ConversationAuthorizationStore::for_current_user(&config));
 
@@ -1352,8 +1355,9 @@ mod tests {
             conversation_authorizations: Arc::new(ConversationAuthorizationStore::new()),
             conversation_exec_sessions: Arc::new(ConversationExecSessionStore::new()),
             diff_checkpoints: Arc::new(DiffCheckpointManager::new()),
-            artifact_egress: Arc::new(ArtifactEgressStore::new(
+            artifact_egress: Arc::new(ArtifactEgressStore::new_at(
                 crate::types::ArtifactEgressConfig::default(),
+                root.join("artifacts"),
             )),
             bridged_resources: Arc::new(BridgedResourceStore::new(
                 crate::types::ArtifactEgressConfig::default(),
@@ -1613,8 +1617,9 @@ mod tests {
             conversation_authorizations: Arc::new(ConversationAuthorizationStore::new()),
             conversation_exec_sessions: Arc::new(ConversationExecSessionStore::new()),
             diff_checkpoints: Arc::new(DiffCheckpointManager::new()),
-            artifact_egress: Arc::new(ArtifactEgressStore::new(
+            artifact_egress: Arc::new(ArtifactEgressStore::new_at(
                 crate::types::ArtifactEgressConfig::default(),
+                root.path().join("artifacts"),
             )),
             bridged_resources: Arc::new(BridgedResourceStore::new(
                 crate::types::ArtifactEgressConfig::default(),
@@ -1652,8 +1657,9 @@ mod tests {
             conversation_authorizations: authorizations.clone(),
             conversation_exec_sessions: Arc::new(ConversationExecSessionStore::new()),
             diff_checkpoints: Arc::new(DiffCheckpointManager::new()),
-            artifact_egress: Arc::new(ArtifactEgressStore::new(
+            artifact_egress: Arc::new(ArtifactEgressStore::new_at(
                 crate::types::ArtifactEgressConfig::default(),
+                root.path().join("artifacts"),
             )),
             bridged_resources: Arc::new(BridgedResourceStore::new(
                 crate::types::ArtifactEgressConfig::default(),

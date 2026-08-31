@@ -68,7 +68,9 @@
   "artifactEgress": {
     "enabled": true,
     "maxFileBytes": 104857600,
-    "maxCachedBytes": 268435456,
+    "snapshotMaxFileBytes": 104857600,
+    "maxSnapshotBytes": 5368709120,
+    "fallbackToSource": true,
     "maxReferences": 64,
     "referenceTtlMs": 300000
   }

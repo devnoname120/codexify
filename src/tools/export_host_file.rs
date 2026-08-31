@@ -5,7 +5,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
-use crate::artifact_egress::{ArtifactEgressStore, snapshot_project_file};
+use crate::artifact_egress::ArtifactEgressStore;
 use crate::exec_sessions::SessionState;
 use crate::tool::{Tool, ToolBehavior, ToolRequestContext, parse_tool_args, schema_for};
 use crate::types::{AppConfig, ToolContent, ToolResult};
@@ -39,24 +39,23 @@ impl ExportHostFile {
             Ok(args) => args,
             Err(error) => return *error,
         };
-        let snapshot = match snapshot_project_file(
-            &config.work_dir,
-            &path,
-            &config.artifact_egress,
-            cancellation,
-        )
-        .await
+        let registered = match store
+            .export_project_file(&config.work_dir, &path, cancellation)
+            .await
         {
-            Ok(snapshot) => snapshot,
-            Err(error) => return ToolResult::error(error.to_string()),
-        };
-        let registered = match store.register(snapshot) {
             Ok(registered) => registered,
             Err(error) => return ToolResult::error(error.to_string()),
         };
+        let durability = if registered.snapshot_stored {
+            "An immutable snapshot is retained in Codexify's durable artifact store."
+        } else if registered.fallback_to_source {
+            "No immutable snapshot was retained; the resource resolves to the latest safe version at the recorded project path."
+        } else {
+            "No immutable snapshot was retained and source fallback is disabled."
+        };
         let text = format!(
-            "Exported `{path}` as `{}` ({} bytes, SHA-256 {}). The attached resource is available for {} ms.",
-            registered.name, registered.byte_count, registered.sha256, registered.expires_in_ms
+            "Exported `{path}` as `{}` ({} bytes, SHA-256 {}). {durability}",
+            registered.name, registered.byte_count, registered.sha256
         );
         ToolResult {
             content: vec![
@@ -70,7 +69,8 @@ impl ExportHostFile {
                 "bytes": registered.byte_count,
                 "sha256": registered.sha256,
                 "mimeType": registered.mime_type,
-                "expiresInMs": registered.expires_in_ms
+                "snapshotStored": registered.snapshot_stored,
+                "fallbackToSource": registered.fallback_to_source
             })),
             meta: None,
             audit: Default::default(),
@@ -94,7 +94,7 @@ impl Tool for ExportHostFile {
             false,
             true,
             false,
-            "Reads a local file and creates only private short-lived return-resource bookkeeping without modifying project, user-owned, or external state.",
+            "Reads a local file and creates only private durable return-resource bookkeeping without modifying project, user-owned, or external state.",
         )
     }
 
@@ -109,7 +109,7 @@ impl Tool for ExportHostFile {
     }
 
     fn description(&self) -> String {
-        "Export one existing file from the active project to ChatGPT as a downloadable MCP resource. The path is project-relative. Codexify snapshots the exact bytes before returning, enforces the configured size and cache limits, and exposes only a short-lived opaque resource reference rather than a local filesystem path."
+        "Export one existing file from the active project to ChatGPT as a downloadable MCP resource. The path is project-relative. Codexify retains an immutable snapshot when it fits the configured durable-store limits, otherwise resolves the resource from the latest safe source path, and exposes only an opaque capability rather than a local filesystem path."
             .to_string()
     }
 
@@ -126,7 +126,8 @@ impl Tool for ExportHostFile {
                 "bytes": { "type": "integer", "minimum": 0 },
                 "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
                 "mimeType": { "type": "string" },
-                "expiresInMs": { "type": "integer", "minimum": 0 }
+                "snapshotStored": { "type": "boolean" },
+                "fallbackToSource": { "type": "boolean" }
             },
             "required": [
                 "path",
@@ -134,7 +135,8 @@ impl Tool for ExportHostFile {
                 "bytes",
                 "sha256",
                 "mimeType",
-                "expiresInMs"
+                "snapshotStored",
+                "fallbackToSource"
             ],
             "additionalProperties": false
         }))
@@ -174,9 +176,13 @@ mod tests {
     #[tokio::test]
     async fn returns_a_resource_link_and_matching_structured_receipt() {
         let root = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
         std::fs::write(root.path().join("report.txt"), b"final report\n").unwrap();
         let config = crate::config::default_config(root.path().to_path_buf());
-        let store = ArtifactEgressStore::new(config.artifact_egress.clone());
+        let store = ArtifactEgressStore::new_at(
+            config.artifact_egress.clone(),
+            state.path().join("artifacts"),
+        );
         let result = ExportHostFile
             .run(
                 json!({ "path": "report.txt" }),
@@ -193,12 +199,16 @@ mod tests {
                 if resource.name == "report.txt"
                     && resource.mime_type.as_deref() == Some("text/plain")
         ));
-        let structured = result.structured_content.unwrap();
+        let structured = result.structured_content.as_ref().unwrap();
         assert_eq!(structured["path"], "report.txt");
         assert_eq!(structured["name"], "report.txt");
         assert_eq!(structured["bytes"], 13);
         assert_eq!(structured["mimeType"], "text/plain");
+        assert_eq!(structured["snapshotStored"], true);
+        assert_eq!(structured["fallbackToSource"], true);
+        assert!(structured.get("expiresInMs").is_none());
         assert!(structured.get("resourceUri").is_none());
+        assert!(!result.joined_text().contains("available for"));
     }
 
     #[test]

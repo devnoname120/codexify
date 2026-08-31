@@ -7,6 +7,7 @@
 pub mod apply_patch;
 pub mod artifact_egress;
 pub mod artifact_ingress;
+mod artifact_store;
 mod audit;
 pub mod auth;
 pub mod bridge;
