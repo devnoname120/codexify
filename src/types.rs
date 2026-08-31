@@ -273,7 +273,8 @@ pub const DEFAULT_ARTIFACT_MAX_REDIRECTS: u8 = 3;
 pub const DEFAULT_ARTIFACT_MAX_CONCURRENT_DOWNLOADS: usize = 2;
 
 pub const DEFAULT_ARTIFACT_EGRESS_MAX_FILE_BYTES: u64 = 100 * 1024 * 1024;
-pub const DEFAULT_ARTIFACT_EGRESS_MAX_CACHED_BYTES: u64 = 256 * 1024 * 1024;
+pub const DEFAULT_ARTIFACT_EGRESS_SNAPSHOT_MAX_FILE_BYTES: u64 = 100 * 1024 * 1024;
+pub const DEFAULT_ARTIFACT_EGRESS_MAX_SNAPSHOT_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 pub const DEFAULT_ARTIFACT_EGRESS_MAX_REFERENCES: usize = 64;
 pub const DEFAULT_ARTIFACT_EGRESS_REFERENCE_TTL_MS: u64 = 5 * 60 * 1000;
 
@@ -360,7 +361,9 @@ impl ArtifactIngressConfig {
 pub struct ArtifactEgressConfig {
     pub enabled: bool,
     pub max_file_bytes: u64,
-    pub max_cached_bytes: u64,
+    pub snapshot_max_file_bytes: u64,
+    pub max_snapshot_bytes: u64,
+    pub fallback_to_source: bool,
     pub max_references: usize,
     pub reference_ttl_ms: u64,
 }
@@ -370,7 +373,9 @@ impl Default for ArtifactEgressConfig {
         Self {
             enabled: true,
             max_file_bytes: DEFAULT_ARTIFACT_EGRESS_MAX_FILE_BYTES,
-            max_cached_bytes: DEFAULT_ARTIFACT_EGRESS_MAX_CACHED_BYTES,
+            snapshot_max_file_bytes: DEFAULT_ARTIFACT_EGRESS_SNAPSHOT_MAX_FILE_BYTES,
+            max_snapshot_bytes: DEFAULT_ARTIFACT_EGRESS_MAX_SNAPSHOT_BYTES,
+            fallback_to_source: true,
             max_references: DEFAULT_ARTIFACT_EGRESS_MAX_REFERENCES,
             reference_ttl_ms: DEFAULT_ARTIFACT_EGRESS_REFERENCE_TTL_MS,
         }
@@ -381,9 +386,6 @@ impl ArtifactEgressConfig {
     pub fn validate(&self) -> Result<(), String> {
         if self.max_file_bytes == 0 {
             return Err("artifactEgress.maxFileBytes must be positive".to_string());
-        }
-        if self.max_cached_bytes < self.max_file_bytes {
-            return Err("artifactEgress.maxCachedBytes must be at least maxFileBytes".to_string());
         }
         if !(1..=1024).contains(&self.max_references) {
             return Err("artifactEgress.maxReferences must be between 1 and 1024".to_string());

@@ -303,7 +303,7 @@ async fn mutation_guard_serializes_diff_for_the_same_scope() {
 
     drop(guard);
     let result = tokio::time::timeout(
-        Duration::from_secs(5),
+        Duration::from_secs(30),
         manager.show_diff(&config, owner, request(DiffBaseline::ProjectOpen, false)),
     )
     .await

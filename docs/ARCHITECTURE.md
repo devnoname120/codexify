@@ -61,8 +61,9 @@ ChatGPT / MCP client
 │    • scoped Git refs + MCP Apps resource      │
 │                                               │
 │  shared ArtifactEgressStore                   │
-│    • opaque short-lived resource capabilities │
-│    • bounded immutable in-memory snapshots    │
+│    • durable opaque native capabilities       │
+│    • global per-user disk snapshots + LRU     │
+│    • safe latest-source fallback              │
 │                                               │
 │  optional shared AuditLogger                  │
 │    • redacted JSONL tool lifecycle records    │
@@ -92,9 +93,11 @@ Five integration surfaces are exposed to the client:
   `show_diff`, whose complete diff arrives through component-only result
   metadata, plus opaque exported-file resources linked from `export_host_file`
   and opaque capabilities replacing resource links returned by bridged MCP tools.
-  `resources/read` resolves local snapshots or proxies the read to the originating
-  upstream peer. Unsupported clients ignore diff UI metadata and keep the concise
-  ordinary text result; a client must support resource links to retrieve file bytes.
+  `resources/read` resolves durable native records to retained immutable disk
+  snapshots or a safely revalidated current source path, while bridged references
+  proxy the read to the originating upstream peer. Unsupported clients ignore diff
+  UI metadata and keep the concise ordinary text result; a client must support
+  resource links to retrieve file bytes.
 
 ---
 
@@ -487,10 +490,11 @@ or its descendants.
   `ProjectBindingStore` resolves its project, the persistent
   `ConversationAuthorizationStore` resolves the optional token grant, and the in-memory
   `ConversationExecSessionStore` resolves resident commands across replacement
-  transports, `ArtifactEgressStore` preserves short-lived exported-file snapshots,
-  and `BridgedResourceStore` preserves short-lived upstream-resource routing
-  capabilities across the same replacement. Upstream MCP connections, these
-  stores, and the tool registry are shared (`Arc`) across transports.
+  transports. `ArtifactEgressStore` resolves native bearer capabilities through a
+  global per-user durable record/snapshot store, while `BridgedResourceStore`
+  preserves only short-lived upstream-resource routing capabilities across the
+  same replacement transport. Upstream MCP connections, these stores, and the
+  tool registry are shared (`Arc`) across transports.
 - **`get_info`** advertises server name `codexify` (wire-compatible identity),
   version, tools/resources capabilities, the `io.modelcontextprotocol/ui` extension,
   and the `instructions`. The diff resource is embedded in the binary and has no
@@ -501,8 +505,9 @@ or its descendants.
   `resource_link`. Bridged `resource_link` blocks are converted to the same
   downstream content type after their upstream URI is replaced by an opaque
   `codexify://upstream-resource/...` capability. `resources/read` resolves native
-  snapshots locally or forwards bridged capabilities to their originating peer.
-  The conversion layer has no tool-name special case.
+  durable records to an immutable snapshot or a safely revalidated source file,
+  and forwards bridged capabilities to their originating peer. The conversion
+  layer has no tool-name special case.
 - **Errors**: a tool that fails returns `Ok(CallToolResult::error(...))`
   (`isError: true`) so the caller sees the message; only an unknown tool name is
   an error *result* as well. Protocol errors are avoided.
@@ -875,7 +880,9 @@ latter.
                        "maxRedirects": 3, "maxConcurrentDownloads": 2,
                        "allowedHosts": ["*"] },
   "artifactEgress": { "enabled": true, "maxFileBytes": 104857600,
-                      "maxCachedBytes": 268435456, "maxReferences": 64,
+                      "snapshotMaxFileBytes": 104857600,
+                      "maxSnapshotBytes": 5368709120,
+                      "fallbackToSource": true, "maxReferences": 64,
                       "referenceTtlMs": 300000 },
   "worktrees": { "mode": "auto",        // auto | always | never; or --worktree-mode
                  "root": "…",            // default: $CODEX_HOME/worktrees; or --worktree-root
@@ -1034,4 +1041,4 @@ Run: `cargo test`. Build a standalone binary: `cargo build --release`.
 | `import_host_file` is missing | `artifactIngress.enabled` is false, or the connector cached an older manifest. Enable it and remove/re-add the connector so ChatGPT refreshes `tools/list`. |
 | Native file import reports an untrusted URL | The supplied value was not a ChatGPT-native file parameter or its temporary provider URL no longer matches the supported OpenAI file-service boundary. Reattach or regenerate the file instead of passing a URL manually. |
 | `export_host_file` is missing | `artifactEgress.enabled` is false, or the connector cached an older manifest. Enable it and remove/re-add the connector so ChatGPT refreshes `tools/list`. |
-| An exported-file resource is unknown or expired | Its opaque capability exceeded `artifactEgress.referenceTtlMs`, was evicted by the byte/reference bounds, or Codexify restarted. Call `export_host_file` again to create a fresh immutable snapshot. |
+| An exported-file resource is unknown or unavailable | Native exported-file records do not expire on `referenceTtlMs` and survive Codexify restarts. The resource is unavailable only when its durable record is missing/invalid, or when no retained snapshot exists and the recorded source fallback is disabled, missing, unsafe, or over `maxFileBytes`. Re-export to create a new capability. Bridged upstream resources remain process-local and expire under `referenceTtlMs`/`maxReferences`. |

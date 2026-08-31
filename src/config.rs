@@ -2630,7 +2630,7 @@ mod tests {
     }
 
     #[test]
-    fn artifact_egress_config_accepts_defaults_and_camel_case_overrides() {
+    fn artifact_egress_config_accepts_durable_defaults_and_camel_case_overrides() {
         let empty: FileConfig = serde_json::from_str(r#"{"artifactEgress":{}}"#).unwrap();
         let empty = empty.artifact_egress.unwrap();
         assert!(empty.enabled);
@@ -2639,9 +2639,14 @@ mod tests {
             crate::types::DEFAULT_ARTIFACT_EGRESS_MAX_FILE_BYTES
         );
         assert_eq!(
-            empty.max_cached_bytes,
-            crate::types::DEFAULT_ARTIFACT_EGRESS_MAX_CACHED_BYTES
+            empty.snapshot_max_file_bytes,
+            crate::types::DEFAULT_ARTIFACT_EGRESS_SNAPSHOT_MAX_FILE_BYTES
         );
+        assert_eq!(
+            empty.max_snapshot_bytes,
+            crate::types::DEFAULT_ARTIFACT_EGRESS_MAX_SNAPSHOT_BYTES
+        );
+        assert!(empty.fallback_to_source);
         assert_eq!(
             empty.max_references,
             crate::types::DEFAULT_ARTIFACT_EGRESS_MAX_REFERENCES
@@ -2656,7 +2661,9 @@ mod tests {
                 "artifactEgress": {
                     "enabled": false,
                     "maxFileBytes": 4096,
-                    "maxCachedBytes": 8192,
+                    "snapshotMaxFileBytes": 2048,
+                    "maxSnapshotBytes": 8192,
+                    "fallbackToSource": false,
                     "maxReferences": 4,
                     "referenceTtlMs": 5000
                 }
@@ -2666,9 +2673,26 @@ mod tests {
         let configured = configured.artifact_egress.unwrap();
         assert!(!configured.enabled);
         assert_eq!(configured.max_file_bytes, 4096);
-        assert_eq!(configured.max_cached_bytes, 8192);
+        assert_eq!(configured.snapshot_max_file_bytes, 2048);
+        assert_eq!(configured.max_snapshot_bytes, 8192);
+        assert!(!configured.fallback_to_source);
         assert_eq!(configured.max_references, 4);
         assert_eq!(configured.reference_ttl_ms, 5000);
+    }
+
+    #[test]
+    fn artifact_egress_legacy_max_cached_bytes_is_accepted_but_does_not_change_snapshot_defaults() {
+        let parsed: FileConfig =
+            serde_json::from_str(r#"{"artifactEgress":{"maxCachedBytes":8192}}"#).unwrap();
+        let egress = parsed.artifact_egress.unwrap();
+        assert_eq!(
+            egress.max_snapshot_bytes,
+            crate::types::DEFAULT_ARTIFACT_EGRESS_MAX_SNAPSHOT_BYTES
+        );
+        assert_eq!(
+            egress.snapshot_max_file_bytes,
+            crate::types::DEFAULT_ARTIFACT_EGRESS_SNAPSHOT_MAX_FILE_BYTES
+        );
     }
 
     #[test]
@@ -2679,10 +2703,6 @@ mod tests {
             (
                 r#"{"artifactEgress":{"maxFileBytes":0}}"#,
                 "maxFileBytes must be positive",
-            ),
-            (
-                r#"{"artifactEgress":{"maxFileBytes":4096,"maxCachedBytes":4095}}"#,
-                "maxCachedBytes must be at least maxFileBytes",
             ),
             (
                 r#"{"artifactEgress":{"maxReferences":0}}"#,
