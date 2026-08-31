@@ -6,6 +6,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-08-31
+
 ### Added
 
 - `codexify doctor` for side-effect-free local diagnostics with deterministic
@@ -34,6 +36,27 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Release archives now include `CHANGELOG.md`, and the detached worker waits 10
   seconds before service interruption so ChatGPT can receive and initialize the
   updater resource.
+- Native exported-file capabilities now survive MCP reconnects and Codexify
+  restarts. Eligible files are retained as immutable per-user disk snapshots with
+  a configurable global least-recently-used budget, while snapshots that are too
+  large or have been evicted can safely resolve the latest file at their recorded
+  project-relative source path.
+
+### Changed
+
+- Command execution now uses `exec_command`/`write_stdin` exclusively. The
+  redundant `run_command` tool and top-level `allowedCommands` setting were
+  removed; `exec.mode` now defaults to `"unrestricted"` and
+  `exec.extraAllowedCommands` defaults to an empty list. Opt-in allowlist mode
+  remains available through `exec.extraAllowedCommands`.
+- `view_image` now follows Codex's `high`/`original` detail contract and image
+  preparation limits, with `high` as the default and original-resolution detail
+  using Codex's larger image budget.
+- `clock_sleep` now uses integer millisecond durations and ends early when the
+  active MCP request is cancelled, mirroring Codex's interruptible-sleep behavior
+  within Codexify's existing five-minute tunnel-safe cap.
+- Scheduled self-updates now explicitly direct users to refresh the ChatGPT
+  connector after Codexify restarts so the updated tool schema is loaded.
 
 ### Fixed
 
@@ -41,6 +64,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `EALREADY` lifecycle transitions, recovers when a bootout or bootstrap finishes
   between commands, and verifies server plus native-tunnel readiness before
   declaring the restarted update successful.
+- The Codexify landing page keeps its GitHub button visible on narrow mobile
+  layouts.
 
 ## [1.1.0] - 2026-08-30
 
@@ -55,17 +80,6 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The macOS/Linux and Windows installers now explicitly tell users to restart
   their terminal after installation and then run `codexify quickstart` to finish
   connector setup.
-- Command execution now uses `exec_command`/`write_stdin` exclusively. The
-  redundant `run_command` tool and top-level `allowedCommands` setting were
-  removed; `exec.mode` now defaults to `"unrestricted"` and
-  `exec.extraAllowedCommands` defaults to an empty list. Opt-in allowlist mode
-  remains available through `exec.extraAllowedCommands`.
-- `view_image` now follows Codex's `high`/`original` detail contract and image
-  preparation limits, with `high` as the default and original-resolution detail
-  using Codex's larger image budget.
-- `clock_sleep` now uses integer millisecond durations and ends early when the
-  active MCP request is cancelled, mirroring Codex's interruptible-sleep behavior
-  within Codexify's existing five-minute tunnel-safe cap.
 
 ### Fixed
 
@@ -154,6 +168,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   drained through bounded head/tail buffers, while component-only `_meta` remains
   outside the model-visible limit.
 
-[Unreleased]: https://github.com/devnoname120/codexify/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/devnoname120/codexify/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/devnoname120/codexify/releases/tag/v1.2.0
 [1.1.0]: https://github.com/devnoname120/codexify/releases/tag/v1.1.0
 [1.0.0]: https://github.com/devnoname120/codexify/releases/tag/v1.0.0
