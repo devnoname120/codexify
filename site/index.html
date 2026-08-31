@@ -1024,12 +1024,20 @@
   <script>
     const tabs = document.querySelectorAll('.tab');
     const panels = document.querySelectorAll('.install-panel');
+
+    const activateInstallTab = (tabName) => {
+      tabs.forEach((item) => item.setAttribute('aria-selected', String(item.dataset.tab === tabName)));
+      panels.forEach((panel) => panel.classList.toggle('active', panel.id === tabName));
+    };
+
+    const installTabForPlatform = (platform) => /windows|win32|win64/i.test(platform) ? 'windows' : 'unix';
+    const browserPlatform = navigator.userAgentData?.platform || navigator.platform || navigator.userAgent || '';
+    const initialInstallTab = installTabForPlatform(browserPlatform);
+    activateInstallTab(initialInstallTab);
+
     tabs.forEach((tab) => {
       tab.addEventListener('click', () => {
-        tabs.forEach((item) => item.setAttribute('aria-selected', 'false'));
-        panels.forEach((panel) => panel.classList.remove('active'));
-        tab.setAttribute('aria-selected', 'true');
-        document.getElementById(tab.dataset.tab).classList.add('active');
+        activateInstallTab(tab.dataset.tab);
       });
     });
 
