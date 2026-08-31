@@ -2,7 +2,7 @@
 
 ## Problem
 
-The current setup widget is visually too large for the amount of information it normally carries. It duplicates agent-only orchestration text, presents update/schema state as dashboard cards instead of compact status lines, and renders doctor output as an unstyled text block. It also cannot show the changelog before the user commits to an update.
+The current setup widget is visually too large for the amount of information it normally carries. It duplicates agent-only orchestration text, presents update/schema state as dashboard cards instead of compact status lines, renders doctor output as an unstyled text block, and offers no explicit retry for the latest-release check.
 
 The desired behavior is a compact status surface that stays quiet when everything is healthy, exposes maintenance actions exactly where they are relevant, performs diagnostics in the background without blocking the agent, and expands only when there is something worth the user's attention.
 
@@ -10,23 +10,21 @@ The desired behavior is a compact status surface that stays quiet when everythin
 
 - Keep the healthy setup widget compact and centered.
 - Show Codexify and connector-schema status as simple status rows.
-- Show `Upgrade` only when a newer Codexify release is known.
-- Show `Refresh` only when the connector schema is stale or cannot be proven current.
-- Let the user inspect the relevant changelog before choosing whether to upgrade.
+- Keep a manual `Check for updates` action available next to the Codexify status.
+- Show `Upgrade` next to the Codexify version only when a newer release is known.
+- Show `Refresh` next to the connector-schema version only when the schema is stale or cannot be proven current.
 - Run doctor asynchronously from the widget after setup completes, without delaying the agent's project-selection and `get_agent_brief` flow.
 - Hide automatic doctor output when healthy.
 - Surface warning/failure state with clear color semantics, and automatically expand failure details.
 - Provide `Autofix` for warning/failure doctor results by asking ChatGPT to investigate and repair the findings.
+- Make `Refresh` ask ChatGPT to construct the correct current-page settings link from connector context, with a safe generic fallback.
 - Keep agent-only setup instructions available to the model while removing them from the user-facing widget.
-- Render the supported changelog Markdown safely, including nested lists and images, without injecting raw HTML.
 - Remain responsive on mobile, tablet, and desktop hosts.
 
 ## Non-goals
 
 - The widget does not perform arbitrary repair actions itself; `Autofix` delegates investigation and repair to ChatGPT.
-- The widget does not expose a manual `Check for updates` button. Setup already performs the bounded latest-release check.
-- Changelog preview failure does not prevent upgrading.
-- The Markdown renderer does not execute embedded HTML, scripts, iframes, or arbitrary Markdown extensions.
+- `Refresh` does not navigate or mutate connector state itself; it delegates link construction and user instructions to ChatGPT.
 - The setup widget does not replace the existing restart-safe self-update progress widget. Once the update is accepted, the existing self-update lifecycle remains authoritative.
 
 ## Healthy-state layout
@@ -36,7 +34,7 @@ The default widget is a single compact card with a normal maximum width of **500
 ```text
 Codexify: v1.2.0 ✓
 Connector schema: v1.2.0 ✓
-[Doctor]
+[Check for updates] [Doctor]
 ```
 
 There is no duplicate title/header, separate version badge, subtitle, dashboard grid, or user-visible `nextStep` instruction.
@@ -49,28 +47,26 @@ The setup response continues to contain the model-facing next step, such as sele
 
 ```text
 Codexify: v1.2.0 ✓
+[Check for updates]
 ```
 
-No update-related button is shown.
+`Check for updates` remains available and invokes a dedicated app-only, read-only latest-release check. It updates only the Codexify row and does not rerun setup or its conversation-authorization flow.
 
 ### Update available
 
 ```text
-Codexify: v1.2.0 → v1.3.0 available     [Upgrade]
-What changed                                  +
+Codexify: v1.2.0 → v1.3.0 available     [Upgrade] [Check for updates]
 ```
 
-`Upgrade` is row-local and appears only while setup has positively identified a newer release. Expanding `What changed` loads the changelog preview lazily; setup itself does not wait for changelog retrieval.
-
-If several releases were skipped, the changelog preview contains every release section in the interval `(current, target]`, newest first, using the same interval-selection semantics as self-update.
+`Upgrade` is row-local and appears only while setup or the manual update check has positively identified a newer release. The existing self-update widget remains responsible for showing the checksum-bound changelog and monitoring installation after the user accepts the update.
 
 ### Update check unavailable
 
-The row may indicate that update status could not be determined, but no `Check for updates` action is added. Doctor may independently report the release-check warning.
+The row indicates that update status could not be determined and retains `Check for updates` as a retry. Doctor may independently report the release-check warning.
 
 ### Ahead of published release
 
-Treat this as healthy/informational. Do not offer `Upgrade`.
+Treat this as healthy/informational. Do not offer `Upgrade`; retain `Check for updates`.
 
 ## Connector-schema states
 
@@ -88,9 +84,14 @@ No button is shown.
 Connector schema: v1.1.0 · refresh required   [Refresh]
 ```
 
-`Refresh` sits on the schema row and opens the existing ChatGPT connector-settings route. The existing connector-ID/configured-URL resolution remains the source of that destination.
+`Refresh` sits on the schema row. It does not attempt iframe navigation. It sends a follow-up message to ChatGPT instructing the model to construct and present the correct relative settings link from context:
 
-If a usable settings destination cannot be resolved, the widget displays the refresh requirement without a dead button and keeps the existing explanatory fallback text available when needed.
+- if the current conversation exposes a connector URI containing `plugin://dev-<slug>@...`, extract `<slug>` and use exactly `#settings/Plugins/plugin_asdk_app_<slug>`;
+- otherwise use exactly `#settings/Plugins`;
+- never invent or guess a slug;
+- tell the user to open the link, select Codexify if necessary, scroll below the list of tools, and click **Refresh**.
+
+This conversational handoff deliberately relies on context available to ChatGPT rather than duplicating fragile connector-ID discovery inside the server or widget.
 
 ## Doctor behavior
 
@@ -155,123 +156,16 @@ The prompt should include only warning/failure findings unless additional contex
 
 If the host cannot send a follow-up message, `Autofix` becomes disabled or reports that the action is unavailable rather than silently doing nothing.
 
-## Changelog preview architecture
-
-The current self-update flow obtains `CHANGELOG.md` only after downloading and extracting the release archive. That is too late for an upgrade-decision UI.
-
-Add a dedicated app-only/private changelog-preview action. It receives or derives the already-known current and target versions and returns only the bounded changelog sections relevant to that exact upgrade interval.
-
-Requirements:
-
-- fetch from the exact published target tag, never an unversioned branch tip;
-- validate requested versions as release versions and require the target to match the latest release already established by the setup/update cache, so the preview action cannot become an arbitrary repository fetch primitive;
-- enforce the existing changelog file and selected-output byte limits;
-- reuse `select_changelog_sections` semantics rather than duplicating interval logic;
-- cache successful preview data with the latest-release inspection so repeatedly opening the disclosure is cheap;
-- keep the changelog component-only/app-only so large release notes do not enter model context;
-- make failure non-blocking: the widget shows `Changelog unavailable` and leaves `Upgrade` enabled.
-
-The post-download self-update changelog remains independent. It is still useful because it is extracted from the checksum-verified release archive that is actually being installed.
-
-## Changelog Markdown subset
-
-Use a real CommonMark-capable parser rather than extending the current line-oriented renderer with ad hoc regular expressions. Raw HTML from the source remains disabled. Prefer parsing into a safe token/event tree and constructing DOM nodes from those tokens; do not inject unsanitized generated HTML with `innerHTML`.
-
-Supported block syntax:
-
-- headings used by the changelog (`#`, `##`, `###` at minimum);
-- paragraphs;
-- unordered lists;
-- ordered lists;
-- nested unordered lists;
-- nested ordered lists;
-- mixed ordered/unordered nesting.
-
-Supported inline syntax:
-
-- inline code;
-- links;
-- images;
-- linked images;
-- italic;
-- bold.
-
-Links must accept only safe external schemes (`https`, and `http` only where existing policy explicitly permits it). Relative changelog links resolve against the exact release tag, not the default branch.
-
-Images scale to the content width and never enlarge the widget beyond its text-based width calculation. Broken/unavailable images degrade to alt text or a compact unavailable-image presentation.
-
-## Remote image handling
-
-The widget CSP should not be opened to arbitrary image hosts.
-
-Use an app-only bounded image-fetch path for Markdown images that are not already covered by a narrowly allowed static resource domain. The fetch path must:
-
-- allow only validated public HTTPS URLs;
-- reject credential-bearing URLs and unsafe/private destinations;
-- revalidate redirects;
-- bound download size and time;
-- require an image content type and reject malformed/non-image responses;
-- return image bytes only to the component, never model-visible content.
-
-Relative release images resolve against the exact tagged repository state before fetching.
-
-Linked images use the image-fetch path for the visual asset and the same safe-link handling as ordinary links for the click destination.
-
-## Changelog wrapping and scrolling
-
-The changelog is vertical-scroll only. It must not require a horizontal scrollbar for prose, URLs, paths, inline code, or list content.
-
-Representative styling:
-
-```css
-.changelog-body {
-  overflow-y: auto;
-  overflow-x: hidden;
-  overflow-wrap: anywhere;
-  white-space: normal;
-}
-
-.changelog-body img {
-  display: block;
-  max-width: 100%;
-  height: auto;
-}
-```
-
-The body receives a bounded maximum height so long changelogs scroll inside the widget instead of making the conversation card arbitrarily tall.
-
-## Dynamic width
-
-The closed/normal widget target is **500 px**.
-
-When the changelog is expanded, the widget may become wider to reduce excessive wrapping, but it must remain bounded. The conceptual rule is:
-
-```text
-desired width =
-min(
-  host available width,
-  680 px,
-  max(500 px, measured changelog content width + horizontal chrome)
-)
-```
-
-The measurement is performed after rendering the changelog and is based on text/list content that benefits from additional width. Images, pathological URLs, long filesystem-like tokens, and other intentionally wrappable atomic content do not force expansion.
-
-This is deliberately not a protocol assumption about ChatGPT's own inline-widget width. The host may provide less than 500 px; in that case the widget remains fluid and uses `width: 100%` within the available host width.
-
-When the changelog is closed, the widget returns to the 500 px target.
-
 ## Interaction and sizing
 
-Every state transition that changes rendered height or desired width reports the new component size through the existing MCP Apps size-change notification path. Relevant transitions include:
+The widget targets a compact **500 px** maximum width and remains fluid below that host width. Every state transition that changes rendered height reports the new component size through the existing MCP Apps size-change notification path. Relevant transitions include:
 
-- opening/closing `What changed`;
-- changelog preview loading/completion/failure;
+- manual update checks;
 - automatic doctor completion;
 - manual doctor runs;
 - doctor detail expansion;
 - update scheduling output;
-- schema-refresh notices.
+- schema-refresh and Autofix message status.
 
 Respect reduced-motion preferences. No transition is required for correctness.
 
@@ -285,13 +179,12 @@ The setup widget should not duplicate restart monitoring.
 
 ## Error handling
 
-- Setup release check fails: show non-fatal unavailable state; no manual update-check button.
-- Changelog preview fails: keep `Upgrade` enabled and show an inline unavailable message.
+- Setup release check fails: show a non-fatal unavailable state and retain the manual `Check for updates` retry.
+- Manual update check fails: retain the current version, show a non-fatal unavailable state, and leave the retry enabled.
 - Doctor tool call fails: show a compact diagnostic-call failure with a manual `Doctor` retry.
 - Doctor has warnings/failures: show `Autofix`.
 - `Autofix` follow-up message fails: report the failure in the widget and retain the doctor findings.
-- Connector settings URL unavailable: show refresh-required text without an unusable link/button.
-- Remote changelog image fails: preserve text layout and render alt/fallback content.
+- `Refresh` follow-up message fails: report the failure in the widget and retain the stale-schema state.
 
 ## Testing
 
@@ -299,31 +192,24 @@ The setup widget should not duplicate restart monitoring.
 
 - doctor app-only metadata remains private and widget-accessible;
 - doctor structured output validates against its schema and matches `DoctorReport` counts/statuses;
-- changelog-preview tool is app-only/private and bounded;
-- exact-tag changelog retrieval rejects invalid versions/tags and oversized content;
-- preview interval selection reuses the same semantics as self-update;
-- preview failures do not affect update availability;
+- manual update-check tool is app-only/private, read-only, and returns the same status vocabulary as setup;
 - setup output continues to contain the agent `nextStep` even though the widget no longer renders it;
 - connector stale/current/unknown states preserve existing schema comparison behavior.
 
 ### Widget tests
 
-- healthy state has no `Upgrade`, `Refresh`, doctor summary, or agent-only next-step text;
-- update-available state has row-local `Upgrade` and collapsible `What changed`;
-- current state never shows a `Check for updates` button;
+- healthy state has no `Upgrade`, `Refresh`, doctor summary, or agent-only next-step text, but has `Check for updates` and `Doctor`;
+- update-available state has row-local `Upgrade` plus `Check for updates`;
+- current state retains `Check for updates`;
 - stale schema has row-local `Refresh`;
+- `Refresh` sends the constrained link-construction prompt and never guesses a connector slug inside the widget;
 - automatic healthy doctor result stays hidden;
 - warning-only doctor result shows compact summary plus `Autofix`;
 - failure doctor result expands actionable diagnostics automatically;
 - manual doctor can display a healthy full report;
 - `Autofix` sends the structured findings in a follow-up prompt;
-- changelog renderer covers inline code, links, images, linked images, italic, bold, nested bullets, nested numbered lists, and mixed nesting;
-- Markdown source containing raw HTML cannot inject DOM/script content;
-- long URLs/paths and nested list content do not create horizontal scrolling;
-- images remain within the changelog width;
-- dynamic width returns to 500 px when changelog closes, can expand toward 680 px for useful text width, and never exceeds host width;
 - mobile/tablet widths remain fluid below the desktop target.
 
 ### Integration/manual verification
 
-Exercise the widget in representative host widths around 390 px, 768 px, ChatGPT-like inline desktop width, and wide desktop. Verify healthy, update-available, stale-schema, warning-only doctor, failure doctor, changelog loading/error, and multi-release changelog states in light and dark themes.
+Exercise the widget in representative host widths around 390 px, 768 px, ChatGPT-like inline desktop width, and wide desktop. Verify healthy, update-available, update-check-error, stale-schema, unknown-schema, warning-only doctor, failure doctor, Autofix failure, and Refresh-message failure states in light and dark themes.
