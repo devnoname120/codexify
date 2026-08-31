@@ -306,6 +306,9 @@ mod tests {
             conversation_authorizations: Arc::new(
                 crate::conversation_auth::ConversationAuthorizationStore::new(),
             ),
+            project_bindings: Arc::new(crate::project_bindings::ProjectBindingStore::new(
+                root.path().join("project-bindings"),
+            )),
             diff_checkpoints: Arc::new(crate::diff::DiffCheckpointManager::new()),
             artifact_egress: Arc::new(crate::artifact_egress::ArtifactEgressStore::new_at(
                 config.artifact_egress.clone(),

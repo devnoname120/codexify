@@ -428,6 +428,7 @@ impl ServerHandler for CodexHandler {
         let tool_context = ToolRequestContext {
             conversation: conversation.clone(),
             conversation_authorizations: self.conversation_authorizations.clone(),
+            project_bindings: self.project_bindings.clone(),
             diff_checkpoints: self.diff_checkpoints.clone(),
             artifact_egress: self.artifact_egress.clone(),
             cancellation: context.ct.clone(),

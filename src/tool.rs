@@ -18,13 +18,14 @@ use crate::artifact_egress::ArtifactEgressStore;
 use crate::conversation_auth::ConversationAuthorizationStore;
 use crate::diff::DiffCheckpointManager;
 use crate::exec_sessions::SessionState;
-use crate::project_bindings::ConversationIdentity;
+use crate::project_bindings::{ConversationIdentity, ProjectBindingStore};
 use crate::types::{AppConfig, ToolResult};
 
 #[derive(Clone)]
 pub struct ToolRequestContext {
     pub conversation: Option<ConversationIdentity>,
     pub conversation_authorizations: Arc<ConversationAuthorizationStore>,
+    pub project_bindings: Arc<ProjectBindingStore>,
     pub diff_checkpoints: Arc<DiffCheckpointManager>,
     pub artifact_egress: Arc<ArtifactEgressStore>,
     /// Cancelled when the transport drops or a per-call deadline (e.g. the

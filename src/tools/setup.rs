@@ -10,6 +10,7 @@ use crate::conversation_auth::{
     conversation_auth_tokens_match, validate_conversation_auth_token,
 };
 use crate::exec_sessions::SessionState;
+use crate::project_bindings::{ProjectBindingScope, ProjectBindingState};
 use crate::self_update::LatestVersionInspection;
 use crate::setup_ui;
 use crate::tool::{Tool, ToolBehavior, ToolRequestContext, parse_tool_args};
@@ -42,6 +43,15 @@ enum ConnectorSchemaStatus {
     Unknown,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum SetupProjectStatus {
+    Unselected,
+    Selected,
+    WithoutProject,
+    CheckFailed,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ConnectorSchemaInfo {
@@ -49,6 +59,20 @@ struct ConnectorSchemaInfo {
     advertised_version: String,
     observed_version: Option<String>,
     refresh_recommended: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SetupProjectInfo {
+    status: SetupProjectStatus,
+    selection_available: bool,
+    access_root: Option<String>,
+    name: Option<String>,
+    active_path: Option<String>,
+    source_path: Option<String>,
+    managed_worktree: bool,
+    binding_scope: Option<String>,
+    detail: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -63,19 +87,171 @@ struct SetupOutput {
     content: String,
     server_version: String,
     next_step: String,
+    project: SetupProjectInfo,
     update: UpdateCheckOutput,
     connector_schema: ConnectorSchemaInfo,
     debug: Option<SetupDebugInfo>,
 }
 
-fn setup_result(
-    scope_description: &str,
-    next_step: &str,
-    observed_connector_version: Option<&str>,
+fn path_name(path: &std::path::Path) -> String {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| path.display().to_string())
+}
+
+fn scope_name(scope: ProjectBindingScope) -> String {
+    scope.as_str().to_string()
+}
+
+fn compact_error(error: &str) -> String {
+    error
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(512)
+        .collect()
+}
+
+fn static_project_info(config: &AppConfig) -> SetupProjectInfo {
+    match std::fs::canonicalize(&config.work_dir) {
+        Ok(project_root) => SetupProjectInfo {
+            status: SetupProjectStatus::Selected,
+            selection_available: false,
+            access_root: Some(project_root.to_string_lossy().into_owned()),
+            name: Some(path_name(&project_root)),
+            active_path: Some(project_root.to_string_lossy().into_owned()),
+            source_path: Some(project_root.to_string_lossy().into_owned()),
+            managed_worktree: false,
+            binding_scope: Some("static".to_string()),
+            detail: None,
+        },
+        Err(error) => SetupProjectInfo {
+            status: SetupProjectStatus::CheckFailed,
+            selection_available: false,
+            access_root: Some(config.work_dir.to_string_lossy().into_owned()),
+            name: None,
+            active_path: None,
+            source_path: None,
+            managed_worktree: false,
+            binding_scope: Some("static".to_string()),
+            detail: Some(compact_error(&format!(
+                "Could not resolve static project root {}: {error}",
+                config.work_dir.display()
+            ))),
+        },
+    }
+}
+
+fn project_info(
+    config: &AppConfig,
+    session: &SessionState,
+    context: &ToolRequestContext,
+) -> SetupProjectInfo {
+    if !config.multi_project {
+        return static_project_info(config);
+    }
+
+    let state = match context.conversation.as_ref() {
+        Some(identity) => context.project_bindings.binding_state(config, identity),
+        None => session.binding_state(config),
+    };
+    match state {
+        Ok(ProjectBindingState::Unselected { access_root, scope }) => SetupProjectInfo {
+            status: SetupProjectStatus::Unselected,
+            selection_available: true,
+            access_root: Some(access_root.to_string_lossy().into_owned()),
+            name: None,
+            active_path: None,
+            source_path: None,
+            managed_worktree: false,
+            binding_scope: Some(scope_name(scope)),
+            detail: None,
+        },
+        Ok(ProjectBindingState::Project(selection)) => SetupProjectInfo {
+            status: SetupProjectStatus::Selected,
+            selection_available: true,
+            access_root: Some(selection.access_root.to_string_lossy().into_owned()),
+            name: Some(path_name(&selection.source_project_root)),
+            active_path: Some(selection.project_root.to_string_lossy().into_owned()),
+            source_path: Some(selection.source_project_root.to_string_lossy().into_owned()),
+            managed_worktree: selection.managed_worktree,
+            binding_scope: Some(scope_name(selection.scope)),
+            detail: None,
+        },
+        Ok(ProjectBindingState::WithoutProject {
+            access_root,
+            scratch_root,
+            scope,
+        }) => SetupProjectInfo {
+            status: SetupProjectStatus::WithoutProject,
+            selection_available: true,
+            access_root: Some(access_root.to_string_lossy().into_owned()),
+            name: Some("Chat without a project".to_string()),
+            active_path: Some(scratch_root.to_string_lossy().into_owned()),
+            source_path: None,
+            managed_worktree: false,
+            binding_scope: Some(scope_name(scope)),
+            detail: None,
+        },
+        Err(error) => SetupProjectInfo {
+            status: SetupProjectStatus::CheckFailed,
+            selection_available: true,
+            access_root: Some(config.work_dir.to_string_lossy().into_owned()),
+            name: None,
+            active_path: None,
+            source_path: None,
+            managed_worktree: false,
+            binding_scope: Some(if context.conversation.is_some() {
+                "chatgpt_conversation".to_string()
+            } else {
+                "mcp_transport_session".to_string()
+            }),
+            detail: Some(compact_error(&error)),
+        },
+    }
+}
+
+fn next_step_for_project(project: &SetupProjectInfo) -> String {
+    match project.status {
+        SetupProjectStatus::Unselected => {
+            "If the intended project is already unambiguous, call `set_project_root` directly. Otherwise let the user choose a project or Chat without a project in the setup card. Then call `get_agent_brief`.".to_string()
+        }
+        SetupProjectStatus::Selected => {
+            "Call `get_agent_brief` before using project tools.".to_string()
+        }
+        SetupProjectStatus::WithoutProject => {
+            "Call `get_agent_brief` before using the private scratch workspace.".to_string()
+        }
+        SetupProjectStatus::CheckFailed => {
+            "Project state could not be checked; resolve the setup-card error before using project-scoped tools."
+                .to_string()
+        }
+    }
+}
+
+struct SetupResultInput<'a> {
+    scope_description: &'a str,
+    next_step: &'a str,
+    project: SetupProjectInfo,
+    observed_connector_version: Option<&'a str>,
     update_result: Result<LatestVersionInspection, String>,
     debug: bool,
     update_check_ms: u64,
-) -> ToolResult {
+}
+
+fn setup_result(input: SetupResultInput<'_>) -> ToolResult {
+    let SetupResultInput {
+        scope_description,
+        next_step,
+        project,
+        observed_connector_version,
+        update_result,
+        debug,
+        update_check_ms,
+    } = input;
     let advertised_version = env!("CARGO_PKG_VERSION");
     let observed_connector_version = observed_connector_version.map(str::trim);
     let schema_status = match observed_connector_version {
@@ -116,6 +292,7 @@ fn setup_result(
         content: text.clone(),
         server_version: advertised_version.to_string(),
         next_step: next_step.to_string(),
+        project,
         update,
         connector_schema,
         debug: debug.then_some(SetupDebugInfo { update_check_ms }),
@@ -132,6 +309,38 @@ impl ConversationAuthorization {
                 "content": { "type": "string" },
                 "serverVersion": { "type": "string" },
                 "nextStep": { "type": "string" },
+                "project": {
+                    "type": "object",
+                    "properties": {
+                        "status": {
+                            "type": "string",
+                            "enum": ["unselected", "selected", "without_project", "check_failed"]
+                        },
+                        "selectionAvailable": { "type": "boolean" },
+                        "accessRoot": { "type": ["string", "null"] },
+                        "name": { "type": ["string", "null"] },
+                        "activePath": { "type": ["string", "null"] },
+                        "sourcePath": { "type": ["string", "null"] },
+                        "managedWorktree": { "type": "boolean" },
+                        "bindingScope": {
+                            "type": ["string", "null"],
+                            "enum": ["static", "chatgpt_conversation", "mcp_transport_session", null]
+                        },
+                        "detail": { "type": ["string", "null"] }
+                    },
+                    "required": [
+                        "status",
+                        "selectionAvailable",
+                        "accessRoot",
+                        "name",
+                        "activePath",
+                        "sourcePath",
+                        "managedWorktree",
+                        "bindingScope",
+                        "detail"
+                    ],
+                    "additionalProperties": false
+                },
                 "update": update_output_schema_value(),
                 "connectorSchema": {
                     "type": "object",
@@ -178,6 +387,7 @@ impl ConversationAuthorization {
                 "content",
                 "serverVersion",
                 "nextStep",
+                "project",
                 "update",
                 "connectorSchema",
                 "debug"
@@ -222,23 +432,21 @@ impl ConversationAuthorization {
             Ok(scope) => scope,
             Err(error) => return error,
         };
-        let next_step = if config.multi_project {
-            "Select the project for this conversation, then call `get_agent_brief`."
-        } else {
-            "Call `get_agent_brief` before using project tools."
-        };
+        let project = project_info(config, session, context);
+        let next_step = next_step_for_project(&project);
         let update_started = Instant::now();
         let update_result = update_check().await;
         let update_check_ms =
             u64::try_from(update_started.elapsed().as_millis()).unwrap_or(u64::MAX);
-        setup_result(
-            scope.description(),
-            next_step,
-            connector_version.as_deref(),
+        setup_result(SetupResultInput {
+            scope_description: scope.description(),
+            next_step: &next_step,
+            project,
+            observed_connector_version: connector_version.as_deref(),
             update_result,
-            config.debug,
+            debug: config.debug,
             update_check_ms,
-        )
+        })
     }
 }
 
@@ -339,7 +547,7 @@ mod tests {
     use crate::config::default_config;
     use crate::conversation_auth::ConversationAuthorizationStore;
     use crate::diff::DiffCheckpointManager;
-    use crate::project_bindings::ConversationIdentity;
+    use crate::project_bindings::{ConversationIdentity, ProjectBindingStore};
 
     fn assert_model_facing_setup_vocabulary(text: &str) {
         let text = text.to_ascii_lowercase();
@@ -371,21 +579,36 @@ mod tests {
         assert_eq!(schema["required"], json!(["ref"]));
     }
 
+    fn fixture_project_info() -> SetupProjectInfo {
+        SetupProjectInfo {
+            status: SetupProjectStatus::Selected,
+            selection_available: false,
+            access_root: Some("/tmp/project".to_string()),
+            name: Some("project".to_string()),
+            active_path: Some("/tmp/project".to_string()),
+            source_path: Some("/tmp/project".to_string()),
+            managed_worktree: false,
+            binding_scope: Some("static".to_string()),
+            detail: None,
+        }
+    }
+
     #[test]
     fn setup_result_reports_update_and_connector_schema_status_directly() {
-        let result = setup_result(
-            "this ChatGPT conversation",
-            "Call `get_agent_brief` before using project tools.",
-            Some("1.0.0"),
-            Ok(crate::self_update::LatestVersionInspection {
+        let result = setup_result(SetupResultInput {
+            scope_description: "this ChatGPT conversation",
+            next_step: "Call `get_agent_brief` before using project tools.",
+            project: fixture_project_info(),
+            observed_connector_version: Some("1.0.0"),
+            update_result: Ok(crate::self_update::LatestVersionInspection {
                 status: crate::self_update::LatestVersionStatus::UpdateAvailable,
                 current: Version::new(1, 1, 0),
                 latest: Version::new(1, 2, 0),
                 source: crate::self_update::LatestVersionSource::GithubCli,
             }),
-            true,
-            17,
-        );
+            debug: true,
+            update_check_ms: 17,
+        });
 
         assert!(!result.is_error);
         let structured = result.structured_content.as_ref().unwrap();
@@ -422,14 +645,15 @@ mod tests {
         .unwrap();
         assert!(args.connector_version.is_none());
 
-        let result = setup_result(
-            "this MCP transport session",
-            "Call `get_agent_brief` before using project tools.",
-            None,
-            Err("offline".to_string()),
-            false,
-            9,
-        );
+        let result = setup_result(SetupResultInput {
+            scope_description: "this MCP transport session",
+            next_step: "Call `get_agent_brief` before using project tools.",
+            project: fixture_project_info(),
+            observed_connector_version: None,
+            update_result: Err("offline".to_string()),
+            debug: false,
+            update_check_ms: 9,
+        });
         let structured = result.structured_content.as_ref().unwrap();
         assert_eq!(structured["connectorSchema"]["status"], "unknown");
         assert_eq!(structured["connectorSchema"]["refreshRecommended"], true);
@@ -445,6 +669,9 @@ mod tests {
         ToolRequestContext {
             conversation: identity,
             conversation_authorizations: authorizations,
+            project_bindings: Arc::new(ProjectBindingStore::new(
+                state_root.join("project-bindings"),
+            )),
             diff_checkpoints: Arc::new(DiffCheckpointManager::new()),
             artifact_egress: Arc::new(crate::artifact_egress::ArtifactEgressStore::new_at(
                 crate::types::ArtifactEgressConfig::default(),
@@ -452,6 +679,257 @@ mod tests {
             )),
             cancellation: tokio_util::sync::CancellationToken::new(),
         }
+    }
+
+    fn current_update() -> LatestVersionInspection {
+        LatestVersionInspection {
+            status: crate::self_update::LatestVersionStatus::UpToDate,
+            current: Version::parse(env!("CARGO_PKG_VERSION")).unwrap(),
+            latest: Version::parse(env!("CARGO_PKG_VERSION")).unwrap(),
+            source: crate::self_update::LatestVersionSource::GithubApi,
+        }
+    }
+
+    fn initialize_git_project(project: &std::path::Path) {
+        std::fs::create_dir_all(project).unwrap();
+        std::fs::write(project.join("tracked.txt"), "tracked\n").unwrap();
+        for args in [
+            vec!["init", "--quiet"],
+            vec!["add", "tracked.txt"],
+            vec![
+                "-c",
+                "user.email=codexify@example.invalid",
+                "-c",
+                "user.name=Codexify Tests",
+                "commit",
+                "--quiet",
+                "-m",
+                "initial",
+            ],
+        ] {
+            let output = std::process::Command::new("git")
+                .args(&args)
+                .current_dir(project)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "git {} failed: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn setup_reports_an_unselected_multi_project_context() {
+        let root = tempfile::tempdir().unwrap();
+        let access = root.path().join("projects");
+        std::fs::create_dir_all(&access).unwrap();
+        let mut config = default_config(access.clone());
+        config.multi_project = true;
+        let auth_token = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        config.conversation_auth_token = Some(auth_token.into());
+        let identity = ConversationIdentity::from_openai_session("project-picker").unwrap();
+        let request_context = context(
+            Some(identity),
+            Arc::new(ConversationAuthorizationStore::new()),
+            root.path(),
+        );
+
+        let result = ConversationAuthorization
+            .call_with_context_and_update_check(
+                json!({ "ref": auth_token }),
+                &config,
+                &SessionState::new(),
+                &request_context,
+                || async { Ok(current_update()) },
+            )
+            .await;
+
+        assert!(!result.is_error, "{}", result.joined_text());
+        let structured = result.structured_content.as_ref().unwrap();
+        assert_eq!(structured["project"]["status"], "unselected");
+        assert_eq!(structured["project"]["selectionAvailable"], true);
+        assert_eq!(
+            structured["project"]["bindingScope"],
+            "chatgpt_conversation"
+        );
+        assert!(structured["project"]["activePath"].is_null());
+        assert!(
+            structured["nextStep"]
+                .as_str()
+                .unwrap()
+                .contains("setup card")
+        );
+    }
+
+    #[tokio::test]
+    async fn setup_reports_selected_project_and_scratch_paths() {
+        let root = tempfile::tempdir().unwrap();
+        let access = root.path().join("projects");
+        let project = access.join("alpha");
+        std::fs::create_dir_all(&project).unwrap();
+        let mut config = default_config(access.clone());
+        config.multi_project = true;
+        config.worktrees.mode = crate::types::WorktreeMode::Never;
+        let auth_token = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        config.conversation_auth_token = Some(auth_token.into());
+
+        let identity = ConversationIdentity::from_openai_session("selected-project").unwrap();
+        let selected_context = context(
+            Some(identity.clone()),
+            Arc::new(ConversationAuthorizationStore::new()),
+            &root.path().join("selected"),
+        );
+        selected_context
+            .project_bindings
+            .select_project_root(&config, &identity, "alpha")
+            .await
+            .unwrap();
+        let selected = ConversationAuthorization
+            .call_with_context_and_update_check(
+                json!({ "ref": auth_token }),
+                &config,
+                &SessionState::new(),
+                &selected_context,
+                || async { Ok(current_update()) },
+            )
+            .await;
+        let selected_output = selected.structured_content.as_ref().unwrap();
+        assert_eq!(selected_output["project"]["status"], "selected");
+        assert_eq!(selected_output["project"]["name"], "alpha");
+        assert_eq!(
+            selected_output["project"]["activePath"],
+            std::fs::canonicalize(&project)
+                .unwrap()
+                .to_string_lossy()
+                .as_ref()
+        );
+        assert_eq!(
+            selected_output["project"]["sourcePath"],
+            selected_output["project"]["activePath"]
+        );
+        assert_eq!(selected_output["project"]["managedWorktree"], false);
+
+        let scratch_identity =
+            ConversationIdentity::from_openai_session("selected-scratch").unwrap();
+        let scratch_context = context(
+            Some(scratch_identity.clone()),
+            Arc::new(ConversationAuthorizationStore::new()),
+            &root.path().join("scratch"),
+        );
+        let scratch_selection = scratch_context
+            .project_bindings
+            .select_without_project(&config, &scratch_identity)
+            .await
+            .unwrap();
+        let scratch = ConversationAuthorization
+            .call_with_context_and_update_check(
+                json!({ "ref": auth_token }),
+                &config,
+                &SessionState::new(),
+                &scratch_context,
+                || async { Ok(current_update()) },
+            )
+            .await;
+        let scratch_output = scratch.structured_content.as_ref().unwrap();
+        assert_eq!(scratch_output["project"]["status"], "without_project");
+        assert_eq!(scratch_output["project"]["name"], "Chat without a project");
+        assert_eq!(
+            scratch_output["project"]["activePath"],
+            scratch_selection.scratch_root.to_string_lossy().as_ref()
+        );
+        assert!(scratch_output["project"]["sourcePath"].is_null());
+    }
+
+    #[tokio::test]
+    async fn setup_reports_the_active_managed_worktree_path() {
+        let root = tempfile::tempdir().unwrap();
+        let access = root.path().join("projects");
+        let project = access.join("alpha");
+        initialize_git_project(&project);
+        let mut config = default_config(access);
+        config.multi_project = true;
+        config.worktrees.mode = crate::types::WorktreeMode::Always;
+        config.worktrees.root = root.path().join("worktrees");
+        config.worktrees.auto_cleanup_enabled = false;
+        let auth_token = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        config.conversation_auth_token = Some(auth_token.into());
+        let identity = ConversationIdentity::from_openai_session("managed-worktree").unwrap();
+        let request_context = context(
+            Some(identity.clone()),
+            Arc::new(ConversationAuthorizationStore::new()),
+            root.path(),
+        );
+        let selection = request_context
+            .project_bindings
+            .select_project_root(&config, &identity, "alpha")
+            .await
+            .unwrap();
+        assert!(selection.managed_worktree);
+
+        let result = ConversationAuthorization
+            .call_with_context_and_update_check(
+                json!({ "ref": auth_token }),
+                &config,
+                &SessionState::new(),
+                &request_context,
+                || async { Ok(current_update()) },
+            )
+            .await;
+
+        let project_info = &result.structured_content.as_ref().unwrap()["project"];
+        assert_eq!(project_info["status"], "selected");
+        assert_eq!(project_info["managedWorktree"], true);
+        assert!(
+            same_file::is_same_file(
+                project_info["activePath"].as_str().unwrap(),
+                &selection.project_root,
+            )
+            .unwrap()
+        );
+        assert!(
+            same_file::is_same_file(
+                project_info["sourcePath"].as_str().unwrap(),
+                &selection.source_project_root,
+            )
+            .unwrap()
+        );
+        assert_ne!(project_info["activePath"], project_info["sourcePath"]);
+    }
+
+    #[tokio::test]
+    async fn setup_keeps_authorization_success_when_project_state_check_fails() {
+        let root = tempfile::tempdir().unwrap();
+        let access = root.path().join("projects");
+        std::fs::create_dir_all(&access).unwrap();
+        let mut config = default_config(access.clone());
+        config.multi_project = true;
+        let auth_token = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        config.conversation_auth_token = Some(auth_token.into());
+        let identity = ConversationIdentity::from_openai_session("broken-project-state").unwrap();
+        let request_context = context(
+            Some(identity),
+            Arc::new(ConversationAuthorizationStore::new()),
+            root.path(),
+        );
+        std::fs::remove_dir_all(&access).unwrap();
+
+        let result = ConversationAuthorization
+            .call_with_context_and_update_check(
+                json!({ "ref": auth_token }),
+                &config,
+                &SessionState::new(),
+                &request_context,
+                || async { Ok(current_update()) },
+            )
+            .await;
+
+        assert!(!result.is_error, "{}", result.joined_text());
+        let project = &result.structured_content.as_ref().unwrap()["project"];
+        assert_eq!(project["status"], "check_failed");
+        assert!(project["detail"].as_str().unwrap().contains("access root"));
     }
 
     #[tokio::test]
