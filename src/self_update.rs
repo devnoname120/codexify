@@ -281,32 +281,59 @@ pub fn inspect_update_lock() -> anyhow::Result<Option<UpdateLockInspection>> {
     inspect_update_lock_from(&home)
 }
 
-pub async fn inspect_latest_version() -> anyhow::Result<LatestVersionInspection> {
-    let cache = LATEST_VERSION_CACHE.get_or_init(|| tokio::sync::Mutex::new(None));
+async fn inspect_latest_version_cached_with<F, Fut>(
+    cache: &tokio::sync::Mutex<Option<CachedLatestVersionInspection>>,
+    force_refresh: bool,
+    inspect: F,
+) -> anyhow::Result<LatestVersionInspection>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<LatestVersionInspection, String>>,
+{
     let mut cache = cache.lock().await;
-    if let Some(cached) = cache.as_ref() {
-        let ttl = if cached.result.is_ok() {
-            LATEST_VERSION_CACHE_TTL
-        } else {
-            LATEST_VERSION_ERROR_CACHE_TTL
-        };
-        if cached.checked_at.elapsed() < ttl {
-            return cached.result.clone().map_err(anyhow::Error::msg);
+    if !force_refresh {
+        if let Some(cached) = cache.as_ref() {
+            let ttl = if cached.result.is_ok() {
+                LATEST_VERSION_CACHE_TTL
+            } else {
+                LATEST_VERSION_ERROR_CACHE_TTL
+            };
+            if cached.checked_at.elapsed() < ttl {
+                return cached.result.clone().map_err(anyhow::Error::msg);
+            }
         }
     }
 
-    let result = inspect_latest_version_with(
-        env!("CARGO_PKG_VERSION"),
-        || latest_release_tag_via_gh(GH_LATEST_VERSION_CHECK_TIMEOUT),
-        || latest_release_tag_via_api(ReleaseSource::default(), LATEST_VERSION_CHECK_TIMEOUT),
-    )
-    .await
-    .map_err(|error| format!("{error:#}"));
+    let result = inspect().await;
     *cache = Some(CachedLatestVersionInspection {
         checked_at: Instant::now(),
         result: result.clone(),
     });
     result.map_err(anyhow::Error::msg)
+}
+
+async fn inspect_latest_version_with_cache(
+    force_refresh: bool,
+) -> anyhow::Result<LatestVersionInspection> {
+    let cache = LATEST_VERSION_CACHE.get_or_init(|| tokio::sync::Mutex::new(None));
+    inspect_latest_version_cached_with(cache, force_refresh, || async {
+        inspect_latest_version_with(
+            env!("CARGO_PKG_VERSION"),
+            || latest_release_tag_via_gh(GH_LATEST_VERSION_CHECK_TIMEOUT),
+            || latest_release_tag_via_api(ReleaseSource::default(), LATEST_VERSION_CHECK_TIMEOUT),
+        )
+        .await
+        .map_err(|error| format!("{error:#}"))
+    })
+    .await
+}
+
+pub async fn inspect_latest_version() -> anyhow::Result<LatestVersionInspection> {
+    inspect_latest_version_with_cache(false).await
+}
+
+pub async fn refresh_latest_version() -> anyhow::Result<LatestVersionInspection> {
+    inspect_latest_version_with_cache(true).await
 }
 
 async fn inspect_latest_version_with<G, GFut, A, AFut>(
@@ -2128,6 +2155,38 @@ mod tests {
         .unwrap();
         assert_eq!(from_api.source, LatestVersionSource::GithubApi);
         assert_eq!(from_api.status, LatestVersionStatus::UpToDate);
+    }
+
+    #[tokio::test]
+    async fn forced_latest_version_check_bypasses_a_fresh_cache_entry() {
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let cache = tokio::sync::Mutex::new(Some(CachedLatestVersionInspection {
+            checked_at: Instant::now(),
+            result: Ok(LatestVersionInspection {
+                status: LatestVersionStatus::UpToDate,
+                current: Version::new(1, 0, 0),
+                latest: Version::new(1, 0, 0),
+                source: LatestVersionSource::GithubApi,
+            }),
+        }));
+
+        let result = inspect_latest_version_cached_with(&cache, true, {
+            let calls = calls.clone();
+            move || async move {
+                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(LatestVersionInspection {
+                    status: LatestVersionStatus::UpdateAvailable,
+                    current: Version::new(1, 0, 0),
+                    latest: Version::new(1, 1, 0),
+                    source: LatestVersionSource::GithubCli,
+                })
+            }
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(result.latest, Version::new(1, 1, 0));
     }
 
     #[test]
