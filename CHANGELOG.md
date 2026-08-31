@@ -15,6 +15,17 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   latest-release freshness, self-update locks, native-service state and loopback
   health, and OpenAI tunnel credentials/runtime integrity without starting MCP
   children or downloading the managed tunnel runtime.
+- `self_update` now attaches an MCP App that renders every checksum-bound
+  changelog section in the upgrade interval and monitors the detached update
+  across service restart. A private atomic record under
+  `~/.codexify/update/status/` distinguishes scheduled, installation, validation,
+  restart, success, failure, and rollback states. The component polls through a
+  dedicated tool advertised with app-only visibility, requires the target process
+  version before declaring supervised success, and treats its 60-second timeout as
+  unverified completion rather than failure.
+- Release archives now include `CHANGELOG.md`, and the detached worker waits 10
+  seconds before service interruption so ChatGPT can receive and initialize the
+  updater resource.
 
 ## [1.1.0] - 2026-08-30
 
@@ -128,5 +139,6 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   drained through bounded head/tail buffers, while component-only `_meta` remains
   outside the model-visible limit.
 
+[Unreleased]: https://github.com/devnoname120/codexify/compare/v1.1.0...HEAD
 [1.1.0]: https://github.com/devnoname120/codexify/releases/tag/v1.1.0
 [1.0.0]: https://github.com/devnoname120/codexify/releases/tag/v1.0.0

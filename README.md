@@ -414,17 +414,36 @@ only by an interactive shell.
 The `self_update` MCP tool updates a standard `~/.codexify/bin` installation to
 the latest GitHub release. It requires an explicit user request and
 `{"confirm": true}`. Codexify downloads the platform archive and published
-checksums, verifies SHA-256, extracts exactly one executable, and runs the staged
-binary's `--help` probe while the current server remains available.
+checksums, verifies SHA-256, extracts exactly one executable plus an optional
+bounded `CHANGELOG.md`, and runs the staged binary's `--help` probe while the
+current server remains available. Release notes are therefore covered by the
+same published archive checksum as the executable. The updater card selects all
+changelog sections in the semantic-version interval `(current, target]`, so a
+single update can accurately describe skipped releases.
 
 For a service-supervised server, Codexify then submits a one-shot updater outside
 the service's process tree: a transient systemd user unit on Linux, a submitted
 launchd job on macOS, or an on-demand Task Scheduler task on Windows. The worker
-waits for the MCP response to be delivered, stops the service, atomically replaces
-the executable while retaining a rollback copy, validates the replacement, and
-starts the service again. A failed replacement is rolled back before restart. The
-MCP connection therefore disconnects temporarily after a successful scheduling
-response.
+waits 10 seconds for the MCP response and updater resource to be delivered, stops
+the service, atomically replaces the executable while retaining a rollback copy,
+validates the replacement, and starts the service again. A failed replacement is
+rolled back before restart. The MCP connection therefore disconnects temporarily
+after a successful scheduling response.
+
+Before handing off, Codexify writes a private status record under
+`~/.codexify/update/status/<update-id>.json`. The worker atomically advances that
+record through `scheduled`, `installing`, `validating`, `restarting`, and one of
+`succeeded`, `failed`, or `rolled_back`; the newest 32 records are retained. The
+card polls the record through the app-only `self_update_status` tool. That tool is
+advertised with app visibility rather than model visibility, and accepts only the
+opaque 96-bit update identifier returned by `self_update`.
+
+The card polls every second while reachable and backs off to two seconds across
+the expected restart outage. It reports success for a supervised update only
+after both the durable record is `succeeded` and the responding Codexify process
+reports the target version. If no terminal state can be observed within 60
+seconds, the card says completion could not be verified and offers **Check
+again**; a timeout is not reported as an update failure.
 
 After Codexify restarts, open ChatGPT Settings, select the Codexify connector,
 scroll to the bottom of its tool list, and click **Refresh** so ChatGPT reloads
@@ -434,7 +453,10 @@ Progress and failures are appended to the normal rotating service log and can be
 followed with `codexify service logs -f`. A fixed update lock rejects concurrent
 updates. Self-update refuses source-tree or nonstandard executable locations;
 native Windows self-update also requires the background service because a running
-executable cannot be replaced in place.
+executable cannot be replaced in place. A foreground Unix update can replace the
+installed executable without restarting its already-running process; the card
+therefore reports the installed update separately from that process's
+`runningVersion`.
 
 ## Tools
 
@@ -486,11 +508,18 @@ Eight always-on tools have no Codex counterpart:
 | `get_agent_brief` | Return the whole operating brief — behaviour, environment, saved state and project rules — in one call |
 | `get_environment` | Report the OS, the shell `exec_command` uses, the work directory, and what the policy allows |
 | `get_project_doc` | Read the project's `AGENTS.md` instructions |
-| `self_update` | Download and verify the latest Codexify release, then schedule a detached executable swap and service restart after explicit confirmation |
+| `self_update` | Download and verify the latest Codexify release, show its checksum-bound changelog in an updater card, then schedule a detached executable swap and service restart after explicit confirmation |
 | `remember` | Create one durable note under a new short key; existing keys are never overwritten |
 | `update_memory_note` | Replace one existing durable note without creating a missing key |
 | `forget_memory_note` | Delete one existing durable note |
 | `recall` | Return the plan and notes saved by earlier turns or earlier conversations |
+
+One additional native tool exists solely for the updater component and is
+advertised with app-only visibility:
+
+| Tool | Description |
+|------|-------------|
+| `self_update_status` | Read one durable update record by its opaque update ID and report the responding Codexify process version; not offered to the model by hosts that implement MCP Apps visibility |
 
 Multi-project mode adds two project-control tools:
 
@@ -501,7 +530,7 @@ Multi-project mode adds two project-control tools:
 
 These tools expose runtime context, project instructions, and the four durable memory/task-state operations through MCP. See [Context and memory](#context-and-memory), [Acting as a Codex agent](#acting-as-a-codex-agent), [Shells and the host](#shells-and-the-host), [AGENTS.md](#agentsmd) and [Skills](#skills).
 
-That is 30 native tools in the default single-project mode and 32 in multi-project mode. Enabling conversation authorization adds the ChatGPT-facing `setup` tool, producing 31 or 33 respectively. Setting `artifactIngress.enabled` to `false` removes `import_host_file`; setting `artifactEgress.enabled` to `false` independently removes `export_host_file`. Each disabled direction reduces the applicable count by one. One or more [catalog-mode MCP upstreams](#catalog-mode-default-for-automatic-imports) add one shared four-tool discovery/call surface regardless of how many transitive tools they contain. Direct mode adds one downstream tool per selected upstream tool; gateway mode adds one downstream dispatcher per upstream server.
+That is 31 advertised native tools in the default single-project mode and 33 in multi-project mode. Of those, 30 and 32 respectively are model-visible; `self_update_status` is app-only. Enabling conversation authorization adds the ChatGPT-facing `setup` tool, producing 32 or 34 advertised tools and 31 or 33 model-visible tools. Setting `artifactIngress.enabled` to `false` removes `import_host_file`; setting `artifactEgress.enabled` to `false` independently removes `export_host_file`. Each disabled direction reduces the applicable count by one. One or more [catalog-mode MCP upstreams](#catalog-mode-default-for-automatic-imports) add one shared four-tool discovery/call surface regardless of how many transitive tools they contain. Direct mode adds one downstream tool per selected upstream tool; gateway mode adds one downstream dispatcher per upstream server.
 
 MCP-specific tool behavior:
 
@@ -1354,7 +1383,7 @@ Codex CLI MCP discovery: codex
   idalib -> imported from Codex CLI (not present in config.toml)
 Codex MCP overrides:
   remote-exec -> imported fields overlaid by codexify.config.json
-Tools loaded (32): 28 native + 4 upstream-facing MCP tools
+Tools loaded (33): 29 native + 4 upstream-facing MCP tools
 Upstream MCP servers:
   idalib      -> catalog (66 private tool(s))
   idasql      -> catalog (12 private tool(s))

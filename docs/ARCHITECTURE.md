@@ -600,6 +600,8 @@ the original order and rejects duplicate names.
 | `exec_sessions.rs` | Generic-client transport fallback plus conversation-owned unified-exec sessions and transport-local diff state: trusted configured-shell resolution, Codex-compatible model shell-type selection by basename, PowerShell exit-code wrapping, background stdout/stderr drain tasks, process-group kill, idle cleanup, and output truncation (UTF-16 units to match the TS). |
 | `diff.rs` | Project-scoped Git snapshots, persistent conversation refs, transport-local fallbacks, incremental comparisons whose emitted snapshot can advance the private diff cursor through compare-and-swap, legacy review-ref migration, diff parsing and component-payload budgets. |
 | `diff_ui.rs` | Embedded MCP Apps resource, component-only diff-result metadata, legacy review-card compatibility, and persisted private interaction state for the interactive `show_diff` card. |
+| `self_update.rs` | Verified release resolution, checksum validation, bounded executable/changelog extraction, private durable updater records, and generated rollback-capable OS worker scripts. |
+| `self_update_ui.rs` | Embedded updater MCP App, component-only changelog payload, restart-tolerant polling, absolute timeout state, and app-only status-tool integration. |
 | `apply_patch.rs` | The Codex patch format: verify the whole patch, then apply file operations sequentially with Codex-compatible partial-failure behavior, fuzzy context matching and CRLF preservation. |
 | `tool.rs` | Mandatory titles and `ToolBehavior`, typed-schema helpers, startup descriptor checks, cached dialect-aware JSON Schema validators, masked input diagnostics, and successful structured-output validation. |
 | `memory.rs` | Working memory outside the repo, keyed by a hash of the normalized active root, with `O_EXCL` locking and atomic writes. In multi-project mode, a configured `memory.dir` is a base containing one hashed child per project. |
@@ -817,22 +819,46 @@ read through `skills_read`. Scope `plugin`.
 `~/.codexify/update/update.lock` before contacting GitHub. It resolves the latest
 semantic-versioned release, downloads `checksums.txt` and the exact platform
 archive through a bounded rustls client, verifies SHA-256, accepts exactly one
-bounded regular executable from the archive, writes it beside the installed
-binary, and validates it with `--help`. No service interruption occurs during
-that preflight.
+bounded regular executable plus an optional bounded `CHANGELOG.md` from the
+archive, writes the executable beside the installed binary, and validates it with
+`--help`. The selected changelog sections satisfy `(current, target]` and remain
+in component-only result metadata. No service interruption occurs during that
+preflight.
+
+Before scheduling the worker, Codexify creates
+`~/.codexify/update/status/<update-id>.json` with mode `0600` beneath a private
+directory. Same-directory temporary files and atomic replacement preserve a
+complete JSON record across process restart. Records contain source/target
+versions, an update timestamp, bounded controlled failure information, and one of
+`scheduled`, `installing`, `validating`, `restarting`, `succeeded`, `failed`, or
+`rolled_back`. Opportunistic oldest-first cleanup retains at most 32 records while
+never deleting the active update.
 
 The service supervisor marks only its ordinary server child with
 `CODEXIFY_SERVICE_SUPERVISED=1`; model-launched subprocesses have that marker
 removed. A supervised update hands the final transaction to an OS-managed job
 outside the service's process tree: a transient systemd user unit, a submitted
-launchd job, or an on-demand Windows scheduled task. The worker delays briefly so
-the MCP result can be delivered, stops the service, retains the old executable as
-a rollback copy, atomically installs and probes the replacement, restarts the
-service, and removes its task, staging files, and lock. Unix foreground processes
-can schedule the same detached replacement without a service restart and continue
-running their already-open executable image; Windows requires service supervision
-because the running executable is locked. Update events share the rotating service
-log.
+launchd job, or an on-demand Windows scheduled task. The worker delays 10 seconds
+so the MCP result and UI resource can be delivered, advances the durable record at
+transaction boundaries, stops the service, retains the old executable as a
+rollback copy, atomically installs and probes the replacement, restarts the
+service, and removes its task, staging files, and lock. Its terminal state reflects
+whether the replacement succeeded, was restored, or left the service unavailable.
+
+`self_update_status` is a project-independent read-only tool whose standard MCP
+Apps metadata uses `visibility: ["app"]`; OpenAI compatibility metadata marks it
+private and widget-accessible. It accepts only the opaque 96-bit update ID and
+returns the durable record plus the version of the process answering the poll.
+The `self_update` tool links `ui://codexify/self-update/v1/mcp-app.html`, which
+polls immediately, uses one-second normal and two-second reconnect intervals, and
+stores its absolute 60-second deadline and terminal state in private widget state.
+A timeout is rendered as unverified completion rather than failure and exposes a
+manual retry.
+
+Unix foreground processes can schedule the same detached replacement without a
+service restart and continue running their already-open executable image; Windows
+requires service supervision because the running executable is locked. Update
+events share the rotating service log.
 
 ---
 
@@ -930,7 +956,7 @@ The banner is designed so failures are never silent:
 
 ```
 Config: C:\Users\alice\.codexify\codexify.config.json (user config)
-Tools loaded (36): 32 native + 4 upstream-facing MCP tools
+Tools loaded (37): 33 native + 4 upstream-facing MCP tools
 Upstream MCP servers:
   idalib      -> catalog (66 private tool(s))
   remote-exec -> catalog (84 private tool(s))
