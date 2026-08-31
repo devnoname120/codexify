@@ -26,7 +26,6 @@ flowchart LR
     Ingress["import_host_file"]
     Egress["export_host_file"]
     Search["glob\ngrep"]
-    Shell["run_command"]
     Git["git_status\nshow_diff\ngit_push\ngit_commit\ngit_log"]
     Edit["apply_patch"]
     Exec["exec_command\nwrite_stdin"]
@@ -60,7 +59,6 @@ flowchart LR
     Tools --> Ingress
     Tools --> Egress
     Tools --> Search
-    Tools --> Shell
     Tools --> Git
     Tools --> Edit
     Tools --> Exec
@@ -317,7 +315,7 @@ Each release ships a compiled binary per platform — `windows-x64`, `linux-x64`
 | `--tool-log-max-response-bytes <BYTES>` | No | `4096` | Maximum UTF-8 bytes retained from each redacted response payload (`64`-`65536`) |
 | `--tool-log-redact-env <NAME>` | No | - | Redact the current value of an environment variable from tool payload logs; repeat for multiple names |
 | `--audit <FILE>` | No | Disabled | Append privacy-preserving tool activity events to a JSONL file (`--audit-log` is an alias) |
-| `--audit-command-preview` | No | Disabled | Add bounded, redacted previews for `exec_command` and `run_command` to the audit log |
+| `--audit-command-preview` | No | Disabled | Add bounded, redacted previews for `exec_command` to the audit log |
 | `--audit-redact-env <NAME>` | No | - | Redact the current value of an environment variable from command previews; repeat for multiple names |
 | `--openai-tunnel-id` | No | - | Existing OpenAI Secure MCP Tunnel ID; enables native tunnel mode |
 | `--openai-tunnel-api-key-ref` | No | `env:CONTROL_PLANE_API_KEY` | Runtime key reference in `env:NAME` or `file:/path` form |
@@ -416,7 +414,6 @@ Structured primitives — cheaper and safer than shelling out for the same job, 
 | `write_file` | Write content to a file, creating parent directories if needed |
 | `import_host_file` | Stream one ChatGPT attachment or generated file into a new project-relative path, with bounded size, SHA-256 verification and atomic no-overwrite publication |
 | `export_host_file` | Snapshot one project-relative file and return a short-lived, opaque MCP resource that ChatGPT can download without receiving a local path or base64 text |
-| `run_command` | Execute a command in the work directory (allowlist-restricted) |
 | `git_status` | Show git status, parsed into changed files with status codes |
 | `show_diff` | Present the scoped working-tree diff from the project-open or last-diff checkpoint and, by default, record the emitted snapshot as the next incremental baseline; compatible hosts receive the bounded diff in an interactive component-only diff card |
 | `git_push` | Push one existing local branch to the same branch name on a configured remote; arbitrary refspecs, force syntax, and deletion syntax are rejected |
@@ -441,10 +438,10 @@ Codex-compatible agent tools:
 | `apply_patch` | `apply_patch` | Verify the complete context patch, then apply its file operations sequentially with Codex-compatible partial-failure semantics |
 | `exec_command` | `exec_command` | Run a shell command; returns output, or a session id if it is still running. A model-provided `shell` selects only a recognized installed shell type by basename |
 | `write_stdin` | `write_stdin` | Write to (or poll) a running `exec_command` session |
-| `view_image` | `view_image` | Load a local image file for visual inspection |
+| `view_image` | `view_image` | Load a local image for visual inspection; `high` is the default prepared resolution and `original` preserves Codex's larger original-detail budget |
 | `update_plan` | `update_plan` | Track a multi-step plan; saved to disk so a later conversation can pick it up |
 | `clock_curr_time` | `clock.curr_time` | Current time in UTC |
-| `clock_sleep` | `clock.sleep` | Pause for a given duration |
+| `clock_sleep` | `clock.sleep` | Pause for a given duration and end early when the active MCP request is cancelled, such as when the client interrupts the turn |
 | `skills_list` | `skills.list` | List the `SKILL.md` skills installed for this project and this user |
 | `skills_read` | `skills.read` | Read a skill's instructions, or another file in its package |
 
@@ -472,7 +469,7 @@ Multi-project mode adds two project-control tools:
 
 These tools expose runtime context, project instructions, and the four durable memory/task-state operations through MCP. See [Context and memory](#context-and-memory), [Acting as a Codex agent](#acting-as-a-codex-agent), [Shells and the host](#shells-and-the-host), [AGENTS.md](#agentsmd) and [Skills](#skills).
 
-That is 31 native tools in the default single-project mode and 33 in multi-project mode. Enabling conversation authorization adds the ChatGPT-facing `setup` tool, producing 32 or 34 respectively. Setting `artifactIngress.enabled` to `false` removes `import_host_file`; setting `artifactEgress.enabled` to `false` independently removes `export_host_file`. Each disabled direction reduces the applicable count by one. One or more [catalog-mode MCP upstreams](#catalog-mode-default-for-automatic-imports) add one shared four-tool discovery/call surface regardless of how many transitive tools they contain. Direct mode adds one downstream tool per selected upstream tool; gateway mode adds one downstream dispatcher per upstream server.
+That is 30 native tools in the default single-project mode and 32 in multi-project mode. Enabling conversation authorization adds the ChatGPT-facing `setup` tool, producing 31 or 33 respectively. Setting `artifactIngress.enabled` to `false` removes `import_host_file`; setting `artifactEgress.enabled` to `false` independently removes `export_host_file`. Each disabled direction reduces the applicable count by one. One or more [catalog-mode MCP upstreams](#catalog-mode-default-for-automatic-imports) add one shared four-tool discovery/call surface regardless of how many transitive tools they contain. Direct mode adds one downstream tool per selected upstream tool; gateway mode adds one downstream dispatcher per upstream server.
 
 MCP-specific tool behavior:
 
@@ -486,9 +483,9 @@ the connector transport between adjacent tool calls. Generic MCP clients use
 transport-session ownership. Process handles are in memory only: they do not
 survive a Codexify restart, and `exec.idleTimeoutMs` expires abandoned sessions.
 
-`clock_sleep` caps at 5 minutes because a longer wait would outlive the HTTP request through the tunnel.
+`clock_sleep` caps at 5 minutes because a longer wait would outlive the HTTP request through the tunnel. Within that MCP-specific cap it follows Codex's interruption behavior: the timer races the request cancellation token, so a client that cancels the active tool call can end the sleep immediately.
 
-Every native fixed-shape input schema is closed and compiled at startup. Calls are validated before dispatch, including integer bounds and nested objects; validation diagnostics mask `writeOnly` values. Native tools and fixed dispatchers that advertise an `outputSchema` must return matching `structuredContent`, and successful results are validated before they leave the server. Directly bridged upstream tools preserve the upstream convention that structured content may be absent, while any structured content they do return is checked against the advertised upstream schema. `exec_command` and `write_stdin` return Codex's unified-exec object, `import_host_file` returns its destination, byte count and SHA-256 receipt, `export_host_file` returns its immutable-snapshot receipt and a standard MCP `resource_link`, `clock_curr_time` returns `{ current_time }`, `get_environment` returns the environment object, `get_project_doc` returns `{ files, content }` and `skills_list` returns `{ skills, content }`; the rest return the exact `{ content: <text> }` object, which the server derives from text blocks so handlers do not repeat it. `show_diff` deliberately advertises no output schema: its model-visible result is concise text, while its complete diff payload is attached as component-only result `_meta` for the MCP App. Catalog discovery records have static exact wrapper schemas even though their source and tool values are discovered at runtime; `mcp_call_tool` has no output schema because the selected upstream tool determines that result shape.
+Every native fixed-shape input schema is closed and compiled at startup. Calls are validated before dispatch, including integer bounds and nested objects; validation diagnostics mask `writeOnly` values. Native tools and fixed dispatchers that advertise an `outputSchema` must return matching `structuredContent`, and successful results are validated before they leave the server. Directly bridged upstream tools preserve the upstream convention that structured content may be absent, while any structured content they do return is checked against the advertised upstream schema. `exec_command` and `write_stdin` return Codex's unified-exec object, `import_host_file` returns its destination, byte count and SHA-256 receipt, `export_host_file` returns its immutable-snapshot receipt and a standard MCP `resource_link`, `clock_curr_time` returns `{ current_time }`, `get_environment` returns the environment object, `get_project_doc` returns `{ files, content }` and `skills_list` returns `{ skills, content }`; other text-returning tools with a fixed output schema use the exact `{ content: <text> }` object, which the server derives from text blocks so handlers do not repeat it. `view_image` deliberately uses MCP's native image content block rather than duplicating Codex's data URL into `structuredContent`, while `clock_sleep` advertises no output schema to match Codex's sleep tool. `show_diff` likewise advertises no output schema: its model-visible result is concise text, while its complete diff payload is attached as component-only result `_meta` for the MCP App. Catalog discovery records have static exact wrapper schemas even though their source and tool values are discovered at runtime; `mcp_call_tool` has no output schema because the selected upstream tool determines that result shape.
 
 All project-scoped paths are resolved relative to the active project root: `--work-dir` in single-project mode, or the root selected for the current ChatGPT conversation in multi-project mode. Non-ChatGPT clients use the root selected for their current MCP transport session.
 
@@ -522,11 +519,10 @@ optional and uses camelCase names.
     "keepCount": 15,
     "allowSetupScript": false
   },
-  "allowedCommands": ["bun", "npm", "npx", "node", "git", "python", "pip", "cargo", "make"],
   "port": 3000,
   "tree": {
     "defaultDepth": 3,
-    "ignore": ["node_modules", ".git", "dist", ".next", "__pycache__", ".venv", "venv"]
+    "ignore": ["node_modules", ".git", "dist", ".next", "__pycache__"]
   },
   "ignore": {
     "useGitignore": true,
@@ -538,11 +534,8 @@ optional and uses camelCase names.
     "maxTimeout": 120000
   },
   "exec": {
-    "mode": "allowlist",
-    "extraAllowedCommands": [
-      "ls", "cat", "grep", "find", "head", "tail", "wc", "echo", "pwd",
-      "which", "rg", "sed", "awk", "sort", "uniq", "diff", "true", "false"
-    ],
+    "mode": "unrestricted",
+    "extraAllowedCommands": [],
     "maxSessions": 8,
     "idleTimeoutMs": 300000
   },
@@ -717,7 +710,7 @@ The `audit` config block has the same controls:
 | Key | Default | Description |
 |-----|---------|-------------|
 | `logFile` | `null` | JSONL destination; a relative path resolves from the launch directory. Setting it enables auditing |
-| `includeCommandPreview` | `false` | Include bounded, redacted `exec_command` / `run_command` previews |
+| `includeCommandPreview` | `false` | Include bounded, redacted `exec_command` previews |
 | `commandPreviewMaxBytes` | `512` | Maximum UTF-8 byte length of a command preview; accepted range is `1`-`16384` |
 | `redactEnv` | `[]` | Environment-variable names whose current values must be removed from previews |
 
@@ -759,7 +752,7 @@ The `worktrees` block controls isolation between conversations selecting the sam
 | `upstreamRefreshMode` | Codex setting or `"never"` | `"best-effort"` refreshes a tracked upstream before worktree creation without making fetch failure fatal |
 | `autoCleanupEnabled` | Codex setting or `true` | On startup, remove old unreferenced worktrees only when their working trees are clean |
 | `keepCount` | Codex setting or `15` | Number of newest unreferenced managed worktrees retained before cleanup candidates are considered |
-| `allowSetupScript` | `false` | Whether a worktree's Codex environment setup script may run on creation. This executes an arbitrary command **outside** the `allowedCommands`/exec policy, and both the environment file and its script path are selectable through the source repository's local Git config, so an untrusted project could otherwise plant a script that runs on the next binding. Leave it off unless every project reachable by this server is trusted to run arbitrary setup commands |
+| `allowSetupScript` | `false` | Whether a worktree's Codex environment setup script may run on creation. This executes an arbitrary command **outside** the `exec` policy, and both the environment file and its script path are selectable through the source repository's local Git config, so an untrusted project could otherwise plant a script that runs on the next binding. Leave it off unless every project reachable by this server is trusted to run arbitrary setup commands |
 
 When these values are absent, Codexify reads Codex Desktop's `[desktop]` worktree settings from `$CODEX_HOME/config.toml`, including `git-worktree-root`, `worktree-upstream-refresh-mode`, `worktree-auto-cleanup-enabled`, and `worktree-keep-count`. The final location falls back to `$CODEX_HOME/worktrees` (normally `~/.codex/worktrees`).
 
@@ -767,8 +760,8 @@ The `exec` block governs `exec_command` and `write_stdin`:
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `mode` | `"allowlist"` | `"allowlist"` checks every command in the string against the allowlist; `"unrestricted"` runs whatever it is given |
-| `extraAllowedCommands` | 18 read-only utilities | Additional allowlist entries used only by `exec_command`; `run_command` uses `allowedCommands` only |
+| `mode` | `"unrestricted"` | `"unrestricted"` runs whatever it is given; `"allowlist"` opts into checking every command in the string against `extraAllowedCommands` |
+| `extraAllowedCommands` | `[]` | Complete executable allowlist when `mode` is `"allowlist"`; ignored by unrestricted mode |
 | `maxSessions` | `8` | Cap on concurrent background sessions per ChatGPT conversation, or per MCP transport for clients without conversation metadata |
 | `idleTimeoutMs` | `300000` | Milliseconds without a tool interaction before a resident process is killed and forgotten; `0` disables idle expiry |
 | `defaultShell` | `$SHELL`, else PowerShell on Windows and `/bin/sh` elsewhere | Shell used when an `exec_command` call names none |
@@ -1019,7 +1012,7 @@ Codexify bounds model-visible tool output and persists task state so long-runnin
 (showing lines 1-1000 of 4820 — call again with offset=1000 for the rest)
 ```
 
-That line matters as much as the cap. Silent truncation reads as "that was the whole file", which is worse than no cap at all. `read_file` has a byte ceiling as well as a line one, because a minified bundle is a single line several megabytes long that a line cap alone would hand back in full. `grep` additionally caps context, match count and individual lines while preserving the actual match inside a long minified line. `exec_command` and `write_stdin` keep Codex's 10,000-token default but clamp larger requests to server policy. `run_command` drains stdout and stderr through bounded head/tail buffers before applying the same model-output policy, so a chatty or timed-out child cannot consume unbounded process memory or context. Oversized arbitrary `structuredContent` becomes a bounded error requesting narrower arguments rather than invalid partial JSON.
+That line matters as much as the cap. Silent truncation reads as "that was the whole file", which is worse than no cap at all. `read_file` has a byte ceiling as well as a line one, because a minified bundle is a single line several megabytes long that a line cap alone would hand back in full. `grep` additionally caps context, match count and individual lines while preserving the actual match inside a long minified line. `exec_command` and `write_stdin` keep Codex's 10,000-token default but clamp larger requests to server policy. Oversized arbitrary `structuredContent` becomes a bounded error requesting narrower arguments rather than invalid partial JSON.
 
 **Keep what would be expensive to rediscover.** `remember` creates one keyed note and refuses an existing key; `update_memory_note` replaces an existing note without creating a missing key; `forget_memory_note` deletes an existing note; `recall` hands back the notes and the current plan. `update_plan` persists too, so the plan survives the conversation that made it. Separating creation, replacement, and deletion gives each operation an accurate safety classification and prevents an empty string from doubling as an implicit delete command.
 
@@ -1430,7 +1423,7 @@ Native tunnel mode ignores `allowedHosts` and forces the accepted authorities to
 - **Bounded state writes outside the work directory**: `remember` and `update_plan` write `memory.json` under `~/.codexify/projects/`. Multi-project mode also writes one small project-binding record under `~/.codexify/conversation-projects/` for each ChatGPT conversation and access root. Per-conversation authorization writes a small marker under `~/.codexify/conversation-authorizations/`. Binding and authorization filenames are derived from a hash of `openai/session`; the raw identifier is not stored. Authorization namespaces include a one-way digest of the canonical work directory and configured token, while marker contents store only the grant. Set `memory.enabled` to `false` to disable plans and notes; delete the corresponding state directory to forget bindings or authorizations. See [Context and memory](#context-and-memory).
 - **Bounded reads outside the work directory**: [skills](#skills) may live in `~/.agents/skills`, `~/.codex/skills`, `~/.claude/skills`, or an enabled installed Codex/Claude Code plugin. Codex plugin discovery reads only Codex's user config, active plugin-cache package, manifest, and declared skill roots; `skills_read` then opens files only inside a discovered skill package. Its `resource` path is checked against the skill's own directory, so it cannot walk out into the rest of your home directory. `skills_list` reports the absolute path of every skill it found. Set `skills.enabled` to `false` to switch it off, `skills.includePlugins` to `false` to suppress plugin packages, or `skills.dirs` to point the standalone user scope somewhere you choose.
 - **Read-only Codex configuration discovery**: MCP import and the project catalogue read the user-level Codex `config.toml` without rewriting it. Project discovery inspects only the top-level `projects` table, does not read candidate project contents, and suppresses rejected absolute paths from MCP output. Set `projectCatalog.codexConfig.enabled` to `false` to disable that provider. Native Codex trust does not override the Codexify access-root boundary.
-- **Command allowlist**: `run_command` only runs binaries listed in `allowedCommands`; everything else is rejected. `exec_command` checks the same list plus `exec.extraAllowedCommands`, at every command position in the string.
+- **Command execution policy**: `exec_command` is unrestricted by default, matching the requested Codex-like local-agent behavior. Operators who want a guardrail can set `exec.mode` to `"allowlist"`; in that mode every command position in the shell string is checked against the complete `exec.extraAllowedCommands` list. This is a guardrail, not a sandbox: an allowed interpreter can still execute arbitrary code.
 - **Bridged servers carry delegated authority**: an explicit `mcpServers` entry or an automatically imported Codex MCP—including one contributed by a Codex plugin—can receive model-directed calls. A stdio upstream launches a real process that runs as your OS user; a Streamable HTTP upstream receives calls plus its configured bearer token and HTTP headers. Catalog mode reduces connector-schema exposure, not runtime authority: `mcp_call_tool` can still dispatch any filtered catalogue entry. Only bridge servers you trust, use `tools`/`disabledTools` to narrow callable operations, prefer catalog mode to keep transitive schemas private, keep secrets in `bearerTokenEnvVar`/`envHttpHeaders` rather than static JSON, set `codexMcp.useCli` to `false` to exclude plugin-only discovery, or set `codexMcp.enabled` to `false` to disable all automatic Codex import. Launch, connection, authentication, and handshake failures are reported rather than silently ignored.
 - **Native OpenAI tunnel is outbound-only**: Codexify binds its MCP listener to loopback and supervises OpenAI's official runtime-only tunnel client. Startup fails unless the runtime reports `/readyz` and completes a control-plane poll. Failure of either process stops the other, and HTTP shutdown has a bounded grace period before remaining connections are aborted.
 - **The loopback MCP hop is authenticated**: native mode generates a random per-process bearer token and configures the tunnel runtime to send it on MCP requests and discovery probes. The token is never printed, written to the config file, or inherited by model-launched commands and bridged MCP children.

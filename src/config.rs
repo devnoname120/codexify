@@ -143,7 +143,7 @@ pub struct Cli {
     )]
     pub audit_log: Option<String>,
 
-    /// Include bounded, redacted previews of exec_command and run_command.
+    /// Include bounded, redacted previews of exec_command.
     #[arg(long = "audit-command-preview", global = true)]
     pub audit_command_preview: bool,
 
@@ -238,25 +238,6 @@ pub struct ProjectsListArgs {
     pub show_skipped: bool,
 }
 
-fn default_allowed_commands() -> Vec<String> {
-    [
-        "bun", "npm", "npx", "node", "git", "python", "pip", "cargo", "make",
-    ]
-    .into_iter()
-    .map(String::from)
-    .collect()
-}
-
-fn default_extra_allowed() -> Vec<String> {
-    [
-        "ls", "cat", "grep", "find", "head", "tail", "wc", "echo", "pwd", "which", "rg", "sed",
-        "awk", "sort", "uniq", "diff", "true", "false",
-    ]
-    .into_iter()
-    .map(String::from)
-    .collect()
-}
-
 fn default_tree() -> TreeConfig {
     TreeConfig {
         default_depth: 3,
@@ -276,8 +257,8 @@ fn default_command() -> CommandConfig {
 
 fn default_exec() -> ExecConfig {
     ExecConfig {
-        mode: ExecMode::Allowlist,
-        extra_allowed_commands: default_extra_allowed(),
+        mode: ExecMode::Unrestricted,
+        extra_allowed_commands: Vec::new(),
         max_sessions: 8,
         default_shell: None,
         idle_timeout_ms: 300_000,
@@ -532,7 +513,6 @@ struct FileConfig {
     multi_project: Option<bool>,
     project_clone_dir: Option<String>,
     worktrees: Option<PartialWorktrees>,
-    allowed_commands: Option<Vec<String>>,
     tree: Option<PartialTree>,
     command: Option<PartialCommand>,
     exec: Option<PartialExec>,
@@ -732,7 +712,6 @@ pub fn default_config(work_dir: std::path::PathBuf) -> AppConfig {
         api_key: None,
         conversation_auth_token: None,
         port: 3000,
-        allowed_commands: default_allowed_commands(),
         tree: default_tree(),
         command: default_command(),
         exec: default_exec(),
@@ -1434,9 +1413,6 @@ pub fn load_config(cli: Cli) -> Result<AppConfig, String> {
         api_key,
         conversation_auth_token,
         port: cli.port.or(file.port).unwrap_or(3000),
-        allowed_commands: file
-            .allowed_commands
-            .unwrap_or_else(default_allowed_commands),
         tree,
         command,
         exec,

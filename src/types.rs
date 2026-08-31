@@ -1,7 +1,7 @@
 //! Shared configuration and result types.
 //!
 //! Core data structures shared by configuration, tools, and MCP transport code.
-//! Config field names use camelCase on the wire (`allowedCommands`,
+//! Config field names use camelCase on the wire (`extraAllowedCommands`,
 //! `maxSessions`, …) through serde renames.
 
 use std::fmt;
@@ -771,7 +771,7 @@ pub struct WorktreeConfig {
     /// Whether a per-worktree setup script (declared through the bound
     /// environment's `environment.toml`) may be executed when a managed
     /// worktree is created. This runs an arbitrary command *outside* the
-    /// `allowedCommands`/exec policy, and the environment path is itself
+    /// `exec` policy, and the environment path is itself
     /// selectable through local git config, so an untrusted repository could
     /// otherwise plant a script that runs on the next binding. It is therefore
     /// opt-in and defaults to `false`; leave it off unless every project that
@@ -794,7 +794,6 @@ pub struct AppConfig {
     pub api_key: Option<String>,
     pub conversation_auth_token: Option<ConversationAuthToken>,
     pub port: u16,
-    pub allowed_commands: Vec<String>,
     pub tree: TreeConfig,
     pub command: CommandConfig,
     pub exec: ExecConfig,

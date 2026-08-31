@@ -84,48 +84,6 @@ impl SecretRedactor {
         )
     }
 
-    pub(crate) fn redact_argv_preview<'a>(
-        &self,
-        argv: impl IntoIterator<Item = &'a str>,
-        max_payload_bytes: usize,
-    ) -> String {
-        let traversal_truncated = Cell::new(false);
-        let mut output = String::from("[");
-        let mut redact_next = false;
-        let mut first = true;
-        for argument in argv {
-            let remaining = max_payload_bytes.saturating_sub(output.len());
-            if remaining == 0 {
-                output.push_str(VALUE_TRUNCATED);
-                break;
-            }
-            let redacted = if redact_next {
-                redact_next = false;
-                REDACTED.to_string()
-            } else {
-                redact_next = secret_flag_takes_next(argument);
-                self.redact_text_bounded(
-                    argument,
-                    self.max_text_bytes(remaining),
-                    &traversal_truncated,
-                )
-            };
-            let encoded =
-                serde_json::to_string(&redacted).unwrap_or_else(|_| format!("\"{REDACTED}\""));
-            if !first {
-                output.push(',');
-            }
-            output.push_str(&encoded);
-            first = false;
-            if output.len() >= max_payload_bytes {
-                output.push_str(VALUE_TRUNCATED);
-                break;
-            }
-        }
-        output.push(']');
-        output
-    }
-
     pub(crate) fn redacted_json<'a>(
         &'a self,
         value: &'a Value,
@@ -557,31 +515,6 @@ fn secret_env_name(name: &str) -> bool {
         || normalized.ends_with("_dsn")
 }
 
-fn secret_flag_takes_next(argument: &str) -> bool {
-    if !argument.starts_with('-') || argument.contains('=') {
-        return false;
-    }
-    let name = argument.trim_start_matches('-').to_ascii_lowercase();
-    matches!(name.as_str(), "u" | "user" | "proxy-user") || sensitive_value_name(&name)
-}
-
-fn sensitive_value_name(name: &str) -> bool {
-    let normalized: String = name
-        .chars()
-        .filter(|character| character.is_ascii_alphanumeric())
-        .flat_map(char::to_lowercase)
-        .collect();
-    secret_env_name(name)
-        || normalized.contains("checksum")
-        || normalized.contains("digest")
-        || normalized.contains("fingerprint")
-        || normalized.ends_with("hash")
-        || matches!(
-            normalized.as_str(),
-            "md5" | "sha1" | "sha256" | "sha384" | "sha512" | "crc32" | "etag"
-        )
-}
-
 fn secret_patterns() -> Vec<(Regex, &'static str)> {
     [
         (
@@ -668,29 +601,6 @@ mod tests {
         assert!(!rendered.contains("file_sensitive_identifier"));
         assert!(!rendered.contains("github-token-value"));
         assert!(!rendered.contains("nested-secret"));
-    }
-
-    #[test]
-    fn argv_redaction_covers_separate_secret_values() {
-        let root = tempfile::tempdir().unwrap();
-        let config = default_config(root.path().to_path_buf());
-        let redactor = SecretRedactor::for_tool_logging(&config);
-        let redacted = redactor.redact_argv_preview(
-            [
-                "tool",
-                "--github-token",
-                "separate-secret",
-                "--header",
-                "Authorization: Bearer header-secret",
-                "--checksum",
-                "deadbeef-checksum",
-            ],
-            4096,
-        );
-        let rendered = serde_json::to_string(&redacted).unwrap();
-        assert!(!rendered.contains("separate-secret"));
-        assert!(!rendered.contains("header-secret"));
-        assert!(!rendered.contains("deadbeef-checksum"));
     }
 
     #[test]

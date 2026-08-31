@@ -750,7 +750,6 @@ fn brief_drops_cli_only_rules() {
 /// deterministic and never reads the developer's real state.
 fn brief_config(work_dir: &Path, state_dir: &Path, shell: &str) -> AppConfig {
     let mut c = default_config(work_dir.to_path_buf());
-    c.allowed_commands = vec!["git".to_string(), "bun".to_string()];
     c.exec.default_shell = Some(shell.to_string());
     c.memory.dir = Some(state_dir.to_string_lossy().into_owned());
     c.skills.dirs = Some(vec![]);
@@ -1213,7 +1212,6 @@ async fn skills_read_errors_when_disabled() {
 /// through the tool's text output (which is exactly that helper's return).
 fn doc_tool_config(work_dir: &Path, state_dir: &Path) -> AppConfig {
     let mut c = default_config(work_dir.to_path_buf());
-    c.allowed_commands = vec!["git".to_string()];
     c.exec.default_shell = Some("bash".to_string());
     c.memory.dir = Some(state_dir.to_string_lossy().into_owned());
     c.skills.dirs = Some(vec![]);
@@ -1406,12 +1404,12 @@ async fn agent_brief_works_without_agents_md() {
 
 // --- get_environment ----------------------------------------------------
 
-/// The TS get-environment suite pins workDir to "/tmp/project" and does not need
-/// it to exist. allowedCommands ["node","git"], extraAllowedCommands ["ls"].
+/// The get-environment suite pins workDir to "/tmp/project" and uses an explicit
+/// allowlist so rendering of the opt-in policy remains covered.
 fn env_config(default_shell: Option<&str>) -> AppConfig {
     let mut c = default_config(PathBuf::from("/tmp/project"));
-    c.allowed_commands = vec!["node".to_string(), "git".to_string()];
-    c.exec.extra_allowed_commands = vec!["ls".to_string()];
+    c.exec.mode = ExecMode::Allowlist;
+    c.exec.extra_allowed_commands = vec!["node".to_string(), "git".to_string(), "ls".to_string()];
     c.exec.default_shell = default_shell.map(|s| s.to_string());
     c
 }
@@ -1446,10 +1444,6 @@ fn describe_reports_workdir_and_effective_allowlist() {
     assert_eq!(
         info.exec.allowed_commands,
         vec!["git".to_string(), "ls".to_string(), "node".to_string()]
-    );
-    assert_eq!(
-        info.run_command_allowed,
-        vec!["git".to_string(), "node".to_string()]
     );
 }
 
@@ -1529,7 +1523,6 @@ async fn environment_tool_structured_keys_match_schema() {
         "path_separator",
         "shell",
         "exec",
-        "run_command_allowed",
     ];
     required.sort();
     assert_eq!(keys, required);

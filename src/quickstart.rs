@@ -685,6 +685,7 @@ fn merge_tunnel_config(
         ),
     );
     config.insert("multiProject".to_string(), Value::Bool(multi_project));
+    config.remove("allowedCommands");
     match conversation_auth_token {
         Some(token) => {
             config.insert(
@@ -1013,7 +1014,16 @@ mod tests {
         // the server path still refuses to start when it is missing — the
         // requirement is now enforced while the configuration is loaded rather
         // than at argument-parse time.
-        let cli = Cli::try_parse_from(["codexify"]).unwrap();
+        // Pin config discovery to an explicit missing file so this assertion is
+        // independent of the developer machine's real ~/.codexify config.
+        let root = TempDir::new().unwrap();
+        let missing_config = root.path().join("missing.json");
+        let cli = Cli::try_parse_from(vec![
+            "codexify".to_string(),
+            "--config".to_string(),
+            missing_config.to_string_lossy().into_owned(),
+        ])
+        .unwrap();
         assert!(cli.command.is_none());
         assert!(cli.work_dir.is_none());
         let error = crate::config::load_config(cli).unwrap_err();
@@ -1160,7 +1170,7 @@ mod tests {
         assert!(output.contains(&conversation_auth_prompt(CONVERSATION_TOKEN)));
         assert!(!output.contains("Require each new ChatGPT conversation"));
         assert!(!output.contains("Generate a new conversation token"));
-        assert_eq!(config["allowedCommands"], json!(["git"]));
+        assert!(config.get("allowedCommands").is_none());
         assert_eq!(
             config["openaiTunnel"]["organizationId"],
             json!("org_example")

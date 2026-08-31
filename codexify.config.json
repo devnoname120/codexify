@@ -1,11 +1,10 @@
 {
   "workDir": null,
-  "allowedCommands": ["bun", "npm", "npx", "node", "git", "python", "pip", "cargo", "make"],
   "conversationAuthToken": null,
   "port": 3000,
   "tree": {
     "defaultDepth": 3,
-    "ignore": ["node_modules", ".git", "dist", ".next", "__pycache__", ".venv", "venv"]
+    "ignore": ["node_modules", ".git", "dist", ".next", "__pycache__"]
   },
   "ignore": {
     "useGitignore": true,
@@ -17,11 +16,8 @@
     "maxTimeout": 120000
   },
   "exec": {
-    "mode": "allowlist",
-    "extraAllowedCommands": [
-      "ls", "cat", "grep", "find", "head", "tail", "wc", "echo", "pwd",
-      "which", "rg", "sed", "awk", "sort", "uniq", "diff", "true", "false"
-    ],
+    "mode": "unrestricted",
+    "extraAllowedCommands": [],
     "maxSessions": 8,
     "idleTimeoutMs": 300000
   },
@@ -40,7 +36,7 @@
     "maxEntries": 500,
     "maxTreeNodes": 1000
   },
-  "review": {
+  "diff": {
     "maxPatchBytes": 4194304
   },
   "toolLogging": {

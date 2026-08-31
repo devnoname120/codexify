@@ -64,7 +64,6 @@ pub struct EnvironmentInfo {
     pub path_separator: String,
     pub shell: ShellInfo,
     pub exec: ExecInfo,
-    pub run_command_allowed: Vec<String>,
 }
 
 pub fn describe_environment(config: &AppConfig) -> EnvironmentInfo {
@@ -77,9 +76,6 @@ pub fn describe_environment(config: &AppConfig) -> EnvironmentInfo {
         crate::types::ExecMode::Allowlist => "allowlist",
         crate::types::ExecMode::Unrestricted => "unrestricted",
     };
-
-    let mut run_command_allowed = config.allowed_commands.clone();
-    run_command_allowed.sort();
 
     EnvironmentInfo {
         os: os_name(&platform),
@@ -97,7 +93,6 @@ pub fn describe_environment(config: &AppConfig) -> EnvironmentInfo {
             max_sessions: config.exec.max_sessions,
             allowed_commands: effective_allowlist(config),
         },
-        run_command_allowed,
     }
 }
 
@@ -134,10 +129,6 @@ pub fn render_environment(info: &EnvironmentInfo) -> String {
         shell_advice.to_string(),
         String::new(),
         format!("exec_command policy: {}{}", info.exec.mode, exec_policy),
-        format!(
-            "run_command allows: {}",
-            info.run_command_allowed.join(", ")
-        ),
         format!("Concurrent exec sessions: up to {}", info.exec.max_sessions),
     ]
     .join("\n")

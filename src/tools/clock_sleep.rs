@@ -5,7 +5,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::exec_sessions::SessionState;
-use crate::tool::{Tool, ToolBehavior, parse_tool_args, text_output_schema};
+use crate::tool::{Tool, ToolBehavior, ToolRequestContext, parse_tool_args};
 use crate::types::{AppConfig, ToolResult};
 
 /// Codex allows up to 12 hours here. This bridge caps at 5 minutes: the MCP
@@ -19,7 +19,49 @@ pub struct ClockSleep;
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ClockSleepArgs {
-    duration_ms: f64,
+    duration_ms: u64,
+}
+
+impl ClockSleep {
+    async fn run(
+        &self,
+        args: Value,
+        cancellation: Option<&tokio_util::sync::CancellationToken>,
+    ) -> ToolResult {
+        let ClockSleepArgs { duration_ms } = match parse_tool_args(args) {
+            Ok(args) => args,
+            Err(error) => return *error,
+        };
+
+        if !(1..=MAX_SLEEP_DURATION_MS).contains(&duration_ms) {
+            return ToolResult::error(format!(
+                "duration_ms must be between 1 and {MAX_SLEEP_DURATION_MS}"
+            ));
+        }
+
+        let started = Instant::now();
+        let interrupted = if let Some(cancellation) = cancellation {
+            let sleep = tokio::time::sleep(Duration::from_millis(duration_ms));
+            tokio::pin!(sleep);
+            tokio::select! {
+                _ = &mut sleep => false,
+                _ = cancellation.cancelled() => true,
+            }
+        } else {
+            tokio::time::sleep(Duration::from_millis(duration_ms)).await;
+            false
+        };
+        let wall_time_seconds = started.elapsed().as_secs_f64();
+        let message = if interrupted {
+            "Sleep interrupted by new input."
+        } else {
+            "Sleep completed."
+        };
+
+        ToolResult::text(format!(
+            "Wall time: {wall_time_seconds:.4} seconds\n{message}"
+        ))
+    }
 }
 
 #[async_trait]
@@ -43,9 +85,7 @@ impl Tool for ClockSleep {
     }
 
     fn description(&self) -> String {
-        format!(
-            "Pause execution for a specified duration, then return the elapsed wall-clock time. Use this to wait between polls of a long-running exec_command session or an external job. Must be between 1 and {MAX_SLEEP_DURATION_MS} ms."
-        )
+        "Pause execution for a specified duration. The sleep ends early when new input arrives for the active turn. Returns the elapsed wall-clock time.".to_string()
     }
 
     fn input_schema(&self) -> Value {
@@ -64,32 +104,21 @@ impl Tool for ClockSleep {
         })
     }
 
-    fn output_schema(&self) -> Option<Value> {
-        Some(text_output_schema())
-    }
-
     fn requires_project_root(&self) -> bool {
         false
     }
 
     async fn call(&self, args: Value, _config: &AppConfig, _session: &SessionState) -> ToolResult {
-        let ClockSleepArgs { duration_ms } = match parse_tool_args(args) {
-            Ok(args) => args,
-            Err(error) => return *error,
-        };
+        self.run(args, None).await
+    }
 
-        if duration_ms < 1.0 || duration_ms > MAX_SLEEP_DURATION_MS as f64 {
-            return ToolResult::error(format!(
-                "duration_ms must be between 1 and {MAX_SLEEP_DURATION_MS}"
-            ));
-        }
-
-        let started = Instant::now();
-        tokio::time::sleep(Duration::from_secs_f64(duration_ms / 1000.0)).await;
-        let wall_time_seconds = started.elapsed().as_secs_f64();
-
-        ToolResult::text(format!(
-            "Wall time: {wall_time_seconds:.4} seconds\nSleep completed."
-        ))
+    async fn call_with_context(
+        &self,
+        args: Value,
+        _config: &AppConfig,
+        _session: &SessionState,
+        context: &ToolRequestContext,
+    ) -> ToolResult {
+        self.run(args, Some(&context.cancellation)).await
     }
 }

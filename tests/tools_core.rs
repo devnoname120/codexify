@@ -1,28 +1,33 @@
 // Integration tests for the core tool set, ported from the Bun/TypeScript
-// suites `src/tools/__tests__/codex-tools.test.ts` and
-// `src/tools/__tests__/run-command.test.ts`.
+// suite `src/tools/__tests__/codex-tools.test.ts`.
 //
 // Assertions are adapted to the actual Rust behavior (exact user-facing strings
 // were confirmed by reading the source of each tool under test). exec_command /
 // write_stdin from the TS file are intentionally NOT ported here (see the note
 // at the bottom of this file).
 
+use std::io::Cursor;
+use std::sync::Arc;
+
+use base64::{Engine, engine::general_purpose::STANDARD};
 use serde_json::json;
 use tempfile::TempDir;
 
+use codexify::artifact_egress::ArtifactEgressStore;
 use codexify::config::default_config;
+use codexify::conversation_auth::ConversationAuthorizationStore;
+use codexify::diff::DiffCheckpointManager;
 use codexify::exec_sessions::SessionState;
-use codexify::output_budget::approx_token_count;
-use codexify::tool::Tool;
+use codexify::tool::{Tool, ToolRequestContext};
 use codexify::tools::apply_patch::ApplyPatch;
 use codexify::tools::clock_curr_time::ClockCurrTime;
 use codexify::tools::clock_sleep::ClockSleep;
 use codexify::tools::read_file::ReadFile;
-use codexify::tools::run_command::RunCommand;
 use codexify::tools::update_plan::UpdatePlan;
 use codexify::tools::view_image::ViewImage;
 use codexify::tools::write_file::WriteFile;
-use codexify::types::ToolContent;
+use codexify::types::{ArtifactEgressConfig, ToolContent};
+use tokio_util::sync::CancellationToken;
 
 /// A config rooted at `dir` with the memory (plan-persistence) directory pinned
 /// inside a temp path, so update_plan never writes to the real state directory.
@@ -237,6 +242,28 @@ const PNG_BYTES: &[u8] = &[
 /// Canonical STANDARD base64 of PNG_BYTES - what view_image should emit.
 const PNG_BASE64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
 
+fn png_bytes(width: u32, height: u32) -> Vec<u8> {
+    let image = image::RgbaImage::from_pixel(width, height, image::Rgba([0, 0, 0, 255]));
+    let mut output = Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba8(image)
+        .write_to(&mut output, image::ImageFormat::Png)
+        .unwrap();
+    output.into_inner()
+}
+
+fn returned_png_dimensions(result: &codexify::types::ToolResult) -> (u32, u32) {
+    let ToolContent::Image { data, mime_type } = &result.content[0] else {
+        panic!("expected image content block, got {:?}", result.content[0]);
+    };
+    assert_eq!(mime_type, "image/png");
+    let bytes = STANDARD.decode(data).unwrap();
+    assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
+    (
+        u32::from_be_bytes(bytes[16..20].try_into().unwrap()),
+        u32::from_be_bytes(bytes[20..24].try_into().unwrap()),
+    )
+}
+
 #[tokio::test]
 async fn view_image_returns_an_image_content_block() {
     let dir = TempDir::new().unwrap();
@@ -256,6 +283,65 @@ async fn view_image_returns_an_image_content_block() {
         }
         other => panic!("expected image content block, got {other:?}"),
     }
+}
+
+#[test]
+fn view_image_exposes_only_codex_high_and_original_detail_values() {
+    let schema = ViewImage.input_schema();
+    assert_eq!(
+        schema["properties"]["detail"]["enum"],
+        json!(["high", "original"])
+    );
+}
+
+#[tokio::test]
+async fn view_image_rejects_low_detail_like_codex() {
+    let dir = TempDir::new().unwrap();
+    std::fs::write(dir.path().join("pixel.png"), PNG_BYTES).unwrap();
+    let config = config_in(&dir);
+    let session = SessionState::new();
+
+    let r = ViewImage
+        .call(
+            json!({ "path": "pixel.png", "detail": "low" }),
+            &config,
+            &session,
+        )
+        .await;
+
+    assert!(r.is_error);
+    assert!(
+        r.joined_text()
+            .contains("only supports `high` or `original`")
+    );
+}
+
+#[tokio::test]
+async fn view_image_high_resizes_while_original_preserves_resolution() {
+    let dir = TempDir::new().unwrap();
+    std::fs::write(dir.path().join("wide.png"), png_bytes(3000, 100)).unwrap();
+    let config = config_in(&dir);
+    let session = SessionState::new();
+
+    let high = ViewImage
+        .call(json!({ "path": "wide.png" }), &config, &session)
+        .await;
+    assert!(!high.is_error, "unexpected error: {}", high.joined_text());
+    assert_eq!(returned_png_dimensions(&high), (2048, 68));
+
+    let original = ViewImage
+        .call(
+            json!({ "path": "wide.png", "detail": "original" }),
+            &config,
+            &session,
+        )
+        .await;
+    assert!(
+        !original.is_error,
+        "unexpected error: {}",
+        original.joined_text()
+    );
+    assert_eq!(returned_png_dimensions(&original), (3000, 100));
 }
 
 #[tokio::test]
@@ -382,6 +468,51 @@ async fn clock_sleep_rejects_a_non_numeric_duration() {
 
     assert!(r.is_error);
     assert!(r.joined_text().contains("Invalid tool arguments"));
+}
+
+#[tokio::test]
+async fn clock_sleep_rejects_fractional_milliseconds_like_codex() {
+    let dir = TempDir::new().unwrap();
+    let config = config_in(&dir);
+    let session = SessionState::new();
+
+    let r = ClockSleep
+        .call(json!({ "duration_ms": 60.5 }), &config, &session)
+        .await;
+
+    assert!(r.is_error);
+    assert!(r.joined_text().contains("Invalid tool arguments"));
+}
+
+#[tokio::test]
+async fn clock_sleep_ends_early_when_the_mcp_request_is_cancelled() {
+    let dir = TempDir::new().unwrap();
+    let config = config_in(&dir);
+    let session = SessionState::new();
+    let cancellation = CancellationToken::new();
+    let context = ToolRequestContext {
+        conversation: None,
+        conversation_authorizations: Arc::new(ConversationAuthorizationStore::new()),
+        diff_checkpoints: Arc::new(DiffCheckpointManager::new()),
+        artifact_egress: Arc::new(ArtifactEgressStore::new(ArtifactEgressConfig::default())),
+        cancellation: cancellation.clone(),
+    };
+
+    let future = ClockSleep.call_with_context(
+        json!({ "duration_ms": 60_000 }),
+        &config,
+        &session,
+        &context,
+    );
+    tokio::pin!(future);
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    cancellation.cancel();
+
+    let r = tokio::time::timeout(std::time::Duration::from_secs(1), &mut future)
+        .await
+        .expect("cancelled sleep should finish promptly");
+    assert!(!r.is_error, "unexpected error: {}", r.joined_text());
+    assert!(r.joined_text().contains("Sleep interrupted by new input."));
 }
 
 // --- update_plan ------------------------------------------------------------
@@ -525,181 +656,6 @@ async fn read_file_reports_a_missing_file() {
 
     assert!(r.is_error);
     assert!(r.joined_text().contains("File not found"));
-}
-
-// --- run_command ------------------------------------------------------------
-// The TS suite uses `echo`, which is a shell builtin (not a spawnable program)
-// on Windows, where this Rust crate's run_command spawns the binary directly.
-// `git` is used instead: it is in the default allowlist and is always present
-// (the crate lives in a git repo). Behavioral intent - allowlist enforcement,
-// output capture, exit-code reporting, and timeout - is preserved.
-
-#[tokio::test]
-async fn run_command_runs_an_allowed_command_and_returns_output() {
-    let dir = TempDir::new().unwrap();
-    let config = config_in(&dir); // default allowed_commands includes "git"
-    let session = SessionState::new();
-
-    let r = RunCommand
-        .call(
-            json!({ "command": "git", "args": ["--version"] }),
-            &config,
-            &session,
-        )
-        .await;
-
-    assert!(!r.is_error, "unexpected error: {}", r.joined_text());
-    let text = r.joined_text();
-    assert!(text.contains("git version"));
-    assert!(text.contains("exit code: 0"));
-}
-
-#[tokio::test]
-async fn run_command_rejects_a_command_not_in_the_allowlist() {
-    let dir = TempDir::new().unwrap();
-    let config = config_in(&dir);
-    let session = SessionState::new();
-
-    let r = RunCommand
-        .call(
-            json!({ "command": "curl", "args": ["http://evil.com"] }),
-            &config,
-            &session,
-        )
-        .await;
-
-    assert!(r.is_error);
-    let text = r.joined_text();
-    assert!(text.contains("Command not allowed"));
-    // The rejection lists the allowlist, which includes git by default.
-    assert!(text.contains("git"));
-}
-
-#[tokio::test]
-async fn run_command_returns_exit_code_on_failure() {
-    let dir = TempDir::new().unwrap();
-    let config = config_in(&dir);
-    let session = SessionState::new();
-
-    // An unknown git subcommand exits non-zero without needing a repo.
-    let r = RunCommand
-        .call(
-            json!({ "command": "git", "args": ["not-a-real-subcommand-xyz"] }),
-            &config,
-            &session,
-        )
-        .await;
-
-    assert!(r.is_error);
-    assert!(r.joined_text().contains("exit code"));
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn run_command_bounds_large_stdout_before_returning_it() {
-    let dir = TempDir::new().unwrap();
-    let mut config = config_in(&dir);
-    config.allowed_commands = vec!["sh".to_string()];
-    config.output.max_tool_output_tokens = Some(100);
-    let session = SessionState::new();
-
-    let r = RunCommand
-        .call(
-            json!({
-                "command": "sh",
-                "args": ["-c", "head -c 2000000 /dev/zero | tr '\\0' x"],
-                "timeout": 10_000
-            }),
-            &config,
-            &session,
-        )
-        .await;
-
-    let text = r.joined_text();
-    assert!(!r.is_error, "{text}");
-    assert_eq!(r.audit.truncated, Some(true));
-    assert!(text.contains("output truncated"), "{text}");
-    assert!(text.contains("exit code: 0"), "{text}");
-    assert!(approx_token_count(&text) <= 100);
-}
-
-#[cfg(windows)]
-#[tokio::test]
-async fn run_command_bounds_large_stdout_before_returning_it() {
-    let dir = TempDir::new().unwrap();
-    let mut config = config_in(&dir);
-    config.allowed_commands = vec!["powershell.exe".to_string()];
-    config.output.max_tool_output_tokens = Some(100);
-    let session = SessionState::new();
-
-    let r = RunCommand
-        .call(
-            json!({
-                "command": "powershell.exe",
-                "args": ["-NoProfile", "-Command", "[Console]::Out.Write('x' * 2000000)"],
-                "timeout": 10_000
-            }),
-            &config,
-            &session,
-        )
-        .await;
-
-    let text = r.joined_text();
-    assert!(!r.is_error, "{text}");
-    assert_eq!(r.audit.truncated, Some(true));
-    assert!(text.contains("output truncated"), "{text}");
-    assert!(text.contains("exit code: 0"), "{text}");
-    assert!(approx_token_count(&text) <= 100);
-}
-
-#[cfg(windows)]
-#[tokio::test]
-async fn run_command_respects_timeout() {
-    let dir = TempDir::new().unwrap();
-    let mut config = config_in(&dir);
-    config.allowed_commands = vec!["powershell.exe".to_string()];
-    let session = SessionState::new();
-
-    let r = RunCommand
-        .call(
-            json!({
-                "command": "powershell.exe",
-                "args": ["-NoProfile", "-Command", "[Console]::Out.Write('ready'); Start-Sleep -Seconds 60"],
-                "timeout": 100
-            }),
-            &config,
-            &session,
-        )
-        .await;
-
-    assert!(r.is_error);
-    assert!(r.joined_text().contains("ready"));
-    assert!(r.joined_text().contains("timed out"));
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn run_command_respects_timeout() {
-    let dir = TempDir::new().unwrap();
-    let mut config = config_in(&dir);
-    config.allowed_commands = vec!["sh".to_string()];
-    let session = SessionState::new();
-
-    let r = RunCommand
-        .call(
-            json!({
-                "command": "sh",
-                "args": ["-c", "printf ready; sleep 60"],
-                "timeout": 100
-            }),
-            &config,
-            &session,
-        )
-        .await;
-
-    assert!(r.is_error);
-    assert!(r.joined_text().contains("ready"));
-    assert!(r.joined_text().contains("timed out"));
 }
 
 // --- Intentionally NOT ported -----------------------------------------------

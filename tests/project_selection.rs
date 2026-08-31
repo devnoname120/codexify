@@ -8,12 +8,12 @@ use codexify::instructions::{build_initial_instructions, build_instructions};
 use codexify::memory::memory_dir;
 use codexify::project_bindings::{ConversationIdentity, ProjectBindingScope, ProjectBindingStore};
 use codexify::tool::Tool;
+use codexify::tools::exec_command::ExecCommand;
 use codexify::tools::git_status::GitStatus;
 use codexify::tools::list_projects::ListProjects;
 use codexify::tools::read_file::ReadFile;
 use codexify::tools::recall::Recall;
 use codexify::tools::remember::Remember;
-use codexify::tools::run_command::RunCommand;
 use codexify::tools::set_project_root::SetProjectRoot;
 use codexify::types::WorktreeMode;
 use codexify::worktrees::metadata_path_for_worktree;
@@ -369,12 +369,9 @@ async fn command_and_git_tools_use_the_selected_root() {
         .await;
     let selected = session.effective_config(&config).unwrap();
 
-    let command = RunCommand
+    let command = ExecCommand
         .call(
-            json!({
-                "command": "git",
-                "args": ["status", "--porcelain"]
-            }),
+            json!({ "cmd": "git status --porcelain" }),
             &selected,
             &session,
         )

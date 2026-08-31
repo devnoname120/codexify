@@ -17,6 +17,17 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The macOS/Linux and Windows installers now explicitly tell users to restart
   their terminal after installation and then run `codexify quickstart` to finish
   connector setup.
+- Command execution now uses `exec_command`/`write_stdin` exclusively. The
+  redundant `run_command` tool and top-level `allowedCommands` setting were
+  removed; `exec.mode` now defaults to `"unrestricted"` and
+  `exec.extraAllowedCommands` defaults to an empty list. Opt-in allowlist mode
+  remains available through `exec.extraAllowedCommands`.
+- `view_image` now follows Codex's `high`/`original` detail contract and image
+  preparation limits, with `high` as the default and original-resolution detail
+  using Codex's larger image budget.
+- `clock_sleep` now uses integer millisecond durations and ends early when the
+  active MCP request is cancelled, mirroring Codex's interruptible-sleep behavior
+  within Codexify's existing five-minute tunnel-safe cap.
 
 ### Fixed
 

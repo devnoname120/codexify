@@ -21,7 +21,6 @@ pub mod list_projects;
 pub mod read_file;
 pub mod recall;
 pub mod remember;
-pub mod run_command;
 pub mod self_update;
 pub mod set_project_root;
 pub mod setup;

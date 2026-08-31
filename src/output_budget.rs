@@ -4,7 +4,6 @@
 //! continuation. The connector-wide policy is the fallback that prevents any
 //! built-in or bridged result from bypassing the context bound.
 
-use std::collections::VecDeque;
 use std::io::{self, Write};
 
 use serde_json::Value;
@@ -372,89 +371,6 @@ fn utf16_suffix_start(text: &str, max_units: usize) -> usize {
     start
 }
 
-#[derive(Debug, Default)]
-pub(crate) struct BoundedTextBuffer<const MAX_BYTES: usize> {
-    head: Vec<u8>,
-    tail: VecDeque<u8>,
-    omitted_bytes: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct BoundedTextOutput {
-    pub text: String,
-    pub truncated: bool,
-    pub omitted_bytes: u64,
-}
-
-impl<const MAX_BYTES: usize> BoundedTextBuffer<MAX_BYTES> {
-    const HEAD_BYTES: usize = MAX_BYTES / 2;
-    const TAIL_BYTES: usize = MAX_BYTES - Self::HEAD_BYTES;
-
-    pub(crate) fn new() -> Self {
-        Self::default()
-    }
-
-    pub(crate) fn push_bytes(&mut self, chunk: &[u8]) {
-        let mut chunk = chunk;
-        if self.head.len() < Self::HEAD_BYTES {
-            let space = Self::HEAD_BYTES - self.head.len();
-            if chunk.len() <= space {
-                self.head.extend_from_slice(chunk);
-                return;
-            }
-            self.head.extend_from_slice(&chunk[..space]);
-            chunk = &chunk[space..];
-        }
-
-        let remaining_tail = Self::TAIL_BYTES.saturating_sub(self.tail.len());
-        let excess = chunk.len().saturating_sub(remaining_tail);
-        self.omitted_bytes = self.omitted_bytes.saturating_add(excess as u64);
-        if excess <= self.tail.len() {
-            self.tail.drain(..excess);
-            self.tail.extend(chunk);
-        } else {
-            let skip = excess - self.tail.len();
-            self.tail.clear();
-            self.tail.extend(&chunk[skip..]);
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn push_str(&mut self, chunk: &str) {
-        self.push_bytes(chunk.as_bytes());
-    }
-
-    pub(crate) fn take(&mut self, reason: &str) -> BoundedTextOutput {
-        let head = std::mem::take(&mut self.head);
-        let mut tail = std::mem::take(&mut self.tail);
-        let omitted_bytes = std::mem::replace(&mut self.omitted_bytes, 0);
-        if omitted_bytes == 0 {
-            let mut bytes = head;
-            bytes.extend(tail);
-            BoundedTextOutput {
-                text: String::from_utf8_lossy(&bytes).into_owned(),
-                truncated: false,
-                omitted_bytes,
-            }
-        } else {
-            let head = String::from_utf8_lossy(&head);
-            let tail = String::from_utf8_lossy(tail.make_contiguous());
-            BoundedTextOutput {
-                text: format!(
-                    "{head}\n\n[... {omitted_bytes} bytes elided ({reason}) ...]\n\n{tail}"
-                ),
-                truncated: true,
-                omitted_bytes,
-            }
-        }
-    }
-
-    #[cfg(test)]
-    fn retained_bytes(&self) -> usize {
-        self.head.len().saturating_add(self.tail.len())
-    }
-}
-
 #[derive(Debug, Clone, Copy)]
 pub struct FileBudget {
     pub max_lines: usize,
@@ -710,28 +626,5 @@ mod tests {
                 .map(str::len),
             Some(10_000)
         );
-    }
-
-    #[test]
-    fn bounded_text_buffer_keeps_head_and_tail() {
-        let mut buffer = BoundedTextBuffer::<16>::new();
-        buffer.push_str("abcdefghijklmnopqrstuvwx");
-        assert_eq!(buffer.retained_bytes(), 16);
-        let output = buffer.take("test limit");
-        assert!(output.truncated);
-        assert_eq!(output.omitted_bytes, 8);
-        assert!(output.text.starts_with("abcdefgh"));
-        assert!(output.text.ends_with("qrstuvwx"));
-    }
-
-    #[test]
-    fn bounded_text_buffer_decodes_utf8_after_chunk_reassembly() {
-        let mut buffer = BoundedTextBuffer::<32>::new();
-        let bytes = "a😀b".as_bytes();
-        buffer.push_bytes(&bytes[..3]);
-        buffer.push_bytes(&bytes[3..]);
-        let output = buffer.take("test limit");
-        assert_eq!(output.text, "a😀b");
-        assert!(!output.truncated);
     }
 }

@@ -175,7 +175,7 @@ pub async fn create_managed_worktree_at(
         })?;
 
         // The setup script runs an arbitrary command outside the
-        // `allowedCommands`/exec policy, and both the environment file and its
+        // `exec` policy, and both the environment file and its
         // script path are selectable through the source repository's local git
         // config — so an untrusted repo could plant a script that executes on
         // the next binding. Gate the whole prepare-and-run path behind an

@@ -1,12 +1,13 @@
-//! Policy check for `exec_command`, which takes a free-form shell string rather
-//! than the (command, args) pair `run_command` uses. Ports `src/exec-policy.ts`.
+//! Optional allowlist policy for `exec_command`, which takes a free-form shell
+//! string. The default mode is unrestricted; operators who opt into allowlist
+//! mode populate `exec.extraAllowedCommands` with every executable they want to
+//! permit.
 //!
 //! This is a GUARDRAIL, NOT A SANDBOX. It exists so a model cannot casually
 //! reach for `curl` or `rm -rf /` when the operator only meant to expose a build
-//! toolchain — it is not a security boundary. The default allowlist already
-//! contains `node`, `python` and `bun`, any of which will run arbitrary code in
-//! one line. Treat the work directory, and the machine running the bridge, as
-//! fully reachable by whoever can call these tools.
+//! toolchain — it is not a security boundary. Any allowed interpreter can run
+//! arbitrary code. Treat the work directory, and the machine running the bridge,
+//! as fully reachable by whoever can call these tools.
 
 use std::collections::BTreeSet;
 
@@ -155,9 +156,6 @@ pub fn split_shell_segments(cmd: &str) -> Result<Vec<Vec<String>>, ExecPolicyErr
 /// The set of binaries `exec_command` may invoke under allowlist mode.
 pub fn effective_allowlist(config: &AppConfig) -> Vec<String> {
     let mut set: BTreeSet<String> = BTreeSet::new();
-    for c in &config.allowed_commands {
-        set.insert(c.clone());
-    }
     for c in &config.exec.extra_allowed_commands {
         set.insert(c.clone());
     }
@@ -240,9 +238,14 @@ mod tests {
 
     fn cfg(mode: ExecMode) -> AppConfig {
         let mut config = default_config(std::path::PathBuf::from("/w"));
-        config.allowed_commands = vec!["git".into(), "node".into()];
         config.exec.mode = mode;
-        config.exec.extra_allowed_commands = vec!["ls".into(), "cat".into(), "grep".into()];
+        config.exec.extra_allowed_commands = vec![
+            "git".into(),
+            "node".into(),
+            "ls".into(),
+            "cat".into(),
+            "grep".into(),
+        ];
         config
     }
 

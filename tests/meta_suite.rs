@@ -20,20 +20,28 @@ use codexify::exec_sessions::SessionState;
 use codexify::registry::{load_tools, load_tools_for_config, load_tools_for_mode};
 use codexify::safe_path::resolve_safe_path;
 use codexify::tool::{Tool, ToolBehavior, validate_and_wrap_tools};
-use codexify::types::{AppConfig, ToolContent, ToolResult};
+use codexify::types::{AppConfig, ExecMode, ToolContent, ToolResult};
 
 // ─── registry.test.ts ──────────────────────────────────────────────────
 
 #[test]
-fn loads_all_31_tools() {
+fn default_exec_policy_is_unrestricted_without_an_allowlist() {
+    let config = default_config(PathBuf::from("/tmp"));
+    assert_eq!(config.exec.mode, ExecMode::Unrestricted);
+    assert!(config.exec.extra_allowed_commands.is_empty());
+}
+
+#[test]
+fn loads_all_30_tools() {
     let tools = load_tools();
-    assert_eq!(tools.len(), 31);
+    assert_eq!(tools.len(), 30);
+    assert!(!tools.iter().any(|tool| tool.name() == "run_command"));
 }
 
 #[test]
 fn multi_project_mode_adds_catalogue_and_session_selector() {
     let tools = load_tools_for_mode(true);
-    assert_eq!(tools.len(), 33);
+    assert_eq!(tools.len(), 32);
     assert_eq!(tools[0].name(), "list_projects");
     assert_eq!(tools[1].name(), "set_project_root");
 }
@@ -46,7 +54,7 @@ fn artifact_ingress_can_be_omitted_by_configuration() {
         .into_iter()
         .map(|tool| tool.name())
         .collect::<Vec<_>>();
-    assert_eq!(names.len(), 30);
+    assert_eq!(names.len(), 29);
     assert!(!names.contains(&"import_host_file"));
 }
 
@@ -58,7 +66,7 @@ fn artifact_egress_can_be_omitted_by_configuration() {
         .into_iter()
         .map(|tool| tool.name())
         .collect::<Vec<_>>();
-    assert_eq!(names.len(), 30);
+    assert_eq!(names.len(), 29);
     assert!(!names.contains(&"export_host_file"));
 }
 
@@ -68,7 +76,7 @@ fn conversation_auth_mode_adds_innocuously_named_gate_before_protected_tools() {
     config.conversation_auth_token =
         Some("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into());
     let tools = load_tools_for_config(&config);
-    assert_eq!(tools.len(), 32);
+    assert_eq!(tools.len(), 31);
     assert_eq!(tools[0].name(), "setup");
     let schema = tools[0].input_schema();
     assert!(schema["properties"].get("ref").is_some());
@@ -91,7 +99,7 @@ fn conversation_auth_mode_adds_innocuously_named_gate_before_protected_tools() {
 
     config.multi_project = true;
     let tools = load_tools_for_config(&config);
-    assert_eq!(tools.len(), 34);
+    assert_eq!(tools.len(), 33);
     assert_eq!(tools[0].name(), "setup");
     assert_eq!(tools[1].name(), "list_projects");
     assert_eq!(tools[2].name(), "set_project_root");
@@ -223,7 +231,6 @@ fn native_tool_annotations_match_the_audited_side_effect_matrix() {
         ("read_file", (true, false, true, false)),
         ("recall", (true, false, true, false)),
         ("remember", (false, false, true, false)),
-        ("run_command", (false, true, false, true)),
         ("self_update", (false, true, false, true)),
         ("set_project_root", (false, false, true, true)),
         ("setup", (false, false, true, false)),
@@ -252,7 +259,6 @@ fn includes_expected_tool_names() {
         "write_file",
         "import_host_file",
         "export_host_file",
-        "run_command",
         "self_update",
         "git_status",
         "show_diff",
@@ -266,6 +272,7 @@ fn includes_expected_tool_names() {
     ] {
         assert!(names.contains(&expected), "missing tool: {expected}");
     }
+    assert!(!names.contains(&"run_command"));
     assert!(!names.contains(&"show_changes"));
 }
 
@@ -362,7 +369,6 @@ fn mutating_tools_are_classified_for_checkpoint_fail_closed_behavior() {
             "exec_command".to_string(),
             "git_commit".to_string(),
             "import_host_file".to_string(),
-            "run_command".to_string(),
             "write_file".to_string(),
             "write_stdin".to_string(),
         ]

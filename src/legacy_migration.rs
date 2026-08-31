@@ -113,6 +113,10 @@ fn migrate_config(
         .and_then(|value| value.as_object().cloned())
         .unwrap_or_default();
     strip_effective_defaults(&mut migrated);
+    // `allowedCommands` existed only for the removed run_command tool. Never
+    // carry a customized legacy value into Codexify now that the field has no
+    // runtime meaning.
+    migrated.remove("allowedCommands");
 
     if let Some(review) = migrated.remove("review") {
         match migrated.entry("diff".to_string()) {

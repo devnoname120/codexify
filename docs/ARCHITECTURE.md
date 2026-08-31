@@ -348,7 +348,7 @@ boundary of its own: the environment file is neither copied into the worktree no
 its setup script executed unless `worktrees.allowSetupScript` is explicitly `true`
 (default `false`), because both the file and its script path are selectable through
 the source repository's local Git config and the script runs outside the
-`allowedCommands`/exec policy.
+`exec` policy.
 
 ### `ConversationExecSessionStore` and `SessionState` (`exec_sessions.rs`)
 `SessionState` is the per-MCP-transport view: it owns the optional fallback
@@ -525,7 +525,7 @@ a private per-run temporary directory and are removed after shutdown.
 | Group | Tools |
 |-------|-------|
 | File / code | `read_file`, `write_file`, `import_host_file`, `export_host_file`, `apply_patch`, `glob`, `grep`, `list_directory`, `tree`, `view_image` |
-| Commands | `run_command` (allowlisted argv), `exec_command` / `write_stdin` (resident shell sessions) |
+| Commands | `exec_command` / `write_stdin` (one-shot or resident shell sessions) |
 | Git / diff | `git_status`, `show_diff`, `git_push`, `git_commit`, `git_log` |
 | Environment / project | `get_environment`, `get_project_doc`, `get_agent_brief` |
 | Task state | `update_plan`, `remember`, `update_memory_note`, `forget_memory_note`, `recall` |
@@ -825,7 +825,6 @@ latter.
   "conversationAuthToken": "0123456789abcdef…", // exactly 64 lowercase hex characters
   "multiProject": false,               // or --multi-project; work-dir becomes access root
   "projectCloneDir": ".",             // existing path below access root; or --project-clone-dir
-  "allowedCommands": ["git", "node", …],   // run_command allowlist
   "allowedHosts": [],                  // DNS-rebinding allowlist; empty = any host
   "openaiTunnel": {
     "tunnelId": "tunnel_0123456789abcdef0123456789abcdef",
@@ -835,8 +834,8 @@ latter.
   },
   "tree":   { "defaultDepth": 3, "ignore": ["node_modules", ".git", …] },
   "command":{ "defaultTimeout": 30000, "maxTimeout": 120000 },   // ms
-  "exec":   { "mode": "allowlist"|"unrestricted",
-              "extraAllowedCommands": ["ls", "cat", …], "maxSessions": 8,
+  "exec":   { "mode": "unrestricted",     // or "allowlist"
+              "extraAllowedCommands": [], "maxSessions": 8,
               "defaultShell": "…" },
   "ignore": { "useGitignore": true, "useDefaultPatterns": true, "customPatterns": [] },
   "output": { "maxToolOutputTokens": 10000, "maxFileLines": 1000, "maxFileBytes": 131072, "maxEntries": 500, "maxTreeNodes": 1000 },

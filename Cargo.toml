@@ -25,6 +25,7 @@ globset = "0.4"
 walkdir = "2"
 sha2 = "0.10"
 base64 = "0.22"
+image = { version = "0.25.9", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
 flate2 = "1"
 tar = "0.4"
 semver = "1"

@@ -301,13 +301,10 @@ fn render_added_file_terminates_with_newline() {
 
 // ─── exec-policy ──────────────────────────────────────────────────────
 
-/// Mirrors the TS `makeConfig`: allowedCommands = [bun, node, git],
-/// extraAllowedCommands = [ls, echo]. Built from default_config then overridden
-/// so the effective allowlist matches the TS expectation exactly.
+/// Builds an explicit allowlist configuration for the policy tests.
 fn policy_config(mode: ExecMode) -> AppConfig {
     let mut config = default_config(PathBuf::from("/tmp"));
-    config.allowed_commands = strs(&["bun", "node", "git"]);
-    config.exec.extra_allowed_commands = strs(&["ls", "echo"]);
+    config.exec.extra_allowed_commands = strs(&["bun", "node", "git", "ls", "echo"]);
     config.exec.mode = mode;
     config
 }

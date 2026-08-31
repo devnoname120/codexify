@@ -66,10 +66,9 @@ impl Tool for GetEnvironment {
                     },
                     "required": ["mode", "max_sessions", "allowed_commands"],
                     "additionalProperties": false
-                },
-                "run_command_allowed": { "type": "array", "items": { "type": "string" }, "description": "Commands run_command accepts, which is the narrower list." }
+                }
             },
-            "required": ["os", "platform", "arch", "cwd", "path_separator", "shell", "exec", "run_command_allowed"],
+            "required": ["os", "platform", "arch", "cwd", "path_separator", "shell", "exec"],
             "additionalProperties": false
         }))
     }

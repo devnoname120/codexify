@@ -177,20 +177,6 @@ impl AuditLogger {
                     self.command_preview_max_bytes,
                 ))
             }
-            "run_command" => {
-                let command = arguments.get("command")?.as_str()?;
-                let additional = arguments
-                    .get("args")
-                    .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten()
-                    .filter_map(Value::as_str);
-                let preview = self.redactor.as_ref()?.redact_argv_preview(
-                    std::iter::once(command).chain(additional),
-                    self.command_preview_max_bytes,
-                );
-                Some(bound_utf8(&preview, self.command_preview_max_bytes))
-            }
             _ => None,
         }
     }
@@ -675,32 +661,6 @@ mod tests {
         assert!(!redacted.contains("basic-token"));
         assert!(!redacted.contains("abc.def"));
         assert!(redacted.matches("[REDACTED]").count() >= 6);
-    }
-
-    #[test]
-    fn run_command_preview_redacts_separate_secret_arguments() {
-        let root = tempfile::tempdir().unwrap();
-        let mut config = default_config(root.path().to_path_buf());
-        config.audit.log_file = Some(root.path().join("audit.jsonl"));
-        config.audit.include_command_preview = true;
-        let logger = AuditLogger::open(&config).unwrap().unwrap();
-        let arguments = json!({
-            "command": "tool",
-            "args": [
-                "--github-token",
-                "separate-token-value",
-                "--header",
-                "Authorization: Bearer header-token-value",
-                "--user",
-                "name:password"
-            ]
-        });
-
-        let preview = logger.command_preview("run_command", &arguments).unwrap();
-        assert!(!preview.contains("separate-token-value"), "{preview}");
-        assert!(!preview.contains("header-token-value"), "{preview}");
-        assert!(!preview.contains("name:password"), "{preview}");
-        assert!(preview.matches("[REDACTED]").count() >= 3, "{preview}");
     }
 
     #[test]
