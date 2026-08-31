@@ -47,7 +47,9 @@ pub fn resource_meta() -> MetaObject {
 pub fn resource() -> Resource {
     Resource::new(SETUP_UI_URI, "codexify-setup")
         .with_title("Codexify status")
-        .with_description("Codexify setup, update, connector-schema, and diagnostic status")
+        .with_description(
+            "Codexify workspace selection, setup, update, connector-schema, and diagnostic status",
+        )
         .with_mime_type(SETUP_UI_MIME_TYPE)
         .with_size(SETUP_UI_HTML.len() as u64)
         .with_meta(resource_meta())
@@ -118,6 +120,16 @@ mod tests {
             "status-failure",
             "status-skipped",
             "io.github.devnoname120/codexify/debug",
+            "Chat without a project",
+            "project-search",
+            "list_projects",
+            "set_project_root",
+            "withoutProject",
+            "active_root",
+            "source_project_root",
+            "managed_worktree",
+            "Aliases:",
+            "projectQueryGeneration",
         ] {
             assert!(text.contains(expected), "missing {expected}");
         }
@@ -126,6 +138,7 @@ mod tests {
         assert!(!text.contains("openExternal"));
         assert!(!text.contains("connectorSettingsUrl"));
         assert!(!text.contains("connectorPluginId"));
+        assert!(!text.contains("innerHTML"));
         assert!(text.contains("max-width: 500px"));
         assert!(contents_for_uri("ui://codexify/setup/unknown").is_none());
     }

@@ -98,6 +98,82 @@ button { font: inherit; }
 .button.warning { border-color: color-mix(in srgb, var(--warn) 55%, var(--border)); color: var(--warn); }
 .button.failure { border-color: color-mix(in srgb, var(--bad) 55%, var(--border)); color: var(--bad); }
 .button:disabled { cursor: wait; opacity: .55; }
+.workspace {
+  margin-bottom: 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+.workspace-head { display: grid; gap: 2px; margin-bottom: 7px; }
+.workspace-title { margin: 0; font-size: 12px; font-weight: 700; letter-spacing: -.01em; }
+.workspace-copy { margin: 0; color: var(--muted); font-size: 11px; }
+.project-picker { display: grid; gap: 6px; }
+.project-search {
+  width: 100%;
+  min-height: 32px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+}
+.project-search:focus { outline: 2px solid var(--focus); outline-offset: 1px; }
+.project-results { display: grid; gap: 5px; max-height: 260px; overflow: auto; }
+.project-choice, .project-row {
+  display: grid;
+  width: 100%;
+  gap: 2px;
+  padding: 7px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+}
+.project-choice { border-style: dashed; }
+.project-choice:hover:not(:disabled), .project-row:hover:not(:disabled) {
+  background: var(--panel-strong);
+}
+.project-choice:focus-visible, .project-row:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+}
+.project-choice:disabled, .project-row:disabled { cursor: wait; opacity: .55; }
+.project-choice-title, .project-row-title { font-size: 11px; font-weight: 700; }
+.project-choice-detail, .project-row-detail {
+  color: var(--muted);
+  font-size: 10px;
+  overflow-wrap: anywhere;
+}
+.project-state, .project-count {
+  min-height: 14px;
+  color: var(--muted);
+  font-size: 10px;
+  overflow-wrap: anywhere;
+}
+.project-state.failure { color: var(--bad); }
+.workspace-name { margin-bottom: 5px; font-size: 12px; font-weight: 700; }
+.workspace-fields { display: grid; gap: 5px; }
+.workspace-field { min-width: 0; }
+.workspace-field-label {
+  display: block;
+  margin-bottom: 1px;
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+.workspace-path {
+  display: block;
+  padding: 5px 6px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--panel);
+  font: 10px/1.4 var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  overflow-wrap: anywhere;
+}
 .utility-actions {
   justify-content: flex-start;
   margin-top: 8px;
@@ -205,6 +281,7 @@ button { font: inherit; }
   "use strict";
 
   const DEBUG_META_KEY = "io.github.devnoname120/codexify/debug";
+  const PROJECT_RESULT_LIMIT = 50;
   const REFRESH_PROMPT = `The Codexify connector schema is outdated and needs to be refreshed.
 
 Build a clickable relative ChatGPT settings link for the user:
@@ -234,6 +311,17 @@ Tell the user to open that link, select the Codexify plugin if necessary, scroll
   let actionState = { kind: null, message: null, tone: null, pending: false };
   let automaticDoctorStarted = false;
   let debugEntries = [];
+  let projectSearchTimer = null;
+  let projectQueryGeneration = 0;
+  let projectSelecting = false;
+  let projectCatalog = {
+    phase: "idle",
+    query: "",
+    projects: [],
+    total: 0,
+    warnings: [],
+    error: null
+  };
 
   function post(message) {
     window.parent.postMessage(message, "*");
@@ -300,6 +388,53 @@ Tell the user to open that link, select the Codexify plugin if necessary, scroll
       if (payload && typeof payload === "object" && predicate(payload)) return payload;
       return predicate(candidate) ? candidate : null;
     });
+  }
+
+  function projectListPayload(value) {
+    return structuredPayload(value, candidate =>
+      Array.isArray(candidate.projects) && Number.isFinite(candidate.total)
+    );
+  }
+
+  function projectSelectionPayload(value) {
+    return structuredPayload(value, candidate =>
+      (candidate.mode === "project" || candidate.mode === "without_project")
+      && typeof candidate.active_root === "string"
+      && candidate.active_root.length > 0
+    );
+  }
+
+  function toolFailureText(value) {
+    return objectFrom(value, candidate => {
+      if (candidate.isError !== true && candidate.is_error !== true) return null;
+      if (!Array.isArray(candidate.content)) return "The tool call failed.";
+      const text = candidate.content
+        .map(item => item && typeof item.text === "string" ? item.text : "")
+        .filter(Boolean)
+        .join("\n");
+      return text || "The tool call failed.";
+    });
+  }
+
+  function projectStateFromSelection(selection) {
+    const withoutProject = selection.mode === "without_project";
+    return {
+      status: withoutProject ? "without_project" : "selected",
+      selectionAvailable: true,
+      accessRoot: typeof selection.access_root === "string" ? selection.access_root : null,
+      name: typeof selection.project_name === "string"
+        ? selection.project_name
+        : withoutProject ? "Chat without a project" : "Selected project",
+      activePath: selection.active_root,
+      sourcePath: typeof selection.source_project_root === "string"
+        ? selection.source_project_root
+        : null,
+      managedWorktree: Boolean(selection.managed_worktree),
+      bindingScope: typeof selection.binding_scope === "string"
+        ? selection.binding_scope
+        : null,
+      detail: null
+    };
   }
 
   function debugPayload(value) {
@@ -504,6 +639,265 @@ Tell the user to open that link, select the Codexify plugin if necessary, scroll
     return row;
   }
 
+  function workspaceField(label, value) {
+    const field = el("div", "workspace-field");
+    field.append(
+      el("span", "workspace-field-label", label),
+      el("span", "workspace-path", value || "Unavailable")
+    );
+    return field;
+  }
+
+  function projectRow(project) {
+    const row = el("button", "project-row");
+    row.type = "button";
+    row.disabled = projectSelecting;
+    const name = typeof project.name === "string" && project.name
+      ? project.name
+      : project.selector;
+    row.append(el("span", "project-row-title", name));
+    const details = [];
+    if (typeof project.selector === "string") details.push(project.selector);
+    if (typeof project.description === "string" && project.description) {
+      details.push(project.description);
+    }
+    if (details.length) row.append(el("span", "project-row-detail", details.join(" — ")));
+    const aliases = Array.isArray(project.aliases)
+      ? project.aliases.filter(alias => typeof alias === "string" && alias)
+      : [];
+    if (aliases.length) {
+      row.append(el(
+        "span",
+        "project-row-detail",
+        `Aliases: ${aliases.join(", ")}`
+      ));
+    }
+    row.addEventListener("click", () => {
+      if (typeof project.selector === "string" && project.selector) {
+        void selectWorkspace({ path: project.selector });
+      }
+    });
+    return row;
+  }
+
+  function renderProjectPicker(project) {
+    const section = el("section", "workspace");
+    const heading = el("div", "workspace-head");
+    heading.append(
+      el("h3", "workspace-title", "Choose a workspace"),
+      el("p", "workspace-copy", "Attach one project to this chat or work in an isolated scratch directory.")
+    );
+    section.append(heading);
+
+    const picker = el("div", "project-picker");
+    const scratch = el("button", "project-choice");
+    scratch.type = "button";
+    scratch.disabled = projectSelecting;
+    scratch.append(
+      el("span", "project-choice-title", "Chat without a project"),
+      el("span", "project-choice-detail", "Use a private scratch workspace for files and commands without attaching a repository.")
+    );
+    scratch.addEventListener("click", () => {
+      void selectWorkspace({ withoutProject: true });
+    });
+
+    const search = el("input", "project-search");
+    search.id = "project-search";
+    search.type = "search";
+    search.placeholder = "Search projects";
+    search.value = projectCatalog.query;
+    search.disabled = projectSelecting;
+    search.setAttribute("aria-label", "Search projects");
+    search.addEventListener("input", () => {
+      projectCatalog.query = search.value;
+      if (projectSearchTimer !== null) clearTimeout(projectSearchTimer);
+      projectSearchTimer = setTimeout(() => {
+        projectSearchTimer = null;
+        void loadProjects(projectCatalog.query);
+      }, 250);
+    });
+
+    const results = el("div", "project-results");
+    for (const candidate of projectCatalog.projects) results.append(projectRow(candidate));
+
+    const projectFailed = projectCatalog.phase === "error" || projectCatalog.phase === "selection_error";
+    const stateClass = projectFailed ? "project-state failure" : "project-state";
+    let stateText = "";
+    if (projectSelecting) {
+      stateText = "Selecting workspace…";
+    } else if (projectCatalog.phase === "loading") {
+      stateText = projectCatalog.query.trim() ? "Searching projects…" : "Loading projects…";
+    } else if (projectCatalog.phase === "error") {
+      stateText = `Could not load projects: ${projectCatalog.error || "Unknown error"}`;
+    } else if (projectCatalog.phase === "selection_error") {
+      stateText = `Could not select workspace: ${projectCatalog.error || "Unknown error"}`;
+    } else if (projectCatalog.phase === "ready" && projectCatalog.projects.length === 0) {
+      stateText = projectCatalog.query.trim()
+        ? "No projects matched this search."
+        : "No selectable projects were found.";
+    }
+    const state = el("div", stateClass, stateText);
+    const shown = projectCatalog.projects.length;
+    const total = Number.isFinite(projectCatalog.total) ? projectCatalog.total : shown;
+    const countText = projectCatalog.phase === "ready"
+      ? total > shown
+        ? `Showing ${shown} of ${total} matches. Refine the search to narrow the list.`
+        : `${shown} project${shown === 1 ? "" : "s"}`
+      : "";
+    const count = el("div", "project-count", countText);
+    if (projectCatalog.warnings.length) {
+      count.textContent += `${count.textContent ? " · " : ""}${projectCatalog.warnings[0]}`;
+    }
+
+    picker.append(scratch, search, results, state, count);
+    section.append(picker);
+    return section;
+  }
+
+  function renderSelectedWorkspace(project) {
+    const section = el("section", "workspace");
+    const withoutProject = project.status === "without_project";
+    const heading = el("div", "workspace-head");
+    heading.append(
+      el("h3", "workspace-title", withoutProject ? "Chat without a project" : "Project selected"),
+      el("p", "workspace-copy", withoutProject
+        ? "Files and commands are scoped to this private scratch workspace."
+        : project.managedWorktree
+          ? "This chat uses an isolated managed worktree."
+          : "This chat uses the source checkout directly.")
+    );
+    section.append(heading);
+    if (project.name) section.append(el("div", "workspace-name", project.name));
+    const fields = el("div", "workspace-fields");
+    fields.append(workspaceField(
+      withoutProject ? "Scratch" : project.managedWorktree ? "Worktree" : "Path",
+      project.activePath
+    ));
+    if (!withoutProject && project.managedWorktree && project.sourcePath) {
+      fields.append(workspaceField("Source", project.sourcePath));
+    }
+    section.append(fields);
+    return section;
+  }
+
+  function renderProjectSection() {
+    const project = currentData && currentData.project;
+    if (!project || typeof project !== "object") return null;
+    if (project.status === "unselected") return renderProjectPicker(project);
+    if (project.status === "selected" || project.status === "without_project") {
+      return renderSelectedWorkspace(project);
+    }
+    if (project.status === "check_failed") {
+      const section = el("section", "workspace");
+      const heading = el("div", "workspace-head");
+      heading.append(
+        el("h3", "workspace-title", "Workspace status unavailable"),
+        el("p", "workspace-copy", project.detail || "Codexify could not read the current workspace binding.")
+      );
+      section.append(heading);
+      return section;
+    }
+    return null;
+  }
+
+  async function loadProjects(query) {
+    if (!currentData || !currentData.project || currentData.project.status !== "unselected") return;
+    const generation = ++projectQueryGeneration;
+    projectCatalog = {
+      ...projectCatalog,
+      phase: "loading",
+      query: String(query || ""),
+      error: null
+    };
+    renderCurrent();
+    const startedAt = performance.now();
+    try {
+      const args = { limit: PROJECT_RESULT_LIMIT };
+      const normalizedQuery = projectCatalog.query.trim();
+      if (normalizedQuery) args.query = normalizedQuery;
+      const result = await callTool("list_projects", args);
+      if (generation !== projectQueryGeneration) return;
+      const failure = toolFailureText(result);
+      if (failure) throw new Error(failure);
+      const listing = projectListPayload(result);
+      if (!listing) throw new Error("The project catalogue result was incomplete.");
+      captureTiming("list_projects", result, startedAt);
+      projectCatalog = {
+        phase: "ready",
+        query: normalizedQuery,
+        projects: listing.projects.filter(candidate =>
+          candidate && typeof candidate.selector === "string" && candidate.selector
+        ),
+        total: listing.total,
+        warnings: Array.isArray(listing.warnings) ? listing.warnings.slice(0, 8) : [],
+        error: null
+      };
+    } catch (error) {
+      if (generation !== projectQueryGeneration) return;
+      projectCatalog = {
+        ...projectCatalog,
+        phase: "error",
+        projects: [],
+        total: 0,
+        warnings: [],
+        error: errorText(error)
+      };
+    }
+    renderCurrent();
+  }
+
+  async function selectWorkspace(argumentsValue) {
+    if (projectSelecting || !currentData) return;
+    if (projectSearchTimer !== null) {
+      clearTimeout(projectSearchTimer);
+      projectSearchTimer = null;
+    }
+    projectQueryGeneration += 1;
+    projectSelecting = true;
+    renderCurrent();
+    const startedAt = performance.now();
+    try {
+      const result = await callTool("set_project_root", argumentsValue);
+      const failure = toolFailureText(result);
+      if (failure) throw new Error(failure);
+      const selection = projectSelectionPayload(result);
+      if (!selection) throw new Error("The workspace-selection result was incomplete.");
+      captureTiming("set_project_root", result, startedAt);
+      const project = projectStateFromSelection(selection);
+      currentData = {
+        ...currentData,
+        project,
+        nextStep: project.status === "without_project"
+          ? "Call get_agent_brief before using the private scratch workspace."
+          : "Call get_agent_brief before using project tools."
+      };
+      projectCatalog = {
+        phase: "idle",
+        query: "",
+        projects: [],
+        total: 0,
+        warnings: [],
+        error: null
+      };
+    } catch (error) {
+      projectCatalog = {
+        ...projectCatalog,
+        phase: "selection_error",
+        error: errorText(error)
+      };
+    } finally {
+      projectSelecting = false;
+      renderCurrent();
+    }
+  }
+
+  function maybeStartProjectLoad() {
+    const canCall = initialized || (window.openai && typeof window.openai.callTool === "function");
+    if (!canCall || !currentData || !currentData.project) return;
+    if (currentData.project.status !== "unselected" || projectCatalog.phase !== "idle") return;
+    void loadProjects(projectCatalog.query);
+  }
+
   function problemChecks(report) {
     if (!report || !Array.isArray(report.checks)) return [];
     return report.checks
@@ -643,8 +1037,17 @@ Tell the user to open that link, select the Codexify plugin if necessary, scroll
 
   function renderCurrent() {
     if (!currentData) return;
+    const previousSearch = document.getElementById("project-search");
+    const restoreSearch = previousSearch === document.activeElement
+      ? {
+          start: previousSearch.selectionStart,
+          end: previousSearch.selectionEnd
+        }
+      : null;
     root.replaceChildren();
     const card = el("section", "card");
+    const projectSection = renderProjectSection();
+    if (projectSection) card.append(projectSection);
     const statuses = el("div", "status-list");
     statuses.append(renderUpdateRow(), renderSchemaRow());
     card.append(statuses);
@@ -678,6 +1081,15 @@ Tell the user to open that link, select the Codexify plugin if necessary, scroll
     card.append(debug);
     root.append(card);
     refreshDebugFooter();
+    if (restoreSearch) {
+      const nextSearch = document.getElementById("project-search");
+      if (nextSearch && !nextSearch.disabled) {
+        nextSearch.focus();
+        if (restoreSearch.start !== null && restoreSearch.end !== null) {
+          nextSearch.setSelectionRange(restoreSearch.start, restoreSearch.end);
+        }
+      }
+    }
     scheduleSizeReport();
   }
 
@@ -893,6 +1305,7 @@ Tell the user to open that link, select the Codexify plugin if necessary, scroll
       }
     }
     renderCurrent();
+    maybeStartProjectLoad();
     maybeStartAutomaticDoctor();
   }
 
@@ -940,12 +1353,14 @@ Tell the user to open that link, select the Codexify plugin if necessary, scroll
     initialized = true;
     applyHostContext(result && result.hostContext);
     notify("ui/notifications/initialized", {});
+    maybeStartProjectLoad();
     maybeStartAutomaticDoctor();
     reportSize();
   }).catch(error => {
     if (!currentData) {
       root.replaceChildren(el("div", "initialization-error", `Setup UI could not initialize: ${errorText(error)}`));
     }
+    maybeStartProjectLoad();
     maybeStartAutomaticDoctor();
     reportSize();
   });
