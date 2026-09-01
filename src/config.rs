@@ -529,6 +529,7 @@ impl PartialMcpServerSpec {
 struct FileConfig {
     work_dir: Option<String>,
     debug: Option<bool>,
+    ui_widgets: Option<bool>,
     api_key: Option<String>,
     conversation_auth_token: Option<String>,
     port: Option<u16>,
@@ -761,6 +762,7 @@ pub fn default_config(work_dir: std::path::PathBuf) -> AppConfig {
         project_clone_dir: work_dir.clone(),
         work_dir,
         debug: false,
+        ui_widgets: true,
         multi_project: false,
         project_catalog: ProjectCatalogConfig::default(),
         worktrees: default_worktree_config(),
@@ -1474,6 +1476,7 @@ fn load_config_with_announcements(cli: Cli, announce: bool) -> Result<AppConfig,
     Ok(AppConfig {
         work_dir,
         debug: file.debug.unwrap_or(false),
+        ui_widgets: file.ui_widgets.unwrap_or(true),
         multi_project: cli.multi_project || file.multi_project.unwrap_or(false),
         project_clone_dir,
         project_catalog,
@@ -1700,6 +1703,28 @@ mod tests {
         let mut args = cli(root.path(), &config_path);
         args.work_dir = None;
         assert!(load_config(args).is_ok());
+    }
+
+    #[test]
+    fn ui_widgets_default_on_and_can_be_disabled() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(default_config(root.path().to_path_buf()).ui_widgets);
+
+        let config_path = root.path().join("codexify.config.json");
+        std::fs::write(
+            &config_path,
+            serde_json::to_vec(&json!({
+                "workDir": root.path(),
+                "uiWidgets": false,
+                "codexMcp": { "enabled": false }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let mut args = cli(root.path(), &config_path);
+        args.work_dir = None;
+        assert!(!load_config(args).unwrap().ui_widgets);
     }
 
     #[test]

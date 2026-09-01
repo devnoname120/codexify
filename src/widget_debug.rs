@@ -23,7 +23,7 @@ pub fn attach_configured_tool_timing(
     tool: &str,
     duration_ms: u64,
 ) {
-    if config.debug {
+    if config.debug && config.ui_widgets {
         attach_tool_timing(result, tool, duration_ms);
     }
 }
@@ -68,5 +68,10 @@ mod tests {
                 .and_then(|value| value.get("durationMs")),
             Some(&json!(7))
         );
+
+        let mut result = ToolResult::text("ok");
+        config.ui_widgets = false;
+        attach_configured_tool_timing(&config, &mut result, "setup", 7);
+        assert!(result.meta.is_none());
     }
 }

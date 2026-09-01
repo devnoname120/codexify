@@ -221,6 +221,26 @@ fn finalize_model_visible_result(
     }
 }
 
+fn without_widget_advertisement(
+    mut meta: rmcp::model::MetaObject,
+) -> Option<rmcp::model::MetaObject> {
+    meta.0.remove("ui/resourceUri");
+    meta.0.remove("openai/outputTemplate");
+    meta.0.remove("openai/widgetAccessible");
+
+    let remove_ui = if let Some(Value::Object(ui)) = meta.0.get_mut("ui") {
+        ui.remove("resourceUri");
+        ui.is_empty()
+    } else {
+        false
+    };
+    if remove_ui {
+        meta.0.remove("ui");
+    }
+
+    (!meta.0.is_empty()).then_some(meta)
+}
+
 fn advertised_tool(tool: &dyn Tool, config: &AppConfig) -> rmcp::model::Tool {
     let schema = tool.input_schema().as_object().cloned().unwrap_or_default();
     let mut advertised = rmcp::model::Tool::new(tool.name(), tool.describe(config), schema)
@@ -232,7 +252,14 @@ fn advertised_tool(tool: &dyn Tool, config: &AppConfig) -> rmcp::model::Tool {
     if let Some(icons) = tool.icons() {
         advertised = advertised.with_icons(icons);
     }
-    if let Some(meta) = tool.meta() {
+    let meta = tool.meta().and_then(|meta| {
+        if config.ui_widgets {
+            Some(meta)
+        } else {
+            without_widget_advertisement(meta)
+        }
+    });
+    if let Some(meta) = meta {
         advertised = advertised.with_meta(meta);
     }
     if let Some(output) = tool.output_schema()
@@ -243,7 +270,10 @@ fn advertised_tool(tool: &dyn Tool, config: &AppConfig) -> rmcp::model::Tool {
     advertised
 }
 
-fn builtin_ui_resources() -> Vec<rmcp::model::Resource> {
+fn builtin_ui_resources(ui_widgets: bool) -> Vec<rmcp::model::Resource> {
+    if !ui_widgets {
+        return Vec::new();
+    }
     vec![
         diff_ui::resource(),
         self_update_ui::resource(),
@@ -251,7 +281,10 @@ fn builtin_ui_resources() -> Vec<rmcp::model::Resource> {
     ]
 }
 
-fn builtin_ui_contents(uri: &str) -> Option<rmcp::model::ResourceContents> {
+fn builtin_ui_contents(ui_widgets: bool, uri: &str) -> Option<rmcp::model::ResourceContents> {
+    if !ui_widgets {
+        return None;
+    }
     diff_ui::contents_for_uri(uri)
         .or_else(|| self_update_ui::contents_for_uri(uri))
         .or_else(|| setup_ui::contents_for_uri(uri))
@@ -263,15 +296,17 @@ impl ServerHandler for CodexHandler {
             .enable_resources()
             .enable_tools()
             .build();
-        let mut extensions = ExtensionCapabilities::new();
-        extensions.insert(
-            diff_ui::MCP_APPS_EXTENSION_ID.to_string(),
-            json!({ "mimeTypes": [diff_ui::DIFF_UI_MIME_TYPE] })
-                .as_object()
-                .cloned()
-                .expect("static MCP Apps capability must be an object"),
-        );
-        capabilities.extensions = Some(extensions);
+        if self.config.ui_widgets {
+            let mut extensions = ExtensionCapabilities::new();
+            extensions.insert(
+                diff_ui::MCP_APPS_EXTENSION_ID.to_string(),
+                json!({ "mimeTypes": [diff_ui::DIFF_UI_MIME_TYPE] })
+                    .as_object()
+                    .cloned()
+                    .expect("static MCP Apps capability must be an object"),
+            );
+            capabilities.extensions = Some(extensions);
+        }
         InitializeResult::new(capabilities)
             .with_server_info(Implementation::new("codexify", env!("CARGO_PKG_VERSION")))
             .with_instructions(build_initial_instructions(&self.config))
@@ -315,7 +350,8 @@ impl ServerHandler for CodexHandler {
         _request: Option<PaginatedRequestParams>,
         context: RequestContext<RoleServer>,
     ) -> Result<ListResourcesResult, McpError> {
-        let mut result = ListResourcesResult::with_all_items(builtin_ui_resources());
+        let mut result =
+            ListResourcesResult::with_all_items(builtin_ui_resources(self.config.ui_widgets));
         ensure_modern_cache_hints(
             context.protocol_version().as_ref(),
             &mut result.ttl_ms,
@@ -393,7 +429,7 @@ impl ServerHandler for CodexHandler {
                 None,
             ));
         }
-        let Some(contents) = builtin_ui_contents(&request.uri) else {
+        let Some(contents) = builtin_ui_contents(self.config.ui_widgets, &request.uri) else {
             return Err(McpError::resource_not_found(
                 format!("Unknown resource: {}", request.uri),
                 None,
@@ -1836,13 +1872,13 @@ mod tests {
                 })
         );
 
-        let resources = builtin_ui_resources();
+        let resources = builtin_ui_resources(true);
         assert_eq!(resources.len(), 3);
         assert_eq!(resources[0].uri, diff_ui::DIFF_UI_URI);
         assert_eq!(resources[1].uri, crate::self_update_ui::SELF_UPDATE_UI_URI);
         assert_eq!(resources[2].uri, crate::setup_ui::SETUP_UI_URI);
 
-        let contents = builtin_ui_contents(crate::self_update_ui::SELF_UPDATE_UI_URI)
+        let contents = builtin_ui_contents(true, crate::self_update_ui::SELF_UPDATE_UI_URI)
             .expect("self-update MCP App resource must be readable");
         let contents = serde_json::to_value(contents).unwrap();
         assert_eq!(contents["uri"], crate::self_update_ui::SELF_UPDATE_UI_URI);
@@ -1856,12 +1892,84 @@ mod tests {
                 .is_some_and(|text| text.contains("self_update_status"))
         );
 
-        let setup_contents = builtin_ui_contents(crate::setup_ui::SETUP_UI_URI)
+        let setup_contents = builtin_ui_contents(true, crate::setup_ui::SETUP_UI_URI)
             .expect("setup MCP App resource must be readable");
         let setup_contents = serde_json::to_value(setup_contents).unwrap();
         assert!(setup_contents["text"].as_str().is_some_and(|text| {
             text.contains("Check for updates") && text.contains("\"Doctor\"")
         }));
+
+        assert!(builtin_ui_resources(false).is_empty());
+        assert!(builtin_ui_contents(false, crate::setup_ui::SETUP_UI_URI).is_none());
+    }
+
+    #[test]
+    fn disabled_ui_widgets_remove_widget_advertisement_without_exposing_private_helpers() {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = crate::config::default_config(root.path().to_path_buf());
+        config.ui_widgets = false;
+
+        let show_diff = advertised_tool(&crate::tools::show_diff::ShowDiff, &config);
+        let show_diff_meta = show_diff.meta.as_ref().unwrap();
+        assert!(show_diff_meta.get("ui/resourceUri").is_none());
+        assert!(
+            show_diff_meta
+                .get("ui")
+                .and_then(|value| value.get("resourceUri"))
+                .is_none()
+        );
+
+        let doctor = advertised_tool(&crate::tools::doctor::Doctor, &config);
+        let doctor_meta = doctor.meta.as_ref().unwrap();
+        assert_eq!(
+            doctor_meta.get("openai/visibility"),
+            Some(&json!("private"))
+        );
+        assert_eq!(
+            doctor_meta.get("ui"),
+            Some(&json!({ "visibility": ["app"] }))
+        );
+        assert!(doctor_meta.get("openai/widgetAccessible").is_none());
+
+        let import = advertised_tool(
+            &crate::tools::import_host_file::ImportHostFile::new(1),
+            &config,
+        );
+        assert_eq!(
+            import
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.get("openai/fileParams")),
+            Some(&json!(["file"]))
+        );
+
+        let handler = CodexHandler {
+            config: Arc::new(config),
+            tools: Arc::new(crate::registry::load_tools()),
+            project_bindings: Arc::new(ProjectBindingStore::new(root.path().join("bindings"))),
+            conversation_authorizations: Arc::new(ConversationAuthorizationStore::new()),
+            conversation_exec_sessions: Arc::new(ConversationExecSessionStore::new()),
+            diff_checkpoints: Arc::new(DiffCheckpointManager::new()),
+            artifact_egress: Arc::new(ArtifactEgressStore::new_at(
+                crate::types::ArtifactEgressConfig::default(),
+                root.path().join("artifacts"),
+            )),
+            bridged_resources: Arc::new(BridgedResourceStore::new(
+                crate::types::ArtifactEgressConfig::default(),
+            )),
+            audit: None,
+            tool_logging: None,
+            next_tool_call_id: Arc::new(AtomicU64::new(1)),
+            session: SessionState::new(),
+        };
+        let info = handler.get_info();
+        assert!(info.capabilities.resources.is_some());
+        assert!(
+            info.capabilities
+                .extensions
+                .as_ref()
+                .is_none_or(|extensions| !extensions.contains_key(diff_ui::MCP_APPS_EXTENSION_ID))
+        );
     }
 
     #[test]

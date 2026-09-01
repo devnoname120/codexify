@@ -791,6 +791,8 @@ pub struct AppConfig {
     pub work_dir: std::path::PathBuf,
     /// Expose bounded operational timing metadata to MCP App widgets.
     pub debug: bool,
+    /// Advertise and serve Codexify's built-in MCP App widgets.
+    pub ui_widgets: bool,
     pub multi_project: bool,
     pub project_clone_dir: std::path::PathBuf,
     pub project_catalog: ProjectCatalogConfig,

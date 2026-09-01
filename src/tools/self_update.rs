@@ -54,7 +54,7 @@ impl SelfUpdate {
         })
     }
 
-    fn result(receipt: SelfUpdateReceipt) -> ToolResult {
+    fn result(receipt: SelfUpdateReceipt, ui_widgets: bool) -> ToolResult {
         let text = match receipt.status {
             SelfUpdateStatus::Scheduled => {
                 if receipt.service_restart {
@@ -80,11 +80,12 @@ impl SelfUpdate {
                 receipt.current_version, receipt.target_version
             ),
         };
-        let meta = self_update_ui::result_meta(&receipt);
         let mut result = ToolResult::text(text).with_structured(
-            serde_json::to_value(receipt).expect("self-update receipt must serialize"),
+            serde_json::to_value(&receipt).expect("self-update receipt must serialize"),
         );
-        result.meta = Some(meta);
+        if ui_widgets {
+            result.meta = Some(self_update_ui::result_meta(&receipt));
+        }
         result
     }
 }
@@ -115,6 +116,14 @@ impl Tool for SelfUpdate {
 
     fn description(&self) -> String {
         "Update the installed Codexify executable to the latest verified GitHub release. Call only after the user explicitly requests an update and pass confirm=true. The release is downloaded, checksum-verified, extracted, and probed before a detached OS-managed worker is scheduled. The attached updater component receives checksum-bound changelog sections and monitors a durable status record across the expected MCP restart without adding the changelog to model-visible structured content. When Codexify is service-supervised, the worker runs outside the service kill boundary, waits for this tool response to be delivered, stops the service, atomically replaces the executable with rollback protection, starts the service again, and verifies server plus native-tunnel readiness before marking the durable update record successful. After a scheduled update, explicitly tell the user to open ChatGPT Settings, select the Codexify connector, scroll to the bottom of its tool list, and click Refresh after Codexify restarts so ChatGPT reloads the connector tools.".to_string()
+    }
+
+    fn describe(&self, config: &AppConfig) -> String {
+        if config.ui_widgets {
+            return self.description();
+        }
+        "Update the installed Codexify executable to the latest verified GitHub release. Call only after the user explicitly requests an update and pass confirm=true. The release is downloaded, checksum-verified, extracted, and probed before a detached OS-managed worker is scheduled. With uiWidgets=false, no updater component or component-only changelog payload is emitted; progress remains available through `codexify service logs -f`. When Codexify is service-supervised, the worker runs outside the service kill boundary, waits for this tool response to be delivered, stops the service, atomically replaces the executable with rollback protection, starts the service again, and verifies server plus native-tunnel readiness before marking the durable update record successful. After a scheduled update, explicitly tell the user to open ChatGPT Settings, select the Codexify connector, scroll to the bottom of its tool list, and click Refresh after Codexify restarts so ChatGPT reloads the connector tools."
+            .to_string()
     }
 
     fn input_schema(&self) -> Value {
@@ -155,7 +164,7 @@ impl Tool for SelfUpdate {
             );
         }
         match crate::self_update::trigger(config.port).await {
-            Ok(receipt) => Self::result(receipt),
+            Ok(receipt) => Self::result(receipt, config.ui_widgets),
             Err(error) => ToolResult::error(format!(
                 "Codexify self-update could not be prepared or scheduled: {error:#}"
             )),
@@ -200,6 +209,22 @@ mod tests {
         assert!(!SelfUpdate.may_modify_project());
     }
 
+    #[test]
+    fn description_reflects_disabled_ui_widgets() {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = crate::config::default_config(root.path().to_path_buf());
+        assert!(
+            SelfUpdate
+                .describe(&config)
+                .contains("attached updater component")
+        );
+
+        config.ui_widgets = false;
+        let description = SelfUpdate.describe(&config);
+        assert!(!description.contains("attached updater component"));
+        assert!(description.contains("uiWidgets=false"));
+    }
+
     #[tokio::test]
     async fn false_confirmation_is_rejected_before_update_preflight() {
         let config = crate::config::default_config(std::env::temp_dir());
@@ -221,7 +246,7 @@ mod tests {
             log_path: "/tmp/codexify.log".to_string(),
             changelog: Some("## [2.0.0]\n\n- New behavior.\n".to_string()),
         };
-        let result = SelfUpdate::result(receipt);
+        let result = SelfUpdate::result(receipt.clone(), true);
         assert!(!result.is_error);
         let validator = jsonschema::options()
             .build(&SelfUpdate::output_schema_value())
@@ -249,15 +274,21 @@ mod tests {
             "open ChatGPT Settings, select the Codexify connector, scroll to the bottom of its tool list, and click Refresh"
         ));
 
-        let foreground_result = SelfUpdate::result(SelfUpdateReceipt {
-            status: SelfUpdateStatus::Scheduled,
-            current_version: "1.0.0".to_string(),
-            target_version: "2.0.0".to_string(),
-            update_id: Some("89abcdef0123456701234567".to_string()),
-            service_restart: false,
-            log_path: "/tmp/codexify.log".to_string(),
-            changelog: None,
-        });
+        let without_widgets = SelfUpdate::result(receipt, false);
+        assert!(without_widgets.meta.is_none());
+
+        let foreground_result = SelfUpdate::result(
+            SelfUpdateReceipt {
+                status: SelfUpdateStatus::Scheduled,
+                current_version: "1.0.0".to_string(),
+                target_version: "2.0.0".to_string(),
+                update_id: Some("89abcdef0123456701234567".to_string()),
+                service_restart: false,
+                log_path: "/tmp/codexify.log".to_string(),
+                changelog: None,
+            },
+            true,
+        );
         assert!(foreground_result.joined_text().contains("click Refresh"));
     }
 }

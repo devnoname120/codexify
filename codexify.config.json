@@ -1,6 +1,7 @@
 {
   "workDir": null,
   "debug": false,
+  "uiWidgets": true,
   "conversationAuthToken": null,
   "port": 3000,
   "tree": {

@@ -22,13 +22,26 @@ struct ShowDiffArgs {
 impl ShowDiff {
     pub const NAME: &'static str = "show_diff";
 
-    fn tool_result(result: DiffResult) -> ToolResult {
+    fn tool_result(mut result: DiffResult, ui_widgets: bool) -> ToolResult {
+        if !ui_widgets
+            && (result.patch_included
+                || result.patch_omitted_reason.as_deref()
+                    == Some("disabled by the show_diff request"))
+        {
+            result.patch.clear();
+            result.patch_included = false;
+            result.patch_bytes = None;
+            result.patch_omitted_reason =
+                Some("UI widgets are disabled by uiWidgets=false".to_string());
+        }
         let mut output = ToolResult::text(result.render_text());
-        output.meta = Some(diff_ui::result_meta(&result));
+        if ui_widgets {
+            output.meta = Some(diff_ui::result_meta(&result));
+        }
         output
     }
 
-    fn request(args: &Value) -> Result<DiffRequest, String> {
+    fn request(args: &Value, ui_widgets: bool) -> Result<DiffRequest, String> {
         let ShowDiffArgs {
             since,
             advance,
@@ -40,7 +53,7 @@ impl ShowDiff {
         Ok(DiffRequest {
             since: DiffBaseline::parse(since.as_deref())?,
             advance: advance.unwrap_or(true),
-            include_patch: include_patch.unwrap_or(true),
+            include_patch: ui_widgets && include_patch.unwrap_or(true),
         })
     }
 
@@ -51,7 +64,7 @@ impl ShowDiff {
         manager: &DiffCheckpointManager,
         conversation: Option<&crate::project_bindings::ConversationIdentity>,
     ) -> ToolResult {
-        let request = match Self::request(&args) {
+        let request = match Self::request(&args, config.ui_widgets) {
             Ok(request) => request,
             Err(error) => return ToolResult::error(error),
         };
@@ -60,7 +73,7 @@ impl ShowDiff {
             None => DiffOwner::transport(session.diff_state()),
         };
         match manager.show_diff(config, owner, request).await {
-            Ok(result) => Self::tool_result(result),
+            Ok(result) => Self::tool_result(result, config.ui_widgets),
             Err(error) => ToolResult::error(error),
         }
     }
@@ -95,6 +108,14 @@ impl Tool for ShowDiff {
             .to_string()
     }
 
+    fn describe(&self, config: &AppConfig) -> String {
+        if config.ui_widgets {
+            return self.description();
+        }
+        "Present a project-scoped working-tree diff against the immutable project-open checkpoint or the incremental last-diff checkpoint. With uiWidgets=false, Codexify returns the concise text summary without widget metadata and skips unified-patch generation. By default the emitted snapshot becomes the next incremental baseline; this updates only Codexify's private diff cursor and does not modify project files, Git history, or external state. Set advance=false to inspect without moving that cursor."
+            .to_string()
+    }
+
     fn input_schema(&self) -> Value {
         json!({
             "type": "object",
@@ -110,7 +131,7 @@ impl Tool for ShowDiff {
                 },
                 "include_patch": {
                     "type": "boolean",
-                    "description": "Attach the unified binary-capable patch to component-only widget metadata when it fits diff.maxPatchBytes. Default: true."
+                    "description": "Attach the unified binary-capable patch to component-only widget metadata when uiWidgets is enabled and it fits diff.maxPatchBytes. Default: true."
                 }
             },
             "additionalProperties": false
@@ -147,18 +168,33 @@ mod tests {
 
     #[test]
     fn request_defaults_to_incremental_advancing_diff() {
-        let request = ShowDiff::request(&json!({})).unwrap();
+        let request = ShowDiff::request(&json!({}), true).unwrap();
         assert_eq!(request.since, DiffBaseline::LastDiff);
         assert!(request.advance);
         assert!(request.include_patch);
+
+        let without_widgets = ShowDiff::request(&json!({ "include_patch": true }), false).unwrap();
+        assert!(!without_widgets.include_patch);
     }
 
     #[test]
     fn request_rejects_wrong_argument_types() {
-        assert!(ShowDiff::request(&json!({ "since": 1 })).is_err());
-        assert!(ShowDiff::request(&json!({ "since": "last_review" })).is_err());
-        assert!(ShowDiff::request(&json!({ "advance": "yes" })).is_err());
-        assert!(ShowDiff::request(&json!({ "include_patch": 1 })).is_err());
+        assert!(ShowDiff::request(&json!({ "since": 1 }), true).is_err());
+        assert!(ShowDiff::request(&json!({ "since": "last_review" }), true).is_err());
+        assert!(ShowDiff::request(&json!({ "advance": "yes" }), true).is_err());
+        assert!(ShowDiff::request(&json!({ "include_patch": 1 }), true).is_err());
+    }
+
+    #[test]
+    fn description_reflects_disabled_ui_widgets() {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = crate::config::default_config(root.path().to_path_buf());
+        assert!(ShowDiff.describe(&config).contains("interactive widget"));
+
+        config.ui_widgets = false;
+        let description = ShowDiff.describe(&config);
+        assert!(!description.contains("interactive widget"));
+        assert!(description.contains("uiWidgets=false"));
     }
 
     #[test]
@@ -183,7 +219,7 @@ mod tests {
             warnings: Vec::new(),
         };
 
-        let output = ShowDiff::tool_result(result);
+        let output = ShowDiff::tool_result(result.clone(), true);
         assert!(output.structured_content.is_none());
         assert!(!output.joined_text().contains("secret patch line"));
         assert_eq!(
@@ -195,5 +231,14 @@ mod tests {
                 .and_then(Value::as_str),
             Some("diff --git a/file b/file\n+secret patch line\n")
         );
+
+        let without_widgets = ShowDiff::tool_result(result, false);
+        assert!(without_widgets.meta.is_none());
+        assert!(
+            !without_widgets
+                .joined_text()
+                .contains("attached to component-only widget metadata")
+        );
+        assert!(without_widgets.joined_text().contains("uiWidgets=false"));
     }
 }

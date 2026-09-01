@@ -625,6 +625,7 @@ optional and uses camelCase names.
 {
   "workDir": "/absolute/path/to/project",
   "debug": false,
+  "uiWidgets": true,
   "multiProject": false,
   "projectCloneDir": ".",
   "conversationAuthToken": null,
@@ -753,6 +754,13 @@ timing metadata to every tool result. The setup, diff, and updater cards render
 the server execution time at their end; cards that invoke tools also distinguish
 widget-observed round-trip time from server time. It does not enable payload
 logging and does not place tool arguments or output in the timing metadata.
+
+`uiWidgets` defaults to `true`, preserving the built-in setup, diff, and updater
+MCP Apps. Set it to `false` to run Codexify without those UI widgets. Codexify
+then omits the MCP Apps extension, built-in UI resources, widget template/access
+metadata, component-only diff/updater payloads, and widget timing metadata. The
+underlying tools remain available, app-only helper tools remain private, and MCP
+resource support stays enabled for exported files and bridged resources.
 
 ## Diagnostics, tool payloads, and audit logging
 
@@ -1132,7 +1140,7 @@ refs/codexify/diff/<project-hash>/<conversation-hash>/last-diff
 
 The raw conversation identifier is never written. The refs survive MCP reconnects and Codexify restarts. Generic MCP clients receive transport-local in-memory checkpoints instead. Each conversation/project pair retains only its current two referenced snapshots; unreferenced synthetic commits are ordinary Git-GC candidates. To inspect or remove current refs manually, use `git for-each-ref refs/codexify/diff/` and `git update-ref -d <ref>`. Removing both refs resets that owner to the current scoped state on its next project call. Existing `refs/codexify/review/.../project-open` and `.../last-review` refs are copied lazily into the diff namespace and retained so installations from the current review-named surface keep their checkpoints.
 
-Codexify advertises the standard MCP Apps extension and serves a self-contained diff resource at `ui://codexify/diff/v3/mcp-app.html`. Compatible ChatGPT developer connectors render `show_diff` as the interactive GitHub-style file/statistic/patch card from component-only result metadata; the component is model-visible but is not granted app-side tool access. Other clients receive the concise text result. Existing review metadata and the v3, v2, and unversioned `ui://codexify/review/...` resources remain readable so existing cards can remount, while current `show_diff` results emit only the diff-named metadata. Expansion state is persisted as private widget state, including migration of `reviewOpen` to `diffOpen`. Cursor advancement completes before the result is returned and never waits for widget interaction, and the card updates at the `show_diff` tool-call boundary rather than continuously watching the filesystem.
+With `uiWidgets=true` (the default), Codexify advertises the standard MCP Apps extension and serves a self-contained diff resource at `ui://codexify/diff/v3/mcp-app.html`. Compatible ChatGPT developer connectors render `show_diff` as the interactive GitHub-style file/statistic/patch card from component-only result metadata; the component is model-visible but is not granted app-side tool access. Other clients receive the concise text result. Existing review metadata and the v3, v2, and unversioned `ui://codexify/review/...` resources remain readable so existing cards can remount, while current `show_diff` results emit only the diff-named metadata. Expansion state is persisted as private widget state, including migration of `reviewOpen` to `diffOpen`. Cursor advancement completes before the result is returned and never waits for widget interaction, and the card updates at the `show_diff` tool-call boundary rather than continuously watching the filesystem. With `uiWidgets=false`, the widget resource and component payload are not advertised or emitted, and patch generation is skipped.
 
 ## Context and memory
 

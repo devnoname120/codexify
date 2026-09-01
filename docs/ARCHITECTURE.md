@@ -425,7 +425,9 @@ explicit `mcpServers` entries as field overlays. Optional sub-configs (`projectD
 `memory`, `skills`, `ignore`, `audit`) fall back to per-module defaults, as does `codexMcp`
 (Codex MCP import and CLI enrichment). The former top-level `review` key remains a
 deserialization alias for `diff`, but resolved runtime configuration uses only the
-diff-named field. In multi-project mode, dispatch clones this
+diff-named field. Top-level `uiWidgets` defaults to `true`; disabling it removes
+Codexify's MCP Apps capability/resource advertisement and widget-only metadata
+without disabling general MCP resources or the underlying tools. In multi-project mode, dispatch clones this
 config per call and substitutes the conversation's selected root—or the transport
 fallback—for `work_dir`; the static server policy, catalogue overlay, and bridge
 configuration remain shared. Native Codex project entries are intentionally re-read
@@ -983,6 +985,7 @@ latter.
 {
   "workDir": "/absolute/path/to/project", // required when --work-dir is omitted
   "debug": false,                         // component-only tool timing footers
+  "uiWidgets": true,                     // built-in setup/diff/updater MCP Apps
   "port": 3000,
   "apiKey": "…",                      // or --api-key; bearer token
   "conversationAuthToken": "0123456789abcdef…", // exactly 64 lowercase hex characters

@@ -6,6 +6,14 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Top-level `uiWidgets` configuration now controls Codexify's built-in MCP App
+  widgets. It defaults to `true`; setting it to `false` removes widget template
+  metadata, the MCP Apps extension, built-in UI resources, and component-only
+  diff/updater/debug payloads while keeping the underlying tools and non-widget
+  resource/file metadata available.
+
 ### Changed
 
 - The setup widget's stale-schema **Refresh** action now derives the connector
