@@ -17,6 +17,7 @@ use codexify::tools::read_file::ReadFile;
 use codexify::tools::recall::Recall;
 use codexify::tools::remember::Remember;
 use codexify::tools::set_project_root::SetProjectRoot;
+use codexify::tools::write_file::WriteFile;
 use codexify::types::WorktreeMode;
 use codexify::worktrees::metadata_path_for_worktree;
 use rmcp::model::RequestMetaObject;
@@ -512,6 +513,56 @@ async fn set_project_root_without_project_returns_a_scratch_workspace_receipt() 
             .unwrap()
             .is_valid(structured)
     );
+}
+
+#[tokio::test]
+async fn scratch_workspace_supports_filesystem_and_command_tools() {
+    let root = TempDir::new().unwrap();
+    let access = root.path().join("projects");
+    fs::create_dir_all(&access).unwrap();
+    let config = multi_project_config(&access);
+    let session = SessionState::new();
+
+    let selected = SetProjectRoot
+        .call(json!({ "withoutProject": true }), &config, &session)
+        .await;
+    assert!(!selected.is_error, "{}", selected.joined_text());
+    let effective = session.effective_config(&config).unwrap();
+
+    let written = WriteFile
+        .call(
+            json!({ "path": "notes/scratch.txt", "content": "scratch data\n" }),
+            &effective,
+            &session,
+        )
+        .await;
+    assert!(!written.is_error, "{}", written.joined_text());
+    let read = ReadFile
+        .call(json!({ "path": "notes/scratch.txt" }), &effective, &session)
+        .await;
+    assert!(!read.is_error, "{}", read.joined_text());
+    assert!(read.joined_text().contains("scratch data"));
+    assert!(!access.join("notes/scratch.txt").exists());
+
+    let (command, shell) = if cfg!(windows) {
+        ("cd", "cmd")
+    } else {
+        ("pwd", "sh")
+    };
+    let executed = ExecCommand
+        .call(
+            json!({ "cmd": command, "shell": shell }),
+            &effective,
+            &session,
+        )
+        .await;
+    assert!(!executed.is_error, "{}", executed.joined_text());
+    let scratch_name = effective
+        .work_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap();
+    assert!(executed.joined_text().contains(scratch_name));
 }
 
 #[tokio::test]

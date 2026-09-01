@@ -129,10 +129,18 @@ mod tests {
             "source_project_root",
             "managed_worktree",
             "Aliases:",
+            "Worktree",
+            "Scratch",
             "projectQueryGeneration",
         ] {
             assert!(text.contains(expected), "missing {expected}");
         }
+        let picker = &text[text.find("const scratch").unwrap()..];
+        assert!(
+            picker.find("Chat without a project").unwrap() < picker.find("const search").unwrap(),
+            "the projectless option must be constructed before the search input"
+        );
+        assert!(picker.contains("picker.append(scratch, search"));
         assert!(!text.contains("data.nextStep"));
         assert!(!text.contains("Connector status and diagnostics"));
         assert!(!text.contains("openExternal"));
