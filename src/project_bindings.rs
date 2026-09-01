@@ -648,7 +648,23 @@ impl ProjectBindingStore {
         access_root: &Path,
         identity: &ConversationIdentity,
     ) -> Result<(PathBuf, bool), String> {
-        let (scratch_dir, _) = ensure_private_directory(&self.scratch_dir, "scratch root")?;
+        if self.scratch_dir == access_root || self.scratch_dir.starts_with(access_root) {
+            return Err(format!(
+                "The Codexify scratch root must not be inside the configured project access root: {}",
+                self.scratch_dir.display()
+            ));
+        }
+        let (scratch_dir, scratch_dir_created) =
+            ensure_private_directory(&self.scratch_dir, "scratch root")?;
+        if scratch_dir == access_root || scratch_dir.starts_with(access_root) {
+            if scratch_dir_created {
+                let _ = std::fs::remove_dir(&scratch_dir);
+            }
+            return Err(format!(
+                "The Codexify scratch root must not resolve inside the configured project access root: {}",
+                scratch_dir.display()
+            ));
+        }
         let namespace_path = scratch_dir.join(access_root_key(access_root));
         let (namespace, _) = ensure_private_directory(&namespace_path, "scratch namespace")?;
         if !namespace.starts_with(&scratch_dir) {
@@ -1447,5 +1463,65 @@ mod tests {
             store.selected_project_root(&config, &identity).unwrap(),
             Some(project)
         );
+    }
+
+    #[tokio::test]
+    async fn scratch_base_inside_access_root_is_rejected_without_creating_it() {
+        let root = tempfile::tempdir().unwrap();
+        let access_root = root.path().join("projects");
+        std::fs::create_dir_all(&access_root).unwrap();
+        let access_root = std::fs::canonicalize(access_root).unwrap();
+        let scratch_dir = access_root.join(".codexify-scratch");
+        let store = ProjectBindingStore::new_with_scratch_dir(
+            root.path().join("state"),
+            scratch_dir.clone(),
+        );
+        let mut config = crate::config::default_config(access_root);
+        config.multi_project = true;
+        let identity = ConversationIdentity::from_openai_session("contained-scratch").unwrap();
+
+        let error = store
+            .select_without_project(&config, &identity)
+            .await
+            .unwrap_err();
+
+        assert!(error.contains("access root"), "{error}");
+        assert!(!scratch_dir.exists());
+    }
+
+    #[tokio::test]
+    async fn scratch_marker_with_a_different_namespace_fails_closed() {
+        let root = tempfile::tempdir().unwrap();
+        let access_root = root.path().join("projects");
+        let outside = root.path().join("outside");
+        std::fs::create_dir_all(&access_root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let access_root = std::fs::canonicalize(access_root).unwrap();
+        let mut config = crate::config::default_config(access_root.clone());
+        config.multi_project = true;
+        let identity = ConversationIdentity::from_openai_session("mismatched-scratch").unwrap();
+        let store = ProjectBindingStore::new(root.path().join("state"));
+        store
+            .select_without_project(&config, &identity)
+            .await
+            .unwrap();
+        let marker_path = store.without_project_path(&access_root, &identity);
+        std::fs::write(
+            &marker_path,
+            serde_json::to_vec_pretty(&StoredWithoutProjectBinding {
+                version: WITHOUT_PROJECT_BINDING_VERSION,
+                access_root: access_root.to_string_lossy().into_owned(),
+                scratch_root: std::fs::canonicalize(outside)
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        let error = store.binding_state(&config, &identity).unwrap_err();
+
+        assert!(error.contains("conversation namespace"), "{error}");
     }
 }

@@ -141,6 +141,12 @@ mod tests {
             "the projectless option must be constructed before the search input"
         );
         assert!(picker.contains("picker.append(scratch, search"));
+        let search_handler = &text[text.find("search.addEventListener(\"input\"").unwrap()..];
+        assert!(
+            search_handler.find("projectQueryGeneration += 1").unwrap()
+                < search_handler.find("setTimeout").unwrap(),
+            "editing the query must invalidate an in-flight response before the debounce fires"
+        );
         assert!(!text.contains("data.nextStep"));
         assert!(!text.contains("Connector status and diagnostics"));
         assert!(!text.contains("openExternal"));

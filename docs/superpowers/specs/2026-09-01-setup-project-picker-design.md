@@ -87,7 +87,7 @@ For an unselected multi-project context:
 7. On the no-project click, call `set_project_root({ withoutProject: true })`.
 8. Disable the chooser while selection is in flight. On a successful structured receipt, replace the chooser with the selected-state view. On error, retain the chooser and show the bounded tool error.
 
-The selected project view displays the project name and primary active path. For managed worktrees it labels that path as **Worktree** and also displays the source checkout. Direct selections display **Path**. The no-project view labels the active path as **Scratch** and explains that files and commands are scoped to that private workspace rather than to a source project.
+The selected project view displays the project name and primary active path. For managed worktrees it labels that path as **Worktree** and also displays the source checkout. Direct selections display **Path**. The no-project view labels the active path as **Scratch** and explains that structured file operations use that private workspace while commands start there, rather than implying an operating-system sandbox.
 
 The widget continues to use the existing MCP Apps `tools/call` bridge with `window.openai.callTool` fallback. `list_projects` and `set_project_root` remain model-visible because the model still needs the existing automatic-selection workflow; no new public tool is added.
 

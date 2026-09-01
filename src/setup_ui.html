@@ -710,6 +710,7 @@ Tell the user to open that link, select the Codexify plugin if necessary, scroll
     search.setAttribute("aria-label", "Search projects");
     search.addEventListener("input", () => {
       projectCatalog.query = search.value;
+      projectQueryGeneration += 1;
       if (projectSearchTimer !== null) clearTimeout(projectSearchTimer);
       projectSearchTimer = setTimeout(() => {
         projectSearchTimer = null;
@@ -761,7 +762,7 @@ Tell the user to open that link, select the Codexify plugin if necessary, scroll
     heading.append(
       el("h3", "workspace-title", withoutProject ? "Chat without a project" : "Project selected"),
       el("p", "workspace-copy", withoutProject
-        ? "Files and commands are scoped to this private scratch workspace."
+        ? "Structured file operations use this private scratch workspace, and commands start there."
         : project.managedWorktree
           ? "This chat uses an isolated managed worktree."
           : "This chat uses the source checkout directly.")

@@ -184,9 +184,9 @@ Five integration surfaces are exposed to the client:
    `ToolCallIdentity`. Native tools retain their
    downstream name; direct, gateway, and catalog MCP proxies map the call to the
    raw configured upstream server/tool before execution. Dispatch then supplies a
-   request context containing the stable conversation identity, any
-   feature-detected ChatGPT connector identifier, shared authorization and
-   project-binding stores, and shared diff manager; tools that do not need it use
+   request context containing the stable conversation identity, shared
+   authorization and project-binding stores, and the shared diff manager; tools
+   that do not need it use
    the default context-free implementation. The server applies the model-output
    policy to textual `content` and explicit `structuredContent`, then fills default
    structured text mirrors within the same ceiling. A successful result is checked

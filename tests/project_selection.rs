@@ -734,6 +734,50 @@ async fn chatgpt_without_project_binding_persists_a_private_scratch_root() {
 }
 
 #[tokio::test]
+async fn chatgpt_missing_scratch_workspace_fails_closed() {
+    let root = TempDir::new().unwrap();
+    let access = root.path().join("projects");
+    fs::create_dir_all(&access).unwrap();
+    let config = multi_project_config(&access);
+    let store = ProjectBindingStore::new(root.path().join("bindings"));
+    let identity = conversation_identity("missing-scratch-workspace");
+    let selection = store
+        .select_without_project(&config, &identity)
+        .await
+        .unwrap();
+    fs::remove_dir_all(&selection.scratch_root).unwrap();
+
+    let error = store.binding_state(&config, &identity).unwrap_err();
+
+    assert!(error.contains("scratch workspace"), "{error}");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn chatgpt_scratch_link_replacement_fails_closed() {
+    use std::os::unix::fs::symlink;
+
+    let root = TempDir::new().unwrap();
+    let access = root.path().join("projects");
+    let outside = root.path().join("outside");
+    fs::create_dir_all(&access).unwrap();
+    fs::create_dir_all(&outside).unwrap();
+    let config = multi_project_config(&access);
+    let store = ProjectBindingStore::new(root.path().join("bindings"));
+    let identity = conversation_identity("retargeted-scratch-workspace");
+    let selection = store
+        .select_without_project(&config, &identity)
+        .await
+        .unwrap();
+    fs::remove_dir_all(&selection.scratch_root).unwrap();
+    symlink(&outside, &selection.scratch_root).unwrap();
+
+    let error = store.binding_state(&config, &identity).unwrap_err();
+
+    assert!(error.contains("not a private directory"), "{error}");
+}
+
+#[tokio::test]
 async fn chatgpt_project_binding_rejects_switching_to_without_project() {
     let root = TempDir::new().unwrap();
     let access = root.path().join("projects");
@@ -1118,10 +1162,11 @@ async fn initialize_instructions_defer_project_state_until_selection() {
     let initial = build_initial_instructions(&config);
     assert!(initial.contains("list_projects"));
     assert!(initial.contains("set_project_root"));
-    assert!(initial.contains("searchable setup card"));
+    assert!(initial.contains("call `list_projects`"));
     assert!(initial.contains("withoutProject=true"));
     assert!(initial.contains("private scratch workspace"));
-    assert!(initial.contains("do not guess"));
+    assert!(initial.contains("ask the user"));
+    assert!(!initial.contains("setup card"));
     assert!(initial.contains("<not selected>"));
     assert!(!initial.contains("ACCESS-ROOT-INSTRUCTION"));
     assert!(!initial.contains("SELECTED-PROJECT-INSTRUCTION"));
