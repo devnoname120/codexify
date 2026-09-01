@@ -16,6 +16,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `chatgptConnectorSettingsUrl` setting and connector-ID metadata probing were
   removed.
 
+### Fixed
+
+- MCP 2026-07-28 cacheable list and resource-read responses now include the
+  required private, immediately-stale hints. This restores ChatGPT widget
+  ingestion and connector refresh while preserving legacy wire shapes and
+  capability-bounded cache lifetimes for bridged resources.
+
 ## [1.2.1] - 2026-09-01
 
 ### Changed

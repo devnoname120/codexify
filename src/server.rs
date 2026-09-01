@@ -17,10 +17,11 @@ use axum::{Router, extract::State, http::StatusCode, response::Json, routing::ge
 use rmcp::{
     ErrorData as McpError, ServerHandler,
     model::{
-        CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock,
-        ExtensionCapabilities, Implementation, InitializeResult, ListResourcesResult,
-        ListToolsResult, PaginatedRequestParams, ReadResourceRequestParams, ReadResourceResponse,
-        ReadResourceResult, ServerCapabilities, ServerInfo,
+        CacheScope, CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock,
+        ExtensionCapabilities, Implementation, InitializeResult, ListPromptsResult,
+        ListResourceTemplatesResult, ListResourcesResult, ListToolsResult, PaginatedRequestParams,
+        ProtocolVersion, ReadResourceRequestParams, ReadResourceResponse, ReadResourceResult,
+        ServerCapabilities, ServerInfo,
     },
     service::{RequestContext, RoleServer},
     transport::streamable_http_server::{
@@ -60,11 +61,25 @@ use crate::types::{AppConfig, ToolContent, ToolResult};
 use crate::widget_debug;
 
 const HTTP_SERVER_STOP_TIMEOUT: Duration = Duration::from_secs(10);
+// Connector refreshes must observe the current configuration and embedded UI,
+// so modern clients may store these responses but must consider them stale at once.
+const DEFAULT_CACHE_TTL_MS: u64 = 0;
 
 fn should_emit_ordinary_tool_completion(
     tool_log_call: Option<&crate::tool_logging::ToolLogCall>,
 ) -> bool {
     !tool_log_call.is_some_and(crate::tool_logging::ToolLogCall::events_enabled)
+}
+
+fn ensure_modern_cache_hints(
+    protocol_version: Option<&ProtocolVersion>,
+    ttl_ms: &mut Option<u64>,
+    cache_scope: &mut Option<CacheScope>,
+) {
+    if protocol_version.is_some_and(|version| version >= &ProtocolVersion::V_2026_07_28) {
+        ttl_ms.get_or_insert(DEFAULT_CACHE_TTL_MS);
+        cache_scope.get_or_insert(CacheScope::Private);
+    }
 }
 
 // Tunnel supervision (native OpenAI tunnel mode). The HTTP server stays up across
@@ -263,22 +278,62 @@ impl ServerHandler for CodexHandler {
     async fn list_tools(
         &self,
         _request: Option<PaginatedRequestParams>,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
         let tools = self
             .tools
             .iter()
             .map(|tool| advertised_tool(tool.as_ref(), &self.config))
             .collect();
-        Ok(ListToolsResult::with_all_items(tools))
+        let mut result = ListToolsResult::with_all_items(tools);
+        ensure_modern_cache_hints(
+            context.protocol_version().as_ref(),
+            &mut result.ttl_ms,
+            &mut result.cache_scope,
+        );
+        Ok(result)
+    }
+
+    async fn list_prompts(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<ListPromptsResult, McpError> {
+        let mut result = ListPromptsResult::with_all_items(Vec::new());
+        ensure_modern_cache_hints(
+            context.protocol_version().as_ref(),
+            &mut result.ttl_ms,
+            &mut result.cache_scope,
+        );
+        Ok(result)
     }
 
     async fn list_resources(
         &self,
         _request: Option<PaginatedRequestParams>,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<ListResourcesResult, McpError> {
-        Ok(ListResourcesResult::with_all_items(builtin_ui_resources()))
+        let mut result = ListResourcesResult::with_all_items(builtin_ui_resources());
+        ensure_modern_cache_hints(
+            context.protocol_version().as_ref(),
+            &mut result.ttl_ms,
+            &mut result.cache_scope,
+        );
+        Ok(result)
+    }
+
+    async fn list_resource_templates(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<ListResourceTemplatesResult, McpError> {
+        let mut result = ListResourceTemplatesResult::with_all_items(Vec::new());
+        ensure_modern_cache_hints(
+            context.protocol_version().as_ref(),
+            &mut result.ttl_ms,
+            &mut result.cache_scope,
+        );
+        Ok(result)
     }
 
     async fn read_resource(
@@ -286,12 +341,20 @@ impl ServerHandler for CodexHandler {
         request: ReadResourceRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<ReadResourceResponse, McpError> {
+        let protocol_version = context.protocol_version();
         match self
             .bridged_resources
             .read_resource(&request.uri, &context.ct)
             .await
         {
-            Ok(Some(result)) => return Ok(result.into()),
+            Ok(Some(mut result)) => {
+                ensure_modern_cache_hints(
+                    protocol_version.as_ref(),
+                    &mut result.ttl_ms,
+                    &mut result.cache_scope,
+                );
+                return Ok(result.into());
+            }
             Ok(None) => {}
             Err(error) => {
                 return Err(McpError::internal_error(error.to_string(), None));
@@ -309,7 +372,13 @@ impl ServerHandler for CodexHandler {
             .await
         {
             Ok(Some(contents)) => {
-                return Ok(ReadResourceResult::new(vec![contents]).into());
+                let mut result = ReadResourceResult::new(vec![contents]);
+                ensure_modern_cache_hints(
+                    protocol_version.as_ref(),
+                    &mut result.ttl_ms,
+                    &mut result.cache_scope,
+                );
+                return Ok(result.into());
             }
             Ok(None) => {}
             Err(error) => {
@@ -328,7 +397,13 @@ impl ServerHandler for CodexHandler {
                 None,
             ));
         };
-        Ok(ReadResourceResult::new(vec![contents]).into())
+        let mut result = ReadResourceResult::new(vec![contents]);
+        ensure_modern_cache_hints(
+            protocol_version.as_ref(),
+            &mut result.ttl_ms,
+            &mut result.cache_scope,
+        );
+        Ok(result.into())
     }
 
     async fn call_tool(
@@ -1154,7 +1229,8 @@ mod tests {
     use std::sync::Mutex;
 
     use async_trait::async_trait;
-    use rmcp::ServiceExt;
+    use rmcp::model::{CacheScope, ProtocolVersion, ReadResourceRequestParams};
+    use rmcp::{ClientLifecycleMode, ClientServiceExt, ServiceExt};
     use tracing::field::{Field, Visit};
     use tracing::subscriber::Interest;
     use tracing::{Event, Metadata, Subscriber};
@@ -1417,6 +1493,91 @@ mod tests {
             next_tool_call_id: Arc::new(AtomicU64::new(1)),
             session: SessionState::new(),
         }
+    }
+
+    async fn assert_cacheable_response_hints(
+        lifecycle: Option<ClientLifecycleMode>,
+        expected_ttl_ms: Option<u64>,
+        expected_cache_scope: Option<CacheScope>,
+    ) {
+        let root = tempfile::tempdir().unwrap();
+        let handler = handler_with_tools(
+            root.path(),
+            crate::registry::load_tools(),
+            crate::types::ToolLogLevel::Info,
+        );
+        let (server_transport, client_transport) = tokio::io::duplex(256 * 1024);
+        let server_task = tokio::spawn(async move {
+            handler
+                .serve(server_transport)
+                .await
+                .unwrap()
+                .waiting()
+                .await
+                .unwrap();
+        });
+        let client = match lifecycle {
+            Some(lifecycle) => ().serve_with_lifecycle(client_transport, lifecycle).await.unwrap(),
+            None => ().serve(client_transport).await.unwrap(),
+        };
+
+        macro_rules! assert_hints {
+            ($result:expr) => {{
+                let result = $result;
+                assert_eq!(result.ttl_ms, expected_ttl_ms);
+                assert_eq!(result.cache_scope, expected_cache_scope.clone());
+                result
+            }};
+        }
+
+        assert_hints!(client.list_tools(None).await.unwrap());
+        assert_hints!(client.list_prompts(None).await.unwrap());
+        assert_hints!(client.list_resources(None).await.unwrap());
+        assert_hints!(client.list_resource_templates(None).await.unwrap());
+        let resource = assert_hints!(
+            client
+                .read_resource(ReadResourceRequestParams::new(diff_ui::DIFF_UI_URI))
+                .await
+                .unwrap()
+        );
+        let contents = serde_json::to_value(resource.contents.first().unwrap()).unwrap();
+        assert_eq!(contents["uri"], diff_ui::DIFF_UI_URI);
+        assert_eq!(contents["mimeType"], diff_ui::DIFF_UI_MIME_TYPE);
+
+        client.cancel().await.unwrap();
+        server_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn modern_cacheable_responses_include_required_hints() {
+        assert_cacheable_response_hints(
+            Some(ClientLifecycleMode::Discover {
+                preferred_versions: vec![ProtocolVersion::V_2026_07_28],
+            }),
+            Some(0),
+            Some(CacheScope::Private),
+        )
+        .await;
+    }
+
+    #[test]
+    fn modern_cache_hint_defaults_preserve_an_existing_private_ttl() {
+        let mut ttl_ms = Some(12_345);
+        let mut cache_scope = Some(CacheScope::Private);
+
+        ensure_modern_cache_hints(
+            Some(&ProtocolVersion::V_2026_07_28),
+            &mut ttl_ms,
+            &mut cache_scope,
+        );
+
+        assert_eq!(ttl_ms, Some(12_345));
+        assert_eq!(cache_scope, Some(CacheScope::Private));
+    }
+
+    #[tokio::test]
+    async fn legacy_cacheable_responses_preserve_the_old_wire_shape() {
+        assert_cacheable_response_hints(None, None, None).await;
     }
 
     #[test]

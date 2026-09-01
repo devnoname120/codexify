@@ -121,10 +121,15 @@ Five integration surfaces are exposed to the client:
    icons, input/output schemas, OpenAI file-parameter metadata, and MCP Apps
    resource metadata. Transitive definitions held by the private MCP catalog are
    deliberately absent from this registry. `resources/list` exposes the embedded
-   diff, setup, and updater HTML resources. `resources/read` serves those static resources, resolves
-   opaque exported-file capabilities returned by `export_host_file`, and proxies
-   opaque capabilities created from bridged upstream `resource_link` results;
-   those dynamic references are intentionally not enumerable.
+   diff, setup, and updater HTML resources. `resources/read` serves those static
+   resources, resolves opaque exported-file capabilities returned by
+   `export_host_file`, and proxies opaque capabilities created from bridged
+   upstream `resource_link` results; those dynamic references are intentionally
+   not enumerable. For MCP 2026-07-28 and newer, every Codexify-owned cacheable
+   list/read response carries `ttlMs: 0` and `cacheScope: "private"`; older peers
+   keep the historical field-omitting wire shape. Bridged resource reads retain
+   any stricter capability-bounded upstream TTL because the protocol boundary only
+   fills missing cache hints.
 4. `tools/call` → `CodexHandler::call_tool` reads `openai/session` from rmcp's
    `RequestContext::meta`. rmcp moves wire-level request `_meta` into that context
    before dispatch, so the typed tool parameters are not the authoritative source.
