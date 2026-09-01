@@ -1,7 +1,8 @@
 use rmcp::model::{MetaObject, Resource, ResourceContents};
 use serde_json::json;
 
-pub const SETUP_UI_URI: &str = "ui://codexify/setup/v2/mcp-app.html";
+pub const SETUP_UI_URI: &str = "ui://codexify/setup/v3/mcp-app.html";
+pub const PREVIOUS_SETUP_UI_URI: &str = "ui://codexify/setup/v2/mcp-app.html";
 pub const LEGACY_SETUP_UI_URI: &str = "ui://codexify/setup/v1/mcp-app.html";
 pub const SETUP_UI_MIME_TYPE: &str = "text/html;profile=mcp-app";
 
@@ -56,7 +57,7 @@ pub fn resource() -> Resource {
 }
 
 pub fn contents_for_uri(uri: &str) -> Option<ResourceContents> {
-    if uri != SETUP_UI_URI && uri != LEGACY_SETUP_UI_URI {
+    if uri != SETUP_UI_URI && uri != PREVIOUS_SETUP_UI_URI && uri != LEGACY_SETUP_UI_URI {
         return None;
     }
     Some(
@@ -88,7 +89,8 @@ mod tests {
 
     #[test]
     fn current_and_legacy_setup_resource_uris_are_readable() {
-        assert_eq!(SETUP_UI_URI, "ui://codexify/setup/v2/mcp-app.html");
+        assert_eq!(SETUP_UI_URI, "ui://codexify/setup/v3/mcp-app.html");
+        assert!(contents_for_uri(PREVIOUS_SETUP_UI_URI).is_some());
         assert!(contents_for_uri(SETUP_UI_URI).is_some());
         assert!(contents_for_uri(LEGACY_SETUP_UI_URI).is_some());
     }
@@ -106,13 +108,15 @@ mod tests {
             "doctor",
             "ui/message",
             "window.openai.sendFollowUpMessage",
+            "ui/open-link",
+            "window.openai.openExternal",
             "Check for updates",
             "Upgrade",
             "Refresh",
             "Autofix",
-            "plugin://dev-<slug>@...",
-            "#settings/Plugins/plugin_asdk_app_<slug>",
-            "#settings/Plugins",
+            "web-sandbox\\.oaiusercontent\\.com",
+            "plugin_asdk_app_",
+            "https://chatgpt.com/",
             "scroll below the list of tools",
             "Doctor returned no structured report",
             "status-pass",
@@ -149,7 +153,8 @@ mod tests {
         );
         assert!(!text.contains("data.nextStep"));
         assert!(!text.contains("Connector status and diagnostics"));
-        assert!(!text.contains("openExternal"));
+        assert!(!text.contains("REFRESH_PROMPT"));
+        assert!(!text.contains("sendRefreshPrompt"));
         assert!(!text.contains("connectorSettingsUrl"));
         assert!(!text.contains("connectorPluginId"));
         assert!(!text.contains("innerHTML"));

@@ -6,6 +6,14 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- The setup widget's stale-schema **Refresh** action now derives the connector
+  slug directly from ChatGPT's same-origin `asdk_app_<slug>.web-sandbox`
+  ancestor and opens the matching plugin settings through the host link API,
+  with the generic Plugins page as fallback. Refresh no longer sends an agent
+  follow-up prompt.
+
 ## [1.2.2] - 2026-09-01
 
 ### Added

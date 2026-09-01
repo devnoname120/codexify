@@ -284,7 +284,7 @@ fn setup_result(input: SetupResultInput<'_>) -> ToolResult {
     }
     if connector_schema.refresh_recommended {
         text.push_str(
-            " ChatGPT's cached Codexify connector schema could not be confirmed as current. The setup panel offers a Refresh action that can provide the correct settings link and instructions.",
+            " ChatGPT's cached Codexify connector schema could not be confirmed as current. The setup panel offers a Refresh action that opens the connector settings and explains where to click Refresh.",
         );
     }
 
@@ -632,7 +632,7 @@ mod tests {
         assert!(
             result
                 .joined_text()
-                .contains("setup panel offers a Refresh action")
+                .contains("opens the connector settings")
         );
         assert!(!result.joined_text().contains("Open ChatGPT Settings"));
     }

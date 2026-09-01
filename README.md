@@ -277,12 +277,16 @@ ChatGPT for diagnosis and repair rather than executing remediation inside the
 component.
 
 When the cached connector schema is stale or unknown, a row-local **Refresh**
-action sends ChatGPT a constrained follow-up request. ChatGPT constructs a
-relative settings link from a visible `plugin://dev-<slug>@...` connector mention,
-or falls back to `#settings/Plugins`, then tells the user to select Codexify,
-scroll below the tool list, and click **Refresh**. The component does not guess a
-connector slug or navigate to settings itself. The model-facing setup continuation
-remains in the tool result but is not rendered to the user.
+action opens the relevant ChatGPT connector settings directly. The component walks
+up through same-origin iframe ancestors and accepts a connector slug only from a
+hostname matching `asdk_app_<slug>.web-sandbox.oaiusercontent.com`. It then opens
+`#settings/Plugins/plugin_asdk_app_<slug>` through the host link API, or falls back
+to the generic `#settings/Plugins` route when that sandbox identity is unavailable.
+If an accessible ChatGPT referrer is present, it is used as the base so the current
+page path is preserved when possible. The widget then tells the user to select
+Codexify if necessary, scroll below the tool list, and click **Refresh**. The
+model-facing setup continuation remains in the tool result but is not rendered to
+the user.
 
 This extra gate is necessary because ChatGPT's connector OAuth state controls
 whether the account can use the connector at all; it does not independently

@@ -17,14 +17,14 @@ The desired behavior is a compact status surface that stays quiet when everythin
 - Hide automatic doctor output when healthy.
 - Surface warning/failure state with clear color semantics, and automatically expand failure details.
 - Provide `Autofix` for warning/failure doctor results by asking ChatGPT to investigate and repair the findings.
-- Make `Refresh` ask ChatGPT to construct the correct current-page settings link from connector context, with a safe generic fallback.
+- Make `Refresh` derive the connector slug from the same-origin ChatGPT widget sandbox and open the connector settings directly, with a safe generic Plugins fallback.
 - Keep agent-only setup instructions available to the model while removing them from the user-facing widget.
 - Remain responsive on mobile, tablet, and desktop hosts.
 
 ## Non-goals
 
 - The widget does not perform arbitrary repair actions itself; `Autofix` delegates investigation and repair to ChatGPT.
-- `Refresh` does not navigate or mutate connector state itself; it delegates link construction and user instructions to ChatGPT.
+- `Refresh` does not mutate connector state itself; it only opens ChatGPT settings and tells the user where the host-side **Refresh** control is.
 - The setup widget does not replace the existing restart-safe self-update progress widget. Once the update is accepted, the existing self-update lifecycle remains authoritative.
 
 ## Healthy-state layout
@@ -84,34 +84,15 @@ No button is shown.
 Connector schema: v1.1.0 · refresh required   [Refresh]
 ```
 
-`Refresh` sits on the schema row. It does not attempt iframe navigation. It sends a follow-up message to ChatGPT instructing the model to construct and present the correct relative settings link from context:
+`Refresh` sits on the schema row. The widget walks upward through same-origin iframe ancestors until the first cross-origin boundary. ChatGPT's widget sandbox ancestor has a hostname of the form `asdk_app_<slug>.web-sandbox.oaiusercontent.com`; the widget extracts only that `<slug>` and builds `#settings/Plugins/plugin_asdk_app_<slug>`. If no validated sandbox slug is found, it falls back to `#settings/Plugins`.
 
-- if the current conversation exposes a connector URI containing `plugin://dev-<slug>@...`, extract `<slug>` and use exactly `#settings/Plugins/plugin_asdk_app_<slug>`;
-- otherwise use exactly `#settings/Plugins`;
-- never invent or guess a slug;
-- tell the user to open the link, select Codexify if necessary, scroll below the list of tools, and click **Refresh**.
+When an accessible ancestor exposes a `document.referrer` on `https://chatgpt.com`, the hash is resolved against that URL so the current ChatGPT page path is preserved when possible. Otherwise the fallback base is `https://chatgpt.com/`.
 
-The follow-up prompt is fixed and explicit:
+The widget opens the resulting URL through the portable `ui/open-link` host request, with `window.openai.openExternal` as the ChatGPT compatibility fallback. It never attempts to reach through the cross-origin boundary or assign the outer frame's location directly.
 
-```text
-The Codexify connector schema is outdated and needs to be refreshed.
-Build a clickable relative ChatGPT settings link for the user:
+After the link request is accepted, the widget tells the user to select Codexify if necessary, scroll below the list of tools, and click **Refresh**. Link-opening failures are shown inline and never fall back to an agent prompt.
 
-- If the current conversation context exposes a connector URI containing
-  `plugin://dev-<slug>@...`, extract `<slug>` and use exactly:
-  `#settings/Plugins/plugin_asdk_app_<slug>`
-- Otherwise use exactly:
-  `#settings/Plugins`
-- Never invent or guess a slug.
-
-Tell the user to open that link, select the Codexify plugin if necessary,
-scroll to the bottom past the list of tools, and click Refresh.
-Keep the response concise.
-```
-
-This conversational handoff deliberately relies on context available to ChatGPT rather than duplicating fragile connector-ID discovery inside the server or widget.
-
-Because this handoff replaces widget-side settings routing, remove the deployment-specific `chatgptConnectorSettingsUrl` setting, connector-ID request plumbing, and widget/server helpers that existed only to construct a settings destination.
+The deployment-specific `chatgptConnectorSettingsUrl` setting and server-side connector-ID request plumbing remain unnecessary: the browser sandbox already exposes the routing slug without making it model-visible.
 
 ## Doctor behavior
 
@@ -185,7 +166,7 @@ The widget targets a compact **500 px** maximum width and remains fluid below th
 - manual doctor runs;
 - doctor detail expansion;
 - update scheduling output;
-- schema-refresh and Autofix message status.
+- schema-settings opening and Autofix message status.
 
 Respect reduced-motion preferences. No transition is required for correctness.
 
@@ -204,7 +185,7 @@ The setup widget should not duplicate restart monitoring.
 - Doctor tool call fails: show a compact diagnostic-call failure with a manual `Doctor` retry.
 - Doctor has warnings/failures: show `Autofix`.
 - `Autofix` follow-up message fails: report the failure in the widget and retain the doctor findings.
-- `Refresh` follow-up message fails: report the failure in the widget and retain the stale-schema state.
+- `Refresh` settings-link opening fails: report the failure in the widget and retain the stale-schema state.
 - Self-update failures retain the updater's existing durable failure/rollback status UI.
 
 ## Testing
@@ -224,7 +205,8 @@ The setup widget should not duplicate restart monitoring.
 - update-available state has row-local `Upgrade` plus `Check for updates`;
 - current state retains `Check for updates`;
 - stale schema has row-local `Refresh`;
-- `Refresh` sends the constrained link-construction prompt and never guesses a connector slug inside the widget;
+- `Refresh` extracts the slug only from a matching `asdk_app_<slug>.web-sandbox.oaiusercontent.com` same-origin ancestor, uses the generic Plugins route when absent, and never sends an agent prompt;
+- `Refresh` uses `ui/open-link` with `window.openai.openExternal` as the compatibility fallback;
 - automatic healthy doctor result stays hidden;
 - warning-only doctor result shows compact summary plus `Autofix`;
 - failure doctor result expands actionable diagnostics automatically;
@@ -234,4 +216,4 @@ The setup widget should not duplicate restart monitoring.
 
 ### Integration/manual verification
 
-Exercise the widget in representative host widths around 390 px, 768 px, ChatGPT-like inline desktop width, and wide desktop. Verify healthy, update-available, update-check-error, stale-schema, unknown-schema, warning-only doctor, failure doctor, Autofix failure, and Refresh-message failure states in light and dark themes.
+Exercise the widget in representative host widths around 390 px, 768 px, ChatGPT-like inline desktop width, and wide desktop. Verify healthy, update-available, update-check-error, stale-schema, unknown-schema, warning-only doctor, failure doctor, Autofix failure, direct-slug Refresh, generic-fallback Refresh, and link-opening failure states in light and dark themes.

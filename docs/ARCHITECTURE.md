@@ -644,7 +644,7 @@ the original order and rejects duplicate names.
 | `exec_sessions.rs` | Generic-client project/scratch fallback plus conversation-owned unified-exec sessions and transport-local diff state: private ephemeral scratch lifetime, trusted configured-shell resolution, Codex-compatible model shell-type selection by basename, PowerShell exit-code wrapping, background stdout/stderr drain tasks, process-group kill, idle cleanup, and output truncation (UTF-16 units to match the TS). |
 | `diff.rs` | Project-scoped Git snapshots, persistent conversation refs, transport-local fallbacks, incremental comparisons whose emitted snapshot can advance the private diff cursor through compare-and-swap, legacy review-ref migration, diff parsing and component-payload budgets. |
 | `diff_ui.rs` | Embedded MCP Apps resource, component-only diff-result metadata, legacy review-card compatibility, and persisted private interaction state for the interactive `show_diff` card. |
-| `setup_ui.rs` / `setup_ui.html` | Compact setup/status MCP App with a searchable project/scratch chooser, selected direct/worktree/scratch path rendering, cached-bypass update checks, background structured doctor diagnostics, conversational Refresh/Autofix handoffs, and debug timing display. |
+| `setup_ui.rs` / `setup_ui.html` | Compact setup/status MCP App with a searchable project/scratch chooser, selected direct/worktree/scratch path rendering, cached-bypass update checks, background structured doctor diagnostics, direct connector-settings Refresh routing, conversational Autofix, and debug timing display. |
 | `self_update.rs` | Verified release resolution, checksum validation, bounded executable/changelog extraction, private durable updater records, and generated rollback-capable OS worker scripts. |
 | `self_update_ui.rs` | Embedded updater MCP App, component-only changelog payload, restart-tolerant polling, absolute timeout state, and app-only status-tool integration. |
 | `widget_debug.rs` | Small component-only timing metadata shared by all tool results when top-level debug mode is enabled. |
@@ -907,12 +907,16 @@ warning/failure findings to ChatGPT through `ui/message` and asks the agent to
 diagnose, repair, verify, and rerun doctor.
 
 A stale or unknown connector schema adds a row-local **Refresh** action. The
-component does not inspect undocumented connector metadata or navigate itself;
-instead it sends a constrained `ui/message` prompt telling ChatGPT to derive
-`#settings/Plugins/plugin_asdk_app_<slug>` from any visible
-`plugin://dev-<slug>@...` mention, otherwise use `#settings/Plugins`, never guess a
-slug, and tell the user to scroll below the connector's tool list and click
-**Refresh**.
+component walks upward through same-origin iframe ancestors until the first
+cross-origin boundary and accepts a connector slug only from a hostname matching
+`asdk_app_<slug>.web-sandbox.oaiusercontent.com`. It builds
+`#settings/Plugins/plugin_asdk_app_<slug>` from that sandbox identity or uses the
+generic `#settings/Plugins` route when unavailable. An accessible ChatGPT
+`document.referrer` is used as the base when possible; otherwise the base is
+`https://chatgpt.com/`. The result is opened through `ui/open-link`, with
+`window.openai.openExternal` as the ChatGPT compatibility fallback. The widget
+then tells the user to select Codexify if necessary, scroll below the connector's
+tool list, and click **Refresh**. Refresh never creates an agent turn.
 
 ### 8.5 Detached self-update
 

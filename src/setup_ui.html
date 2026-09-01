@@ -64,6 +64,11 @@ button { font: inherit; }
   font: 600 12px/1.2 var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
 }
 .status-state { font-size: 12px; font-weight: 650; }
+.status-help {
+  flex-basis: 100%;
+  color: var(--muted);
+  font-size: 10px;
+}
 .status-pass { color: var(--good); }
 .status-warning { color: var(--warn); }
 .status-failure { color: var(--bad); }
@@ -282,14 +287,6 @@ button { font: inherit; }
 
   const DEBUG_META_KEY = "io.github.devnoname120/codexify/debug";
   const PROJECT_RESULT_LIMIT = 50;
-  const REFRESH_PROMPT = `The Codexify connector schema is outdated and needs to be refreshed.
-
-Build a clickable relative ChatGPT settings link for the user:
-- If the current conversation context exposes a connector URI containing \`plugin://dev-<slug>@...\`, extract \`<slug>\` and use exactly \`#settings/Plugins/plugin_asdk_app_<slug>\`.
-- Otherwise use exactly \`#settings/Plugins\`.
-- Never invent or guess a slug.
-
-Tell the user to open that link, select the Codexify plugin if necessary, scroll below the list of tools, and click Refresh. Keep the response concise.`;
   const root = document.getElementById("root");
   const pending = new Map();
   let nextId = 1;
@@ -507,6 +504,69 @@ Tell the user to open that link, select the Codexify plugin if necessary, scroll
     throw new Error("This host does not expose follow-up messages.");
   }
 
+  async function openLink(url) {
+    if (initialized) {
+      try {
+        const result = await request("ui/open-link", { url });
+        return accepted(result, "Open link");
+      } catch (error) {
+        if (!(window.openai && typeof window.openai.openExternal === "function")) {
+          throw error;
+        }
+      }
+    }
+    if (window.openai && typeof window.openai.openExternal === "function") {
+      const result = await window.openai.openExternal({ href: url, redirectUrl: false });
+      return accepted(result, "Open link");
+    }
+    throw new Error("This host does not expose link opening.");
+  }
+
+  function connectorSettingsContext() {
+    let current = window;
+    let slug = null;
+    let chatgptReferrer = null;
+
+    for (let depth = 0; depth < 8; depth += 1) {
+      try {
+        const hostname = String(current.location.hostname || "").toLowerCase();
+        const match = hostname.match(/^asdk_app_([a-z0-9_-]+)\.web-sandbox\.oaiusercontent\.com$/);
+        if (!slug && match) slug = match[1];
+
+        const referrer = current.document && current.document.referrer;
+        if (!chatgptReferrer && referrer) {
+          const parsed = new URL(referrer);
+          if (parsed.protocol === "https:"
+              && (parsed.hostname === "chatgpt.com" || parsed.hostname === "www.chatgpt.com")) {
+            chatgptReferrer = parsed.href;
+          }
+        }
+      } catch {
+        break;
+      }
+
+      let parent;
+      try {
+        parent = current.parent;
+        if (!parent || parent === current) break;
+        void parent.location.href;
+      } catch {
+        break;
+      }
+      current = parent;
+    }
+
+    return { slug, chatgptReferrer };
+  }
+
+  function refreshSettingsUrl() {
+    const context = connectorSettingsContext();
+    const hash = context.slug
+      ? `#settings/Plugins/plugin_asdk_app_${context.slug}`
+      : "#settings/Plugins";
+    return new URL(hash, context.chatgptReferrer || "https://chatgpt.com/").href;
+  }
+
   function addDebugEntry(entry) {
     if (!entry || debugEntries.includes(entry)) return;
     debugEntries.push(entry);
@@ -626,12 +686,20 @@ Tell the user to open that link, select the Codexify plugin if necessary, scroll
       copy.append(el("span", "status-state status-warning", "version unknown"));
     }
 
+    if (schema.refreshRecommended) {
+      copy.append(el(
+        "span",
+        "status-help",
+        "Select Codexify if needed, scroll below the list of tools, then click Refresh."
+      ));
+    }
+
     const actions = el("div", "row-actions");
     if (schema.refreshRecommended) {
       actions.append(actionButton(
-        actionState.pending && actionState.kind === "refresh" ? "Sending…" : "Refresh",
+        actionState.pending && actionState.kind === "refresh" ? "Opening…" : "Refresh",
         "primary",
-        () => { void sendRefreshPrompt(); },
+        () => { void openRefreshSettings(); },
         actionState.pending
       ));
     }
@@ -1268,8 +1336,27 @@ Tell the user to open that link, select the Codexify plugin if necessary, scroll
     renderCurrent();
   }
 
-  async function sendRefreshPrompt() {
-    await sendPrompt("refresh", REFRESH_PROMPT, "Refresh instructions sent to ChatGPT.");
+  async function openRefreshSettings() {
+    if (actionState.pending) return;
+    actionState = { kind: "refresh", message: "Opening connector settings…", tone: null, pending: true };
+    renderCurrent();
+    try {
+      await openLink(refreshSettingsUrl());
+      actionState = {
+        kind: "refresh",
+        message: "In ChatGPT settings, select Codexify if needed, scroll below the list of tools, and click Refresh.",
+        tone: null,
+        pending: false
+      };
+    } catch (error) {
+      actionState = {
+        kind: "refresh",
+        message: `Could not open connector settings: ${errorText(error)}`,
+        tone: "failure",
+        pending: false
+      };
+    }
+    renderCurrent();
   }
 
   async function sendAutofixPrompt() {

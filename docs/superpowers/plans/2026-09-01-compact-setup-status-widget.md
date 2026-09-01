@@ -2,11 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Replace the oversized setup dashboard with compact status rows, explicit update/doctor actions, structured background diagnostics, and conversational Refresh/Autofix handoffs.
+**Goal:** Replace the oversized setup dashboard with compact status rows, explicit update/doctor actions, structured background diagnostics, direct connector-settings Refresh routing, and a conversational Autofix handoff.
 
-**Architecture:** Add one app-only `check_for_updates` tool backed by a force-refresh variant of the existing latest-release inspection. Return structured `DoctorReport` data from the app-only doctor tool. Refactor the setup widget into a small client-side state machine that renders setup state immediately, starts doctor asynchronously after initialization, and sends `ui/message` requests with ChatGPT compatibility fallbacks for Refresh and Autofix. Remove obsolete connector-settings URL discovery/configuration because link construction moves into the follow-up prompt.
+**Architecture:** Add one app-only `check_for_updates` tool backed by a force-refresh variant of the existing latest-release inspection. Return structured `DoctorReport` data from the app-only doctor tool. Refactor the setup widget into a small client-side state machine that renders setup state immediately, starts doctor asynchronously after initialization, sends Autofix through `ui/message`, and opens stale-schema settings directly through `ui/open-link`. The widget derives the connector slug from the same-origin `asdk_app_<slug>.web-sandbox.oaiusercontent.com` ancestor and falls back to the generic Plugins route when that sandbox identity is unavailable. Remove obsolete server-side connector-settings URL discovery/configuration.
 
-**Tech Stack:** Rust, Tokio, serde/serde_json, rmcp tool metadata, embedded HTML/CSS/JavaScript, MCP Apps JSON-RPC (`tools/call`, `ui/message`, size notifications), ChatGPT `window.openai` compatibility APIs, Cargo tests.
+**Tech Stack:** Rust, Tokio, serde/serde_json, rmcp tool metadata, embedded HTML/CSS/JavaScript, MCP Apps JSON-RPC (`tools/call`, `ui/message`, `ui/open-link`, size notifications), ChatGPT `window.openai` compatibility APIs, Cargo tests.
 
 ---
 
@@ -16,7 +16,7 @@
 - Modify `src/self_update.rs`: expose a force-refresh latest-version inspection while preserving the existing cache for setup/doctor.
 - Modify `src/tools/setup.rs`: reuse the shared update output, remove settings URL output/plumbing, retain model-only `nextStep`.
 - Modify `src/tools/doctor.rs`: advertise and return structured `DoctorReport` data.
-- Modify `src/setup_ui.rs`: compact rows, background doctor, colored diagnostics, Upgrade/Refresh/Autofix, `ui/message`, and responsive sizing.
+- Modify `src/setup_ui.rs`: compact rows, background doctor, colored diagnostics, Upgrade/Refresh/Autofix, `ui/message`, `ui/open-link`, and responsive sizing.
 - Modify `src/tools/mod.rs` and `src/registry.rs`: register the new app-only tool.
 - Modify `src/tool.rs`, `src/server.rs`, `src/types.rs`, `src/config.rs`, `src/tools/import_host_file.rs`, `tests/tools_core.rs`: remove obsolete connector-ID/settings-URL plumbing.
 - Modify `tests/meta_suite.rs`: pin the new tool count, annotations, visibility, names, and structured-content contract.
@@ -561,20 +561,22 @@ for expected in [
     "doctor",
     "ui/message",
     "window.openai.sendFollowUpMessage",
+    "ui/open-link",
+    "window.openai.openExternal",
     "Check for updates",
     "Upgrade",
     "Refresh",
     "Autofix",
-    "plugin://dev-<slug>@...",
-    "#settings/Plugins/plugin_asdk_app_<slug>",
-    "#settings/Plugins",
+    "web-sandbox.oaiusercontent.com",
+    "plugin_asdk_app_",
+    "https://chatgpt.com/",
     "scroll below the list of tools",
 ] {
     assert!(text.contains(expected), "missing {expected}");
 }
 assert!(!text.contains("data.nextStep"));
 assert!(!text.contains("Connector status and diagnostics"));
-assert!(!text.contains("openExternal"));
+assert!(!text.contains("REFRESH_PROMPT"));
 ```
 
 - [ ] **Step 2: Run the resource test and verify failure**
@@ -589,7 +591,7 @@ Expected: failure because the old dashboard and settings navigation remain.
 
 - [ ] **Step 3: Implement bridge helpers**
 
-Retain the existing JSON-RPC request map and tool-call fallback. Add structured-result and message helpers:
+Retain the existing JSON-RPC request map and tool-call fallback. Add structured-result, message, and link-opening helpers. `ui/open-link` is the portable path and `window.openai.openExternal` is the ChatGPT compatibility fallback.
 
 ```javascript
 function structuredPayload(value, predicate) {
@@ -714,24 +716,13 @@ async function runDoctor(manual) {
 
 Automatic healthy results render no doctor panel. Warning-only results render a compact summary and Autofix. Failures auto-expand warning/failure checks. Manual results render all checks, including healthy reports.
 
-- [ ] **Step 8: Implement Autofix and Refresh prompts**
+- [ ] **Step 8: Implement Autofix and direct Refresh routing**
 
-Build the Autofix prompt from only warning/failure checks, preserving ID, summary, detail, and remediation. Bound individual fields and total prompt length.
+Build the Autofix prompt from only warning/failure checks, preserving ID, summary, detail, and remediation. Bound individual fields and total prompt length. Autofix calls `sendFollowUpMessage`, disables while pending, and reports rejection/transport errors inline without removing the findings.
 
-Use this Refresh prompt text:
+For Refresh, walk upward through same-origin iframe ancestors until the first cross-origin boundary. Accept a connector slug only from a hostname matching `asdk_app_<slug>.web-sandbox.oaiusercontent.com`. Build `#settings/Plugins/plugin_asdk_app_<slug>` when found and `#settings/Plugins` otherwise. Resolve the hash against an accessible ChatGPT `document.referrer` when available so the current page path is retained; otherwise use `https://chatgpt.com/` as the base. Open the resulting URL through `ui/open-link` with `window.openai.openExternal` as fallback. Never send a Refresh agent prompt.
 
-```text
-The Codexify connector schema is outdated and needs to be refreshed.
-
-Build a clickable relative ChatGPT settings link for the user:
-- If the current conversation context exposes a connector URI containing `plugin://dev-<slug>@...`, extract `<slug>` and use exactly `#settings/Plugins/plugin_asdk_app_<slug>`.
-- Otherwise use exactly `#settings/Plugins`.
-- Never invent or guess a slug.
-
-Tell the user to open that link, select the Codexify plugin if necessary, scroll below the list of tools, and click Refresh. Keep the response concise.
-```
-
-Both buttons call `sendFollowUpMessage`, disable while pending, and report rejection/transport errors inline without removing the underlying state.
+After the host accepts the link request, tell the user to select Codexify if necessary, scroll below the list of tools, and click **Refresh**. Link-opening failures remain inline while preserving the stale-schema state.
 
 - [ ] **Step 9: Implement sizing, responsiveness, and debug timing**
 
@@ -784,7 +775,7 @@ Document:
 - row-local `Upgrade` and `Refresh` actions;
 - background private doctor call;
 - structured colored warnings/failures;
-- Autofix and Refresh as user-initiated `ui/message` handoffs;
+- Autofix as a user-initiated `ui/message` handoff and Refresh as direct host-mediated settings navigation;
 - no user-visible `nextStep` text;
 - removal of `chatgptConnectorSettingsUrl`.
 
@@ -795,7 +786,7 @@ Add under `[Unreleased]`:
 ```markdown
 ### Changed
 
-- The setup MCP App now uses compact status rows, supports an explicit cached-bypass update check, runs structured doctor diagnostics in the background, surfaces warnings/failures with Autofix, and delegates stale connector refresh instructions to a ChatGPT follow-up message. The obsolete `chatgptConnectorSettingsUrl` setting and connector-ID metadata probing were removed.
+- The setup MCP App now uses compact status rows, supports an explicit cached-bypass update check, runs structured doctor diagnostics in the background, surfaces warnings/failures with Autofix, and opens stale connector settings directly from the validated widget-sandbox identity. The obsolete `chatgptConnectorSettingsUrl` setting and connector-ID metadata probing were removed.
 ```
 
 - [ ] **Step 4: Verify stale references are gone**
