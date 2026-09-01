@@ -6,6 +6,16 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- The setup MCP App now uses compact status rows, keeps explicit **Check for
+  updates** and **Doctor** actions available, runs structured doctor diagnostics
+  asynchronously, surfaces warnings/failures with **Autofix**, and delegates stale
+  connector refresh instructions to a ChatGPT follow-up message. Manual release
+  checks bypass the latest-version cache, while the obsolete
+  `chatgptConnectorSettingsUrl` setting and connector-ID metadata probing were
+  removed.
+
 ## [1.2.1] - 2026-09-01
 
 ### Changed

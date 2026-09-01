@@ -108,7 +108,7 @@ fn setup_result(
     }
     if connector_schema.refresh_recommended {
         text.push_str(
-            " ChatGPT's cached Codexify connector schema could not be confirmed as current. Open ChatGPT Settings, select the Codexify connector, scroll to the bottom of its tool list, and click Refresh.",
+            " ChatGPT's cached Codexify connector schema could not be confirmed as current. The setup panel offers a Refresh action that can provide the correct settings link and instructions.",
         );
     }
 
@@ -406,7 +406,12 @@ mod tests {
                 .is_none()
         );
         assert_eq!(structured["debug"]["updateCheckMs"], 17);
-        assert!(result.joined_text().contains("click Refresh"));
+        assert!(
+            result
+                .joined_text()
+                .contains("setup panel offers a Refresh action")
+        );
+        assert!(!result.joined_text().contains("Open ChatGPT Settings"));
     }
 
     #[test]

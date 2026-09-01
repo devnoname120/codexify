@@ -1686,13 +1686,9 @@ mod tests {
         let setup_contents = builtin_ui_contents(crate::setup_ui::SETUP_UI_URI)
             .expect("setup MCP App resource must be readable");
         let setup_contents = serde_json::to_value(setup_contents).unwrap();
-        assert!(
-            setup_contents["text"]
-                .as_str()
-                .is_some_and(|text| {
-                    text.contains("Check for updates") && text.contains("\"Doctor\"")
-                })
-        );
+        assert!(setup_contents["text"].as_str().is_some_and(|text| {
+            text.contains("Check for updates") && text.contains("\"Doctor\"")
+        }));
     }
 
     #[test]

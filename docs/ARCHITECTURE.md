@@ -622,7 +622,7 @@ the original order and rejects duplicate names.
 | `exec_sessions.rs` | Generic-client transport fallback plus conversation-owned unified-exec sessions and transport-local diff state: trusted configured-shell resolution, Codex-compatible model shell-type selection by basename, PowerShell exit-code wrapping, background stdout/stderr drain tasks, process-group kill, idle cleanup, and output truncation (UTF-16 units to match the TS). |
 | `diff.rs` | Project-scoped Git snapshots, persistent conversation refs, transport-local fallbacks, incremental comparisons whose emitted snapshot can advance the private diff cursor through compare-and-swap, legacy review-ref migration, diff parsing and component-payload budgets. |
 | `diff_ui.rs` | Embedded MCP Apps resource, component-only diff-result metadata, legacy review-card compatibility, and persisted private interaction state for the interactive `show_diff` card. |
-| `setup_ui.rs` | Embedded setup/status MCP App with update and doctor actions, connector-schema refresh guidance, optional connector-settings navigation, and debug timing display. |
+| `setup_ui.rs` / `setup_ui.html` | Compact setup/status MCP App with cached-bypass update checks, background structured doctor diagnostics, conversational Refresh/Autofix handoffs, and debug timing display. |
 | `self_update.rs` | Verified release resolution, checksum validation, bounded executable/changelog extraction, private durable updater records, and generated rollback-capable OS worker scripts. |
 | `self_update_ui.rs` | Embedded updater MCP App, component-only changelog payload, restart-tolerant polling, absolute timeout state, and app-only status-tool integration. |
 | `widget_debug.rs` | Small component-only timing metadata shared by all tool results when top-level debug mode is enabled. |
@@ -848,17 +848,34 @@ check. It invokes `gh api --hostname github.com` with a 2-second timeout and fal
 back to an unauthenticated rustls GitHub API request with a 2-second timeout.
 Successful results are cached for 5 minutes and failures for 30 seconds. The
 structured result includes current/latest versions, source, connector-schema
-classification, and the normal next agent step. `setup_ui.rs` renders that one
-result without a second model call and exposes user-driven Update and Doctor
-actions.
+classification, and the normal next agent step. The compact setup component
+renders the version and schema as line-oriented rows but deliberately omits that
+model-only continuation text.
 
-The app-only `doctor` MCP tool reuses `doctor.rs` against the already-resolved
-running `AppConfig`, rather than locating and spawning another executable. The
-component may construct `https://chatgpt.com/#settings/Plugins/<plugin-id>` when
-an `asdk_app_...`/`plugin_...` identifier is feature-detected in request or host
-metadata. Because that identifier is not a documented MCP request field, the
-validated `chatgptConnectorSettingsUrl` config field is the deterministic
-deployment-specific override.
+The app-only `check_for_updates` MCP tool runs the same bounded release inspection
+with a forced cache bypass, then replaces the shared cache entry. This lets the
+persistent **Check for updates** action refresh only the Codexify row without
+repeating setup authorization. A positively identified newer release adds the
+row-local **Upgrade** action, which delegates to the existing verified
+`self_update` flow and its restart-safe progress component.
+
+After the component initializes and has rendered setup state, it asynchronously
+invokes the app-only `doctor` tool. `doctor` reuses `doctor.rs` against the
+already-resolved running `AppConfig`, rather than locating and spawning another
+executable, and returns the complete `DoctorReport` as structured content beside
+the deterministic human report. Healthy automatic results remain hidden;
+warning-only results produce a compact summary, while failures expand structured
+checks with pass/warning/failure/skipped color semantics. **Autofix** sends only
+warning/failure findings to ChatGPT through `ui/message` and asks the agent to
+diagnose, repair, verify, and rerun doctor.
+
+A stale or unknown connector schema adds a row-local **Refresh** action. The
+component does not inspect undocumented connector metadata or navigate itself;
+instead it sends a constrained `ui/message` prompt telling ChatGPT to derive
+`#settings/Plugins/plugin_asdk_app_<slug>` from any visible
+`plugin://dev-<slug>@...` mention, otherwise use `#settings/Plugins`, never guess a
+slug, and tell the user to scroll below the connector's tool list and click
+**Refresh**.
 
 ### 8.5 Detached self-update
 
@@ -925,7 +942,6 @@ latter.
 {
   "workDir": "/absolute/path/to/project", // required when --work-dir is omitted
   "debug": false,                         // component-only tool timing footers
-  "chatgptConnectorSettingsUrl": null,    // optional full https://chatgpt.com settings URL
   "port": 3000,
   "apiKey": "…",                      // or --api-key; bearer token
   "conversationAuthToken": "0123456789abcdef…", // exactly 64 lowercase hex characters

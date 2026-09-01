@@ -1,7 +1,8 @@
 use rmcp::model::{MetaObject, Resource, ResourceContents};
 use serde_json::json;
 
-pub const SETUP_UI_URI: &str = "ui://codexify/setup/v1/mcp-app.html";
+pub const SETUP_UI_URI: &str = "ui://codexify/setup/v2/mcp-app.html";
+pub const LEGACY_SETUP_UI_URI: &str = "ui://codexify/setup/v1/mcp-app.html";
 pub const SETUP_UI_MIME_TYPE: &str = "text/html;profile=mcp-app";
 
 pub fn tool_meta() -> MetaObject {
@@ -45,7 +46,7 @@ pub fn resource() -> Resource {
 }
 
 pub fn contents_for_uri(uri: &str) -> Option<ResourceContents> {
-    if uri != SETUP_UI_URI {
+    if uri != SETUP_UI_URI && uri != LEGACY_SETUP_UI_URI {
         return None;
     }
     Some(
@@ -73,6 +74,13 @@ mod tests {
             Some(&json!(SETUP_UI_URI))
         );
         assert_eq!(meta.get("openai/widgetAccessible"), Some(&json!(true)));
+    }
+
+    #[test]
+    fn current_and_legacy_setup_resource_uris_are_readable() {
+        assert_eq!(SETUP_UI_URI, "ui://codexify/setup/v2/mcp-app.html");
+        assert!(contents_for_uri(SETUP_UI_URI).is_some());
+        assert!(contents_for_uri(LEGACY_SETUP_UI_URI).is_some());
     }
 
     #[test]

@@ -249,20 +249,30 @@ the cached older schema, which omits the field; the result then warns that the
 connector tools should be refreshed. This remains backward compatible because
 `connectorVersion` is optional in the running server's validator.
 
-The setup card checks for a newer release through `gh api` first, with a strict
-2-second timeout, and falls back to the unauthenticated GitHub releases API with a
-2-second timeout. Successful results are cached for 5 minutes and failures for 30
-seconds. An available release adds an **Update** button that invokes the ordinary
-verified `self_update` path only after the user clicks it. The card also exposes a
-**Run doctor** button backed by the same diagnostic engine as `codexify doctor`;
-the app-only `doctor` tool is not offered to the model by MCP Apps-aware hosts.
+The setup component checks for a newer release through `gh api` first, with a
+strict 2-second timeout, and falls back to the unauthenticated GitHub releases API
+with a 2-second timeout. Successful results are cached for 5 minutes and failures
+for 30 seconds. Its compact Codexify row always exposes **Check for updates**;
+that app-only action bypasses the cache and updates the row without rerunning the
+conversation-authorization flow. A known newer release adds a row-local
+**Upgrade** action that invokes the ordinary verified `self_update` path only after
+the user clicks it.
 
-When ChatGPT exposes its internal connector identifier to the component or MCP
-request metadata, the card constructs a generic direct settings link. That
-identifier is not part of the documented MCP metadata contract, so deployments
-that require a reliable project-specific link can set
-`chatgptConnectorSettingsUrl`. Without either source, the card retains the exact
-manual Settings → connector → bottom of tool list → **Refresh** instructions.
+After rendering the setup result, the component starts the app-only `doctor` tool
+asynchronously, so the model can continue project selection and `get_agent_brief`
+without waiting for diagnostics. A healthy automatic result remains hidden;
+warnings are summarized compactly and failures expand into colored structured
+checks. Warning and failure states expose **Autofix**, which sends the findings to
+ChatGPT for diagnosis and repair rather than executing remediation inside the
+component.
+
+When the cached connector schema is stale or unknown, a row-local **Refresh**
+action sends ChatGPT a constrained follow-up request. ChatGPT constructs a
+relative settings link from a visible `plugin://dev-<slug>@...` connector mention,
+or falls back to `#settings/Plugins`, then tells the user to select Codexify,
+scroll below the tool list, and click **Refresh**. The component does not guess a
+connector slug or navigate to settings itself. The model-facing setup continuation
+remains in the tool result but is not rendered to the user.
 
 This extra gate is necessary because ChatGPT's connector OAuth state controls
 whether the account can use the connector at all; it does not independently
@@ -512,7 +522,7 @@ ahead of the protected tools:
 
 | Tool | Description |
 |------|-------------|
-| `setup` | ChatGPT-facing authorization and status entry point. Checks the configured authentication token supplied as `ref`, caches only the conversation/transport grant, returns update and connector-schema freshness state, and renders Update and Doctor actions in a setup card |
+| `setup` | ChatGPT-facing authorization and status entry point. Checks the configured authentication token supplied as `ref`, caches only the conversation/transport grant, returns update and connector-schema freshness state, and renders the compact setup component without exposing the model-only continuation text |
 
 Codex-compatible agent tools:
 
@@ -543,12 +553,13 @@ Eight always-on tools have no Codex counterpart:
 | `forget_memory_note` | Delete one existing durable note |
 | `recall` | Return the plan and notes saved by earlier turns or earlier conversations |
 
-Two additional native tools exist solely for MCP App components and are advertised
+Three additional native tools exist solely for MCP App components and are advertised
 with app-only visibility:
 
 | Tool | Description |
 |------|-------------|
-| `doctor` | Run the same read-only diagnostic engine as `codexify doctor` against the active server configuration and return its human report to the setup card |
+| `check_for_updates` | Bypass the cached release inspection and return fresh structured update state to the setup component |
+| `doctor` | Run the same read-only diagnostic engine as `codexify doctor` against the active server configuration and return both its deterministic human report and structured checks to the setup component |
 | `self_update_status` | Read one durable update record by its opaque update ID and report the responding Codexify process version; not offered to the model by hosts that implement MCP Apps visibility |
 
 Multi-project mode adds two project-control tools:
@@ -560,7 +571,7 @@ Multi-project mode adds two project-control tools:
 
 These tools expose runtime context, project instructions, and the four durable memory/task-state operations through MCP. See [Context and memory](#context-and-memory), [Acting as a Codex agent](#acting-as-a-codex-agent), [Shells and the host](#shells-and-the-host), [AGENTS.md](#agentsmd) and [Skills](#skills).
 
-That is 32 advertised native tools in the default single-project mode and 34 in multi-project mode. Of those, 30 and 32 respectively are model-visible; `doctor` and `self_update_status` are app-only. Enabling conversation authorization adds the ChatGPT-facing `setup` tool, producing 33 or 35 advertised tools and 31 or 33 model-visible tools. Setting `artifactIngress.enabled` to `false` removes `import_host_file`; setting `artifactEgress.enabled` to `false` independently removes `export_host_file`. Each disabled direction reduces the applicable count by one. One or more [catalog-mode MCP upstreams](#catalog-mode-default-for-automatic-imports) add one shared four-tool discovery/call surface regardless of how many transitive tools they contain. Direct mode adds one downstream tool per selected upstream tool; gateway mode adds one downstream dispatcher per upstream server.
+That is 33 advertised native tools in the default single-project mode and 35 in multi-project mode. Of those, 30 and 32 respectively are model-visible; `check_for_updates`, `doctor`, and `self_update_status` are app-only. Enabling conversation authorization adds the ChatGPT-facing `setup` tool, producing 34 or 36 advertised tools and 31 or 33 model-visible tools. Setting `artifactIngress.enabled` to `false` removes `import_host_file`; setting `artifactEgress.enabled` to `false` independently removes `export_host_file`. Each disabled direction reduces the applicable count by one. One or more [catalog-mode MCP upstreams](#catalog-mode-default-for-automatic-imports) add one shared four-tool discovery/call surface regardless of how many transitive tools they contain. Direct mode adds one downstream tool per selected upstream tool; gateway mode adds one downstream dispatcher per upstream server.
 
 MCP-specific tool behavior:
 
@@ -600,7 +611,6 @@ optional and uses camelCase names.
 {
   "workDir": "/absolute/path/to/project",
   "debug": false,
-  "chatgptConnectorSettingsUrl": null,
   "multiProject": false,
   "projectCloneDir": ".",
   "conversationAuthToken": null,
@@ -729,12 +739,6 @@ timing metadata to every tool result. The setup, diff, and updater cards render
 the server execution time at their end; cards that invoke tools also distinguish
 widget-observed round-trip time from server time. It does not enable payload
 logging and does not place tool arguments or output in the timing metadata.
-
-`chatgptConnectorSettingsUrl` is an optional full `https://chatgpt.com` URL used by
-the setup card when it needs to direct the user to this connector's settings. The
-value is rejected if it uses another origin, credentials, a custom port, or a
-non-HTTPS scheme. Leave it `null` to use opportunistic connector-ID discovery and
-manual refresh instructions.
 
 ## Diagnostics, tool payloads, and audit logging
 
