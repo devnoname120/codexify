@@ -3,7 +3,8 @@
 A Rust port of the `codexify` MCP bridge. codexify is a local [Model Context
 Protocol](https://modelcontextprotocol.io) server that exposes Codex-style agent
 tools over **Streamable HTTP**, scoped either to one configured working directory
-or to a project root selected independently by each ChatGPT conversation, and can
+or to a project, managed worktree, or private scratch root selected independently
+by each ChatGPT conversation, and can
 additionally **aggregate local or remote MCP servers**, **surface local skills**,
 materialize ChatGPT-native files inside the active project, and return project files
 to ChatGPT as downloadable MCP resources.
@@ -45,7 +46,7 @@ ChatGPT / MCP client
 │    • gateway tools   ← upstream MCP servers   │
 │                                               │
 │  shared ProjectBindingStore                   │
-│    • openai/session hash → project root       │
+│    • openai/session hash → project/scratch    │
 │    • persistent atomic binding records        │
 │                                               │
 │  shared ConversationAuthorizationStore        │
@@ -70,12 +71,12 @@ ChatGPT / MCP client
 │    • no raw arguments or returned output      │
 │                                               │
 │  per-transport SessionState                   │
-│    • fallback root for generic MCP clients    │
+│    • project or ephemeral scratch fallback    │
 │    • auth + exec + plan + diff fallback       │
 └──────────────────────────────────────────────┘
         │ reads/writes           │ stdio / Streamable HTTP
         ▼                        ▼
-   active project root     upstream MCP servers (idasql, remote-docs, …)
+   active workspace root   upstream MCP servers (idasql, remote-docs, …)
 ```
 
 Five integration surfaces are exposed to the client:
@@ -113,7 +114,7 @@ Five integration surfaces are exposed to the client:
    `conversationAuthToken`, initialization exposes only the model-facing gate protocol;
    project context is loaded later through `get_agent_brief`. Otherwise,
    single-project mode builds the full project-aware brief immediately, while
-   multi-project mode emits only the root-selection protocol and a project-neutral
+   multi-project mode emits only the workspace-selection protocol and a project-neutral
    environment because ChatGPT's conversation identity arrives in request `_meta`
    on tool calls, after initialization.
 3. `tools/list` → `CodexHandler::list_tools` maps the shared tool registry into
@@ -136,8 +137,9 @@ Five integration surfaces are exposed to the client:
 5. When conversation authorization is configured, the intentionally innocuous
    `setup` wire tool compares the authentication token submitted as `ref` without
    echoing it and records only the authorization decision. Its same response also
-   carries the cached connector-version echo, running server version, and a
-   bounded `gh`-first/GitHub-API-fallback release check for the setup MCP App.
+   carries the cached connector-version echo, running server version, current
+   project/scratch binding state, and a bounded `gh`-first/GitHub-API-fallback
+   release check for the setup MCP App.
    Every other model-visible tool fails
    before project resolution or dispatch until the hashed ChatGPT conversation is
    authorized. The marker survives server restarts and is namespaced by the
@@ -149,25 +151,29 @@ Five integration surfaces are exposed to the client:
    static `projectCatalog.entries` overlay, canonicalizes and filters candidates
    against the access root, and returns relative selectors without reading project
    content or creating a binding.
-7. `set_project_root` canonicalizes an existing directory below the configured
-   access root, parses a provider-agnostic HTTPS/SSH Git repository URL ending in
-   `.git`, or parses a supported GitHub repository, branch, pull-request, or commit
-   URL.
+7. `set_project_root` accepts exactly one project selector or
+   `withoutProject: true`. The project path canonicalizes an existing directory
+   below the configured access root, parses a provider-agnostic HTTPS/SSH Git
+   repository URL ending in `.git`, or parses a supported GitHub repository,
+   branch, pull-request, or commit URL.
    URL resolution first looks for a matching local Git top level; when none exists,
    it clones beneath `projectCloneDir` and verifies the resulting remote. A branch
    URL fetches `refs/heads/<branch>` and a PR URL fetches
    `refs/pull/<number>/head`; a commit URL fetches its full object ID. If an existing
    source checkout is not already at the fetched commit, the binding path creates a
    detached managed worktree at that commit rather than moving the source checkout;
-   worktree mode `Never` rejects that case. With `openai/session`, the immutable
-   selection is written through the shared `ProjectBindingStore`; without it, it is
-   stored in the current `SessionState`. Re-selecting the same canonical root or
-   exact URL selection is idempotent, selecting a different one is rejected before
-   cloning or fetching, and a clone destination collision never overwrites existing
-   data.
+   worktree mode `Never` rejects that case. The no-project form creates a private
+   scratch root outside the access root. With `openai/session`, the immutable
+   project or scratch selection is written through the shared
+   `ProjectBindingStore`; without it, it is stored in the current `SessionState`,
+   whose scratch directory is temporary. Re-selecting the same choice is
+   idempotent, selecting a different one is rejected before cloning, fetching, or
+   creating a replacement workspace, and a clone destination collision never
+   overwrites existing data.
 8. Other project-scoped calls resolve the durable conversation binding first, or
    the transport-session fallback when no conversation identity exists, then
-   receive an effective clone of `AppConfig` whose `work_dir` is that root. Before
+   receive an effective clone of `AppConfig` whose `work_dir` is the selected
+   project, managed worktree, or scratch root. Before
    the first such call, the diff manager captures the scoped project-open snapshot.
    Non-Git projects report diff capture as unavailable; a Git snapshot failure blocks
    mutating tools before dispatch.
@@ -179,8 +185,8 @@ Five integration surfaces are exposed to the client:
    downstream name; direct, gateway, and catalog MCP proxies map the call to the
    raw configured upstream server/tool before execution. Dispatch then supplies a
    request context containing the stable conversation identity, any
-   feature-detected ChatGPT connector identifier, shared
-   authorization store, and shared diff manager; tools that do not need it use
+   feature-detected ChatGPT connector identifier, shared authorization and
+   project-binding stores, and shared diff manager; tools that do not need it use
    the default context-free implementation. The server applies the model-output
    policy to textual `content` and explicit `structuredContent`, then fills default
    structured text mirrors within the same ceiling. A successful result is checked
@@ -278,7 +284,7 @@ use it to report truncation, original token count, exec-session ID and PID witho
 putting operational fields into their public output schema.
 
 ### `ProjectBindingStore` (`project_bindings.rs`)
-Shared, durable conversation-to-project bindings. `ConversationIdentity` hashes
+Shared, durable conversation-to-workspace bindings. `ConversationIdentity` hashes
 ChatGPT's `openai/session` value before it reaches a filename; no raw conversation
 identifier is written to disk. Records are namespaced by canonical access-root
 hash, written atomically under a per-record lock, and validated again on every
@@ -287,6 +293,14 @@ can recover the same binding after a server restart. URL-created bindings also
 persist the canonical Git selection URL, allowing normalized equivalents of the
 same repository—and equivalent encodings of an exact GitHub branch, PR, or commit
 selection—to remain idempotent without another remote inspection.
+
+An explicit no-project choice uses a sibling versioned `.no-project` marker and a
+durable private directory beneath
+`~/.codexify/scratch/conversations/<access-root-hash>/<conversation-hash>/`. The
+marker records that exact canonical path. Reads reject symlinked, relocated,
+missing, cross-namespace, or access-root-contained scratch paths; Unix directory
+permissions are tightened to `0700`. Project and scratch mutations acquire the
+same lock, so concurrent choices have one winner and dual records fail closed.
 
 ### Git project resolution (`project_clone.rs`)
 `ProjectReference` distinguishes ordinary filesystem selectors from HTTPS/SSH Git
@@ -368,9 +382,12 @@ the source repository's local Git config and the script runs outside the
 
 ### `ConversationExecSessionStore` and `SessionState` (`exec_sessions.rs`)
 `SessionState` is the per-MCP-transport view: it owns the optional fallback
-project root and authorization flag for generic clients, the current plan, a
+project/scratch root and authorization flag for generic clients, the current plan, a
 transport-owned exec state, and the generic-client diff fallback. The exec state is
 reference-counted and kills running process trees when its last owner disappears.
+Transport scratch mode retains an `Arc<TempDir>` plus its canonical path; it is
+validated outside the configured access root on every resolution and removed when
+the final session owner is dropped.
 
 `ConversationExecSessionStore` is shared by all handlers in the server process.
 For the two unified-exec tools, dispatch uses the hashed `openai/session` identity
@@ -620,20 +637,20 @@ the original order and rejects duplicate names.
 | `conversation_auth.rs` | Authentication-token generation and validation, constant-time comparison, copyable ChatGPT instruction rendering with the innocuous wire vocabulary, durable per-conversation authorization markers, and transport-session fallback. |
 | `ignore_rules.rs` | One `.gitignore`-accurate matcher (the `ignore` crate) shared by glob/grep/tree/list_directory. |
 | `exec_policy.rs` | Shell-string allowlist guard for `exec_command` (a guardrail, not a sandbox). |
-| `project_bindings.rs` | Canonical project-root validation plus durable ChatGPT conversation bindings keyed by a hash of `openai/session`, namespaced by access root, locked per record, and atomically written. |
+| `project_bindings.rs` | Canonical project-root validation plus durable ChatGPT project/scratch bindings keyed by a hash of `openai/session`, namespaced by access root, locked per record, and atomically written; scratch roots are private, exact-path validated, and outside the access root. |
 | `project_clone.rs` | Strict provider-agnostic HTTPS/SSH Git repository URL parsing plus GitHub branch/PR/commit target parsing, conservative normalized remote matching, existing-checkout discovery, exact GitHub target-ref or object-ID fetching, bounded non-interactive cloning below `projectCloneDir`, cross-process repository locks, collision refusal, and post-clone verification. |
 | `worktrees.rs` | Per-conversation managed Git worktree lifecycle: create a detached checkout under `worktrees.root` via `git worktree add`, optionally at an exact fetched commit, dual source/worktree root tracking, startup sweep bounded by `keepCount`, Windows `\\?\`-prefix handling, and the opt-in `allowSetupScript` gate for per-worktree environment setup. |
 | `project_catalog.rs` | Live, read-only project discovery from native Codex plus explicit metadata; canonical access-root filtering, deduplication, deterministic query ranking, sanitized MCP warnings, and local diagnostics. |
-| `exec_sessions.rs` | Generic-client transport fallback plus conversation-owned unified-exec sessions and transport-local diff state: trusted configured-shell resolution, Codex-compatible model shell-type selection by basename, PowerShell exit-code wrapping, background stdout/stderr drain tasks, process-group kill, idle cleanup, and output truncation (UTF-16 units to match the TS). |
+| `exec_sessions.rs` | Generic-client project/scratch fallback plus conversation-owned unified-exec sessions and transport-local diff state: private ephemeral scratch lifetime, trusted configured-shell resolution, Codex-compatible model shell-type selection by basename, PowerShell exit-code wrapping, background stdout/stderr drain tasks, process-group kill, idle cleanup, and output truncation (UTF-16 units to match the TS). |
 | `diff.rs` | Project-scoped Git snapshots, persistent conversation refs, transport-local fallbacks, incremental comparisons whose emitted snapshot can advance the private diff cursor through compare-and-swap, legacy review-ref migration, diff parsing and component-payload budgets. |
 | `diff_ui.rs` | Embedded MCP Apps resource, component-only diff-result metadata, legacy review-card compatibility, and persisted private interaction state for the interactive `show_diff` card. |
-| `setup_ui.rs` / `setup_ui.html` | Compact setup/status MCP App with cached-bypass update checks, background structured doctor diagnostics, conversational Refresh/Autofix handoffs, and debug timing display. |
+| `setup_ui.rs` / `setup_ui.html` | Compact setup/status MCP App with a searchable project/scratch chooser, selected direct/worktree/scratch path rendering, cached-bypass update checks, background structured doctor diagnostics, conversational Refresh/Autofix handoffs, and debug timing display. |
 | `self_update.rs` | Verified release resolution, checksum validation, bounded executable/changelog extraction, private durable updater records, and generated rollback-capable OS worker scripts. |
 | `self_update_ui.rs` | Embedded updater MCP App, component-only changelog payload, restart-tolerant polling, absolute timeout state, and app-only status-tool integration. |
 | `widget_debug.rs` | Small component-only timing metadata shared by all tool results when top-level debug mode is enabled. |
 | `apply_patch.rs` | The Codex patch format: verify the whole patch, then apply file operations sequentially with Codex-compatible partial-failure behavior, fuzzy context matching and CRLF preservation. |
 | `tool.rs` | Mandatory titles and `ToolBehavior`, typed-schema helpers, startup descriptor checks, cached dialect-aware JSON Schema validators, masked input diagnostics, and successful structured-output validation. |
-| `memory.rs` | Working memory outside the repo, keyed by a hash of the normalized active root, with `O_EXCL` locking and atomic writes. In multi-project mode, a configured `memory.dir` is a base containing one hashed child per project. |
+| `memory.rs` | Working memory outside the repo, keyed by a hash of the normalized active root, with `O_EXCL` locking and atomic writes. In multi-project mode, a configured `memory.dir` is a base containing one hashed child per selected project, managed worktree, or scratch workspace. |
 | `quickstart.rs` | Interactive first-install wizard for project scope, native tunnel credentials, JSON config merging, preservation of preconfigured advanced conversation authorization, and the ChatGPT developer-mode connector handoff. |
 | `doctor.rs` | Read-only local diagnostic orchestration, deterministic human/JSON reports, Codex-aligned Git/ripgrep probes, GitHub CLI/shell/Codex CLI/MCP command resolution, bounded GitHub release-freshness and loopback health probes, and service/update/tunnel prerequisite checks. |
 | `service.rs` | Per-user systemd, launchd, and Windows Task Scheduler definitions; state-aware launchd transitions; bounded child restart and readiness supervision; private rotating stdout/stderr logs; and `service logs [-f]`. |
@@ -849,13 +866,28 @@ supply the newer field, so the running server classifies the schema as unknown
 and recommends Refresh without rejecting the backward-compatible call.
 
 After recording the authorization grant, `setup` performs one bounded release
-check. It invokes `gh api --hostname github.com` with a 2-second timeout and falls
-back to an unauthenticated rustls GitHub API request with a 2-second timeout.
-Successful results are cached for 5 minutes and failures for 30 seconds. The
+check and reads the current workspace binding. It invokes
+`gh api --hostname github.com` with a 2-second timeout and falls back to an
+unauthenticated rustls GitHub API request with a 2-second timeout. Successful
+release results are cached for 5 minutes and failures for 30 seconds. The
 structured result includes current/latest versions, source, connector-schema
-classification, and the normal next agent step. The compact setup component
-renders the version and schema as line-oriented rows but deliberately omits that
-model-only continuation text.
+classification, and one of static project, unselected, selected project,
+managed-worktree, scratch, or state-check-failed placement, plus the normal next
+agent step. State inspection is diagnostic and does not undo a successful
+authorization grant. The compact setup component renders workspace state plus the
+version and schema as line-oriented rows, but deliberately omits the model-only
+continuation text.
+
+For an unselected multi-project conversation, `setup_ui.html` renders
+**Chat without a project** before a search input, then calls `list_projects`
+through the app tool bridge after initialization. Search is server-side, debounced,
+bounded to 50 returned rows, and guarded by a monotonic generation so stale
+responses cannot replace newer results. A row click calls
+`set_project_root({path})`; the scratch action calls
+`set_project_root({withoutProject:true})`. Both tools remain model-visible and also
+advertise app access. A successful receipt replaces the chooser with the selected
+name and active **Path**, **Worktree** plus source checkout, or **Scratch** path.
+The same compact card retains its user-driven update and diagnostic actions.
 
 The app-only `check_for_updates` MCP tool runs the same bounded release inspection
 with a forced cache bypass, then replaces the shared cache entry. This lets the

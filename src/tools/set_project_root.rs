@@ -208,7 +208,7 @@ impl Tool for SetProjectRoot {
     }
 
     fn title(&self) -> String {
-        "Set project root".to_string()
+        "Choose workspace".to_string()
     }
 
     fn behavior(&self) -> ToolBehavior {
@@ -217,7 +217,7 @@ impl Tool for SetProjectRoot {
             false,
             true,
             true,
-            "Persists a project binding and may clone or fetch an external Git repository without overwriting an existing source checkout.",
+            "Persists an immutable project or scratch binding and may clone or fetch an external Git repository without overwriting an existing source checkout.",
         )
     }
 

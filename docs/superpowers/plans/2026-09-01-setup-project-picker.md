@@ -1,10 +1,10 @@
 # Setup Project Picker Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **Execution constraint:** Implement this plan inline with no subagents. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Extend Codexify's setup card with a searchable multi-project chooser and a durable, immutable **Chat without a project** choice while preserving all existing project isolation and worktree behavior.
+**Goal:** Extend Codexify's setup card with a searchable multi-project chooser and an immutable **Chat without a project** choice backed by a private scratch workspace, while preserving existing project isolation and worktree behavior.
 
-**Architecture:** Add a tri-state binding snapshot (`unselected`, `project`, `without project`) around the existing conversation and transport binding implementations. Persist ChatGPT no-project choices in a separate versioned marker guarded by the same per-conversation lock as project bindings. Extend `set_project_root`, setup structured output, and the existing MCP App; no new public tool is required.
+**Architecture:** Add a tri-state binding snapshot (`unselected`, `project`, `without project`) around the existing conversation and transport binding implementations. Persist ChatGPT scratch choices and their canonical workspace paths in a separate versioned marker guarded by the same per-conversation lock as project bindings; generic transports own an ephemeral `TempDir`. Extend `set_project_root`, setup structured output, and the existing MCP App; no new public tool is required.
 
 **Tech Stack:** Rust 2024, Tokio, Serde/JSON Schema, RMCP MCP Apps metadata, embedded HTML/CSS/JavaScript, Cargo tests.
 
@@ -45,10 +45,11 @@ assert!(matches!(
     store.binding_state(&config, &identity).unwrap(),
     ProjectBindingState::WithoutProject { .. }
 ));
-assert!(store.effective_config(&config, &identity).unwrap_err().contains("without a project"));
+let effective = store.effective_config(&config, &identity).unwrap();
+assert_eq!(effective.work_dir, selected.scratch_root);
 ```
 
-Recreate the store and assert the marker survives. Assert repeating no-project is idempotent and selecting a project afterward is rejected. Add the inverse test: a selected project rejects no-project mode.
+Write a file in scratch, recreate the store, and assert both the marker and contents survive. Assert repeating no-project is idempotent and selecting a project afterward is rejected. Add the inverse test: a selected project rejects no-project mode.
 
 - [ ] **Step 2: Write failing transport-state tests**
 
@@ -59,10 +60,11 @@ assert!(matches!(
     session.binding_state(&config).unwrap(),
     ProjectBindingState::WithoutProject { .. }
 ));
-assert!(session.effective_config(&config).unwrap_err().contains("without a project"));
+let effective = session.effective_config(&config).unwrap();
+assert_eq!(effective.work_dir, selected.scratch_root);
 ```
 
-Assert idempotence and immutable switching in both directions.
+Assert idempotence and immutable switching in both directions, and assert that the temporary scratch directory is deleted when the transport state is dropped.
 
 - [ ] **Step 3: Write the concurrent winner test**
 
@@ -86,21 +88,26 @@ Add public state and receipt types:
 pub enum ProjectBindingState {
     Unselected { access_root: PathBuf, scope: ProjectBindingScope },
     Project(ProjectRootSelection),
-    WithoutProject { access_root: PathBuf, scope: ProjectBindingScope },
+    WithoutProject {
+        access_root: PathBuf,
+        scratch_root: PathBuf,
+        scope: ProjectBindingScope,
+    },
 }
 
 pub struct WithoutProjectSelection {
     pub access_root: PathBuf,
+    pub scratch_root: PathBuf,
     pub newly_selected: bool,
     pub scope: ProjectBindingScope,
 }
 ```
 
-Persist a versioned no-project marker at a distinct extension under the same access-root/identity namespace. Read both records under one state helper, reject a dual-record inconsistency, and acquire the existing project-binding lock for both mutations.
+Create a private durable scratch directory outside the access root, then persist a versioned no-project marker with its exact canonical path at a distinct extension under the same access-root/identity namespace. Read both records under one state helper, validate the scratch namespace and permissions, reject a dual-record inconsistency, and acquire the existing project-binding lock for both mutations.
 
 - [ ] **Step 6: Implement the transport state**
 
-Replace the optional transport project record with an optional enum carrying either the existing project placement or `WithoutProject`. Add `binding_state` and `select_without_project`; keep project validation unchanged.
+Replace the optional transport project record with an enum carrying either the existing project placement or `WithoutProject { scratch: Arc<TempDir>, scratch_root }`. Add `binding_state` and `select_without_project`; keep project validation unchanged.
 
 - [ ] **Step 7: Run focused tests and verify GREEN**
 
@@ -139,7 +146,7 @@ and:
 { "withoutProject": true }
 ```
 
-Reject `{}`, both fields, `withoutProject: false`, and an empty path. Assert project results contain `mode: "project"`, a derived `project_name`, and the active path. Assert no-project results contain `mode: "without_project"`, `project_name: "Chat without a project"`, and null placement fields.
+Reject `{}`, both fields, `withoutProject: false`, and an empty path. Assert project results contain `mode: "project"`, a derived `project_name`, and `active_root == project_root`. Assert no-project results contain `mode: "without_project"`, `project_name: "Chat without a project"`, `active_root == scratch_root`, and null project/source placement fields.
 
 - [ ] **Step 2: Run and verify RED**
 
@@ -164,7 +171,7 @@ Publish a closed JSON Schema with a root `oneOf`, preserving the existing `path`
 
 - [ ] **Step 4: Implement the common selection result**
 
-Dispatch the request to the conversation store in `server.rs` or the transport session in the tool fallback. Render one structured shape with a required `mode`, nullable placement fields, and existing scope/worktree information.
+Dispatch the request to the conversation store in `server.rs` or the transport session in the tool fallback. Render one structured shape with required `mode`, `project_name`, and `active_root` fields, mutually exclusive `project_root`/`scratch_root`, nullable source placement, and existing scope/worktree information.
 
 - [ ] **Step 5: Run focused tests and verify GREEN**
 
@@ -199,7 +206,7 @@ assert_eq!(structured["project"]["status"], "unselected");
 assert_eq!(structured["project"]["selectionAvailable"], true);
 ```
 
-For a selected managed worktree, assert `activePath` is the worktree project path, `sourcePath` is the source checkout, and `managedWorktree` is true. For no-project, assert the name and no active path. Add a state-read failure fixture that produces `check_failed` without failing setup authorization.
+For a selected managed worktree, assert `activePath` is the worktree project path, `sourcePath` is the source checkout, and `managedWorktree` is true. For no-project, assert the name and active scratch path. Add a state-read failure fixture that produces `check_failed` without failing setup authorization.
 
 - [ ] **Step 2: Run and verify RED**
 
@@ -279,7 +286,7 @@ callTool("set_project_root", { path: project.selector })
 callTool("set_project_root", { withoutProject: true })
 ```
 
-On success, normalize the receipt into setup project state and call the existing `render` function. Display **Worktree** for managed active paths, **Path** otherwise, and source checkout as secondary context.
+On success, normalize the receipt into setup project state and call the existing `render` function. Display **Worktree** for managed active paths, **Path** for direct projects, **Scratch** for no-project mode, and source checkout as secondary context.
 
 - [ ] **Step 6: Run focused tests and verify GREEN**
 
@@ -304,11 +311,11 @@ git commit -m "feat: add project chooser to setup card"
 
 - [ ] **Step 1: Document the user flow**
 
-Describe automatic/model selection when intent is exact, the setup-card chooser when it is ambiguous, server-side search, selected worktree path display, and immutable no-project semantics.
+Describe automatic/model selection when intent is exact, the setup-card chooser when it is ambiguous, server-side search, selected worktree path display, and immutable scratch semantics.
 
 - [ ] **Step 2: Document architecture and security**
 
-Document the tri-state binding, separate marker, shared lock, and the fact that no-project mode never maps to the access root.
+Document the tri-state binding, durable/ephemeral scratch lifecycle, separate marker, shared lock, and the fact that no-project mode never maps to the access root or constitutes an operating-system sandbox for unrestricted shell commands.
 
 - [ ] **Step 3: Run formatting and focused suites**
 

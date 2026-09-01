@@ -6,6 +6,19 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Multi-project `setup` now renders a searchable project chooser with
+  **Chat without a project** fixed above the results. The setup app calls the
+  existing `list_projects` and `set_project_root` tools, discards stale debounced
+  searches, and replaces the chooser with the selected direct path, managed
+  worktree plus source checkout, or private scratch path.
+- `set_project_root` now accepts `withoutProject: true`. ChatGPT conversations
+  receive a durable private scratch workspace outside the configured access root;
+  generic MCP transports receive an ephemeral scratch directory removed on
+  disconnect. Project-scoped filesystem, command, memory, skill, and instruction
+  tools use that scratch root without exposing the projects directory.
+
 ### Changed
 
 - The setup MCP App now uses compact status rows, keeps explicit **Check for
