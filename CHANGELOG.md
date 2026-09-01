@@ -6,6 +6,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.2.2] - 2026-09-01
+
 ### Added
 
 - Multi-project `setup` now renders a searchable project chooser with
