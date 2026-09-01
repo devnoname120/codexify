@@ -291,16 +291,14 @@ where
     Fut: Future<Output = Result<LatestVersionInspection, String>>,
 {
     let mut cache = cache.lock().await;
-    if !force_refresh {
-        if let Some(cached) = cache.as_ref() {
-            let ttl = if cached.result.is_ok() {
-                LATEST_VERSION_CACHE_TTL
-            } else {
-                LATEST_VERSION_ERROR_CACHE_TTL
-            };
-            if cached.checked_at.elapsed() < ttl {
-                return cached.result.clone().map_err(anyhow::Error::msg);
-            }
+    if !force_refresh && let Some(cached) = cache.as_ref() {
+        let ttl = if cached.result.is_ok() {
+            LATEST_VERSION_CACHE_TTL
+        } else {
+            LATEST_VERSION_ERROR_CACHE_TTL
+        };
+        if cached.checked_at.elapsed() < ttl {
+            return cached.result.clone().map_err(anyhow::Error::msg);
         }
     }
 
