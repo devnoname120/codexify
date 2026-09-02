@@ -6,6 +6,14 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- The setup widget's stale-schema **Refresh** action now opens the relative
+  `#settings/Plugins/plugin_asdk_app_<slug>:~:text=Information-,Refresh,-Connected`
+  hash directly through ChatGPT's `window.openai.openExternal`, with
+  `ui/open-link` as fallback. It no longer reconstructs the current ChatGPT URL
+  from `document.referrer`.
+
 ## [1.2.3] - 2026-09-02
 
 ### Added

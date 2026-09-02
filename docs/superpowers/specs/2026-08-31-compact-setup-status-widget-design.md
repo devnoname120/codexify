@@ -84,11 +84,9 @@ No button is shown.
 Connector schema: v1.1.0 · refresh required   [Refresh]
 ```
 
-`Refresh` sits on the schema row. The widget walks upward through same-origin iframe ancestors until the first cross-origin boundary. ChatGPT's widget sandbox ancestor has a hostname of the form `asdk_app_<slug>.web-sandbox.oaiusercontent.com`; the widget extracts only that `<slug>` and builds `#settings/Plugins/plugin_asdk_app_<slug>`. If no validated sandbox slug is found, it falls back to `#settings/Plugins`.
+`Refresh` sits on the schema row. The widget walks upward through same-origin iframe ancestors until the first cross-origin boundary. ChatGPT's widget sandbox ancestor has a hostname of the form `asdk_app_<slug>.web-sandbox.oaiusercontent.com`; the widget extracts only that `<slug>` and builds the relative `#settings/Plugins/plugin_asdk_app_<slug>:~:text=Information-,Refresh,-Connected` hash. If no validated sandbox slug is found, it falls back to `#settings/Plugins`.
 
-When an accessible ancestor exposes a `document.referrer` on `https://chatgpt.com`, the hash is resolved against that URL so the current ChatGPT page path is preserved when possible. Otherwise the fallback base is `https://chatgpt.com/`.
-
-The widget opens the resulting URL through the portable `ui/open-link` host request, with `window.openai.openExternal` as the ChatGPT compatibility fallback. It never attempts to reach through the cross-origin boundary or assign the outer frame's location directly.
+The widget passes that relative hash directly to `window.openai.openExternal`, which preserves the current ChatGPT page without reconstructing it from `document.referrer`. The portable `ui/open-link` host request remains the compatibility fallback. The widget never attempts to reach through the cross-origin boundary or assign the outer frame's location directly.
 
 After the link request is accepted, the widget tells the user to select Codexify if necessary, scroll below the list of tools, and click **Refresh**. Link-opening failures are shown inline and never fall back to an agent prompt.
 
@@ -206,7 +204,7 @@ The setup widget should not duplicate restart monitoring.
 - current state retains `Check for updates`;
 - stale schema has row-local `Refresh`;
 - `Refresh` extracts the slug only from a matching `asdk_app_<slug>.web-sandbox.oaiusercontent.com` same-origin ancestor, uses the generic Plugins route when absent, and never sends an agent prompt;
-- `Refresh` uses `ui/open-link` with `window.openai.openExternal` as the compatibility fallback;
+- `Refresh` passes the relative settings hash to `window.openai.openExternal` first, with `ui/open-link` as the compatibility fallback;
 - automatic healthy doctor result stays hidden;
 - warning-only doctor result shows compact summary plus `Autofix`;
 - failure doctor result expands actionable diagnostics automatically;

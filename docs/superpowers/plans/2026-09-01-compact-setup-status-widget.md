@@ -569,7 +569,7 @@ for expected in [
     "Autofix",
     "web-sandbox.oaiusercontent.com",
     "plugin_asdk_app_",
-    "https://chatgpt.com/",
+    "Information-,Refresh,-Connected",
     "scroll below the list of tools",
 ] {
     assert!(text.contains(expected), "missing {expected}");
@@ -720,7 +720,7 @@ Automatic healthy results render no doctor panel. Warning-only results render a 
 
 Build the Autofix prompt from only warning/failure checks, preserving ID, summary, detail, and remediation. Bound individual fields and total prompt length. Autofix calls `sendFollowUpMessage`, disables while pending, and reports rejection/transport errors inline without removing the findings.
 
-For Refresh, walk upward through same-origin iframe ancestors until the first cross-origin boundary. Accept a connector slug only from a hostname matching `asdk_app_<slug>.web-sandbox.oaiusercontent.com`. Build `#settings/Plugins/plugin_asdk_app_<slug>` when found and `#settings/Plugins` otherwise. Resolve the hash against an accessible ChatGPT `document.referrer` when available so the current page path is retained; otherwise use `https://chatgpt.com/` as the base. Open the resulting URL through `ui/open-link` with `window.openai.openExternal` as fallback. Never send a Refresh agent prompt.
+For Refresh, walk upward through same-origin iframe ancestors until the first cross-origin boundary. Accept a connector slug only from a hostname matching `asdk_app_<slug>.web-sandbox.oaiusercontent.com`. Build the relative `#settings/Plugins/plugin_asdk_app_<slug>:~:text=Information-,Refresh,-Connected` hash when found and `#settings/Plugins` otherwise. Pass the relative hash directly to `window.openai.openExternal`, with `ui/open-link` as fallback. Never inspect `document.referrer` and never send a Refresh agent prompt.
 
 After the host accepts the link request, tell the user to select Codexify if necessary, scroll below the list of tools, and click **Refresh**. Link-opening failures remain inline while preserving the stale-schema state.
 

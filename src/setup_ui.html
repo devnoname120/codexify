@@ -505,42 +505,29 @@ button { font: inherit; }
   }
 
   async function openLink(url) {
-    if (initialized) {
+    if (window.openai && typeof window.openai.openExternal === "function") {
       try {
-        const result = await request("ui/open-link", { url });
+        const result = await window.openai.openExternal({ href: url, redirectUrl: false });
         return accepted(result, "Open link");
       } catch (error) {
-        if (!(window.openai && typeof window.openai.openExternal === "function")) {
-          throw error;
-        }
+        if (!initialized) throw error;
       }
     }
-    if (window.openai && typeof window.openai.openExternal === "function") {
-      const result = await window.openai.openExternal({ href: url, redirectUrl: false });
+    if (initialized) {
+      const result = await request("ui/open-link", { url });
       return accepted(result, "Open link");
     }
     throw new Error("This host does not expose link opening.");
   }
 
-  function connectorSettingsContext() {
+  function connectorSlug() {
     let current = window;
-    let slug = null;
-    let chatgptReferrer = null;
 
     for (let depth = 0; depth < 8; depth += 1) {
       try {
         const hostname = String(current.location.hostname || "").toLowerCase();
         const match = hostname.match(/^asdk_app_([a-z0-9_-]+)\.web-sandbox\.oaiusercontent\.com$/);
-        if (!slug && match) slug = match[1];
-
-        const referrer = current.document && current.document.referrer;
-        if (!chatgptReferrer && referrer) {
-          const parsed = new URL(referrer);
-          if (parsed.protocol === "https:"
-              && (parsed.hostname === "chatgpt.com" || parsed.hostname === "www.chatgpt.com")) {
-            chatgptReferrer = parsed.href;
-          }
-        }
+        if (match) return match[1];
       } catch {
         break;
       }
@@ -556,15 +543,14 @@ button { font: inherit; }
       current = parent;
     }
 
-    return { slug, chatgptReferrer };
+    return null;
   }
 
-  function refreshSettingsUrl() {
-    const context = connectorSettingsContext();
-    const hash = context.slug
-      ? `#settings/Plugins/plugin_asdk_app_${context.slug}`
+  function refreshSettingsHref() {
+    const slug = connectorSlug();
+    return slug
+      ? `#settings/Plugins/plugin_asdk_app_${slug}:~:text=Information-,Refresh,-Connected`
       : "#settings/Plugins";
-    return new URL(hash, context.chatgptReferrer || "https://chatgpt.com/").href;
   }
 
   function addDebugEntry(entry) {
@@ -1341,7 +1327,7 @@ button { font: inherit; }
     actionState = { kind: "refresh", message: "Opening connector settings…", tone: null, pending: true };
     renderCurrent();
     try {
-      await openLink(refreshSettingsUrl());
+      await openLink(refreshSettingsHref());
       actionState = {
         kind: "refresh",
         message: "In ChatGPT settings, select Codexify if needed, scroll below the list of tools, and click Refresh.",

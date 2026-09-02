@@ -116,7 +116,7 @@ mod tests {
             "Autofix",
             "web-sandbox\\.oaiusercontent\\.com",
             "plugin_asdk_app_",
-            "https://chatgpt.com/",
+            "Information-,Refresh,-Connected",
             "scroll below the list of tools",
             "Doctor returned no structured report",
             "status-pass",
@@ -155,9 +155,18 @@ mod tests {
         assert!(!text.contains("Connector status and diagnostics"));
         assert!(!text.contains("REFRESH_PROMPT"));
         assert!(!text.contains("sendRefreshPrompt"));
+        assert!(!text.contains("document.referrer"));
+        assert!(!text.contains("chatgptReferrer"));
         assert!(!text.contains("connectorSettingsUrl"));
         assert!(!text.contains("connectorPluginId"));
         assert!(!text.contains("innerHTML"));
+        let open_link = &text[text.find("async function openLink").unwrap()
+            ..text.find("function connectorSlug").unwrap()];
+        assert!(
+            open_link.find("window.openai.openExternal").unwrap()
+                < open_link.find("ui/open-link").unwrap(),
+            "Refresh must prefer ChatGPT openExternal for relative settings hashes"
+        );
         assert!(text.contains("max-width: 500px"));
         assert!(contents_for_uri("ui://codexify/setup/unknown").is_none());
     }

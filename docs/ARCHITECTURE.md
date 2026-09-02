@@ -911,14 +911,15 @@ diagnose, repair, verify, and rerun doctor.
 A stale or unknown connector schema adds a row-local **Refresh** action. The
 component walks upward through same-origin iframe ancestors until the first
 cross-origin boundary and accepts a connector slug only from a hostname matching
-`asdk_app_<slug>.web-sandbox.oaiusercontent.com`. It builds
-`#settings/Plugins/plugin_asdk_app_<slug>` from that sandbox identity or uses the
-generic `#settings/Plugins` route when unavailable. An accessible ChatGPT
-`document.referrer` is used as the base when possible; otherwise the base is
-`https://chatgpt.com/`. The result is opened through `ui/open-link`, with
-`window.openai.openExternal` as the ChatGPT compatibility fallback. The widget
-then tells the user to select Codexify if necessary, scroll below the connector's
-tool list, and click **Refresh**. Refresh never creates an agent turn.
+`asdk_app_<slug>.web-sandbox.oaiusercontent.com`. It builds the relative
+`#settings/Plugins/plugin_asdk_app_<slug>:~:text=Information-,Refresh,-Connected`
+hash from that sandbox identity and passes it directly to ChatGPT's
+`window.openai.openExternal`, whose relative navigation preserves the current page
+without requiring `document.referrer`. The portable `ui/open-link` request remains
+the compatibility fallback. When the sandbox identity is unavailable, the widget
+uses the generic `#settings/Plugins` route. It then tells the user to select
+Codexify if necessary, scroll below the connector's tool list, and click
+**Refresh**. Refresh never creates an agent turn.
 
 ### 8.5 Detached self-update
 
