@@ -6,6 +6,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.2.3] - 2026-09-02
+
 ### Added
 
 - Top-level `uiWidgets` configuration now controls Codexify's built-in MCP App
