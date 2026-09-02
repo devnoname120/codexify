@@ -6,6 +6,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.2.4] - 2026-09-02
+
 ### Changed
 
 - The setup widget's stale-schema **Refresh** action now opens the relative
