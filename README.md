@@ -4,7 +4,7 @@
 
 > 📖 **New here? Start with the [Wiki](https://github.com/devnoname120/codexify/wiki)** — an end-user guide covering [installation](https://github.com/devnoname120/codexify/wiki/Installation), [every CLI argument](https://github.com/devnoname120/codexify/wiki/CLI-Reference), [every config option](https://github.com/devnoname120/codexify/wiki/Configuration), and [how it all works end-to-end](https://github.com/devnoname120/codexify/wiki/How-It-Works). This README is the complete technical reference; the wiki is the friendlier path in.
 
-A local MCP bridge server that lets ChatGPT Web Pro call tools on your machine: read/write files, run shell commands, git operations, and search. Codexify is implemented in Rust with **tokio + axum** and the official [`rmcp`](https://crates.io/crates/rmcp) SDK over Streamable HTTP. It can expose the local MCP endpoint through OpenAI's native [Secure MCP Tunnel](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels), without opening an inbound port or publishing a general-purpose URL.
+A local MCP bridge server that lets ChatGPT Web models, including 6 Astra Pro, call tools on your machine: read/write files, run shell commands, git operations, and search. Codexify is implemented in Rust with **tokio + axum** and the official [`rmcp`](https://crates.io/crates/rmcp) SDK over Streamable HTTP. It can expose the local MCP endpoint through OpenAI's native [Secure MCP Tunnel](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels), without opening an inbound port or publishing a general-purpose URL.
 
 In native-tunnel mode, Codexify listens only on `127.0.0.1`, protects the MCP endpoint with a random per-process bearer token, starts OpenAI's official runtime-only tunnel client, and supervises it for the lifetime of the server. The tunnel client makes outbound HTTPS requests to OpenAI and forwards tunnel traffic to the authenticated loopback MCP endpoint. Externally managed tunnels are also supported.
 
@@ -16,7 +16,7 @@ Codexify can also **aggregate other MCP servers**. It connects to local stdio se
 
 ```mermaid
 flowchart LR
-    ChatGPT["ChatGPT Web Pro"]
+    ChatGPT["ChatGPT Web\n6 Astra Pro"]
     OpenAITunnel["OpenAI Secure MCP Tunnel"]
     TunnelClient["Official OpenAI\ntunnel-client-runtime"]
     Server["Codexify\nMCP Bridge\n127.0.0.1:3000"]
