@@ -8,6 +8,12 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Copyable continuation prompts when a conversation uses an older connector
+  schema, with a **Prepare handoff** action to save task context. New chats use
+  `set_project_root.resumePath` to reuse the exact saved worktree, direct checkout,
+  or persistent scratch workspace without allocating another checkout. Resumption
+  preserves uncommitted files, the index, and workspace memory; invalid paths fail
+  without falling back. Clipboard denial supports manual copying.
 - Version-only connector reload tracking across conversations and server restarts,
   scoped by endpoint and identified caller. The setup widget distinguishes a
   current schema, a connector requiring Refresh, and an older conversation that

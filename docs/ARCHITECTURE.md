@@ -919,6 +919,32 @@ start a new conversation. A missing reload record remains internally `unknown`
 and hides the row. Polls never write records. Rollbacks are handled by equality,
 not by choosing the greatest semantic version.
 
+For `conversation_stale`, the setup card also renders a copyable continuation
+prompt using the current `project.activePath`. `set_project_root({resumePath})`
+is exclusive with `path`, `withoutProject`, and `createWorktree`, and is handled
+only for stable ChatGPT conversations after the ordinary authorization check.
+Under the destination conversation's binding lock, `ProjectBindingStore` finds
+an existing validated binding for that exact canonical active path within the
+configured access-root scope and persists a new binding to the same workspace.
+There is no clone/fetch/allocation path and no fallback. An already-bound
+conversation can only repeat the same active path. Managed-worktree metadata and
+source/access-root checks remain in effect; the new record also pins the worktree
+for cleanup. Persistent scratch bindings carry an optional original workspace
+namespace key so repeated handoffs reuse the same private directory without
+depending on a chain of old bindings. Legacy scratch records use their own
+conversation key. Namespace keys are validated as bounded hex path components.
+
+Project memory stays keyed by the unchanged active directory. **Prepare handoff**
+uses the existing host-message bridge to ask the current assistant to update its
+plan and `continuation-handoff` note; no server-side transcript access is assumed.
+The copyable prompt requires normal setup in the new conversation, workspace
+resumption before selection, then `get_agent_brief` and `recall`. Authorization,
+command sessions, and diff checkpoints retain the new conversation's identity.
+No raw conversation ID or setup ref is included. Clipboard denial leaves a
+selectable textarea; periodic status checks preserve the textarea while disabling
+actions during revalidation. Failed checks remove the continuation offer.
+New cards use setup resource v5; v1-v4 remain readable.
+
 The same compact card retains its user-driven update and diagnostic actions.
 
 The legacy app-only `check_for_updates` MCP tool remains available for older

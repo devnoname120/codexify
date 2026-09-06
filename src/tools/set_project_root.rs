@@ -13,6 +13,8 @@ use crate::types::{AppConfig, ToolResult, WorktreeMode};
 
 pub struct SetProjectRoot;
 
+pub use crate::project_bindings::WorkspaceSelection as ProjectSelection;
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SetProjectRootArgs {
@@ -21,6 +23,8 @@ struct SetProjectRootArgs {
     without_project: Option<bool>,
     #[serde(rename = "createWorktree")]
     create_worktree: Option<bool>,
+    #[serde(rename = "resumePath")]
+    resume_path: Option<String>,
 }
 
 pub enum ProjectSelectionRequest {
@@ -29,15 +33,12 @@ pub enum ProjectSelectionRequest {
         create_worktree: Option<bool>,
     },
     WithoutProject,
-}
-
-pub enum ProjectSelection {
-    Project(ProjectRootSelection),
-    WithoutProject(WithoutProjectSelection),
+    Resume(String),
 }
 
 impl SetProjectRoot {
     pub const NAME: &'static str = "set_project_root";
+    pub const RESUME_GUIDANCE: &'static str = "A continuation prompt with an exact active workspace path takes precedence over ordinary project selection: call `set_project_root` with only `resumePath` before selecting anything else. This reuses a validated saved worktree, direct checkout, or persistent scratch workspace without creating a worktree or cloning. Do not substitute `path`, the source checkout, a repository URL, or a conversation ID. Stop on a resume error rather than allocating a replacement. Then call `get_agent_brief` and `recall` for saved task context; conversation messages and running command sessions are not transferred.";
 }
 
 fn parse_request(args: &Value) -> Result<ProjectSelectionRequest, String> {
@@ -45,8 +46,20 @@ fn parse_request(args: &Value) -> Result<ProjectSelectionRequest, String> {
         path,
         without_project,
         create_worktree,
+        resume_path,
     } = serde_json::from_value(args.clone())
         .map_err(|error| format!("Invalid tool arguments: {error}"))?;
+    if let Some(resume_path) = resume_path {
+        return if path.is_none()
+            && without_project.is_none()
+            && create_worktree.is_none()
+            && !resume_path.trim().is_empty()
+        {
+            Ok(ProjectSelectionRequest::Resume(resume_path))
+        } else {
+            Err("resumePath must be non-empty and cannot be combined with path, withoutProject, or createWorktree.".into())
+        };
+    }
     match (path, without_project) {
         (Some(path), None) if !path.trim().is_empty() => Ok(ProjectSelectionRequest::Project {
             path,
@@ -226,7 +239,7 @@ where
         ProjectSelectionRequest::Project {
             create_worktree, ..
         } => *create_worktree,
-        ProjectSelectionRequest::WithoutProject => None,
+        ProjectSelectionRequest::WithoutProject | ProjectSelectionRequest::Resume(_) => None,
     };
     let selection = match select(request).await {
         Ok(selection) => selection,
@@ -276,7 +289,8 @@ impl Tool for SetProjectRoot {
     fn describe(&self, config: &AppConfig) -> String {
         if config.multi_project {
             format!(
-                "{} The access root is `{}` and Git clones are placed in `{}`. A filesystem path may be relative to the access root or absolute inside it.",
+                "{} {} The access root is `{}` and Git clones are placed in `{}`. An ordinary project path must be inside the access root; resumePath may name an already validated managed worktree or scratch workspace outside it.",
+                Self::RESUME_GUIDANCE,
                 self.description(),
                 config.work_dir.display(),
                 config.project_clone_dir.display()
@@ -299,6 +313,11 @@ impl Tool for SetProjectRoot {
                     "const": true,
                     "description": "Choose a private scratch workspace instead of attaching a project."
                 },
+                "resumePath": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Resume a saved workspace in a new ChatGPT conversation using its exact absolute active path, including a managed worktree or persistent scratch workspace. Reuses that workspace unchanged; never creates or clones a checkout. Use this instead of path for a continuation prompt, before making any other workspace selection. Requires stable conversation metadata."
+                },
                 "createWorktree": {
                     "type": "boolean",
                     "description": "Override the configured worktree mode for this project selection. Pass false when the user asks to use the source checkout without a worktree; pass true when they ask for a worktree. Omit only when the user has no preference."
@@ -307,11 +326,15 @@ impl Tool for SetProjectRoot {
             "oneOf": [
                 {
                     "required": ["path"],
-                    "not": { "required": ["withoutProject"] }
+                    "not": { "anyOf": [{ "required": ["withoutProject"] }, { "required": ["resumePath"] }] }
                 },
                 {
                     "required": ["withoutProject"],
-                    "not": { "anyOf": [{ "required": ["path"] }, { "required": ["createWorktree"] }] }
+                    "not": { "anyOf": [{ "required": ["path"] }, { "required": ["createWorktree"] }, { "required": ["resumePath"] }] }
+                },
+                {
+                    "required": ["resumePath"],
+                    "not": { "anyOf": [{ "required": ["path"] }, { "required": ["withoutProject"] }, { "required": ["createWorktree"] }] }
                 }
             ],
             "additionalProperties": false
@@ -361,6 +384,7 @@ impl Tool for SetProjectRoot {
     async fn call(&self, args: Value, config: &AppConfig, session: &SessionState) -> ToolResult {
         select_and_render(&args, |request| async move {
             match request {
+                ProjectSelectionRequest::Resume(_) => Err("resumePath requires a stable ChatGPT conversation identifier. Transport-only sessions cannot resume a saved workspace.".into()),
                 ProjectSelectionRequest::Project {
                     path,
                     create_worktree,

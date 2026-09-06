@@ -578,6 +578,11 @@ impl ServerHandler for CodexHandler {
                     if let Some(identity) = conversation.as_ref() {
                         select_and_render(&args, |request| async move {
                             match request {
+                                ProjectSelectionRequest::Resume(path) => {
+                                    self.project_bindings
+                                        .resume_workspace(&self.config, identity, &path)
+                                        .await
+                                }
                                 ProjectSelectionRequest::Project {
                                     path,
                                     create_worktree,
@@ -2075,6 +2080,95 @@ mod tests {
                 client.cancel().await.unwrap();
                 server_task.await.unwrap();
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn resume_dispatch_uses_the_new_conversation_and_preserves_workspace_kind() {
+        for scratch in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let access = root.path().join("projects");
+            std::fs::create_dir_all(access.join("demo")).unwrap();
+            let mut handler = handler_with_tools(
+                root.path(),
+                vec![Box::new(SetProjectRoot)],
+                crate::types::ToolLogLevel::Info,
+            );
+            let config = Arc::make_mut(&mut handler.config);
+            config.multi_project = true;
+            config.work_dir = access;
+            config.worktrees.mode = crate::types::WorktreeMode::Always;
+            config.worktrees.root = root.path().join("worktrees");
+            let config = handler.config.clone();
+            let bindings = handler.project_bindings.clone();
+            let (server_transport, client_transport) = tokio::io::duplex(256 * 1024);
+            let task = tokio::spawn(async move {
+                handler
+                    .serve(server_transport)
+                    .await
+                    .unwrap()
+                    .waiting()
+                    .await
+                    .unwrap();
+            });
+            let client = ().serve(client_transport).await.unwrap();
+            let request = |chat: Option<&str>, args: Value| {
+                let mut value = json!({"name":"set_project_root", "arguments":args});
+                if let Some(chat) = chat {
+                    value["_meta"] = json!({"openai/session":chat});
+                }
+                serde_json::from_value::<CallToolRequestParams>(value).unwrap()
+            };
+            let original = client
+                .call_tool(request(
+                    Some("original"),
+                    if scratch {
+                        json!({"withoutProject":true})
+                    } else {
+                        json!({"path":"demo", "createWorktree":false})
+                    },
+                ))
+                .await
+                .unwrap();
+            assert_ne!(original.is_error, Some(true), "{original:?}");
+            let original = original.structured_content.unwrap();
+            let args = json!({"resumePath":original["active_root"]});
+            let resumed = client
+                .call_tool(request(Some("continuation"), args.clone()))
+                .await
+                .unwrap();
+            assert_ne!(resumed.is_error, Some(true), "{resumed:?}");
+            let resumed = resumed.structured_content.unwrap();
+            assert_eq!(resumed["active_root"], original["active_root"]);
+            assert_eq!(resumed["mode"], original["mode"]);
+            assert_eq!(resumed["managed_worktree"], false);
+            assert_eq!(resumed["cloned"], false);
+            assert_eq!(resumed["newly_selected"], true);
+            assert_eq!(resumed["binding_scope"], "chatgpt_conversation");
+            for chat in ["original", "continuation"] {
+                let identity = ConversationIdentity::from_openai_session(chat).unwrap();
+                assert_eq!(
+                    bindings
+                        .selected_project_root(&config, &identity)
+                        .unwrap()
+                        .unwrap()
+                        .to_string_lossy(),
+                    original["active_root"].as_str().unwrap()
+                );
+            }
+            let repeated = client
+                .call_tool(request(Some("continuation"), args.clone()))
+                .await
+                .unwrap();
+            assert_eq!(
+                repeated.structured_content.unwrap()["newly_selected"],
+                false
+            );
+            let transport = client.call_tool(request(None, args)).await.unwrap();
+            assert_eq!(transport.is_error, Some(true));
+            assert!(!config.worktrees.root.exists());
+            client.cancel().await.unwrap();
+            task.await.unwrap();
         }
     }
 

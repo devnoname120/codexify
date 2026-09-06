@@ -1,8 +1,9 @@
 use rmcp::model::{MetaObject, Resource, ResourceContents};
 use serde_json::json;
 
-pub const SETUP_UI_URI: &str = "ui://codexify/setup/v4/mcp-app.html";
-pub const PREVIOUS_SETUP_UI_URI: &str = "ui://codexify/setup/v3/mcp-app.html";
+pub const SETUP_UI_URI: &str = "ui://codexify/setup/v5/mcp-app.html";
+pub const PREVIOUS_SETUP_UI_URI: &str = "ui://codexify/setup/v4/mcp-app.html";
+pub const PREVIOUS_SETUP_UI_URI_V3: &str = "ui://codexify/setup/v3/mcp-app.html";
 pub const PREVIOUS_SETUP_UI_URI_V2: &str = "ui://codexify/setup/v2/mcp-app.html";
 pub const LEGACY_SETUP_UI_URI: &str = "ui://codexify/setup/v1/mcp-app.html";
 pub const SETUP_UI_MIME_TYPE: &str = "text/html;profile=mcp-app";
@@ -60,6 +61,7 @@ pub fn resource() -> Resource {
 pub fn contents_for_uri(uri: &str) -> Option<ResourceContents> {
     if uri != SETUP_UI_URI
         && uri != PREVIOUS_SETUP_UI_URI
+        && uri != PREVIOUS_SETUP_UI_URI_V3
         && uri != PREVIOUS_SETUP_UI_URI_V2
         && uri != LEGACY_SETUP_UI_URI
     {
@@ -94,7 +96,8 @@ mod tests {
 
     #[test]
     fn current_and_legacy_setup_resource_uris_are_readable() {
-        assert_eq!(SETUP_UI_URI, "ui://codexify/setup/v4/mcp-app.html");
+        assert_eq!(SETUP_UI_URI, "ui://codexify/setup/v5/mcp-app.html");
+        assert!(contents_for_uri(PREVIOUS_SETUP_UI_URI_V3).is_some());
         assert!(contents_for_uri(PREVIOUS_SETUP_UI_URI_V2).is_some());
         assert!(contents_for_uri(PREVIOUS_SETUP_UI_URI).is_some());
         assert!(contents_for_uri(SETUP_UI_URI).is_some());
@@ -112,6 +115,10 @@ mod tests {
             "setup_status",
             "conversationVersion",
             "conversation_stale",
+            "resumePath",
+            "Copy continuation prompt",
+            "Prepare handoff",
+            "continuation-handoff",
             "Start a new conversation to use the latest schema.",
             "self_update",
             "doctor",

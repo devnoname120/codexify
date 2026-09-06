@@ -43,6 +43,10 @@ button { font: inherit; }
   box-shadow: 0 1px 2px light-dark(rgba(0, 0, 0, .04), rgba(0, 0, 0, .20));
 }
 .status-list { display: grid; gap: 5px; }
+.continuation-panel { display: grid; gap: 7px; margin-top: 8px; padding: 9px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); }
+.continuation-prompt { width: 100%; min-height: 140px; resize: vertical; padding: 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text); font: 12px/1.45 var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace); }
+.continuation-prompt:focus { outline: 2px solid var(--focus); outline-offset: 1px; }
+.continuation-actions { display: flex; flex-wrap: wrap; gap: 6px; }
 .status-row {
   display: flex;
   min-width: 0;
@@ -730,6 +734,102 @@ button { font: inherit; }
     return row;
   }
 
+  function continuationView() {
+    if (!hasLiveStatus || (!statusFresh && !statusRefreshing)
+      || currentData.connectorSchema.status !== "conversation_stale") return null;
+    const project = currentData.project || {};
+    if (project.status === "check_failed") {
+      return { help: "Resolve the workspace error before preparing a continuation. Do not select a replacement checkout.", prompt: null };
+    }
+    const setup = "Continue my previous task using the same Codexify connector. Complete its normal setup for this new conversation if required.";
+    const context = "Then call get_agent_brief and recall. Read the saved plan and continuation-handoff note, inspect the current files and Git status where applicable, and continue from the recorded next steps. Previous conversation messages and running command sessions are not transferred. If the saved context is missing or insufficient, ask me for the task summary instead of guessing. Do not edit this workspace concurrently from the old and new conversations.";
+    if (project.status === "unselected") {
+      return { help: "No workspace has been selected. Copy this prompt and add your task summary in the new conversation.", prompt: `${setup}\n\nNo workspace was selected in the previous conversation. Choose a workspace only when the task makes that choice clear. Ask me for the task summary if it is not provided.`, handoff: false };
+    }
+    if (!project.activePath || !["selected", "without_project"].includes(project.status)) {
+      return { help: "Check the workspace status before preparing a continuation.", prompt: null };
+    }
+    if (project.bindingScope === "static") {
+      return { help: "This connector uses a fixed workspace. Prepare a handoff, then copy the prompt into a new conversation using the same connector.", prompt: `${setup}\n\nThe fixed workspace must still be ${JSON.stringify(project.activePath)}. Check get_environment before proceeding; stop if the path differs. Do not call set_project_root.\n\n${context}`, handoff: true };
+    }
+    if (project.bindingScope !== "chatgpt_conversation") {
+      return { help: "This host uses a transport-only workspace that cannot be resumed by this prompt. Save or export its files and task summary before continuing elsewhere.", prompt: null };
+    }
+    return {
+      help: "Prepare a handoff to save task context, then copy this prompt into a new conversation using the same connector. It reuses this exact workspace; it does not copy chat history.",
+      prompt: `${setup}\n\nBefore selecting any project, call set_project_root with exactly:\n${JSON.stringify({ resumePath: project.activePath })}\n\nReuse that existing workspace, including uncommitted changes. Do not create a worktree, clone, pull, reset, switch branches, or fall back to the source checkout. If resuming fails, stop and report the error.\n\n${context}`,
+      handoff: true
+    };
+  }
+
+  function renderContinuation() {
+    const host = document.getElementById("continuation-host");
+    if (!host) return;
+    const view = continuationView();
+    const key = JSON.stringify(view);
+    // Live polling must not remove the selected text while the user copies it.
+    if (host.dataset.key !== key) {
+      host.dataset.key = key;
+      host.replaceChildren();
+      if (view) {
+        const panel = el("section", "continuation-panel");
+        panel.append(el("h3", "workspace-title", "Continue in a new conversation"), el("p", "workspace-copy", view.help));
+        if (view.prompt) {
+          const field = el("textarea", "continuation-prompt");
+          field.id = "continuation-prompt";
+          field.readOnly = true;
+          field.value = view.prompt;
+          field.setAttribute("aria-label", "Continuation prompt");
+          const actions = el("div", "continuation-actions");
+          const copy = actionButton("Copy continuation prompt", "primary", () => { void copyContinuation(); }, false);
+          copy.id = "continuation-copy";
+          actions.append(copy);
+          if (view.handoff) {
+            const prepare = actionButton("Prepare handoff", "", () => { void prepareHandoff(); }, false);
+            prepare.id = "continuation-prepare";
+            actions.append(prepare);
+          }
+          const feedback = el("div", "workspace-copy");
+          feedback.id = "continuation-feedback";
+          feedback.setAttribute("role", "status");
+          panel.append(field, actions, feedback);
+        }
+        host.append(panel);
+      }
+    }
+    for (const id of ["continuation-copy", "continuation-prepare"]) {
+      const button = document.getElementById(id);
+      if (button) button.disabled = !statusFresh || statusRefreshing || actionState.pending;
+    }
+  }
+
+  async function copyContinuation() {
+    if (!statusFresh || statusRefreshing) return;
+    const field = document.getElementById("continuation-prompt");
+    const feedback = document.getElementById("continuation-feedback");
+    if (!field || !feedback) return;
+    try {
+      if (typeof navigator === "undefined" || !navigator.clipboard?.writeText) throw new Error("Clipboard unavailable");
+      await navigator.clipboard.writeText(field.value);
+      feedback.textContent = "Copied. Paste into a new conversation using the same connector.";
+    } catch {
+      if (document.getElementById("continuation-prompt") !== field) return;
+      field.focus();
+      field.select();
+      field.setSelectionRange(0, field.value.length);
+      feedback.textContent = "Automatic copying is unavailable. The prompt is selected; copy it manually.";
+    }
+  }
+
+  async function prepareHandoff() {
+    if (!statusFresh || statusRefreshing || !continuationView()?.handoff) return;
+    const path = JSON.stringify(currentData.project.activePath);
+    await sendPrompt("handoff",
+      `Prepare a continuation handoff for this task in the CURRENT Codexify workspace ${path}. Do not select another workspace or create a worktree. Call recall first, then update the saved plan and create or update the project-memory note named continuation-handoff with the task goal, constraints, completed work, exact workspace, changed files, commits, verification results, pending work, and concrete next steps. Do not store credentials, setup refs, or raw conversation IDs. If project memory is unavailable, give me a self-contained handoff summary to paste alongside the continuation prompt. Do not commit, push, or continue implementation just to prepare the handoff. Report whether the handoff was saved, then stop.`,
+      "Handoff requested. Check the assistant's reply for confirmation that it was saved; otherwise copy its summary alongside the continuation prompt."
+    );
+  }
+
   function workspaceField(label, value) {
     const field = el("div", "workspace-field");
     field.append(
@@ -1154,6 +1254,9 @@ button { font: inherit; }
     const statuses = el("div", "status-list");
     statuses.append(...[renderUpdateRow(), renderSchemaRow()].filter(Boolean));
     card.append(statuses);
+    const continuation = el("div");
+    continuation.id = "continuation-host";
+    card.append(continuation);
     const projectSection = renderProjectSection();
     if (projectSection) card.append(projectSection);
 
@@ -1185,6 +1288,7 @@ button { font: inherit; }
     debug.id = "debug";
     card.append(debug);
     root.append(card);
+    renderContinuation();
     refreshDebugFooter();
     if (restoreSearch) {
       const nextSearch = document.getElementById("project-search");
@@ -1224,6 +1328,7 @@ button { font: inherit; }
     const statuses = root.querySelector(".status-list");
     if (!statuses) { renderCurrent(); return; }
     statuses.replaceChildren(...[renderUpdateRow(), renderSchemaRow()].filter(Boolean));
+    renderContinuation();
     const checkbox = document.getElementById("create-worktree");
     if (checkbox) {
       checkbox.checked = createWorktree === true;

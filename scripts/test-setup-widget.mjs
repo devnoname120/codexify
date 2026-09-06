@@ -47,6 +47,9 @@ class Element extends Events {
     this.parentElement = null;
   }
   setAttribute(name, value) { this.attributes[name] = String(value); }
+  focus() { this.focused = true; }
+  select() { this.setSelectionRange(0, this.value.length); }
+  setSelectionRange(start, end) { this.selectionStart = start; this.selectionEnd = end; }
   get classList() {
     return { toggle: (name, enabled) => {
       const classes = new Set(this.className.split(/\s+/).filter(Boolean));
@@ -86,7 +89,7 @@ function harness(initial, live = initial) {
     createTextNode: text => { const node = new Element("#text"); node.ownText = text; return node; },
     getElementById: id => body.querySelector(`#${id}`)
   });
-  const state = { live: structuredClone(live), fail: false, calls: [], links: [], now: 0 };
+  const state = { live: structuredClone(live), fail: false, calls: [], links: [], messages: [], clipboard: [], clipboardDenied: false, now: 0 };
   const timers = new Map(); let nextTimer = 1;
   const timer = (callback, delay, interval = false) => {
     const id = nextTimer++; timers.set(id, { callback, delay, interval }); return id;
@@ -95,6 +98,7 @@ function harness(initial, live = initial) {
   const callTool = async (name, args) => {
     state.calls.push({ name, args: structuredClone(args) });
     if (name === "setup_status") {
+      if (state.holdStatus) await new Promise(resolve => { state.resolveStatus = resolve; });
       if (state.fail) throw new Error("offline");
       return { structuredContent: structuredClone(state.live) };
     }
@@ -108,6 +112,7 @@ function harness(initial, live = initial) {
       if (message.id === undefined || !message.method) return;
       queueMicrotask(async () => {
         try {
+          if (message.method === "ui/message") state.messages.push(structuredClone(message.params));
           const result = message.method === "tools/call"
             ? await callTool(message.params.name, message.params.arguments)
             : {};
@@ -127,6 +132,10 @@ function harness(initial, live = initial) {
   });
   vm.runInNewContext(script, {
     window, document, console, URL, performance,
+    navigator: { clipboard: { writeText: async text => {
+      if (state.clipboardDenied) throw new Error("Clipboard denied");
+      state.clipboard.push(text);
+    } } },
     Date: class extends Date { static now() { return state.now; } },
     setTimeout: (callback, delay) => timer(callback, delay), clearTimeout: id => timers.delete(id),
     setInterval: (callback, delay) => timer(callback, delay, true), clearInterval: id => timers.delete(id),
@@ -238,4 +247,114 @@ test("teardown stops live status polling", async () => {
   const count = card.state.calls.length;
   card.teardown(); await card.tick();
   assert.equal(card.state.calls.length, count);
+});
+
+test("stale conversations offer an exact-workspace continuation prompt", async () => {
+  const initial = payload("conversation_stale");
+  initial.project = {
+    status: "selected", selectionAvailable: true, bindingScope: "chatgpt_conversation",
+    activePath: '/worktrees/a project/quote"here', sourcePath: "/projects/demo", managedWorktree: true
+  };
+  const card = harness(initial); await drain();
+  assert.ok(card.hasButton("Copy continuation prompt"));
+  const prompt = card.document.getElementById("continuation-prompt");
+  assert.ok(prompt);
+  assert.ok(prompt.value.includes(JSON.stringify({ resumePath: initial.project.activePath })));
+  assert.match(prompt.value, /get_agent_brief/);
+  assert.match(prompt.value, /recall/);
+  assert.doesNotMatch(prompt.value, /"createWorktree"|"path":"\/projects\/demo"|openai\/session/);
+  assert.ok(card.hasButton("Prepare handoff"));
+});
+
+test("unavailable workspace state cannot offer an unsafe resume prompt", async () => {
+  const initial = payload("conversation_stale");
+  initial.project = { status: "check_failed", selectionAvailable: true, activePath: "/old/worktree" };
+  const card = harness(initial); await drain();
+  assert.equal(card.hasButton("Copy continuation prompt"), false);
+  assert.match(card.text(), /workspace.*before.*continu/i);
+});
+
+function workspacePayload() {
+  const initial = payload("conversation_stale");
+  initial.project = { status: "selected", selectionAvailable: true, bindingScope: "chatgpt_conversation", activePath: "/worktrees/existing", sourcePath: "/projects/demo", managedWorktree: true };
+  return initial;
+}
+
+test("copy works and clipboard denial leaves a manually selectable prompt", async () => {
+  const card = harness(workspacePayload()); await drain();
+  const field = card.document.getElementById("continuation-prompt");
+  await card.click("Copy continuation prompt");
+  assert.equal(card.state.clipboard[0], field.value);
+  assert.match(card.text(), /Copied\./);
+  card.state.clipboardDenied = true;
+  await card.click("Copy continuation prompt");
+  assert.equal(field.selectionStart, 0);
+  assert.equal(field.selectionEnd, field.value.length);
+  assert.match(card.text(), /copy it manually/);
+});
+
+test("polling preserves selected continuation text but disables actions until fresh", async () => {
+  const card = harness(workspacePayload()); await drain();
+  const field = card.document.getElementById("continuation-prompt");
+  field.setSelectionRange(12, 38);
+  card.state.holdStatus = true;
+  await card.tick();
+  assert.equal(card.document.getElementById("continuation-prompt"), field);
+  assert.equal(card.document.getElementById("continuation-copy").disabled, true);
+  card.state.holdStatus = false;
+  card.state.resolveStatus(); await drain();
+  assert.equal(card.document.getElementById("continuation-prompt"), field);
+  assert.equal(field.selectionStart, 12);
+  assert.equal(field.selectionEnd, 38);
+  assert.equal(card.document.getElementById("continuation-copy").disabled, false);
+  card.state.fail = true; await card.tick();
+  assert.equal(card.hasButton("Copy continuation prompt"), false);
+});
+
+test("handoff is an explicit context-saving request, not an automatic transfer", async () => {
+  const card = harness(workspacePayload()); await drain();
+  assert.equal(card.state.messages.length, 0);
+  await card.click("Prepare handoff");
+  assert.equal(card.state.messages.length, 1);
+  const prompt = card.state.messages[0].content[0].text;
+  assert.match(prompt, /CURRENT Codexify workspace "\/worktrees\/existing"/);
+  assert.match(prompt, /continuation-handoff/);
+  assert.match(prompt, /If project memory is unavailable/);
+  assert.match(prompt, /Do not commit, push/);
+  assert.match(card.text(), /Handoff requested/);
+  assert.doesNotMatch(card.text(), /Handoff saved/);
+});
+
+test("persistent scratch resumes by path, static and unselected states need no resume", async () => {
+  for (const kind of ["scratch", "static", "unselected", "transport"]) {
+    const initial = workspacePayload();
+    if (kind === "scratch") initial.project.status = "without_project";
+    if (kind === "static") { initial.project.bindingScope = "static"; initial.project.selectionAvailable = false; }
+    if (kind === "unselected") initial.project = { status: "unselected", selectionAvailable: true };
+    if (kind === "transport") initial.project.bindingScope = "mcp_transport_session";
+    const card = harness(initial); await drain();
+    const field = card.document.getElementById("continuation-prompt");
+    if (kind === "transport") {
+      assert.equal(field, null);
+      assert.match(card.text(), /Save or export/);
+    } else if (kind === "scratch") {
+      assert.match(field.value, /"resumePath":"\/worktrees\/existing"/);
+      assert.doesNotMatch(field.value, /withoutProject/);
+    } else {
+      assert.doesNotMatch(field.value, /resumePath/);
+      assert.equal(card.hasButton("Prepare handoff"), kind === "static");
+    }
+  }
+});
+
+test("live workspace wins over a replayed old continuation path", async () => {
+  const old = workspacePayload();
+  const live = workspacePayload(); live.project.activePath = "/worktrees/live";
+  const card = harness(old, live); await drain();
+  card.notify("ui/notifications/tool-result", { structuredContent: old }); await drain();
+  const field = card.document.getElementById("continuation-prompt");
+  assert.match(field.value, /"resumePath":"\/worktrees\/live"/);
+  assert.doesNotMatch(field.value, /\/worktrees\/existing/);
+  card.state.live = payload("current", "1.2.4"); await card.tick();
+  assert.equal(card.hasButton("Copy continuation prompt"), false);
 });

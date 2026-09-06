@@ -120,6 +120,11 @@ pub struct WithoutProjectSelection {
     pub scope: ProjectBindingScope,
 }
 
+pub enum WorkspaceSelection {
+    Project(ProjectRootSelection),
+    WithoutProject(WithoutProjectSelection),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProjectBindingState {
     Unselected {
@@ -164,6 +169,8 @@ struct StoredWithoutProjectBinding {
     version: u32,
     access_root: String,
     scratch_root: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    workspace_key: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -498,6 +505,7 @@ impl ProjectBindingStore {
             version: WITHOUT_PROJECT_BINDING_VERSION,
             access_root: access_root.to_string_lossy().into_owned(),
             scratch_root: scratch_root.to_string_lossy().into_owned(),
+            workspace_key: None,
         };
         if let Err(error) = self.write_without_project_binding(
             &self.without_project_path(&access_root, identity),
@@ -514,6 +522,115 @@ impl ProjectBindingStore {
             scratch_root,
             newly_selected: true,
             scope: ProjectBindingScope::ChatGptConversation,
+        })
+    }
+
+    pub async fn resume_workspace(
+        &self,
+        config: &AppConfig,
+        identity: &ConversationIdentity,
+        input: &str,
+    ) -> Result<WorkspaceSelection, String> {
+        if !config.multi_project {
+            return Err("Workspace resumption requires multi-project mode.".into());
+        }
+        let input = Path::new(input);
+        if !input.is_absolute() {
+            return Err("resumePath must be the absolute active workspace path.".into());
+        }
+        let requested = std::fs::canonicalize(input)
+            .map_err(|error| format!("Cannot resume workspace {}: {error}", input.display()))?;
+        let access_root = canonical_access_root(config)?;
+        let binding_path = self.binding_path(&access_root, identity);
+        let _lock = acquire_lock(&binding_path).await?;
+        let existing = self.resolved_binding_state_at(identity, &access_root)?;
+        let newly_selected = existing.is_none();
+        let binding = if let Some(existing) = existing {
+            let active = match &existing {
+                ResolvedBindingState::Project(binding) => &binding.project_root,
+                ResolvedBindingState::WithoutProject(path) => path,
+            };
+            if active != &requested {
+                return Err("This conversation already has a different workspace. Resume in a new conversation before selecting a project.".into());
+            }
+            existing
+        } else {
+            // Only an already validated binding can authorize a managed path outside the access root.
+            let project = self
+                .binding_files(&access_root)
+                .into_iter()
+                .filter_map(|path| {
+                    self.read_binding(&path, &access_root)
+                        .ok()
+                        .flatten()
+                        .filter(|binding| binding.project_root == requested)
+                })
+                .max_by_key(|binding| binding.managed_worktree);
+            if let Some(binding) = project {
+                let stored = StoredProjectBinding {
+                    version: BINDING_VERSION,
+                    access_root: access_root.to_string_lossy().into_owned(),
+                    source_project_root: Some(
+                        binding.source_project_root.to_string_lossy().into_owned(),
+                    ),
+                    project_root: binding.project_root.to_string_lossy().into_owned(),
+                    repository_url: binding.repository_url.clone(),
+                    managed_worktree: binding.managed_worktree,
+                    worktree_git_root: binding
+                        .worktree_git_root
+                        .as_ref()
+                        .map(|path| path.to_string_lossy().into_owned()),
+                    worktrees_root: binding
+                        .worktrees_root
+                        .as_ref()
+                        .map(|path| path.to_string_lossy().into_owned()),
+                };
+                self.write_binding(&binding_path, &stored)?;
+                ResolvedBindingState::Project(binding)
+            } else {
+                let scratch = std::fs::read_dir(self.access_root_dir(&access_root))
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+                    .find_map(|entry| {
+                        let path = entry.path();
+                        if !entry.file_type().ok()?.is_file() || path.extension()? != "no-project" {
+                            return None;
+                        }
+                        let key = path.file_stem()?.to_str()?;
+                        self.read_without_project_binding(&path, &access_root, key)
+                            .ok()
+                            .flatten()
+                            .filter(|root| root == &requested)
+                    });
+                let Some(scratch_root) = scratch else {
+                    return Err("No valid saved workspace matches resumePath under this access root. Nothing was selected; do not fall back to a new worktree or another checkout.".into());
+                };
+                let marker = StoredWithoutProjectBinding {
+                    version: WITHOUT_PROJECT_BINDING_VERSION,
+                    access_root: access_root.to_string_lossy().into_owned(),
+                    scratch_root: scratch_root.to_string_lossy().into_owned(),
+                    workspace_key: scratch_root
+                        .file_name()
+                        .and_then(|key| key.to_str())
+                        .map(str::to_owned),
+                };
+                self.write_without_project_binding(
+                    &self.without_project_path(&access_root, identity),
+                    &marker,
+                )?;
+                ResolvedBindingState::WithoutProject(scratch_root)
+            }
+        };
+        Ok(match binding {
+            ResolvedBindingState::Project(binding) => WorkspaceSelection::Project(selection_from_binding(
+                access_root, binding, config.worktrees.mode, newly_selected, false,
+                ProjectBindingScope::ChatGptConversation,
+                vec!["Resumed the existing workspace without creating a worktree. Avoid concurrent edits from the previous conversation; messages and running command sessions are not transferred.".into()],
+            )),
+            ResolvedBindingState::WithoutProject(scratch_root) => WorkspaceSelection::WithoutProject(WithoutProjectSelection {
+                access_root, scratch_root, newly_selected, scope: ProjectBindingScope::ChatGptConversation,
+            }),
         })
     }
 
@@ -561,7 +678,7 @@ impl ProjectBindingStore {
         let without_project = self.read_without_project_binding(
             &self.without_project_path(access_root, identity),
             access_root,
-            identity,
+            identity.stable_key(),
         )?;
         match (project, without_project) {
             (Some(_), Some(_)) => Err(format!(
@@ -684,14 +801,21 @@ impl ProjectBindingStore {
         &self,
         stored: &Path,
         access_root: &Path,
-        identity: &ConversationIdentity,
+        workspace_key: &str,
     ) -> Result<PathBuf, String> {
+        if workspace_key.len() != 64
+            || !workspace_key
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err("Invalid scratch workspace namespace key.".into());
+        }
         let scratch_dir = validate_private_directory(&self.scratch_dir, "scratch root")?;
         let namespace = validate_private_directory(
             &scratch_dir.join(access_root_key(access_root)),
             "scratch namespace",
         )?;
-        let expected = namespace.join(identity.stable_key());
+        let expected = namespace.join(workspace_key);
         if stored != expected {
             return Err(format!(
                 "The stored ChatGPT conversation scratch path does not match its conversation namespace: {}",
@@ -898,7 +1022,7 @@ impl ProjectBindingStore {
         &self,
         path: &Path,
         access_root: &Path,
-        identity: &ConversationIdentity,
+        default_workspace_key: &str,
     ) -> Result<Option<PathBuf>, String> {
         let raw = match std::fs::read_to_string(path) {
             Ok(raw) => raw,
@@ -929,8 +1053,15 @@ impl ProjectBindingStore {
                 path.display()
             ));
         }
-        self.resolve_scratch_root(Path::new(&binding.scratch_root), access_root, identity)
-            .map(Some)
+        self.resolve_scratch_root(
+            Path::new(&binding.scratch_root),
+            access_root,
+            binding
+                .workspace_key
+                .as_deref()
+                .unwrap_or(default_workspace_key),
+        )
+        .map(Some)
     }
 
     fn write_binding(&self, target: &Path, binding: &StoredProjectBinding) -> Result<(), String> {
@@ -1510,6 +1641,7 @@ mod tests {
             &marker_path,
             serde_json::to_vec_pretty(&StoredWithoutProjectBinding {
                 version: WITHOUT_PROJECT_BINDING_VERSION,
+                workspace_key: None,
                 access_root: access_root.to_string_lossy().into_owned(),
                 scratch_root: std::fs::canonicalize(outside)
                     .unwrap()

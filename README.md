@@ -294,7 +294,7 @@ conversation marker and compares it with the recorded reload and running version
 | --- | --- |
 | Connector and conversation match the server | Shows the current connector schema version. |
 | Connector reload version differs from the server | Shows **Refresh** and the connector-settings instructions. |
-| Connector matches the server, conversation does not | Shows the connector as current and **Start a new conversation to use the latest schema**, without Refresh. |
+| Connector matches the server, conversation does not | Shows the connector as current and **Start a new conversation to use the latest schema**, with a copyable continuation prompt instead of Refresh. |
 
 The reload record is scoped to the configured tunnel or HTTP endpoint and the
 caller metadata `openai/subject` plus optional `openai/organization`. These are
@@ -308,8 +308,38 @@ diagnostic. Widget polls and old setup markers never overwrite a reload record,
 and opening settings does not count as refreshing. Older chats without a version
 marker receive the new-conversation instruction once the connector is current.
 
-Existing v1–v3 setup resource URLs remain readable, while new cards use
-v4. Already mounted copies of the old widget must be reloaded after deployment to
+The continuation panel includes **Prepare handoff** and **Copy continuation
+prompt**. Prepare handoff asks the current assistant to save the task's plan and a
+`continuation-handoff` project-memory note; sending the request does not mean the
+note has been saved. When memory is unavailable, the assistant supplies a summary
+to copy alongside the prompt. The prompt contains the exact active workspace path
+and instructs the new conversation to perform its normal setup, then call:
+
+```json
+{"resumePath":"/absolute/path/to/the/existing/workspace"}
+```
+
+Pass that object to `set_project_root` **before any ordinary project selection**.
+It reuses a validated, saved direct checkout, managed worktree, or persistent
+scratch workspace under the same access-root scope, regardless of worktree policy.
+It does not clone, fetch, change branches, run setup scripts, or allocate another
+worktree. Uncommitted and untracked files and the Git index remain in place.
+Missing or invalid workspaces fail without falling back to the source checkout.
+Existing bindings remain immutable, and repeated resumes of the same workspace
+are idempotent. The new binding survives restarts and protects a reused managed
+worktree from automatic cleanup independently of the original binding.
+
+Continuation reuses **the workspace**, not the old conversation's identity,
+authorization, command sessions, messages, or diff checkpoints. The new chat runs
+`get_agent_brief` and `recall` against the same workspace to recover saved context.
+Do not edit concurrently from both conversations. The textarea supports manual
+copying when clipboard access is unavailable, and polling preserves its selection.
+A static connector uses its fixed workspace without a selection call; transport-only
+workspaces cannot use `resumePath`. No setup secret or raw conversation ID is
+embedded in the prompt.
+
+Existing v1–v4 setup resource URLs remain readable, while new cards use
+v5. Already mounted copies of the old widget must be reloaded after deployment to
 receive this behavior. The model-facing setup continuation remains in the tool
 result but is not rendered to the user.
 

@@ -242,7 +242,7 @@ fn project_info(
 fn next_step_for_project(project: &SetupProjectInfo) -> String {
     match project.status {
         SetupProjectStatus::Unselected => {
-            "If the intended project is already unambiguous, call `set_project_root` directly, passing `createWorktree=false` if the user asked to use the source checkout without a worktree or `createWorktree=true` if they requested a worktree; an explicit user preference overrides the configured mode. Otherwise let the user choose a project or Chat without a project in the setup card. Then call `get_agent_brief`.".to_string()
+            format!("{} If the intended project is already unambiguous, call `set_project_root` directly, passing `createWorktree=false` if the user asked to use the source checkout without a worktree or `createWorktree=true` if they requested a worktree; an explicit user preference overrides the configured mode. Otherwise let the user choose a project or Chat without a project in the setup card. Then call `get_agent_brief`.", crate::tools::set_project_root::SetProjectRoot::RESUME_GUIDANCE)
         }
         SetupProjectStatus::Selected => {
             "Call `get_agent_brief` before using project tools.".to_string()
