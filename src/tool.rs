@@ -24,6 +24,8 @@ use crate::types::{AppConfig, ToolResult};
 #[derive(Clone)]
 pub struct ToolRequestContext {
     pub conversation: Option<ConversationIdentity>,
+    /// Last version served on an identified connector reload; never from a widget echo.
+    pub connector_schema_version: Option<String>,
     pub conversation_authorizations: Arc<ConversationAuthorizationStore>,
     pub project_bindings: Arc<ProjectBindingStore>,
     pub diff_checkpoints: Arc<DiffCheckpointManager>,

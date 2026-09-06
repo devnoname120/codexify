@@ -1,8 +1,9 @@
 use rmcp::model::{MetaObject, Resource, ResourceContents};
 use serde_json::json;
 
-pub const SETUP_UI_URI: &str = "ui://codexify/setup/v3/mcp-app.html";
-pub const PREVIOUS_SETUP_UI_URI: &str = "ui://codexify/setup/v2/mcp-app.html";
+pub const SETUP_UI_URI: &str = "ui://codexify/setup/v4/mcp-app.html";
+pub const PREVIOUS_SETUP_UI_URI: &str = "ui://codexify/setup/v3/mcp-app.html";
+pub const PREVIOUS_SETUP_UI_URI_V2: &str = "ui://codexify/setup/v2/mcp-app.html";
 pub const LEGACY_SETUP_UI_URI: &str = "ui://codexify/setup/v1/mcp-app.html";
 pub const SETUP_UI_MIME_TYPE: &str = "text/html;profile=mcp-app";
 
@@ -57,7 +58,11 @@ pub fn resource() -> Resource {
 }
 
 pub fn contents_for_uri(uri: &str) -> Option<ResourceContents> {
-    if uri != SETUP_UI_URI && uri != PREVIOUS_SETUP_UI_URI && uri != LEGACY_SETUP_UI_URI {
+    if uri != SETUP_UI_URI
+        && uri != PREVIOUS_SETUP_UI_URI
+        && uri != PREVIOUS_SETUP_UI_URI_V2
+        && uri != LEGACY_SETUP_UI_URI
+    {
         return None;
     }
     Some(
@@ -89,7 +94,8 @@ mod tests {
 
     #[test]
     fn current_and_legacy_setup_resource_uris_are_readable() {
-        assert_eq!(SETUP_UI_URI, "ui://codexify/setup/v3/mcp-app.html");
+        assert_eq!(SETUP_UI_URI, "ui://codexify/setup/v4/mcp-app.html");
+        assert!(contents_for_uri(PREVIOUS_SETUP_UI_URI_V2).is_some());
         assert!(contents_for_uri(PREVIOUS_SETUP_UI_URI).is_some());
         assert!(contents_for_uri(SETUP_UI_URI).is_some());
         assert!(contents_for_uri(LEGACY_SETUP_UI_URI).is_some());
@@ -103,7 +109,10 @@ mod tests {
         for expected in [
             "tools/call",
             "window.openai.callTool",
-            "check_for_updates",
+            "setup_status",
+            "conversationVersion",
+            "conversation_stale",
+            "Start a new conversation to use the latest schema.",
             "self_update",
             "doctor",
             "ui/message",
@@ -144,7 +153,7 @@ mod tests {
             picker.find("Chat without a project").unwrap() < picker.find("const search").unwrap(),
             "the projectless option must be constructed before the search input"
         );
-        assert!(picker.contains("picker.append(scratch, search"));
+        assert!(picker.contains("picker.append(scratch, worktreeChoice, search"));
         let search_handler = &text[text.find("search.addEventListener(\"input\"").unwrap()..];
         assert!(
             search_handler.find("projectQueryGeneration += 1").unwrap()
@@ -152,6 +161,7 @@ mod tests {
             "editing the query must invalidate an in-flight response before the debounce fires"
         );
         assert!(!text.contains("data.nextStep"));
+        assert!(!text.contains("ChatGPT cache unverified"));
         assert!(!text.contains("Connector status and diagnostics"));
         assert!(!text.contains("REFRESH_PROMPT"));
         assert!(!text.contains("sendRefreshPrompt"));

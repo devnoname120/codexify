@@ -55,6 +55,9 @@ jobs:
       - name: Test
         run: cargo test --all
 
+      - name: Test setup widget transitions
+        run: node --test scripts/test-setup-widget.mjs
+
   service-platforms:
     name: Service integration (${{ matrix.os }})
     strategy:

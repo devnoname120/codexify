@@ -863,9 +863,9 @@ read through `skills_read`. Scope `plugin`.
 When conversation authorization is enabled, `setup` accepts the historical
 `ref` argument plus an optional `connectorVersion` echo. The advertised tool
 description embeds the running package version. A freshly refreshed connector
-copies that marker into the call; a cached schema from before an upgrade cannot
-supply the newer field, so the running server classifies the schema as unknown
-and recommends Refresh without rejecting the backward-compatible call.
+copies that marker into the call. The echo identifies the conversation's schema;
+it never changes the server's connector-reload record. A legacy call may omit the
+marker without being rejected.
 
 After recording the authorization grant, `setup` performs one bounded release
 check and reads the current workspace binding. It invokes
@@ -876,7 +876,7 @@ structured result includes current/latest versions, source, connector-schema
 classification, and one of static project, unselected, selected project,
 managed-worktree, scratch, or state-check-failed placement, plus the normal next
 agent step. State inspection is diagnostic and does not undo a successful
-authorization grant. The compact setup component renders workspace state plus the
+authorization grant. The compact setup component renders version status above workspace state and the
 version and schema as line-oriented rows, but deliberately omits the model-only
 continuation text.
 
@@ -885,16 +885,46 @@ For an unselected multi-project conversation, `setup_ui.html` renders
 through the app tool bridge after initialization. Search is server-side, debounced,
 bounded to 50 returned rows, and guarded by a monotonic generation so stale
 responses cannot replace newer results. A row click calls
-`set_project_root({path})`; the scratch action calls
+`set_project_root({path, createWorktree})`; the scratch action calls
 `set_project_root({withoutProject:true})`. Both tools remain model-visible and also
 advertise app access. A successful receipt replaces the chooser with the selected
 name and active **Path**, **Worktree** plus source checkout, or **Scratch** path.
+The card places a worktree checkbox below **Chat without a project** and above project search, defaulting on for `auto`/`always` and off for `never`. Project selection sends `createWorktree`; an explicit boolean overrides the configured placement for that selection only in both conversation and transport dispatch. Model-facing selection guidance requires the same override when the user expresses a preference.
+
+The app-only `setup_status` tool reads the current workspace, worktree policy,
+running version, and bounded/cached release status without repeating setup. Cards
+call it on mount and activation and every 30 seconds while visible. Periodic
+checks replace only status rows so they cannot interrupt workspace clicks. Old
+tool-result snapshots cannot replace newer live data, and failed checks hide
+obsolete version/action claims.
+
+`ConnectorSchemaStore` records the running package version when `tools/list`
+serves a schema to an identified caller. Its scope combines the configured tunnel
+or HTTP endpoint with `openai/subject` and optional `openai/organization`, never
+`openai/session`. Caller identifiers are hashed into private filenames, not used
+for authorization. This scope separates accounts and organizations, but identical
+endpoint/caller metadata cannot distinguish duplicate connector installations.
+Anonymous discovery is not attributed to the last caller or broadcast to all
+callers. Reload versions are atomically persisted outside the repository and
+shared across MCP transports. A failed disk write keeps the in-process observation
+and logs the persistence failure.
+
+The card retains the original `connectorSchema.observedVersion` and sends it as
+`setup_status.conversationVersion`; the server supplies `connectorVersion` from
+the reload record and `advertisedVersion` from the running package. Comparing
+only these strings yields `current`, `stale` (reload differs from server), or
+`conversation_stale` (reload matches but conversation differs or predates the
+marker). Only `stale` recommends Refresh; `conversation_stale` tells the user to
+start a new conversation. A missing reload record remains internally `unknown`
+and hides the row. Polls never write records. Rollbacks are handled by equality,
+not by choosing the greatest semantic version.
+
 The same compact card retains its user-driven update and diagnostic actions.
 
-The app-only `check_for_updates` MCP tool runs the same bounded release inspection
-with a forced cache bypass, then replaces the shared cache entry. This lets the
-persistent **Check for updates** action refresh only the Codexify row without
-repeating setup authorization. A positively identified newer release adds the
+The legacy app-only `check_for_updates` MCP tool remains available for older
+widgets. Current **Check for updates** actions use
+`setup_status({forceUpdateCheck:true})` to refresh the live status and bypass the
+release cache without repeating setup authorization. A positively identified newer release adds the
 row-local **Upgrade** action, which delegates to the existing verified
 `self_update` flow and its restart-safe progress component.
 
@@ -908,8 +938,10 @@ checks with pass/warning/failure/skipped color semantics. **Autofix** sends only
 warning/failure findings to ChatGPT through `ui/message` and asks the agent to
 diagnose, repair, verify, and rerun doctor.
 
-A stale or unknown connector schema adds a row-local **Refresh** action. The
-component walks upward through same-origin iframe ancestors until the first
+Only `stale` adds the row-local **Refresh** action. Its click rechecks live state
+before opening settings, and a later recorded reload removes obsolete Refresh
+feedback as well as the button. The settings-link helper walks upward through
+same-origin iframe ancestors until the first
 cross-origin boundary and accepts a connector slug only from a hostname matching
 `asdk_app_<slug>.web-sandbox.oaiusercontent.com`. It builds the relative
 `#settings/Plugins/plugin_asdk_app_<slug>:~:text=Information-,Refresh,-Connected`

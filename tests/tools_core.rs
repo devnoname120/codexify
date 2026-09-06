@@ -492,6 +492,7 @@ async fn clock_sleep_ends_early_when_the_mcp_request_is_cancelled() {
     let cancellation = CancellationToken::new();
     let context = ToolRequestContext {
         conversation: None,
+        connector_schema_version: None,
         conversation_authorizations: Arc::new(ConversationAuthorizationStore::new()),
         project_bindings: Arc::new(codexify::project_bindings::ProjectBindingStore::new(
             dir.path().join("project-bindings"),

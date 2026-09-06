@@ -45,7 +45,7 @@ flowchart LR
     Worktree[("Managed Git worktree\nper-conversation checkout,\nswept on startup")]
     ExecSessions[("Conversation exec sessions\n(in memory, idle-reaped)")]
     DiffRefs[("Git refs/codexify/diff\nproject-open + last-diff")]
-    DiffUI["MCP App diff card\nui://codexify/diff/v3/mcp-app.html"]
+    DiffUI["MCP App diff card\nui://codexify/diff/v4/mcp-app.html"]
     SkillDirs[(".agents/skills\n.codex/skills\n.claude/skills")]
     CodexCfg[("$CODEX_HOME\nconfig.toml")]
     CodexCli["optional Codex CLI\nmcp list/get --json"]
@@ -211,7 +211,7 @@ To reuse one server across several independent projects, point it at their commo
 cargo run --release -- --work-dir /path/to/projects --multi-project
 ```
 
-Here `--work-dir` is an **access root**, not the active project. In ChatGPT, call `set_project_root` directly when the exact relative/absolute path, an HTTPS/SSH Git repository URL ending in `.git`, or a supported GitHub repository, branch, pull-request, or commit URL is known. Repository URLs reuse an unambiguous matching checkout already below the access root, or run `git clone` in the configured project clone directory before binding. GitHub branch, PR, and commit URLs select their exact targets without switching an unrelated source checkout. When per-conversation setup is enabled and the intended project is ambiguous, the setup card loads `list_projects` into a searchable chooser and keeps **Chat without a project** at the top; that choice creates a private scratch workspace outside the access root. Codexify keys the resulting project or scratch binding from ChatGPT's `_meta["openai/session"]` conversation identifier and persists it outside the repository, so later turns in the same chat recover the active workspace after an MCP reconnect or Codexify restart. A new chat gets a new binding and an existing chat cannot switch choices. Clients that do not provide `openai/session` fall back to a one-time MCP transport-session binding; their scratch directory is removed when that session ends.
+Here `--work-dir` is an **access root**, not the active project. In ChatGPT, call `set_project_root` directly when the exact relative/absolute path, an HTTPS/SSH Git repository URL ending in `.git`, or a supported GitHub repository, branch, pull-request, or commit URL is known. Repository URLs reuse an unambiguous matching checkout already below the access root, or run `git clone` in the configured project clone directory before binding. GitHub branch, PR, and commit URLs select their exact targets without switching an unrelated source checkout. When per-conversation setup is enabled and the intended project is ambiguous, the setup card loads `list_projects` into a searchable chooser and keeps **Chat without a project** above the search and results; that choice creates a private scratch workspace outside the access root. Codexify keys the resulting project or scratch binding from ChatGPT's `_meta["openai/session"]` conversation identifier and persists it outside the repository, so later turns in the same chat recover the active workspace after an MCP reconnect or Codexify restart. A new chat gets a new binding and an existing chat cannot switch choices. Clients that do not provide `openai/session` fall back to a one-time MCP transport-session binding; their scratch directory is removed when that session ends.
 
 ### Optional per-conversation authorization
 
@@ -248,21 +248,31 @@ and is submitted verbatim; no digest transformation is applied.
 The advertised `setup` description contains a connector version marker and its
 schema includes an optional `connectorVersion` echo field. A current connector
 copies that marker into the call. After a Codexify upgrade, ChatGPT may still call
-the cached older schema, which omits the field; the result then warns that the
-connector tools should be refreshed. This remains backward compatible because
+the cached older schema. This marker identifies the conversation's schema, not
+the connector's latest reload. This remains backward compatible because
 `connectorVersion` is optional in the running server's validator.
 
-The setup component checks for a newer release through `gh api` first, with a
+The setup component places version status above workspace selection and checks for a newer release through `gh api` first, with a
 strict 2-second timeout, and falls back to the unauthenticated GitHub releases API
 with a 2-second timeout. Successful results are cached for 5 minutes and failures
 for 30 seconds. Its compact Codexify row always exposes **Check for updates**;
-that app-only action bypasses the cache and updates the row without rerunning the
-conversation-authorization flow. A known newer release adds a row-local
+that action uses the app-only `setup_status(forceUpdateCheck=true)` tool to bypass
+the release cache without rerunning conversation authorization. The same tool
+revalidates visible cards every 30 seconds and on activation, using the release
+cache for automatic checks. Historical results cannot overwrite a newer live
+status. While a check is pending or fails, the card hides snapshot versions and
+Upgrade/Refresh actions. Unknown connector-schema freshness remains internal;
+the card hides that row instead of displaying a cache diagnostic. It does not
+infer freshness from an earlier setup call or assume that opening settings
+completed a refresh. A known newer release adds a row-local
 **Upgrade** action that invokes the ordinary verified `self_update` path only after
 the user clicks it.
 
 In multi-project mode an unbound conversation also receives a searchable project
-chooser before those status controls. The component calls `list_projects` after
+chooser below those status controls. Below **Chat without a project**, **Create a
+worktree for the selected project** defaults to checked for `auto`/`always` and
+unchecked for `never`. Selecting a project sends that explicit boolean; scratch
+selection is unaffected. The component calls `list_projects` after
 its app bridge is ready, debounces server-side searches, and calls
 `set_project_root` only for the row or scratch option the user selects. A successful
 receipt replaces the chooser with the active direct path, managed worktree plus
@@ -276,18 +286,32 @@ checks. Warning and failure states expose **Autofix**, which sends the findings 
 ChatGPT for diagnosis and repair rather than executing remediation inside the
 component.
 
-When the cached connector schema is stale or unknown, a row-local **Refresh**
-action opens the relevant ChatGPT connector settings directly. The component walks
-up through same-origin iframe ancestors and accepts a connector slug only from a
-hostname matching `asdk_app_<slug>.web-sandbox.oaiusercontent.com`. It passes the
-relative
-`#settings/Plugins/plugin_asdk_app_<slug>:~:text=Information-,Refresh,-Connected`
-hash directly to ChatGPT's `window.openai.openExternal`, preserving the current
-page without reconstructing it from `document.referrer`; `ui/open-link` remains the
-compatibility fallback. If the sandbox identity is unavailable, the widget uses
-the generic `#settings/Plugins` route. It then tells the user to select Codexify if
-necessary, scroll below the tool list, and click **Refresh**. The model-facing setup
-continuation remains in the tool result but is not rendered to the user.
+Codexify records the package version served by each identified `tools/list`
+reload and shares that record across conversations. Each card keeps its original
+conversation marker and compares it with the recorded reload and running version:
+
+| State | Widget behavior |
+| --- | --- |
+| Connector and conversation match the server | Shows the current connector schema version. |
+| Connector reload version differs from the server | Shows **Refresh** and the connector-settings instructions. |
+| Connector matches the server, conversation does not | Shows the connector as current and **Start a new conversation to use the latest schema**, without Refresh. |
+
+The reload record is scoped to the configured tunnel or HTTP endpoint and the
+caller metadata `openai/subject` plus optional `openai/organization`. These are
+caller identifiers, not authentication or a separate installation ID: connections
+with identical endpoint and caller metadata share a record. Records survive
+server restarts under `~/.codexify/connector-schemas/`; private filenames hash
+identifiers, but schema comparison uses only version strings, not fingerprints.
+Anonymous discovery never updates another caller's record. When no reload can be
+attributed, the schema row stays hidden rather than displaying an unverified
+diagnostic. Widget polls and old setup markers never overwrite a reload record,
+and opening settings does not count as refreshing. Older chats without a version
+marker receive the new-conversation instruction once the connector is current.
+
+Existing v1–v3 setup resource URLs remain readable, while new cards use
+v4. Already mounted copies of the old widget must be reloaded after deployment to
+receive this behavior. The model-facing setup continuation remains in the tool
+result but is not rendered to the user.
 
 This extra gate is necessary because ChatGPT's connector OAuth state controls
 whether the account can use the connector at all; it does not independently
@@ -1094,7 +1118,8 @@ Each conversation makes exactly one workspace choice through [`set_project_root`
 - A Git repository URL is normalized into a conservative remote identity. Non-GitHub selections accept HTTPS/SSH URLs ending in `.git`; conventional hosting-service SSH remotes such as `git@host:group/repository.git` match their HTTPS equivalent, while arbitrary SSH users and custom-port endpoints remain distinct. GitHub repository roots retain their existing shorthand forms and may also carry an exact branch, PR, or commit target. Codexify first reuses an unambiguous matching local Git top level. Otherwise it serializes concurrent requests for that repository, runs non-interactive `git clone` into a private temporary directory below `projectCloneDir`, verifies the resulting remote, and publishes it at `<projectCloneDir>/<repository-name>`. Name collisions fail rather than overwrite data.
 - Branch URLs fetch `refs/heads/<branch>`; PR URLs fetch GitHub's `refs/pull/<number>/head`; commit URLs fetch the exact full object ID. A fresh branch clone checks out the named branch, while fresh PR and commit clones detach at the selected commit. For an existing checkout, target fetching does not switch, reset, or otherwise move its `HEAD`.
 - The binding belongs to the **ChatGPT conversation**, keyed from `_meta["openai/session"]` (the raw identifier is hashed, never stored), so simultaneous chats can hold different projects or scratch workspaces and a later turn recovers its own root after MCP reconnects or a server restart. A client that sends no ChatGPT conversation metadata falls back to a binding that lasts only the current MCP transport session.
-- With the default worktree mode, the first conversation selecting a Git project uses the source checkout directly. Once that logical project is already assigned, another conversation receives a detached managed worktree under the configured Codex worktree location, preventing concurrent chats from editing the same checkout. A branch, PR, or commit URL also receives a detached worktree when the existing source checkout is on another commit. `always` isolates every selection; `never` uses the source directly and therefore rejects a targeted URL unless that source is already at the requested commit.
+- With the default worktree mode and no explicit selection override, the first conversation selecting a Git project uses the source checkout directly. Once that logical project is already assigned, another conversation receives a detached managed worktree under the configured Codex worktree location, preventing concurrent chats from editing the same checkout. A branch, PR, or commit URL also receives a detached worktree when the existing source checkout is on another commit. `always` isolates every selection; `never` uses the source directly and therefore rejects a targeted URL unless that source is already at the requested commit.
+- Pass `createWorktree: false` to `set_project_root` to use the source checkout regardless of the configured mode, or `true` to create a managed worktree. Models must pass the user's explicit preference even when the project is obvious and selected automatically. Omitting it retains the configured policy. This override affects only the selection, never the saved configuration; an existing immutable binding cannot change placement.
 - Worktree identity uses the repository's Git common directory plus the selected path relative to its Git root. Linked worktrees are therefore recognised as the same repository, while separate subprojects in a monorepo remain distinct.
 - **Chat without a project** creates a private active root beneath `~/.codexify/scratch/conversations/`, outside the configured access root. Structured filesystem tools and project-scoped context/memory operate there, shell commands start there, and Git tools behave as they would in any non-repository directory unless the user initializes one. Generic transport clients receive an ephemeral scratch directory instead.
 - A conversation cannot switch choices once bound — start another chat for a different project or scratch workspace. Re-selecting the same canonical path, exact normalized repository selection, or scratch choice is idempotent. A different choice is rejected before any clone, fetch, or replacement scratch creation begins.
@@ -1141,7 +1166,7 @@ refs/codexify/diff/<project-hash>/<conversation-hash>/last-diff
 
 The raw conversation identifier is never written. The refs survive MCP reconnects and Codexify restarts. Generic MCP clients receive transport-local in-memory checkpoints instead. Each conversation/project pair retains only its current two referenced snapshots; unreferenced synthetic commits are ordinary Git-GC candidates. To inspect or remove current refs manually, use `git for-each-ref refs/codexify/diff/` and `git update-ref -d <ref>`. Removing both refs resets that owner to the current scoped state on its next project call. Existing `refs/codexify/review/.../project-open` and `.../last-review` refs are copied lazily into the diff namespace and retained so installations from the current review-named surface keep their checkpoints.
 
-With `uiWidgets=true` (the default), Codexify advertises the standard MCP Apps extension and serves a self-contained diff resource at `ui://codexify/diff/v3/mcp-app.html`. Compatible ChatGPT developer connectors render `show_diff` as the interactive GitHub-style file/statistic/patch card from component-only result metadata; the component is model-visible but is not granted app-side tool access. Other clients receive the concise text result. Existing review metadata and the v3, v2, and unversioned `ui://codexify/review/...` resources remain readable so existing cards can remount, while current `show_diff` results emit only the diff-named metadata. Expansion state is persisted as private widget state, including migration of `reviewOpen` to `diffOpen`. Cursor advancement completes before the result is returned and never waits for widget interaction, and the card updates at the `show_diff` tool-call boundary rather than continuously watching the filesystem. With `uiWidgets=false`, the widget resource and component payload are not advertised or emitted, and patch generation is skipped.
+With `uiWidgets=true` (the default), Codexify advertises the standard MCP Apps extension and serves a self-contained diff resource at `ui://codexify/diff/v4/mcp-app.html`. Compatible ChatGPT developer connectors render `show_diff` as the interactive GitHub-style file/statistic/patch card from component-only result metadata; the component is model-visible but is not granted app-side tool access. Other clients receive the concise text result. Existing review metadata and the v3, v2, and unversioned `ui://codexify/review/...` resources remain readable so existing cards can remount, while current `show_diff` results emit only the diff-named metadata. Code text is 13 px on both desktop and mobile, with larger file labels and controls. The previous diff v3 resource remains readable. Expansion state is persisted as private widget state, including migration of `reviewOpen` to `diffOpen`. Cursor advancement completes before the result is returned and never waits for widget interaction, and the card updates at the `show_diff` tool-call boundary rather than continuously watching the filesystem. With `uiWidgets=false`, the widget resource and component payload are not advertised or emitted, and patch generation is skipped.
 
 ## Context and memory
 

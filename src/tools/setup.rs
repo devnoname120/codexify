@@ -18,7 +18,7 @@ use crate::tools::check_for_updates::{
     UpdateCheckOutput, UpdateCheckStatus, output_from_result,
     output_schema_value as update_output_schema_value,
 };
-use crate::types::{AppConfig, ToolResult};
+use crate::types::{AppConfig, ToolResult, WorktreeMode};
 
 // This is an authentication and authorization tool despite its deliberately
 // innocuous ChatGPT-facing name and parameter. ChatGPT can falsely classify a
@@ -40,6 +40,7 @@ struct SetupArgs {
 enum ConnectorSchemaStatus {
     Current,
     Stale,
+    ConversationStale,
     Unknown,
 }
 
@@ -58,7 +59,30 @@ struct ConnectorSchemaInfo {
     status: ConnectorSchemaStatus,
     advertised_version: String,
     observed_version: Option<String>,
+    connector_version: Option<String>,
     refresh_recommended: bool,
+}
+
+fn schema_info(
+    server: &str,
+    connector: Option<&str>,
+    conversation: Option<&str>,
+) -> ConnectorSchemaInfo {
+    let status = match connector {
+        Some(version) if version != server => ConnectorSchemaStatus::Stale,
+        Some(_) => match conversation {
+            Some(version) if version == server => ConnectorSchemaStatus::Current,
+            _ => ConnectorSchemaStatus::ConversationStale,
+        },
+        None => ConnectorSchemaStatus::Unknown,
+    };
+    ConnectorSchemaInfo {
+        status,
+        advertised_version: server.into(),
+        observed_version: conversation.map(str::to_string),
+        connector_version: connector.map(str::to_string),
+        refresh_recommended: status == ConnectorSchemaStatus::Stale,
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -86,6 +110,7 @@ struct SetupDebugInfo {
 struct SetupOutput {
     content: String,
     server_version: String,
+    worktree_mode: String,
     next_step: String,
     project: SetupProjectInfo,
     update: UpdateCheckOutput,
@@ -217,7 +242,7 @@ fn project_info(
 fn next_step_for_project(project: &SetupProjectInfo) -> String {
     match project.status {
         SetupProjectStatus::Unselected => {
-            "If the intended project is already unambiguous, call `set_project_root` directly. Otherwise let the user choose a project or Chat without a project in the setup card. Then call `get_agent_brief`.".to_string()
+            "If the intended project is already unambiguous, call `set_project_root` directly, passing `createWorktree=false` if the user asked to use the source checkout without a worktree or `createWorktree=true` if they requested a worktree; an explicit user preference overrides the configured mode. Otherwise let the user choose a project or Chat without a project in the setup card. Then call `get_agent_brief`.".to_string()
         }
         SetupProjectStatus::Selected => {
             "Call `get_agent_brief` before using project tools.".to_string()
@@ -233,10 +258,12 @@ fn next_step_for_project(project: &SetupProjectInfo) -> String {
 }
 
 struct SetupResultInput<'a> {
-    scope_description: &'a str,
+    scope_description: Option<&'a str>,
+    worktree_mode: WorktreeMode,
     next_step: &'a str,
     project: SetupProjectInfo,
     observed_connector_version: Option<&'a str>,
+    reloaded_connector_version: Option<&'a str>,
     update_result: Result<LatestVersionInspection, String>,
     debug: bool,
     update_check_ms: u64,
@@ -245,30 +272,31 @@ struct SetupResultInput<'a> {
 fn setup_result(input: SetupResultInput<'_>) -> ToolResult {
     let SetupResultInput {
         scope_description,
+        worktree_mode,
         next_step,
         project,
         observed_connector_version,
+        reloaded_connector_version,
         update_result,
         debug,
         update_check_ms,
     } = input;
     let advertised_version = env!("CARGO_PKG_VERSION");
-    let observed_connector_version = observed_connector_version.map(str::trim);
-    let schema_status = match observed_connector_version {
-        Some(observed) if observed == advertised_version => ConnectorSchemaStatus::Current,
-        Some(_) => ConnectorSchemaStatus::Stale,
-        None => ConnectorSchemaStatus::Unknown,
-    };
-    let connector_schema = ConnectorSchemaInfo {
-        status: schema_status,
-        advertised_version: advertised_version.to_string(),
-        observed_version: observed_connector_version.map(ToOwned::to_owned),
-        refresh_recommended: schema_status != ConnectorSchemaStatus::Current,
-    };
+    let observed_connector_version = observed_connector_version
+        .map(str::trim)
+        .filter(|version| !version.is_empty());
+    let connector_schema = schema_info(
+        advertised_version,
+        reloaded_connector_version,
+        observed_connector_version,
+    );
 
     let update = output_from_result(update_result);
 
-    let mut text = format!("Setup completed for {scope_description}. {next_step}");
+    let mut text = match scope_description {
+        Some(scope) => format!("Setup completed for {scope}. {next_step}"),
+        None => "Current Codexify status.".to_string(),
+    };
     match update.status {
         UpdateCheckStatus::UpdateAvailable => {
             if let Some(latest) = update.latest_version.as_deref() {
@@ -284,13 +312,16 @@ fn setup_result(input: SetupResultInput<'_>) -> ToolResult {
     }
     if connector_schema.refresh_recommended {
         text.push_str(
-            " ChatGPT's cached Codexify connector schema could not be confirmed as current. The setup panel offers a Refresh action that opens the connector settings and explains where to click Refresh.",
+            " The connector's last recorded schema reload differs from the running server version. Use Refresh in the setup panel to open the connector settings, then click Refresh below the tool list.",
         );
+    } else if connector_schema.status == ConnectorSchemaStatus::ConversationStale {
+        text.push_str(" The connector schema is up to date, but this conversation uses an older schema. Start a new conversation to use the latest schema.");
     }
 
     let output = SetupOutput {
         content: text.clone(),
         server_version: advertised_version.to_string(),
+        worktree_mode: worktree_mode.as_str().to_string(),
         next_step: next_step.to_string(),
         project,
         update,
@@ -308,6 +339,7 @@ impl ConversationAuthorization {
             "properties": {
                 "content": { "type": "string" },
                 "serverVersion": { "type": "string" },
+                "worktreeMode": { "type": "string", "enum": ["auto", "always", "never"] },
                 "nextStep": { "type": "string" },
                 "project": {
                     "type": "object",
@@ -347,9 +379,10 @@ impl ConversationAuthorization {
                     "properties": {
                         "status": {
                             "type": "string",
-                            "enum": ["current", "stale", "unknown"]
+                            "enum": ["current", "stale", "conversation_stale", "unknown"]
                         },
                         "advertisedVersion": { "type": "string" },
+                        "connectorVersion": { "type": ["string", "null"] },
                         "observedVersion": {
                             "anyOf": [
                                 { "type": "string" },
@@ -362,6 +395,7 @@ impl ConversationAuthorization {
                         "status",
                         "advertisedVersion",
                         "observedVersion",
+                        "connectorVersion",
                         "refreshRecommended"
                     ],
                     "additionalProperties": false
@@ -386,6 +420,7 @@ impl ConversationAuthorization {
             "required": [
                 "content",
                 "serverVersion",
+                "worktreeMode",
                 "nextStep",
                 "project",
                 "update",
@@ -439,10 +474,12 @@ impl ConversationAuthorization {
         let update_check_ms =
             u64::try_from(update_started.elapsed().as_millis()).unwrap_or(u64::MAX);
         setup_result(SetupResultInput {
-            scope_description: scope.description(),
+            scope_description: Some(scope.description()),
+            worktree_mode: config.worktrees.mode,
             next_step: &next_step,
             project,
             observed_connector_version: connector_version.as_deref(),
+            reloaded_connector_version: context.connector_schema_version.as_deref(),
             update_result,
             debug: config.debug,
             update_check_ms,
@@ -537,6 +574,97 @@ impl Tool for ConversationAuthorization {
     }
 }
 
+/// Refreshes an existing card using the connector reload record and the card's
+/// original conversation version. Polls never update the reload record.
+pub struct SetupStatus;
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct SetupStatusArgs {
+    #[serde(default)]
+    force_update_check: bool,
+    conversation_version: Option<String>,
+}
+
+#[async_trait]
+impl Tool for SetupStatus {
+    fn title(&self) -> String {
+        "Current Codexify status".into()
+    }
+    fn name(&self) -> &'static str {
+        "setup_status"
+    }
+    fn description(&self) -> String {
+        "Read current server, workspace, worktree defaults, and update status for the setup card. Compares the last recorded connector reload version with the conversation version and running server version.".into()
+    }
+    fn behavior(&self) -> ToolBehavior {
+        ToolBehavior::new(
+            true,
+            false,
+            true,
+            true,
+            "Reads current setup state and a cached or bounded public release check without modifying setup, projects, or configuration.",
+        )
+    }
+    fn meta(&self) -> Option<rmcp::model::MetaObject> {
+        Some(
+            serde_json::from_value(json!({
+                "ui": { "visibility": ["app"] },
+                "openai/visibility": "private",
+                "openai/widgetAccessible": true
+            }))
+            .expect("static setup-status metadata"),
+        )
+    }
+    fn input_schema(&self) -> Value {
+        json!({"type":"object", "properties": {"forceUpdateCheck": {"type":"boolean"}, "conversationVersion": {"type":"string", "minLength":1, "maxLength":64}}, "additionalProperties":false})
+    }
+    fn output_schema(&self) -> Option<Value> {
+        Some(ConversationAuthorization::output_schema_value())
+    }
+    fn fills_structured_content(&self) -> bool {
+        false
+    }
+    fn requires_project_root(&self) -> bool {
+        false
+    }
+    async fn call(&self, _args: Value, _config: &AppConfig, _session: &SessionState) -> ToolResult {
+        ToolResult::error("Setup status requires request metadata.")
+    }
+    async fn call_with_context(
+        &self,
+        args: Value,
+        config: &AppConfig,
+        session: &SessionState,
+        context: &ToolRequestContext,
+    ) -> ToolResult {
+        let args: SetupStatusArgs = match parse_tool_args(args) {
+            Ok(args) => args,
+            Err(error) => return *error,
+        };
+        let project = project_info(config, session, context);
+        let next_step = next_step_for_project(&project);
+        let started = Instant::now();
+        let update_result = if args.force_update_check {
+            crate::self_update::refresh_latest_version().await
+        } else {
+            crate::self_update::inspect_latest_version().await
+        }
+        .map_err(|error| format!("{error:#}"));
+        setup_result(SetupResultInput {
+            scope_description: None,
+            worktree_mode: config.worktrees.mode,
+            next_step: &next_step,
+            project,
+            observed_connector_version: args.conversation_version.as_deref(),
+            reloaded_connector_version: context.connector_schema_version.as_deref(),
+            update_result,
+            debug: config.debug,
+            update_check_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -594,12 +722,98 @@ mod tests {
     }
 
     #[test]
+    fn schema_status_distinguishes_connector_reload_from_conversation_version() {
+        for (connector, conversation, expected) in [
+            (Some("1.2.4"), Some("1.2.4"), "current"),
+            (Some("1.2.3"), Some("1.2.3"), "stale"),
+            (Some("1.2.3"), Some("1.2.4"), "stale"),
+            (Some("1.2.4"), Some("1.2.3"), "conversation_stale"),
+            (Some("1.2.4"), None, "conversation_stale"),
+            (None, Some("1.2.4"), "unknown"),
+            (None, Some("1.2.3"), "unknown"),
+            (None, None, "unknown"),
+        ] {
+            let info = serde_json::to_value(schema_info("1.2.4", connector, conversation)).unwrap();
+            assert_eq!(info["status"], expected, "{connector:?} / {conversation:?}");
+            assert_eq!(info["refreshRecommended"], expected == "stale");
+            assert_eq!(info["connectorVersion"], json!(connector));
+            assert_eq!(info["observedVersion"], json!(conversation));
+        }
+        assert_eq!(
+            schema_info("1.2.3", Some("1.2.4"), Some("1.2.4")).status,
+            ConnectorSchemaStatus::Stale,
+            "a server rollback requires a reload too"
+        );
+    }
+
+    #[test]
+    fn live_status_schema_accepts_only_bounded_conversation_markers() {
+        let schema = SetupStatus.input_schema();
+        for args in [
+            json!({}),
+            json!({"conversationVersion":"1.2.3"}),
+            json!({"forceUpdateCheck":true}),
+        ] {
+            assert!(jsonschema::is_valid(&schema, &args));
+        }
+        for args in [
+            json!({"conversationVersion":""}),
+            json!({"conversationVersion":"x".repeat(65)}),
+            json!({"conversationVersion":1}),
+            json!({"connectorVersion":"1.2.4"}),
+        ] {
+            assert!(!jsonschema::is_valid(&schema, &args));
+        }
+    }
+
+    #[test]
+    fn live_status_exposes_worktree_defaults_without_guessing_host_cache_freshness() {
+        for mode in [
+            WorktreeMode::Auto,
+            WorktreeMode::Always,
+            WorktreeMode::Never,
+        ] {
+            let result = setup_result(SetupResultInput {
+                scope_description: None,
+                worktree_mode: mode,
+                next_step: "",
+                project: fixture_project_info(),
+                observed_connector_version: None,
+                reloaded_connector_version: None,
+                update_result: Err("offline".into()),
+                debug: false,
+                update_check_ms: 0,
+            });
+            let data = result.structured_content.as_ref().unwrap();
+            assert!(jsonschema::is_valid(
+                &ConversationAuthorization::output_schema_value(),
+                data
+            ));
+            assert_eq!(data["worktreeMode"], mode.as_str());
+            assert_eq!(data["serverVersion"], env!("CARGO_PKG_VERSION"));
+            assert_eq!(
+                data["connectorSchema"]["advertisedVersion"],
+                env!("CARGO_PKG_VERSION")
+            );
+            assert_eq!(data["connectorSchema"]["observedVersion"], Value::Null);
+            assert_eq!(data["connectorSchema"]["status"], "unknown");
+            assert_eq!(data["connectorSchema"]["refreshRecommended"], false);
+            assert!(!result.joined_text().contains("Setup completed"));
+        }
+        let meta = SetupStatus.meta().unwrap();
+        assert_eq!(meta.get("ui"), Some(&json!({"visibility":["app"]})));
+        assert_eq!(meta.get("openai/visibility"), Some(&json!("private")));
+    }
+
+    #[test]
     fn setup_result_reports_update_and_connector_schema_status_directly() {
         let result = setup_result(SetupResultInput {
-            scope_description: "this ChatGPT conversation",
+            scope_description: Some("this ChatGPT conversation"),
+            worktree_mode: WorktreeMode::Auto,
             next_step: "Call `get_agent_brief` before using project tools.",
             project: fixture_project_info(),
             observed_connector_version: Some("1.0.0"),
+            reloaded_connector_version: Some("1.0.0"),
             update_result: Ok(crate::self_update::LatestVersionInspection {
                 status: crate::self_update::LatestVersionStatus::UpdateAvailable,
                 current: Version::new(1, 1, 0),
@@ -629,11 +843,7 @@ mod tests {
                 .is_none()
         );
         assert_eq!(structured["debug"]["updateCheckMs"], 17);
-        assert!(
-            result
-                .joined_text()
-                .contains("opens the connector settings")
-        );
+        assert!(result.joined_text().contains("last recorded schema reload"));
         assert!(!result.joined_text().contains("Open ChatGPT Settings"));
     }
 
@@ -646,17 +856,19 @@ mod tests {
         assert!(args.connector_version.is_none());
 
         let result = setup_result(SetupResultInput {
-            scope_description: "this MCP transport session",
+            scope_description: Some("this MCP transport session"),
+            worktree_mode: WorktreeMode::Auto,
             next_step: "Call `get_agent_brief` before using project tools.",
             project: fixture_project_info(),
             observed_connector_version: None,
+            reloaded_connector_version: None,
             update_result: Err("offline".to_string()),
             debug: false,
             update_check_ms: 9,
         });
         let structured = result.structured_content.as_ref().unwrap();
         assert_eq!(structured["connectorSchema"]["status"], "unknown");
-        assert_eq!(structured["connectorSchema"]["refreshRecommended"], true);
+        assert_eq!(structured["connectorSchema"]["refreshRecommended"], false);
         assert_eq!(structured["update"]["status"], "check_failed");
         assert_eq!(structured["debug"], Value::Null);
     }
@@ -668,6 +880,7 @@ mod tests {
     ) -> ToolRequestContext {
         ToolRequestContext {
             conversation: identity,
+            connector_schema_version: None,
             conversation_authorizations: authorizations,
             project_bindings: Arc::new(ProjectBindingStore::new(
                 state_root.join("project-bindings"),

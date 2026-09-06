@@ -3,7 +3,8 @@ use serde_json::json;
 
 use crate::diff::DiffResult;
 
-pub const DIFF_UI_URI: &str = "ui://codexify/diff/v3/mcp-app.html";
+pub const DIFF_UI_URI: &str = "ui://codexify/diff/v4/mcp-app.html";
+pub const PREVIOUS_DIFF_UI_URI: &str = "ui://codexify/diff/v3/mcp-app.html";
 pub const LEGACY_REVIEW_UI_URI_V3: &str = "ui://codexify/review/v3/mcp-app.html";
 pub const LEGACY_REVIEW_UI_URI_V2: &str = "ui://codexify/review/v2/mcp-app.html";
 pub const LEGACY_REVIEW_UI_URI: &str = "ui://codexify/review/mcp-app.html";
@@ -54,6 +55,7 @@ pub fn contents() -> ResourceContents {
 
 pub fn contents_for_uri(uri: &str) -> Option<ResourceContents> {
     if uri != DIFF_UI_URI
+        && uri != PREVIOUS_DIFF_UI_URI
         && uri != LEGACY_REVIEW_UI_URI_V3
         && uri != LEGACY_REVIEW_UI_URI_V2
         && uri != LEGACY_REVIEW_UI_URI
@@ -103,8 +105,8 @@ pub const DIFF_UI_HTML: &str = concat!(
   --syntax-variable: light-dark(#953800, #ffa657);
   --syntax-type: light-dark(#116329, #7ee787);
   --accent: light-dark(#2457c5, #8db4ff);
-  --file-row-height: 28px;
-  --diff-font-size: 9.5px;
+  --file-row-height: 34px;
+  --diff-font-size: 13px;
   font-family: var(--font-sans, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
 }
 :root[data-theme="light"] { color-scheme: light; }
@@ -117,26 +119,26 @@ main { display: grid; width: 100%; min-width: 0; gap: 6px; padding: 6px; }
 .diff { width: 100%; min-width: 0; max-width: 100%; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: var(--bg); }
 .diff-summary, .file-summary { cursor: pointer; list-style: none; -webkit-tap-highlight-color: transparent; }
 .diff-summary::-webkit-details-marker, .file-summary::-webkit-details-marker { display: none; }
-.diff-summary { display: grid; grid-template-columns: minmax(0, 1fr) auto 9px; align-items: center; gap: 8px; min-height: 32px; padding: 6px 9px; background: var(--panel); font-size: 11px; font-weight: 650; }
+.diff-summary { display: grid; grid-template-columns: minmax(0, 1fr) auto 9px; align-items: center; gap: 8px; min-height: 32px; padding: 6px 9px; background: var(--panel); font-size: 13px; font-weight: 650; }
 .diff-summary::after, .file-summary::after { content: ""; width: 7px; height: 7px; border-right: 1.5px solid var(--muted); border-bottom: 1.5px solid var(--muted); transform: rotate(-45deg); transition: transform 120ms ease; }
 .diff[open] > .diff-summary::after, .file-entry[open] > .file-summary::after { transform: rotate(45deg); }
 .diff-summary:focus-visible, .file-summary:focus-visible, .show-more:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
-.summary-stats { display: flex; align-items: baseline; gap: 6px; font-size: 10px; font-weight: 500; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.summary-stats { display: flex; align-items: baseline; gap: 6px; font-size: 12px; font-weight: 500; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .binary-count { color: var(--muted); }
 .files { display: grid; width: 100%; min-width: 0; max-width: 100%; }
 .file-entry { width: 100%; min-width: 0; max-width: 100%; overflow: hidden; border-top: 1px solid var(--border); }
-.file-summary, .file-row { display: grid; width: 100%; min-width: 0; max-width: 100%; grid-template-columns: 12px minmax(0, 1fr) auto 8px; align-items: center; gap: 6px; min-height: var(--file-row-height); padding: 3px 9px; font-size: 10.5px; line-height: 1.25; }
+.file-summary, .file-row { display: grid; width: 100%; min-width: 0; max-width: 100%; grid-template-columns: 12px minmax(0, 1fr) auto 8px; align-items: center; gap: 6px; min-height: var(--file-row-height); padding: 3px 9px; font-size: 12px; line-height: 1.25; }
 .file-row { grid-template-columns: 12px minmax(0, 1fr) auto; border-top: 1px solid var(--border); }
 .file-entry[open] > .file-summary, .file-summary:hover, .show-more:hover { background: var(--panel-hover); }
-.status { width: 12px; color: var(--muted); font-family: var(--font-sans, ui-sans-serif, system-ui, sans-serif); font-size: 8.5px; font-weight: 650; line-height: 1; text-align: center; }
+.status { width: 12px; color: var(--muted); font-family: var(--font-sans, ui-sans-serif, system-ui, sans-serif); font-size: 11px; font-weight: 650; line-height: 1; text-align: center; }
 .path { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace); }
-.stats { font-size: 9.5px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.stats { font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .add { color: var(--added-text); }
 .del { color: var(--deleted-text); margin-left: 5px; }
-.show-more { width: 100%; min-height: var(--file-row-height); padding: 4px 9px; border: 0; border-top: 1px solid var(--border); background: transparent; color: var(--muted); font-size: 10px; line-height: 1.25; text-align: left; cursor: pointer; }
-.empty, .notice { padding: 12px 9px; color: var(--muted); font-size: 10px; text-align: center; }
+.show-more { width: 100%; min-height: var(--file-row-height); padding: 4px 9px; border: 0; border-top: 1px solid var(--border); background: transparent; color: var(--muted); font-size: 12px; line-height: 1.25; text-align: left; cursor: pointer; }
+.empty, .notice { padding: 12px 9px; color: var(--muted); font-size: 12px; text-align: center; }
 .omitted { border-top: 1px solid var(--border); }
-.warning { border: 1px solid var(--border); border-radius: 9px; padding: 7px 9px; color: var(--muted); font-size: 10px; line-height: 1.35; }
+.warning { border: 1px solid var(--border); border-radius: 9px; padding: 7px 9px; color: var(--muted); font-size: 12px; line-height: 1.35; }
 .debug-timing { padding: 0 2px; color: var(--muted); font: 9px/1.35 var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace); text-align: right; }
 .diff-body { width: 100%; min-width: 0; max-width: 100%; overflow: hidden; border-top: 1px solid var(--border); }
 .diff-table { display: grid; width: 100%; min-width: 0; max-width: 100%; grid-template-columns: minmax(3.5em, auto) minmax(3.5em, auto) minmax(0, 1fr); font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace); font-size: var(--diff-font-size); font-variant-ligatures: none; line-height: 1.4; tab-size: 4; }
@@ -167,10 +169,10 @@ main { display: grid; width: 100%; min-width: 0; gap: 6px; padding: 6px; }
 .syntax-builtin, .syntax-tag, .syntax-selector, .syntax-attr-name { color: var(--syntax-type); }
 .binary-diff { padding: 14px 10px; background: var(--panel); color: var(--muted); font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace); font-size: var(--diff-font-size); line-height: 1.4; text-align: center; }
 @media (max-width: 520px) {
-  :root { --file-row-height: 26px; --diff-font-size: 9px; }
+  :root { --file-row-height: 34px; --diff-font-size: 13px; }
   main { gap: 4px; padding: 4px; }
   .diff-summary { min-height: 30px; padding: 5px 7px; }
-  .file-summary, .file-row { padding: 2px 7px; font-size: 10px; }
+  .file-summary, .file-row { padding: 2px 7px; font-size: 12px; }
   .show-more { padding: 3px 7px; }
   .diff-table { grid-template-columns: minmax(3.25em, auto) minmax(3.25em, auto) minmax(0, 1fr); }
   .line-number { padding-inline: 3px; }
@@ -1204,6 +1206,7 @@ mod tests {
     #[test]
     fn resource_uses_the_mcp_apps_mime_type() {
         let resource = resource();
+        assert!(contents_for_uri(PREVIOUS_DIFF_UI_URI).is_some());
         assert_eq!(resource.uri, DIFF_UI_URI);
         assert_eq!(resource.mime_type.as_deref(), Some(DIFF_UI_MIME_TYPE));
         assert_eq!(
@@ -1297,8 +1300,8 @@ mod tests {
 
     #[test]
     fn embedded_view_is_compact_and_collapses_file_diffs_lazily() {
-        assert!(DIFF_UI_HTML.contains("--file-row-height: 28px"));
-        assert!(DIFF_UI_HTML.contains("--diff-font-size: 9.5px"));
+        assert!(DIFF_UI_HTML.contains("--file-row-height: 34px"));
+        assert!(DIFF_UI_HTML.contains("--diff-font-size: 13px"));
         assert!(DIFF_UI_HTML.contains("text-size-adjust: 100%"));
         assert!(DIFF_UI_HTML.contains("const INITIAL_VISIBLE_FILES = 3"));
         assert!(DIFF_UI_HTML.contains("el(\"details\", \"file-entry\")"));

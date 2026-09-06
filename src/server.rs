@@ -107,6 +107,7 @@ pub struct CodexHandler {
     config: Arc<AppConfig>,
     tools: Arc<Vec<Box<dyn Tool>>>,
     project_bindings: Arc<ProjectBindingStore>,
+    connector_schemas: Arc<crate::connector_schema::ConnectorSchemaStore>,
     conversation_authorizations: Arc<ConversationAuthorizationStore>,
     conversation_exec_sessions: Arc<ConversationExecSessionStore>,
     diff_checkpoints: Arc<DiffCheckpointManager>,
@@ -314,7 +315,7 @@ impl ServerHandler for CodexHandler {
 
     async fn list_tools(
         &self,
-        _request: Option<PaginatedRequestParams>,
+        request: Option<PaginatedRequestParams>,
         context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
         let tools = self
@@ -323,6 +324,20 @@ impl ServerHandler for CodexHandler {
             .map(|tool| advertised_tool(tool.as_ref(), &self.config))
             .collect();
         let mut result = ListToolsResult::with_all_items(tools);
+        let caller = crate::connector_schema::caller_key(&context.meta).or_else(|| {
+            request
+                .as_ref()
+                .and_then(|request| request.meta.as_ref())
+                .and_then(crate::connector_schema::caller_key)
+        });
+        if let Some(caller) = caller
+            && let Err(error) = self
+                .connector_schemas
+                .record_reload(&caller, env!("CARGO_PKG_VERSION"))
+        {
+            tracing::warn!(%error, "could not save connector schema reload version");
+        }
+
         ensure_modern_cache_hints(
             context.protocol_version().as_ref(),
             &mut result.ttl_ms,
@@ -449,6 +464,14 @@ impl ServerHandler for CodexHandler {
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, McpError> {
+        let connector_schema_version = crate::connector_schema::caller_key(&context.meta)
+            .or_else(|| {
+                request
+                    .meta
+                    .as_ref()
+                    .and_then(crate::connector_schema::caller_key)
+            })
+            .and_then(|caller| self.connector_schemas.version(&caller));
         let conversation = ConversationIdentity::from_request_meta(&context.meta).or_else(|| {
             request
                 .meta
@@ -463,6 +486,7 @@ impl ServerHandler for CodexHandler {
         let call_id = self.next_tool_call_id.fetch_add(1, Ordering::Relaxed);
         let tool_context = ToolRequestContext {
             conversation: conversation.clone(),
+            connector_schema_version,
             conversation_authorizations: self.conversation_authorizations.clone(),
             project_bindings: self.project_bindings.clone(),
             diff_checkpoints: self.diff_checkpoints.clone(),
@@ -554,11 +578,19 @@ impl ServerHandler for CodexHandler {
                     if let Some(identity) = conversation.as_ref() {
                         select_and_render(&args, |request| async move {
                             match request {
-                                ProjectSelectionRequest::Project(path) => self
-                                    .project_bindings
-                                    .select_project_root(&self.config, identity, &path)
-                                    .await
-                                    .map(ProjectSelection::Project),
+                                ProjectSelectionRequest::Project {
+                                    path,
+                                    create_worktree,
+                                } => {
+                                    let selected = crate::tools::set_project_root::selection_config(
+                                        &self.config,
+                                        create_worktree,
+                                    );
+                                    self.project_bindings
+                                        .select_project_root(&selected, identity, &path)
+                                        .await
+                                        .map(ProjectSelection::Project)
+                                }
                                 ProjectSelectionRequest::WithoutProject => self
                                     .project_bindings
                                     .select_without_project(&self.config, identity)
@@ -749,6 +781,8 @@ pub async fn start_http_server(mut config: AppConfig) -> anyhow::Result<()> {
     let _ = std::fs::remove_dir_all(&gen_dir);
     config.generated_skills_dir = Some(gen_dir);
     let project_bindings = Arc::new(ProjectBindingStore::for_current_user());
+    let connector_schemas =
+        Arc::new(crate::connector_schema::ConnectorSchemaStore::for_current_user(&config));
     let conversation_exec_sessions = Arc::new(ConversationExecSessionStore::new());
     conversation_exec_sessions
         .spawn_idle_reaper(Duration::from_millis(config.exec.idle_timeout_ms));
@@ -834,6 +868,7 @@ pub async fn start_http_server(mut config: AppConfig) -> anyhow::Result<()> {
     let factory_config = config.clone();
     let factory_tools = tools.clone();
     let factory_project_bindings = project_bindings.clone();
+    let factory_connector_schemas = connector_schemas.clone();
     let factory_conversation_authorizations = conversation_authorizations.clone();
     let factory_conversation_exec_sessions = conversation_exec_sessions.clone();
     let factory_diff_checkpoints = diff_checkpoints.clone();
@@ -850,6 +885,7 @@ pub async fn start_http_server(mut config: AppConfig) -> anyhow::Result<()> {
                 config: factory_config.clone(),
                 tools: factory_tools.clone(),
                 project_bindings: factory_project_bindings.clone(),
+                connector_schemas: factory_connector_schemas.clone(),
                 conversation_authorizations: factory_conversation_authorizations.clone(),
                 conversation_exec_sessions: factory_conversation_exec_sessions.clone(),
                 diff_checkpoints: factory_diff_checkpoints.clone(),
@@ -1525,6 +1561,7 @@ mod tests {
         CodexHandler {
             config: Arc::new(config),
             tools: Arc::new(tools),
+            connector_schemas: Arc::new(crate::connector_schema::ConnectorSchemaStore::default()),
             project_bindings: Arc::new(ProjectBindingStore::new(root.join("bindings"))),
             conversation_authorizations: Arc::new(ConversationAuthorizationStore::new()),
             conversation_exec_sessions: Arc::new(ConversationExecSessionStore::new()),
@@ -1540,6 +1577,130 @@ mod tests {
             tool_logging,
             next_tool_call_id: Arc::new(AtomicU64::new(1)),
             session: SessionState::new(),
+        }
+    }
+
+    struct ConnectorSchemaProbe;
+
+    #[async_trait]
+    impl Tool for ConnectorSchemaProbe {
+        fn name(&self) -> &'static str {
+            "connector_schema_probe"
+        }
+        fn title(&self) -> String {
+            "Connector schema probe".into()
+        }
+        fn description(&self) -> String {
+            "Test-only connector reload observation.".into()
+        }
+        fn behavior(&self) -> crate::tool::ToolBehavior {
+            crate::tool::ToolBehavior::new(true, false, true, false, "Test-only state inspection.")
+        }
+        fn input_schema(&self) -> Value {
+            crate::tool::empty_object_schema()
+        }
+        fn output_schema(&self) -> Option<Value> {
+            Some(crate::tool::text_output_schema())
+        }
+        fn requires_project_root(&self) -> bool {
+            false
+        }
+        async fn call(&self, _: Value, _: &AppConfig, _: &SessionState) -> ToolResult {
+            ToolResult::error("Request context required")
+        }
+        async fn call_with_context(
+            &self,
+            _: Value,
+            _: &AppConfig,
+            _: &SessionState,
+            context: &ToolRequestContext,
+        ) -> ToolResult {
+            ToolResult::text(
+                context
+                    .connector_schema_version
+                    .as_deref()
+                    .unwrap_or("unknown"),
+            )
+        }
+    }
+
+    #[tokio::test]
+    async fn connector_reload_is_shared_across_transports_but_not_accounts() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Arc::new(crate::connector_schema::ConnectorSchemaStore::default());
+        let metadata = |subject: &str, chat: &str| {
+            json!({
+                "openai/subject":subject, "openai/organization":"workspace", "openai/session":chat
+            })
+        };
+        let key = |subject: &str| {
+            crate::connector_schema::caller_key(
+                &serde_json::from_value(metadata(subject, "old-chat")).unwrap(),
+            )
+            .unwrap()
+        };
+        store.record_reload(&key("a"), "0.1.0").unwrap();
+        store.record_reload(&key("b"), "0.1.0").unwrap();
+        let mut clients = Vec::new();
+        let mut tasks = Vec::new();
+        for _ in 0..2 {
+            let mut handler = handler_with_tools(
+                root.path(),
+                vec![Box::new(ConnectorSchemaProbe)],
+                crate::types::ToolLogLevel::Info,
+            );
+            handler.connector_schemas = store.clone();
+            let (server_transport, client_transport) = tokio::io::duplex(256 * 1024);
+            tasks.push(tokio::spawn(async move {
+                handler
+                    .serve(server_transport)
+                    .await
+                    .unwrap()
+                    .waiting()
+                    .await
+                    .unwrap();
+            }));
+            clients.push(().serve(client_transport).await.unwrap());
+        }
+        let probe = |subject: &str, chat: &str| {
+            serde_json::from_value::<CallToolRequestParams>(json!({
+                "name":"connector_schema_probe", "arguments":{}, "_meta":metadata(subject, chat)
+            }))
+            .unwrap()
+        };
+
+        clients[0].list_tools(None).await.unwrap();
+        assert_eq!(store.version(&key("a")).as_deref(), Some("0.1.0"));
+        assert_eq!(store.version(&key("b")).as_deref(), Some("0.1.0"));
+        let before = clients[0].call_tool(probe("a", "old-chat")).await.unwrap();
+        assert_eq!(before.structured_content.unwrap()["content"], "0.1.0");
+        clients[1]
+            .list_tools(Some(
+                serde_json::from_value(json!({"_meta":metadata("a", "settings")})).unwrap(),
+            ))
+            .await
+            .unwrap();
+        for chat in ["old-chat", "new-chat"] {
+            let after = clients[0].call_tool(probe("a", chat)).await.unwrap();
+            assert_eq!(
+                after.structured_content.unwrap()["content"],
+                env!("CARGO_PKG_VERSION")
+            );
+        }
+        let other = clients[0].call_tool(probe("b", "old-chat")).await.unwrap();
+        assert_eq!(other.structured_content.unwrap()["content"], "0.1.0");
+        let unknown = clients[1].call_tool(probe("c", "new-chat")).await.unwrap();
+        assert_eq!(unknown.structured_content.unwrap()["content"], "unknown");
+        assert_eq!(
+            store.version(&key("a")).as_deref(),
+            Some(env!("CARGO_PKG_VERSION"))
+        );
+        assert!(store.version(&key("c")).is_none());
+        for client in clients {
+            client.cancel().await.unwrap();
+        }
+        for task in tasks {
+            task.await.unwrap();
         }
     }
 
@@ -1811,6 +1972,112 @@ mod tests {
         server_task.await.unwrap();
     }
 
+    #[tokio::test]
+    async fn project_worktree_override_is_honored_by_both_dispatch_paths() {
+        use crate::types::{ToolLogLevel, WorktreeMode};
+        for stable_conversation in [false, true] {
+            for (mode, preference, expected) in [
+                (WorktreeMode::Always, Some(false), false),
+                (WorktreeMode::Never, Some(true), true),
+                (WorktreeMode::Never, None, false),
+                (WorktreeMode::Always, None, true),
+            ] {
+                let root = tempfile::tempdir().unwrap();
+                let project = root.path().join("demo");
+                std::fs::create_dir(&project).unwrap();
+                std::fs::write(project.join("tracked.txt"), "original\n").unwrap();
+                for args in [
+                    vec!["init", "--quiet"],
+                    vec!["add", "tracked.txt"],
+                    vec![
+                        "-c",
+                        "user.name=Widget Tests",
+                        "-c",
+                        "user.email=tests@example.invalid",
+                        "commit",
+                        "--quiet",
+                        "-m",
+                        "initial",
+                    ],
+                ] {
+                    assert!(
+                        std::process::Command::new("git")
+                            .args(args)
+                            .current_dir(&project)
+                            .output()
+                            .unwrap()
+                            .status
+                            .success()
+                    );
+                }
+                let mut handler = handler_with_tools(
+                    root.path(),
+                    vec![Box::new(SetProjectRoot)],
+                    ToolLogLevel::Info,
+                );
+                let config = Arc::make_mut(&mut handler.config);
+                config.multi_project = true;
+                config.worktrees.mode = mode;
+                config.worktrees.root = root.path().join("worktrees");
+                config.worktrees.auto_cleanup_enabled = false;
+                let config = handler.config.clone();
+                let (server_transport, client_transport) = tokio::io::duplex(256 * 1024);
+                let server_task = tokio::spawn(async move {
+                    handler
+                        .serve(server_transport)
+                        .await
+                        .unwrap()
+                        .waiting()
+                        .await
+                        .unwrap();
+                });
+                let client = ().serve(client_transport).await.unwrap();
+                let mut args = json!({ "path": "demo" });
+                if let Some(preference) = preference {
+                    args["createWorktree"] = json!(preference);
+                }
+                let request = |args: Value| {
+                    let mut value = json!({ "name": "set_project_root", "arguments": args });
+                    if stable_conversation {
+                        value["_meta"] = json!({"openai/session":"worktree-choice"});
+                    }
+                    serde_json::from_value::<CallToolRequestParams>(value).unwrap()
+                };
+                let result = client.call_tool(request(args.clone())).await.unwrap();
+                assert_ne!(result.is_error, Some(true), "{result:?}");
+                let data = result.structured_content.unwrap();
+                assert_eq!(data["managed_worktree"], expected);
+                assert_eq!(
+                    data["binding_scope"],
+                    if stable_conversation {
+                        "chatgpt_conversation"
+                    } else {
+                        "mcp_transport_session"
+                    }
+                );
+                assert_eq!(
+                    config.worktrees.mode, mode,
+                    "override must not mutate server configuration"
+                );
+                let active = std::path::PathBuf::from(data["active_root"].as_str().unwrap());
+                assert_eq!(active != std::fs::canonicalize(&project).unwrap(), expected);
+                assert_eq!(
+                    std::fs::read_to_string(active.join("tracked.txt")).unwrap(),
+                    "original\n"
+                );
+                args["createWorktree"] = json!(!expected);
+                let incompatible = client.call_tool(request(args)).await.unwrap();
+                assert_eq!(
+                    incompatible.is_error,
+                    Some(true),
+                    "an existing binding cannot silently ignore an explicit preference"
+                );
+                client.cancel().await.unwrap();
+                server_task.await.unwrap();
+            }
+        }
+    }
+
     #[test]
     fn filtered_payload_level_falls_back_to_the_ordinary_completion_event() {
         let _tracing_guard = crate::tool_logging::TEST_TRACING_LOCK
@@ -1844,6 +2111,7 @@ mod tests {
         let handler = CodexHandler {
             config: Arc::new(crate::config::default_config(root.path().to_path_buf())),
             tools: Arc::new(crate::registry::load_tools()),
+            connector_schemas: Arc::new(crate::connector_schema::ConnectorSchemaStore::default()),
             project_bindings: Arc::new(ProjectBindingStore::new(root.path().join("bindings"))),
             conversation_authorizations: Arc::new(ConversationAuthorizationStore::new()),
             conversation_exec_sessions: Arc::new(ConversationExecSessionStore::new()),
@@ -1946,6 +2214,7 @@ mod tests {
         let handler = CodexHandler {
             config: Arc::new(config),
             tools: Arc::new(crate::registry::load_tools()),
+            connector_schemas: Arc::new(crate::connector_schema::ConnectorSchemaStore::default()),
             project_bindings: Arc::new(ProjectBindingStore::new(root.path().join("bindings"))),
             conversation_authorizations: Arc::new(ConversationAuthorizationStore::new()),
             conversation_exec_sessions: Arc::new(ConversationExecSessionStore::new()),
@@ -1983,6 +2252,7 @@ mod tests {
         let handler = CodexHandler {
             config: Arc::new(config),
             tools: Arc::new(tools),
+            connector_schemas: Arc::new(crate::connector_schema::ConnectorSchemaStore::default()),
             project_bindings: Arc::new(ProjectBindingStore::new(root.path().join("bindings"))),
             conversation_authorizations: authorizations.clone(),
             conversation_exec_sessions: Arc::new(ConversationExecSessionStore::new()),

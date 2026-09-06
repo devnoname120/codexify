@@ -6,6 +6,24 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Version-only connector reload tracking across conversations and server restarts,
+  scoped by endpoint and identified caller. The setup widget distinguishes a
+  current schema, a connector requiring Refresh, and an older conversation that
+  needs a new chat after the connector was refreshed.
+- A worktree checkbox below **Chat without a project**, using the configured
+  default. Explicit `set_project_root.createWorktree` choices override that
+  default without changing the saved configuration.
+
+### Changed
+
+- Setup version rows appear above workspace selection and recheck live status on
+  activation and every 30 seconds while visible. Old results cannot restore
+  obsolete Upgrade or Refresh actions; unknown schema state stays hidden.
+- Diff code text is now 13 px on desktop and mobile, with larger file labels and
+  controls. Previous setup and diff resource URLs remain readable.
+
 ## [1.2.4] - 2026-09-02
 
 ### Changed

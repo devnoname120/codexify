@@ -303,6 +303,7 @@ mod tests {
         cancellation.cancel();
         let context = ToolRequestContext {
             conversation: None,
+            connector_schema_version: None,
             conversation_authorizations: Arc::new(
                 crate::conversation_auth::ConversationAuthorizationStore::new(),
             ),

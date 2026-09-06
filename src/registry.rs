@@ -90,6 +90,7 @@ fn load_tools_with_options(
         Box::new(tools::get_project_doc::GetProjectDoc),
         Box::new(tools::get_agent_brief::GetAgentBrief),
         Box::new(tools::check_for_updates::CheckForUpdates),
+        Box::new(tools::setup::SetupStatus),
         Box::new(tools::doctor::Doctor),
         Box::new(tools::self_update::SelfUpdate),
         Box::new(tools::self_update_status::SelfUpdateStatus),
@@ -101,7 +102,7 @@ fn load_tools_with_options(
         // Codex's skills.list / skills.read.
         Box::new(tools::skills_list::SkillsList),
         Box::new(tools::skills_read::SkillsRead),
-    ] as [Box<dyn Tool>; 29]);
+    ] as [Box<dyn Tool>; 30]);
 
     let mut seen = std::collections::HashSet::new();
     for tool in &all {

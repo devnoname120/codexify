@@ -104,10 +104,12 @@ button { font: inherit; }
 .button.failure { border-color: color-mix(in srgb, var(--bad) 55%, var(--border)); color: var(--bad); }
 .button:disabled { cursor: wait; opacity: .55; }
 .workspace {
-  margin-bottom: 8px;
-  padding-bottom: 8px;
-  border-bottom: 1px solid var(--border);
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
 }
+.worktree-choice { display: flex; align-items: center; gap: 8px; padding: 5px 0; font-size: 12px; cursor: pointer; }
+.worktree-choice input { width: 17px; height: 17px; margin: 0; accent-color: var(--accent); }
 .workspace-head { display: grid; gap: 2px; margin-bottom: 7px; }
 .workspace-title { margin: 0; font-size: 12px; font-weight: 700; letter-spacing: -.01em; }
 .workspace-copy { margin: 0; color: var(--muted); font-size: 11px; }
@@ -294,6 +296,7 @@ button { font: inherit; }
   let initialized = false;
   let currentData = null;
   let currentMetadata = null;
+  let conversationSchemaVersion = null;
   let updateState = null;
   let updateChecking = false;
   let upgradeRunning = false;
@@ -311,6 +314,17 @@ button { font: inherit; }
   let projectSearchTimer = null;
   let projectQueryGeneration = 0;
   let projectSelecting = false;
+  let createWorktree = null;
+  let worktreeChoiceEdited = false;
+  let projectRevision = 0;
+  let statusStarted = false;
+  let statusFresh = false;
+  let hasLiveStatus = false;
+  let statusRefreshing = false;
+  let statusError = null;
+  let statusTimer = null;
+  let lastStatusCheckAt = 0;
+  let tornDown = false;
   let projectCatalog = {
     phase: "idle",
     query: "",
@@ -324,10 +338,16 @@ button { font: inherit; }
     window.parent.postMessage(message, "*");
   }
 
-  function request(method, params) {
+  function request(method, params, timeoutMs = 120_000) {
     const id = nextId++;
     post({ jsonrpc: "2.0", id, method, params });
-    return new Promise((resolve, reject) => pending.set(id, { resolve, reject }));
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        pending.delete(id);
+        reject(new Error("The host request timed out."));
+      }, timeoutMs);
+      pending.set(id, { resolve, reject, timer });
+    });
   }
 
   function notify(method, params) {
@@ -466,16 +486,22 @@ button { font: inherit; }
     return result;
   }
 
-  async function callTool(name, args) {
+  async function callTool(name, args, timeoutMs = 120_000) {
     if (initialized) {
       try {
-        return await request("tools/call", { name, arguments: args || {} });
+        return await request("tools/call", { name, arguments: args || {} }, timeoutMs);
       } catch (error) {
         if (!(window.openai && typeof window.openai.callTool === "function")) throw error;
       }
     }
     if (window.openai && typeof window.openai.callTool === "function") {
-      return window.openai.callTool(name, args || {});
+      let timer;
+      try {
+        return await Promise.race([
+          window.openai.callTool(name, args || {}),
+          new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("The host request timed out.")), timeoutMs); })
+        ]);
+      } finally { clearTimeout(timer); }
     }
     throw new Error("This host does not expose widget tool calls.");
   }
@@ -599,6 +625,9 @@ button { font: inherit; }
   }
 
   function updateView() {
+    if (!statusFresh) {
+      return { current: null, label: statusRefreshing || !statusStarted ? "checking…" : "status unavailable", tone: "status-muted", latest: null };
+    }
     const update = updateState || (currentData && currentData.update) || {};
     const current = update.currentVersion || (currentData && currentData.serverVersion) || "unknown";
     if (updateChecking) {
@@ -629,9 +658,10 @@ button { font: inherit; }
     const copy = el("div", "status-copy");
     copy.append(
       el("span", "status-label", "Codexify:"),
-      el("span", "status-version", `v${view.current}`),
+      el("span", "status-version", view.current ? `v${view.current}` : ""),
       el("span", `status-state ${view.tone}`, view.label)
     );
+    if (statusError) copy.append(el("span", "status-help", "Current status could not be checked. Try again."));
 
     const actions = el("div", "row-actions");
     if (view.latest) {
@@ -646,7 +676,7 @@ button { font: inherit; }
       updateChecking ? "Checking…" : "Check for updates",
       "",
       () => { void runUpdateCheck(); },
-      updateChecking || upgradeRunning
+      updateChecking || upgradeRunning || statusRefreshing
     ));
     row.append(copy, actions);
     return row;
@@ -654,25 +684,32 @@ button { font: inherit; }
 
   function renderSchemaRow() {
     const schema = currentData.connectorSchema || {};
+    if (!statusFresh || !["current", "stale", "conversation_stale"].includes(schema.status)) return null;
     const row = el("div", "status-row");
     const copy = el("div", "status-copy");
     copy.append(el("span", "status-label", "Connector schema:"));
-
     if (schema.status === "current") {
       copy.append(
-        el("span", "status-version", `v${schema.observedVersion || schema.advertisedVersion || "unknown"}`),
+        el("span", "status-version", `v${schema.connectorVersion || schema.advertisedVersion || "unknown"}`),
         el("span", "status-state status-pass", "✓")
+      );
+    } else if (schema.status === "conversation_stale") {
+      const conversation = schema.observedVersion
+        ? `This conversation uses schema v${schema.observedVersion}.`
+        : "This conversation uses an older schema.";
+      copy.append(
+        el("span", "status-version", `v${schema.connectorVersion}`),
+        el("span", "status-state status-pass", "✓"),
+        el("span", "status-help", `${conversation} Start a new conversation to use the latest schema.`)
       );
     } else if (schema.status === "stale") {
       copy.append(
-        el("span", "status-version", `v${schema.observedVersion || "unknown"}`),
+        el("span", "status-version", `v${schema.connectorVersion || "unknown"}`),
         el("span", "status-state status-warning", "refresh required")
       );
-    } else {
-      copy.append(el("span", "status-state status-warning", "version unknown"));
     }
 
-    if (schema.refreshRecommended) {
+    if (schema.status === "stale" && schema.refreshRecommended) {
       copy.append(el(
         "span",
         "status-help",
@@ -681,7 +718,7 @@ button { font: inherit; }
     }
 
     const actions = el("div", "row-actions");
-    if (schema.refreshRecommended) {
+    if (schema.status === "stale" && schema.refreshRecommended) {
       actions.append(actionButton(
         actionState.pending && actionState.kind === "refresh" ? "Opening…" : "Refresh",
         "primary",
@@ -705,7 +742,7 @@ button { font: inherit; }
   function projectRow(project) {
     const row = el("button", "project-row");
     row.type = "button";
-    row.disabled = projectSelecting;
+    row.disabled = projectSelecting || createWorktree === null;
     const name = typeof project.name === "string" && project.name
       ? project.name
       : project.selector;
@@ -728,7 +765,7 @@ button { font: inherit; }
     }
     row.addEventListener("click", () => {
       if (typeof project.selector === "string" && project.selector) {
-        void selectWorkspace({ path: project.selector });
+        void selectWorkspace({ path: project.selector, createWorktree });
       }
     });
     return row;
@@ -744,6 +781,17 @@ button { font: inherit; }
     section.append(heading);
 
     const picker = el("div", "project-picker");
+    const worktreeChoice = el("label", "worktree-choice");
+    const checkbox = el("input");
+    checkbox.type = "checkbox";
+    checkbox.id = "create-worktree";
+    checkbox.checked = createWorktree === true;
+    checkbox.disabled = projectSelecting || createWorktree === null;
+    checkbox.addEventListener("change", () => {
+      createWorktree = checkbox.checked;
+      worktreeChoiceEdited = true;
+    });
+    worktreeChoice.append(checkbox, el("span", "", "Create a worktree for the selected project"));
     const scratch = el("button", "project-choice");
     scratch.type = "button";
     scratch.disabled = projectSelecting;
@@ -804,7 +852,7 @@ button { font: inherit; }
       count.textContent += `${count.textContent ? " · " : ""}${projectCatalog.warnings[0]}`;
     }
 
-    picker.append(scratch, search, results, state, count);
+    picker.append(scratch, worktreeChoice, search, results, state, count);
     section.append(picker);
     return section;
   }
@@ -908,6 +956,7 @@ button { font: inherit; }
       projectSearchTimer = null;
     }
     projectQueryGeneration += 1;
+    projectRevision += 1;
     projectSelecting = true;
     renderCurrent();
     const startedAt = performance.now();
@@ -919,6 +968,7 @@ button { font: inherit; }
       if (!selection) throw new Error("The workspace-selection result was incomplete.");
       captureTiming("set_project_root", result, startedAt);
       const project = projectStateFromSelection(selection);
+      projectRevision += 1;
       currentData = {
         ...currentData,
         project,
@@ -1101,11 +1151,11 @@ button { font: inherit; }
       : null;
     root.replaceChildren();
     const card = el("section", "card");
+    const statuses = el("div", "status-list");
+    statuses.append(...[renderUpdateRow(), renderSchemaRow()].filter(Boolean));
+    card.append(statuses);
     const projectSection = renderProjectSection();
     if (projectSection) card.append(projectSection);
-    const statuses = el("div", "status-list");
-    statuses.append(renderUpdateRow(), renderSchemaRow());
-    card.append(statuses);
 
     const doctorPanel = renderDoctorPanel();
     if (doctorPanel) card.append(doctorPanel);
@@ -1163,43 +1213,87 @@ button { font: inherit; }
       && typeof payload.summary === "object";
   }
 
+  function applyWorktreeDefault() {
+    if (worktreeChoiceEdited || !currentData) return;
+    if (["auto", "always", "never"].includes(currentData.worktreeMode)) {
+      createWorktree = currentData.worktreeMode !== "never";
+    }
+  }
+
+  function renderStatusRows() {
+    const statuses = root.querySelector(".status-list");
+    if (!statuses) { renderCurrent(); return; }
+    statuses.replaceChildren(...[renderUpdateRow(), renderSchemaRow()].filter(Boolean));
+    const checkbox = document.getElementById("create-worktree");
+    if (checkbox) {
+      checkbox.checked = createWorktree === true;
+      checkbox.disabled = projectSelecting || createWorktree === null;
+    }
+    scheduleSizeReport();
+  }
+
+  async function refreshStatus(force = false) {
+    if (tornDown || statusRefreshing || upgradeRunning || projectSelecting || (!force && document.hidden)) return false;
+    if (!force && statusFresh && Date.now() - lastStatusCheckAt < 1_000) return true;
+    statusStarted = true;
+    statusRefreshing = true;
+    statusFresh = false;
+    statusError = null;
+    const revision = projectRevision;
+    let workspaceChanged = false;
+    // Focus/periodic checks must not replace workspace controls during a click.
+    renderStatusRows();
+    try {
+      const args = { forceUpdateCheck: force };
+      if (conversationSchemaVersion) args.conversationVersion = conversationSchemaVersion;
+      const result = await callTool("setup_status", args, 8_000);
+      if (tornDown) return false;
+      const failure = toolFailureText(result);
+      if (failure) throw new Error(failure);
+      const data = setupPayload(result);
+      if (!data) throw new Error("Current setup status was incomplete.");
+      const project = revision === projectRevision ? data.project : currentData.project;
+      workspaceChanged = JSON.stringify(project) !== JSON.stringify(currentData.project);
+      currentData = { ...currentData, ...data, project };
+      updateState = data.update;
+      if (actionState.kind === "refresh" && ["current", "conversation_stale"].includes(data.connectorSchema.status)) {
+        actionState = { kind: null, message: null, tone: null, pending: false };
+        root.querySelector(".feedback")?.remove();
+      }
+      statusFresh = true;
+      hasLiveStatus = true;
+      lastStatusCheckAt = Date.now();
+      applyWorktreeDefault();
+      maybeStartProjectLoad();
+      return true;
+    } catch (error) {
+      statusError = errorText(error);
+      return false;
+    } finally {
+      statusRefreshing = false;
+      if (workspaceChanged) renderCurrent();
+      else renderStatusRows();
+    }
+  }
+
+  function maybeStartStatusRefresh() {
+    const canCall = initialized || (window.openai && typeof window.openai.callTool === "function");
+    if (!canCall || !currentData || tornDown) return;
+    if (!statusStarted) void refreshStatus();
+    if (statusTimer === null) statusTimer = setInterval(() => { void refreshStatus(); }, 30_000);
+  }
+
   async function runUpdateCheck() {
     if (updateChecking || upgradeRunning) return;
     updateChecking = true;
-    actionState = { kind: "updates", message: null, tone: null, pending: false };
+    await refreshStatus(true);
+    updateChecking = false;
     renderCurrent();
-    const startedAt = performance.now();
-    try {
-      const result = await callTool("check_for_updates", {});
-      const payload = structuredPayload(result, isUpdatePayload);
-      if (!payload) throw new Error("Update check returned no structured status.");
-      captureTiming("check_for_updates", result, startedAt);
-      updateState = payload;
-    } catch (error) {
-      const currentVersion = updateState && updateState.currentVersion
-        ? updateState.currentVersion
-        : currentData.serverVersion || "unknown";
-      updateState = {
-        status: "check_failed",
-        currentVersion,
-        latestVersion: null,
-        source: null,
-        detail: errorText(error)
-      };
-      actionState = {
-        kind: "updates",
-        message: `Update check failed: ${errorText(error)}`,
-        tone: "warning",
-        pending: false
-      };
-    } finally {
-      updateChecking = false;
-      renderCurrent();
-    }
   }
 
   async function startUpgrade() {
     if (upgradeRunning || updateChecking) return;
+    if (!await refreshStatus(true) || updateState.status !== "update_available") return;
     upgradeRunning = true;
     actionState = {
       kind: "upgrade",
@@ -1227,6 +1321,7 @@ button { font: inherit; }
       };
     } finally {
       upgradeRunning = false;
+      void refreshStatus();
       renderCurrent();
     }
   }
@@ -1324,11 +1419,14 @@ button { font: inherit; }
 
   async function openRefreshSettings() {
     if (actionState.pending) return;
+    if (!await refreshStatus() || currentData.connectorSchema.status !== "stale") return;
     actionState = { kind: "refresh", message: "Opening connector settings…", tone: null, pending: true };
     renderCurrent();
     try {
       await openLink(refreshSettingsHref());
-      actionState = {
+      actionState = ["current", "conversation_stale"].includes(currentData.connectorSchema.status)
+        ? { kind: null, message: null, tone: null, pending: false }
+        : {
         kind: "refresh",
         message: "In ChatGPT settings, select Codexify if needed, scroll below the list of tools, and click Refresh.",
         tone: null,
@@ -1365,7 +1463,12 @@ button { font: inherit; }
     const payload = setupPayload(value);
     if (!payload) return;
     const firstPayload = !currentData;
-    currentData = payload;
+    if (firstPayload) conversationSchemaVersion = payload.connectorSchema.observedVersion || null;
+    // Historical tool-result notifications must not replace a newer live check.
+    currentData = hasLiveStatus && currentData
+      ? { ...payload, serverVersion: currentData.serverVersion, worktreeMode: currentData.worktreeMode, update: updateState, connectorSchema: currentData.connectorSchema, project: currentData.project }
+      : payload;
+    applyWorktreeDefault();
     currentMetadata = value || currentMetadata;
     if (firstPayload || !updateState) updateState = payload.update || null;
     if (firstPayload) {
@@ -1381,6 +1484,7 @@ button { font: inherit; }
     renderCurrent();
     maybeStartProjectLoad();
     maybeStartAutomaticDoctor();
+    maybeStartStatusRefresh();
   }
 
   window.addEventListener("message", event => {
@@ -1393,6 +1497,7 @@ button { font: inherit; }
       const waiter = pending.get(message.id);
       if (!waiter) return;
       pending.delete(message.id);
+      clearTimeout(waiter.timer);
       hasError ? waiter.reject(message.error) : waiter.resolve(message.result);
       return;
     }
@@ -1401,8 +1506,19 @@ button { font: inherit; }
     } else if (message.method === "ui/notifications/host-context-changed") {
       applyHostContext(message.params);
     } else if (message.method === "ui/resource-teardown" && message.id !== undefined) {
+      tornDown = true;
+      clearInterval(statusTimer);
+      for (const waiter of pending.values()) { clearTimeout(waiter.timer); waiter.reject(new Error("Widget closed.")); }
+      pending.clear();
       post({ jsonrpc: "2.0", id: message.id, result: {} });
     }
+  });
+
+  window.addEventListener("focus", () => { if (currentData) void refreshStatus(); });
+  window.addEventListener("pageshow", () => { if (currentData) void refreshStatus(); });
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) { statusFresh = false; renderCurrent(); }
+    else if (currentData) void refreshStatus();
   });
 
   const legacyPayload = setupPayload(window.openai && (
@@ -1429,6 +1545,7 @@ button { font: inherit; }
     notify("ui/notifications/initialized", {});
     maybeStartProjectLoad();
     maybeStartAutomaticDoctor();
+    maybeStartStatusRefresh();
     reportSize();
   }).catch(error => {
     if (!currentData) {
@@ -1436,6 +1553,7 @@ button { font: inherit; }
     }
     maybeStartProjectLoad();
     maybeStartAutomaticDoctor();
+    maybeStartStatusRefresh();
     reportSize();
   });
 })();

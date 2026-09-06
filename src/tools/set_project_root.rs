@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use serde::Deserialize;
+use std::borrow::Cow;
 use std::future::Future;
 
 use serde_json::{Value, json};
@@ -8,7 +9,7 @@ use crate::exec_sessions::SessionState;
 use crate::project_bindings::{ProjectBindingScope, ProjectRootSelection, WithoutProjectSelection};
 use crate::setup_ui;
 use crate::tool::{Tool, ToolBehavior};
-use crate::types::{AppConfig, ToolResult};
+use crate::types::{AppConfig, ToolResult, WorktreeMode};
 
 pub struct SetProjectRoot;
 
@@ -18,10 +19,15 @@ struct SetProjectRootArgs {
     path: Option<String>,
     #[serde(rename = "withoutProject")]
     without_project: Option<bool>,
+    #[serde(rename = "createWorktree")]
+    create_worktree: Option<bool>,
 }
 
 pub enum ProjectSelectionRequest {
-    Project(String),
+    Project {
+        path: String,
+        create_worktree: Option<bool>,
+    },
     WithoutProject,
 }
 
@@ -38,11 +44,20 @@ fn parse_request(args: &Value) -> Result<ProjectSelectionRequest, String> {
     let SetProjectRootArgs {
         path,
         without_project,
+        create_worktree,
     } = serde_json::from_value(args.clone())
         .map_err(|error| format!("Invalid tool arguments: {error}"))?;
     match (path, without_project) {
-        (Some(path), None) if !path.trim().is_empty() => Ok(ProjectSelectionRequest::Project(path)),
-        (None, Some(true)) => Ok(ProjectSelectionRequest::WithoutProject),
+        (Some(path), None) if !path.trim().is_empty() => Ok(ProjectSelectionRequest::Project {
+            path,
+            create_worktree,
+        }),
+        (None, Some(true)) if create_worktree.is_none() => {
+            Ok(ProjectSelectionRequest::WithoutProject)
+        }
+        (None, Some(true)) => {
+            Err("Invalid tool arguments: createWorktree only applies to a project path".to_string())
+        }
         (Some(_), Some(_)) => Err(
             "Invalid tool arguments: provide either path or withoutProject, not both".to_string(),
         ),
@@ -52,6 +67,22 @@ fn parse_request(args: &Value) -> Result<ProjectSelectionRequest, String> {
         }
         (None, None) => {
             Err("Invalid tool arguments: provide either path or withoutProject=true".to_string())
+        }
+    }
+}
+
+/// A selection preference overrides placement for this call, never the saved config.
+pub fn selection_config(config: &AppConfig, create_worktree: Option<bool>) -> Cow<'_, AppConfig> {
+    match create_worktree {
+        None => Cow::Borrowed(config),
+        Some(create) => {
+            let mut selected = config.clone();
+            selected.worktrees.mode = if create {
+                WorktreeMode::Always
+            } else {
+                WorktreeMode::Never
+            };
+            Cow::Owned(selected)
         }
     }
 }
@@ -191,12 +222,25 @@ where
         Err(error) => return ToolResult::error(error),
     };
 
+    let requested_worktree = match &request {
+        ProjectSelectionRequest::Project {
+            create_worktree, ..
+        } => *create_worktree,
+        ProjectSelectionRequest::WithoutProject => None,
+    };
     let selection = match select(request).await {
         Ok(selection) => selection,
         Err(error) => return ToolResult::error(error),
     };
     match selection {
-        ProjectSelection::Project(selection) => render_project_selection(selection),
+        ProjectSelection::Project(selection) => {
+            if requested_worktree.is_some_and(|create| create != selection.managed_worktree) {
+                return ToolResult::error(
+                    "This conversation already has a different checkout placement. Its workspace cannot be changed; start a new chat to use the requested worktree choice.",
+                );
+            }
+            render_project_selection(selection)
+        }
         ProjectSelection::WithoutProject(selection) => render_without_project_selection(selection),
     }
 }
@@ -226,7 +270,7 @@ impl Tool for SetProjectRoot {
     }
 
     fn description(&self) -> String {
-        "Bind the current ChatGPT conversation either to one source project beneath the server's configured access root or to a private scratch workspace by passing withoutProject=true. A project path may instead be an HTTPS or SSH Git repository URL ending in `.git`, including non-GitHub hosts such as GitLab, or a supported GitHub repository-root URL. GitHub HTTPS branch URLs ending in /tree/<branch>, pull-request URLs ending in /pull/<number>, and commit URLs ending in /commit/<sha> with a full 40-character hexadecimal commit ID also select exact targets. Codexify reuses an unambiguous matching local checkout, or runs non-interactive git clone in the configured project clone directory before binding. Targeted GitHub URLs fetch the exact requested target; when an existing source checkout is on another commit, Codexify leaves it unchanged and selects a detached managed worktree at the requested commit. Worktree mode `never` therefore requires that the source checkout already be at the requested target. Local/file, insecure, credential-bearing HTTPS, and other arbitrary Git transports are rejected. ChatGPT project and scratch bindings survive MCP reconnects and server restarts and cannot be changed; start a new chat for another choice. Clients without ChatGPT's stable conversation metadata fall back to binding the current MCP transport session, whose scratch workspace is deleted on disconnect. When only a project name or purpose is known, call list_projects first and pass one unambiguous result's selector as path. Do not guess among plausible projects. In multi-project mode, make one project or scratch choice before filesystem, search, edit, command, Git, project-instruction, skill, memory, or plan work, then call get_agent_brief.".into()
+        "Bind the current ChatGPT conversation either to one source project beneath the server's configured access root or to a private scratch workspace by passing withoutProject=true. A project path may instead be an HTTPS or SSH Git repository URL ending in `.git`, including non-GitHub hosts such as GitLab, or a supported GitHub repository-root URL. GitHub HTTPS branch URLs ending in /tree/<branch>, pull-request URLs ending in /pull/<number>, and commit URLs ending in /commit/<sha> with a full 40-character hexadecimal commit ID also select exact targets. Codexify reuses an unambiguous matching local checkout, or runs non-interactive git clone in the configured project clone directory before binding. Targeted GitHub URLs fetch the exact requested target; when an existing source checkout is on another commit, Codexify leaves it unchanged and selects a detached managed worktree at the requested commit. Worktree mode `never` therefore requires that the source checkout already be at the requested target. Local/file, insecure, credential-bearing HTTPS, and other arbitrary Git transports are rejected. ChatGPT project and scratch bindings survive MCP reconnects and server restarts and cannot be changed; start a new chat for another choice. Clients without ChatGPT's stable conversation metadata fall back to binding the current MCP transport session, whose scratch workspace is deleted on disconnect. When only a project name or purpose is known, call list_projects first and pass one unambiguous result's selector as path. Do not guess among plausible projects. Always honor an explicit worktree preference, including when selecting an obvious project automatically: pass createWorktree=false to use the source checkout or createWorktree=true to create a worktree. Omit createWorktree only when no preference was expressed, to use the configured mode. In multi-project mode, make one project or scratch choice before filesystem, search, edit, command, Git, project-instruction, skill, memory, or plan work, then call get_agent_brief.".into()
     }
 
     fn describe(&self, config: &AppConfig) -> String {
@@ -254,6 +298,10 @@ impl Tool for SetProjectRoot {
                 "withoutProject": {
                     "const": true,
                     "description": "Choose a private scratch workspace instead of attaching a project."
+                },
+                "createWorktree": {
+                    "type": "boolean",
+                    "description": "Override the configured worktree mode for this project selection. Pass false when the user asks to use the source checkout without a worktree; pass true when they ask for a worktree. Omit only when the user has no preference."
                 }
             },
             "oneOf": [
@@ -263,7 +311,7 @@ impl Tool for SetProjectRoot {
                 },
                 {
                     "required": ["withoutProject"],
-                    "not": { "required": ["path"] }
+                    "not": { "anyOf": [{ "required": ["path"] }, { "required": ["createWorktree"] }] }
                 }
             ],
             "additionalProperties": false
@@ -313,10 +361,16 @@ impl Tool for SetProjectRoot {
     async fn call(&self, args: Value, config: &AppConfig, session: &SessionState) -> ToolResult {
         select_and_render(&args, |request| async move {
             match request {
-                ProjectSelectionRequest::Project(path) => session
-                    .select_project_root(config, &path)
-                    .await
-                    .map(ProjectSelection::Project),
+                ProjectSelectionRequest::Project {
+                    path,
+                    create_worktree,
+                } => {
+                    let selected = selection_config(config, create_worktree);
+                    session
+                        .select_project_root(&selected, &path)
+                        .await
+                        .map(ProjectSelection::Project)
+                }
                 ProjectSelectionRequest::WithoutProject => session
                     .select_without_project(config)
                     .await

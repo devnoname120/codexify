@@ -461,11 +461,15 @@ fn set_project_root_schema_accepts_exactly_one_project_or_scratch_choice() {
     let validator = jsonschema::options().build(&schema).unwrap();
 
     assert!(validator.is_valid(&json!({ "path": "alpha" })));
+    assert!(validator.is_valid(&json!({ "path": "alpha", "createWorktree": false })));
+    assert!(validator.is_valid(&json!({ "path": "alpha", "createWorktree": true })));
     assert!(validator.is_valid(&json!({ "withoutProject": true })));
     for invalid in [
         json!({}),
         json!({ "path": "" }),
         json!({ "withoutProject": false }),
+        json!({ "withoutProject": true, "createWorktree": false }),
+        json!({ "path": "alpha", "createWorktree": "false" }),
         json!({ "path": "alpha", "withoutProject": true }),
         json!({ "path": "alpha", "unknown": true }),
     ] {
