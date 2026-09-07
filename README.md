@@ -1692,3 +1692,32 @@ The design and module layout are documented in [docs/ARCHITECTURE.md](docs/ARCHI
 ## License
 
 MIT - see [LICENSE](LICENSE).
+
+## Related projects
+
+### ChatGPT connectors and local MCP servers
+
+These projects connect a ChatGPT conversation to local development tools, as
+Codexify does. Some also support other MCP clients.
+
+| Project | Focus |
+| --- | --- |
+| [CodexPro](https://github.com/rebel0789/codexpro) | Local MCP bridge for ChatGPT Developer Mode, with repository inspection, editing, verification, attachment import, and handoff plans. |
+| [local-dev-mcp](https://github.com/harukary/local-dev-mcp) | Registered-project MCP server with file, Git, shell, browser, mobile, and artifact tools, connected to ChatGPT through OpenAI Secure MCP Tunnel. |
+| [codex-free](https://github.com/hypnguyen1209/codex-free) | Rust MCP bridge with Codex-style coding tools, persistent task context, skills, and aggregation of additional MCP servers. |
+| [chatgpt-web-oauth-mcp](https://github.com/escapeWu/chatgpt-web-oauth-mcp) | OAuth-protected FastMCP connector for files, Git, shell, background jobs, and tmux, with optional bounded delegation to Codex or Pi CLI agents. |
+| [Agentic MCP](https://github.com/hugolsramos01-bit/mcp-agentic-server) | MCP server for ChatGPT and local MCP clients, with OAuth, structured editing, shell execution, Git worktrees, semantic navigation, and checkpoints. |
+| [Local Coding Agent](https://github.com/LongNgn204/local-coding-agent) | Local MCP coding workspace with OpenAI Secure MCP Tunnel integration, desktop tray apps, a metrics dashboard, and browser-preview tools. |
+
+### Browser harnesses and Codex model providers
+
+This is a different integration: a browser harness drives a model's web chat
+interface, while a model-provider bridge makes a model available inside Codex.
+The projects above are grouped by their documented ChatGPT-connector role, rather
+than as model providers. Exposing browser-control tools or delegating a task to
+the Codex CLI does not by itself make an MCP connector a browser-based model
+backend or a Codex model provider.
+
+| Project | Focus |
+| --- | --- |
+| [codex-chatgpt-web](https://github.com/miuuyy/codex-chatgpt-web) | Runs ChatGPT Web as selectable Codex models through an embedded-browser Responses bridge, preserving Codex task context, streaming, and images; optional MCP integration exposes the active Codex task's tools to ChatGPT. |
