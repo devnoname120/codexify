@@ -3,8 +3,9 @@ use serde_json::json;
 
 use crate::diff::DiffResult;
 
-pub const DIFF_UI_URI: &str = "ui://codexify/diff/v4/mcp-app.html";
-pub const PREVIOUS_DIFF_UI_URI: &str = "ui://codexify/diff/v3/mcp-app.html";
+pub const DIFF_UI_URI: &str = "ui://codexify/diff/v5/mcp-app.html";
+pub const PREVIOUS_DIFF_UI_URI: &str = "ui://codexify/diff/v4/mcp-app.html";
+pub const LEGACY_DIFF_UI_URI_V3: &str = "ui://codexify/diff/v3/mcp-app.html";
 pub const LEGACY_REVIEW_UI_URI_V3: &str = "ui://codexify/review/v3/mcp-app.html";
 pub const LEGACY_REVIEW_UI_URI_V2: &str = "ui://codexify/review/v2/mcp-app.html";
 pub const LEGACY_REVIEW_UI_URI: &str = "ui://codexify/review/mcp-app.html";
@@ -56,6 +57,7 @@ pub fn contents() -> ResourceContents {
 pub fn contents_for_uri(uri: &str) -> Option<ResourceContents> {
     if uri != DIFF_UI_URI
         && uri != PREVIOUS_DIFF_UI_URI
+        && uri != LEGACY_DIFF_UI_URI_V3
         && uri != LEGACY_REVIEW_UI_URI_V3
         && uri != LEGACY_REVIEW_UI_URI_V2
         && uri != LEGACY_REVIEW_UI_URI
@@ -106,7 +108,7 @@ pub const DIFF_UI_HTML: &str = concat!(
   --syntax-type: light-dark(#116329, #7ee787);
   --accent: light-dark(#2457c5, #8db4ff);
   --file-row-height: 34px;
-  --diff-font-size: 13px;
+  --diff-font-size: 12px;
   font-family: var(--font-sans, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
 }
 :root[data-theme="light"] { color-scheme: light; }
@@ -145,7 +147,7 @@ main { display: grid; width: 100%; min-width: 0; gap: 6px; padding: 6px; }
 .diff-row { display: contents; }
 .diff-cell { min-width: 0; min-height: 1.4em; padding-block: 1px; }
 .line-number { padding-inline: 4px; border-right: 1px solid var(--border); color: var(--diff-line-number); font-variant-numeric: tabular-nums; text-align: right; user-select: none; white-space: nowrap; }
-.code { padding-left: 0.55em; padding-right: 8px; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; }
+.code { padding-left: 0.55em; padding-right: 8px; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-all; }
 .diff-row.added > .line-number { background: var(--diff-addition-number); color: var(--text); }
 .diff-row.added > .code { background: var(--diff-addition-line); }
 .diff-row.deleted > .line-number { background: var(--diff-deletion-number); color: var(--text); }
@@ -169,7 +171,7 @@ main { display: grid; width: 100%; min-width: 0; gap: 6px; padding: 6px; }
 .syntax-builtin, .syntax-tag, .syntax-selector, .syntax-attr-name { color: var(--syntax-type); }
 .binary-diff { padding: 14px 10px; background: var(--panel); color: var(--muted); font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace); font-size: var(--diff-font-size); line-height: 1.4; text-align: center; }
 @media (max-width: 520px) {
-  :root { --file-row-height: 34px; --diff-font-size: 13px; }
+  :root { --diff-font-size: 10px; }
   main { gap: 4px; padding: 4px; }
   .diff-summary { min-height: 30px; padding: 5px 7px; }
   .file-summary, .file-row { padding: 2px 7px; font-size: 12px; }
@@ -1206,7 +1208,6 @@ mod tests {
     #[test]
     fn resource_uses_the_mcp_apps_mime_type() {
         let resource = resource();
-        assert!(contents_for_uri(PREVIOUS_DIFF_UI_URI).is_some());
         assert_eq!(resource.uri, DIFF_UI_URI);
         assert_eq!(resource.mime_type.as_deref(), Some(DIFF_UI_MIME_TYPE));
         assert_eq!(
@@ -1223,6 +1224,8 @@ mod tests {
         assert_eq!(value["uri"], DIFF_UI_URI);
         assert_eq!(value["mimeType"], DIFF_UI_MIME_TYPE);
         for uri in [
+            PREVIOUS_DIFF_UI_URI,
+            LEGACY_DIFF_UI_URI_V3,
             LEGACY_REVIEW_UI_URI_V3,
             LEGACY_REVIEW_UI_URI_V2,
             LEGACY_REVIEW_UI_URI,
@@ -1301,7 +1304,9 @@ mod tests {
     #[test]
     fn embedded_view_is_compact_and_collapses_file_diffs_lazily() {
         assert!(DIFF_UI_HTML.contains("--file-row-height: 34px"));
-        assert!(DIFF_UI_HTML.contains("--diff-font-size: 13px"));
+        assert!(DIFF_UI_HTML.contains("--diff-font-size: 12px"));
+        assert!(DIFF_UI_HTML.contains("--diff-font-size: 10px"));
+        assert_eq!(DIFF_UI_HTML.matches("--diff-font-size:").count(), 2);
         assert!(DIFF_UI_HTML.contains("text-size-adjust: 100%"));
         assert!(DIFF_UI_HTML.contains("const INITIAL_VISIBLE_FILES = 3"));
         assert!(DIFF_UI_HTML.contains("el(\"details\", \"file-entry\")"));
@@ -1327,6 +1332,8 @@ mod tests {
         assert!(DIFF_UI_HTML.contains("grid-template-columns: minmax(3.5em, auto)"));
         assert!(DIFF_UI_HTML.contains("white-space: pre-wrap"));
         assert!(DIFF_UI_HTML.contains("overflow-wrap: anywhere"));
+        assert!(DIFF_UI_HTML.contains("word-break: break-all"));
+        assert!(!DIFF_UI_HTML.contains("word-break: break-word"));
         assert!(DIFF_UI_HTML.contains("background: transparent"));
         assert!(DIFF_UI_HTML.contains("background: var(--bg);"));
         assert!(!DIFF_UI_HTML.contains("overflow-x: auto"));

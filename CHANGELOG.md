@@ -6,6 +6,14 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- Set diff code text to 12 px on desktop and 10 px on mobile while
+  retaining larger file labels and controls. Indented identifiers now wrap within
+  the available width instead of leaving a whitespace-only first visual line;
+  source whitespace and syntax/intraline highlighting remain intact. The diff
+  resource advances to v5, with v4 and v3 URLs still readable.
+
 ## [1.3.0] - 2026-09-07
 
 ### Added

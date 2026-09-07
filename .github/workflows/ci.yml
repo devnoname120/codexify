@@ -58,6 +58,21 @@ jobs:
       - name: Test setup widget transitions
         run: node --test scripts/test-setup-widget.mjs
 
+  diff-widget:
+    name: Diff widget layout (Chromium and WebKit)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install browser test dependencies
+        run: |
+          npm install --no-save --package-lock=false --ignore-scripts playwright@1.62.1
+          npx --no-install playwright install --with-deps chromium webkit
+
+      - name: Test diff layout on mobile and desktop
+        run: node --test scripts/test-diff-widget.mjs
+
   service-platforms:
     name: Service integration (${{ matrix.os }})
     strategy:
