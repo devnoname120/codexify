@@ -118,6 +118,8 @@ jobs:
           mkdir "${STAGE}"
           cp "target/${{ matrix.target }}/release/codexify${{ matrix.ext }}" "${STAGE}/"
           cp codexify.config.json CHANGELOG.md LICENSE README.md "${STAGE}/"
+          mkdir "${STAGE}/docs"
+          cp docs/REFERENCE.md docs/ARCHITECTURE.md "${STAGE}/docs/"
           test -s "${STAGE}/CHANGELOG.md"
           echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
           echo "STAGE=${STAGE}" >> "$GITHUB_ENV"

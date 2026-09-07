@@ -10,8 +10,9 @@ materialize ChatGPT-native files inside the active project, and return project f
 to ChatGPT as downloadable MCP resources.
 Clients without ChatGPT conversation metadata use an MCP-transport-session fallback.
 
-This document explains how it is put together and why. For usage, see
-[README.md](../README.md).
+This document explains how it is put together and why. Start with the
+[README](../README.md) for setup, or use the [technical reference](REFERENCE.md)
+for configuration and tool contracts.
 
 ---
 
