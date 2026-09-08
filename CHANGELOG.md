@@ -6,6 +6,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `codexify service status [--json]` reports the native background service's
+  installation, running/enabled state, definition path, and platform details
+  without starting or changing it. Distinct exit codes identify running, stopped,
+  absent, and query-failure states; no valid server configuration is required.
+
 ### Fixed
 
 - Set diff code text to 12 px on desktop and 10 px on mobile while

@@ -489,13 +489,20 @@ and requires the server's `{ "status": "ok" }` health JSON.
 
 ### Native user service (`service.rs`)
 
-The public `service install|enable|disable|remove|logs` commands manage one
+The public `service install|enable|disable|remove|status|logs` commands manage one
 per-user native definition: an XDG-aware systemd user unit on Linux, a launchd agent on
 macOS, or an at-logon Scheduled Task on Windows. Installation stores the current
 executable path and the selected config path as absolute arguments. The hidden
 `service run` command is the native manager's entry point. The updater also uses
 the hidden `service wait-ready` command to poll the loopback health endpoint under
 a deadline after a restart.
+
+`service status [--json]` reuses the native `service::status()` inspection used by
+Doctor, without loading `AppConfig` or probing server health. Its human and JSON
+reports preserve unknown enabled state and optional definition paths. Exit codes
+distinguish running (`0`), stopped (`3`), absent (`4`), and query failure (`1`);
+the enabled flag does not override running state. Inspection errors remain errors,
+not fabricated absent-service reports.
 
 The service runner does not construct a second server configuration. It waits if
 the selected file does not exist, then starts the ordinary Codexify executable

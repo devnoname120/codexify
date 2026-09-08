@@ -210,6 +210,20 @@ async fn run_service(cli: &Cli, command: ServiceCommand) -> anyhow::Result<()> {
         ServiceCommand::Enable => service::enable(),
         ServiceCommand::Disable => service::disable(),
         ServiceCommand::Remove => service::remove(),
+        ServiceCommand::Status(args) => {
+            let status = service::status()?;
+            if args.json {
+                println!("{}", serde_json::to_string_pretty(&status)?);
+            } else {
+                print!("{}", status.render_human());
+            }
+            std::io::stdout().flush()?;
+            let exit_code = status.exit_code();
+            if exit_code != 0 {
+                std::process::exit(exit_code);
+            }
+            Ok(())
+        }
         ServiceCommand::Logs(args) => service::print_logs(args.follow).await,
         ServiceCommand::Run => {
             let config = config_path_for_service(cli).map_err(anyhow::Error::msg)?;

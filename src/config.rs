@@ -214,6 +214,11 @@ pub enum ServiceCommand {
     Disable,
     /// Stop and remove the background service definition.
     Remove,
+    /// Show the native background service state without changing it.
+    #[command(
+        after_help = "Exit codes: 0 = running, 3 = installed but stopped, 4 = not installed, 1 = query failed.\nThis reports the native supervisor state, not server or tunnel health; use `codexify doctor` for health checks."
+    )]
+    Status(ServiceStatusArgs),
     /// Print recent service logs.
     Logs(ServiceLogsArgs),
     /// Run the service supervisor under the native service manager.
@@ -222,6 +227,13 @@ pub enum ServiceCommand {
     /// Wait until the restarted service and its tunnel are ready.
     #[command(hide = true)]
     WaitReady(ServiceWaitReadyArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct ServiceStatusArgs {
+    /// Emit one machine-readable JSON status object.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Args, Debug)]
@@ -2509,6 +2521,31 @@ mod tests {
         let diagnostic = codex_cli_diagnostic_config(&parsed).unwrap();
         assert!(diagnostic.enabled);
         assert!(diagnostic.required);
+    }
+
+    #[test]
+    fn service_status_cli_accepts_json_and_global_config() {
+        for json in [false, true] {
+            let mut args = vec![
+                "codexify",
+                "service",
+                "status",
+                "--config",
+                "/missing/config.json",
+            ];
+            if json {
+                args.push("--json");
+            }
+            let parsed = Cli::try_parse_from(args).unwrap();
+            assert_eq!(parsed.config.as_deref(), Some("/missing/config.json"));
+            let Some(CliCommand::Service {
+                command: ServiceCommand::Status(args),
+            }) = parsed.command
+            else {
+                panic!("service status subcommand was not parsed");
+            };
+            assert_eq!(args.json, json);
+        }
     }
 
     #[test]

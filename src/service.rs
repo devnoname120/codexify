@@ -9,6 +9,7 @@ use anyhow::{Context, bail};
 use chrono::{SecondsFormat, Utc};
 #[cfg(any(target_os = "windows", test))]
 use serde::Deserialize;
+use serde::Serialize;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command as TokioCommand;
 use tokio::time::Instant;
@@ -75,7 +76,8 @@ struct ServiceSpec {
     path: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ServiceStatus {
     pub installed: bool,
     pub running: bool,
@@ -85,6 +87,41 @@ pub struct ServiceStatus {
 }
 
 impl ServiceStatus {
+    pub fn exit_code(&self) -> i32 {
+        if !self.installed {
+            4
+        } else if self.running {
+            0
+        } else {
+            3
+        }
+    }
+
+    pub fn render_human(&self) -> String {
+        let state = if !self.installed {
+            "not installed"
+        } else if self.running {
+            "running"
+        } else {
+            "stopped"
+        };
+        let enabled = match self.enabled {
+            Some(true) => "yes",
+            Some(false) => "no",
+            None => "unknown",
+        };
+        let mut report = format!(
+            "Codexify service: {state}\nInstalled: {}\nRunning: {}\nEnabled: {enabled}\n",
+            if self.installed { "yes" } else { "no" },
+            if self.running { "yes" } else { "no" },
+        );
+        if let Some(path) = &self.definition_path {
+            report.push_str(&format!("Definition: {}\n", path.display()));
+        }
+        report.push_str(&format!("Details: {}\n", self.detail));
+        report
+    }
+
     fn not_installed(detail: impl Into<String>) -> Self {
         Self {
             installed: false,
@@ -1914,6 +1951,73 @@ mod tests {
             home: root.join("home"),
             path: "/usr/local/bin:/usr/bin:/bin".to_string(),
         }
+    }
+
+    #[test]
+    fn service_status_reports_preserve_native_states_and_exit_codes() {
+        let definition = PathBuf::from("/example/codexify.service");
+        let fixtures = [
+            (
+                parse_systemd_status("active", "enabled", definition.clone()),
+                0,
+                "running",
+            ),
+            (
+                parse_systemd_status("inactive", "enabled", definition.clone()),
+                3,
+                "stopped",
+            ),
+            (
+                parse_launchd_status(None, "\"dev.codexify.service\" => true", definition),
+                3,
+                "stopped",
+            ),
+            (
+                parse_windows_status(r#"{"exists":true,"state":"Running","enabled":false}"#)
+                    .unwrap(),
+                0,
+                "running",
+            ),
+            (
+                parse_windows_status(r#"{"exists":false}"#).unwrap(),
+                4,
+                "not installed",
+            ),
+        ];
+        for (status, exit, state) in fixtures {
+            assert_eq!(status.exit_code(), exit);
+            let report = status.render_human();
+            assert!(report.starts_with(&format!("Codexify service: {state}\n")));
+            assert!(report.contains(&format!("Details: {}\n", status.detail)));
+            let json = serde_json::to_value(&status).unwrap();
+            assert_eq!(
+                json,
+                serde_json::json!({
+                    "installed": status.installed,
+                    "running": status.running,
+                    "enabled": status.enabled,
+                    "definitionPath": status.definition_path,
+                    "detail": status.detail,
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn service_status_unknown_values_are_not_reported_as_disabled() {
+        let status = ServiceStatus {
+            installed: true,
+            running: true,
+            enabled: None,
+            definition_path: None,
+            detail: "Enabled state is unavailable".into(),
+        };
+        assert_eq!(status.exit_code(), 0);
+        assert!(status.render_human().contains("Enabled: unknown\n"));
+        assert!(!status.render_human().contains("Definition:"));
+        let json = serde_json::to_value(status).unwrap();
+        assert!(json["enabled"].is_null());
+        assert!(json["definitionPath"].is_null());
     }
 
     #[test]

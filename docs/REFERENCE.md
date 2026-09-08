@@ -400,6 +400,7 @@ Each release ships a compiled binary per platform — `windows-x64`, `linux-x64`
 | `service enable` | Enable and start an installed service |
 | `service disable` | Stop and disable the installed service |
 | `service remove` | Stop and remove the installed service definition |
+| `service status [--json]` | Report native service installation, running/enabled state, and definition details without changing the service |
 | `service logs [-f]` | Print the latest service log lines; `-f` follows new output |
 
 `quickstart` writes `~/.codexify/codexify.config.json` by default. It accepts
@@ -508,10 +509,30 @@ codexify service install
 codexify service install --config /absolute/path/to/codexify.config.json
 codexify service disable
 codexify service enable
+codexify service status
+codexify service status --json
 codexify service logs
 codexify service logs -f
 codexify service remove
 ```
+
+`service status` queries the native service manager without loading the server
+configuration, starting the MCP server, or changing the service. It works even
+when the configuration is missing or invalid. `--config` and `CODEXIFY_CONFIG`
+do not select a different service: it always reports the current user's Codexify
+service. The default output shows installation, running and enabled state, the
+definition path when available, and platform details. `--json` emits one object
+with `installed`, `running`, `enabled`, `definitionPath`, and `detail`; unknown
+enabled state and unavailable definition paths remain `null`.
+
+Exit codes are `0` when running, `3` when installed but stopped, `4` when not
+installed, and `1` when the query fails. Query failures go to stderr rather than
+producing a misleading status document. Running and enabled are independent:
+a running service that is disabled for future logins still exits `0`.
+
+This reports the native supervisor's state, not whether the MCP server or tunnel
+is healthy. Use `codexify doctor` for configuration, connectivity, and health
+checks.
 
 `workDir` in the selected config must be an absolute existing directory. The
 quickstart wizard writes it and restarts an installed service automatically.
