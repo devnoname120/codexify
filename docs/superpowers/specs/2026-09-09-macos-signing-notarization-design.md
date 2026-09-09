@@ -49,7 +49,7 @@ The secret path limits unsolicited wake-ups, but a forged callback cannot publis
 
 A separate workflow runs on macOS for `repository_dispatch` and manual `workflow_dispatch`. It processes each Codexify draft carrying the manifest:
 
-1. Download and strictly validate the manifest against the draft release, tag, and target commit.
+1. Download and strictly validate the manifest against the draft release and the commit resolved by its tag; GitHub may keep `target_commitish` as the source branch for an existing tag.
 2. Query both submission IDs using `xcrun notarytool info` and the App Store Connect team API key.
 3. If either status is still `In Progress`, exit successfully without changing the draft.
 4. If either status is terminal but not `Accepted`, download the Apple logs, attach them to the draft for diagnosis, keep the release unpublished, and fail the workflow.
