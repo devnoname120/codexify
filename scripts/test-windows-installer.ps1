@@ -111,6 +111,39 @@ fn main() {
         throw 'Local release server did not start.'
     }
 
+    function Invoke-RestMethod {
+        param($Uri, $Headers)
+        return $script:FakeReleaseMetadata
+    }
+    function Invoke-WebRequest {
+        param($UseBasicParsing, $Uri, $Headers, $OutFile)
+        throw 'The installer attempted a download before rejecting unpublished metadata.'
+    }
+    Remove-Item Env:CODEXIFY_VERSION -ErrorAction SilentlyContinue
+    foreach ($Metadata in @(
+        [pscustomobject]@{ tag_name = $Version; draft = $true; prerelease = $false },
+        [pscustomobject]@{ tag_name = $Version; draft = $false; prerelease = $true }
+    )) {
+        $script:FakeReleaseMetadata = $Metadata
+        $Rejected = $false
+        try {
+            & (Join-Path $RepositoryRoot 'install.ps1')
+        }
+        catch {
+            if ($_.Exception.Message -like '*unpublished release*') {
+                $Rejected = $true
+            }
+            else {
+                throw
+            }
+        }
+        if (-not $Rejected) {
+            throw 'Installer accepted unpublished latest-release metadata.'
+        }
+    }
+    Remove-Item Function:Invoke-RestMethod
+    Remove-Item Function:Invoke-WebRequest
+
     $env:CODEXIFY_VERSION = $Version
     $env:CODEXIFY_RELEASE_ROOT = "http://127.0.0.1:$Port"
     $env:CODEXIFY_INSTALL_DIR = $InstallDir

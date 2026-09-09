@@ -103,6 +103,12 @@ done
     exit 1
 }
 
+grep -F 'https://github.com/$REPOSITORY/releases/latest' install.sh >/dev/null
+if grep -E 'releases\?per_page|/tags' install.sh >/dev/null; then
+    printf 'installer release discovery is not restricted to the latest published release\n' >&2
+    exit 1
+fi
+
 missing_config=$root/missing.json
 HOME=$home \
 SHELL=/bin/zsh \

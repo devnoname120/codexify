@@ -25,6 +25,7 @@ use crate::util::home_dir;
 
 const LATEST_RELEASE_URL: &str =
     "https://api.github.com/repos/devnoname120/codexify/releases/latest";
+const GH_LATEST_RELEASE_ENDPOINT: &str = "repos/devnoname120/codexify/releases/latest";
 const RELEASE_ROOT: &str = "https://github.com/devnoname120/codexify/releases/download";
 const MAX_RELEASE_METADATA_BYTES: usize = 1024 * 1024;
 const MAX_ARCHIVE_BYTES: usize = 128 * 1024 * 1024;
@@ -121,6 +122,10 @@ impl Default for ReleaseSource {
 #[derive(Debug, Deserialize)]
 struct LatestRelease {
     tag_name: String,
+    #[serde(default)]
+    draft: bool,
+    #[serde(default)]
+    prerelease: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -387,7 +392,7 @@ async fn latest_release_tag_via_gh(request_timeout: Duration) -> anyhow::Result<
             "api",
             "--hostname",
             "github.com",
-            "repos/devnoname120/codexify/releases/latest",
+            GH_LATEST_RELEASE_ENDPOINT,
             "--jq",
             ".tag_name",
             "--cache",
@@ -978,6 +983,9 @@ async fn latest_release(client: &Client, source: &ReleaseSource) -> anyhow::Resu
     .await?;
     let release: LatestRelease =
         serde_json::from_slice(&bytes).context("parse latest Codexify release metadata")?;
+    if release.draft || release.prerelease {
+        bail!("latest-release endpoint returned an unpublished release");
+    }
     release_asset(&release.tag_name)
 }
 
@@ -2108,6 +2116,36 @@ mod tests {
         }));
         assert!(release_asset("1.2.3").is_err());
         assert!(release_asset("vnot-a-version").is_err());
+    }
+
+    #[test]
+    fn production_release_discovery_uses_latest_published_endpoint() {
+        assert_eq!(
+            LATEST_RELEASE_URL,
+            "https://api.github.com/repos/devnoname120/codexify/releases/latest"
+        );
+        assert_eq!(
+            GH_LATEST_RELEASE_ENDPOINT,
+            "repos/devnoname120/codexify/releases/latest"
+        );
+    }
+
+    #[tokio::test]
+    async fn latest_release_rejects_non_public_metadata() {
+        for body in [
+            r#"{"tag_name":"v1.2.3","draft":true,"prerelease":false}"#,
+            r#"{"tag_name":"v1.2.3","draft":false,"prerelease":true}"#,
+        ] {
+            let source = ReleaseSource {
+                latest_release_url: release_server(body, Duration::ZERO).await,
+                release_root: "http://unused.invalid".to_string(),
+            };
+            let error = inspect_latest_version_from(source, "1.2.2", Duration::from_secs(1))
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("unpublished"), "{error}");
+        }
     }
 
     #[tokio::test]

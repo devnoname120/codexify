@@ -23,6 +23,9 @@ $Headers = @{ 'User-Agent' = 'codexify-installer'; 'Accept' = 'application/vnd.g
 
 if (-not $Version) {
     $Release = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repository/releases/latest" -Headers $Headers
+    if ($Release.draft -or $Release.prerelease) {
+        throw 'The latest-release endpoint returned an unpublished release.'
+    }
     $Version = [string]$Release.tag_name
 }
 

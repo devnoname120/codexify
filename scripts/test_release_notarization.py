@@ -577,5 +577,16 @@ class FinalizerWorkflowTests(unittest.TestCase):
         self.assertNotIn("schedule:", workflow)
 
 
+class ReleaseDiscoveryScriptTests(unittest.TestCase):
+    def test_installers_use_latest_published_release_and_powershell_rejects_unpublished_metadata(self) -> None:
+        posix = (ROOT / "install.sh").read_text()
+        powershell = (ROOT / "install.ps1").read_text()
+        self.assertIn("https://github.com/$REPOSITORY/releases/latest", posix)
+        self.assertNotIn("releases?per_page", posix)
+        self.assertNotIn("/tags", posix)
+        self.assertIn("https://api.github.com/repos/$Repository/releases/latest", powershell)
+        self.assertIn("$Release.draft -or $Release.prerelease", powershell)
+
+
 if __name__ == "__main__":
     unittest.main()
