@@ -114,6 +114,8 @@ command restrictions, and the authority of connected MCP servers.
 | Task | Command |
 | --- | --- |
 | Check configuration and connectivity | `codexify doctor` |
+| Print or inspect configuration | `codexify config` · `codexify config get <key>` |
+| Edit configuration | `codexify config edit` |
 | Check the background service state | `codexify service status` |
 | Follow the formatted service log | `codexify service logs -f` |
 | Stop the background service | `codexify service disable` |

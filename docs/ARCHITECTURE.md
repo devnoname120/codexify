@@ -464,6 +464,19 @@ onboarding choice. If an existing config already contains a valid token, it
 preserves the token, protects the config as a private file on Unix, and prints the
 one-line instruction needed by an individual chat or ChatGPT Project.
 
+### `config` CLI (`config_cli.rs`)
+
+Configuration management operates on the selected raw JSON document rather than
+round-tripping through `AppConfig`, so unknown future fields survive edits. The
+command shares the normal path-precedence resolver, supports escaped dotted object
+paths, and treats values as JSON when they parse or as strings otherwise.
+
+Mutations reject symlinks and non-file targets, serialize beside the destination,
+preserve existing permissions, and publish with atomic replacement. New Unix files
+use mode `0600`. `config edit` opens a staging document selected through `VISUAL`,
+`EDITOR`, platform defaults, waits for the editor, and replaces the real file only
+after validating that the result is a JSON object.
+
 ### `doctor` CLI (`doctor.rs`)
 
 `doctor` is a read-only preflight/support surface built on the same configuration

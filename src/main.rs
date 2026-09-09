@@ -128,6 +128,9 @@ async fn main() {
 async fn run(mut cli: Cli) -> anyhow::Result<()> {
     if let Some(command) = cli.command.take() {
         match command {
+            CliCommand::Config(args) => {
+                return codexify::config_cli::run(&cli, args);
+            }
             CliCommand::Doctor(args) => {
                 let report = doctor::run(cli).await;
                 let output = if args.json {

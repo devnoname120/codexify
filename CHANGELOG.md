@@ -12,6 +12,10 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   installation, running/enabled state, definition path, and platform details
   without starting or changing it. Distinct exit codes identify running, stopped,
   absent, and query-failure states; no valid server configuration is required.
+- `codexify config` can print the selected JSON document, resolve its path, get,
+  set, or unset escaped dotted settings, and edit a validated staging copy via
+  `VISUAL`, `EDITOR`, `nano`/`vi`, or Notepad. Mutations use atomic replacement,
+  preserve unrelated fields and existing permissions, and refuse symlink targets.
 
 ### Changed
 

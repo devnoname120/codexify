@@ -394,6 +394,11 @@ Each release ships a compiled binary per platform — `windows-x64`, `linux-x64`
 
 | Command | Description |
 |---------|-------------|
+| `config [get [KEY]]` | Print the selected raw JSON configuration or one escaped dotted setting |
+| `config path` | Print the selected configuration path without creating the file |
+| `config set KEY VALUE` | Set a dotted setting; valid JSON is stored as JSON and other input as a string |
+| `config unset KEY` | Remove a dotted setting while preserving the rest of the document |
+| `config edit` | Edit a validated staging copy using `VISUAL`, `EDITOR`, `nano`/`vi`, or Notepad |
 | `doctor` | Run read-only local diagnostics for configuration, command dependencies, service/update state, local health, and native tunnel prerequisites; add `--json` for machine-readable output |
 | `quickstart` | Interactively configure the project scope, native OpenAI tunnel credentials, JSON config, and ChatGPT developer-mode connector; restart the installed service or optionally start a foreground server |
 | `service install` | Install, enable, and start the native per-user service using the selected absolute config path |
@@ -406,6 +411,23 @@ Each release ships a compiled binary per platform — `windows-x64`, `linux-x64`
 `quickstart` writes `~/.codexify/codexify.config.json` by default. It accepts
 `--config <PATH>` (or `CODEXIFY_CONFIG`) to select another file and
 `--work-dir <DIR>` as the initial project-directory prompt value.
+
+The `config` command uses the same `--config`, `CODEXIFY_CONFIG`, and user-file
+precedence without loading or normalizing the runtime configuration. Running it
+without a subcommand prints the complete JSON object; a missing file prints `{}`
+without creating anything. `get` emits valid JSON even for scalar values. Dotted
+paths address nested object fields; escape a literal dot or backslash with a
+backslash, for example `mcpServers.team\.server.enabled`.
+
+`set` accepts a JSON value when parsing succeeds (`true`, `4100`, arrays,
+objects, or a quoted JSON string) and otherwise stores the argument as a string.
+`set`, `unset`, and `edit` refuse symlinked or non-file targets, preserve unknown
+fields and existing file permissions, and atomically replace the selected file.
+New files are private on Unix. `edit` edits a temporary JSON copy and publishes
+it only when the editor exits successfully and the result is an object. `VISUAL`
+takes precedence over `EDITOR`; Unix falls back to `nano` and then `vi`, while
+Windows falls back to Notepad. Mutating commands print the path and remind the
+operator to run `codexify service restart` when a running service must reload it.
 
 `doctor` is side-effect free and does not start MCP children, install or repair
 the native service, remove update state, download the managed tunnel runtime, or

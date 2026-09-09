@@ -170,6 +170,8 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum CliCommand {
+    /// Inspect or edit the selected Codexify JSON configuration.
+    Config(ConfigArgs),
     /// Diagnose the local Codexify installation without changing it.
     Doctor(DoctorArgs),
     /// Inspect the read-only project catalogue used by multi-project mode.
@@ -189,6 +191,47 @@ pub enum CliCommand {
     /// Migrate state from the pre-Codexify application name during installation.
     #[command(hide = true)]
     MigrateLegacyInstall,
+}
+
+#[derive(Args, Debug)]
+pub struct ConfigArgs {
+    #[command(subcommand)]
+    pub command: Option<ConfigCommand>,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ConfigCommand {
+    /// Print the selected configuration path.
+    Path,
+    /// Print the complete configuration or one dotted setting as JSON.
+    Get(ConfigGetArgs),
+    /// Set one dotted setting to a JSON value or an unquoted string.
+    Set(ConfigSetArgs),
+    /// Remove one dotted setting.
+    Unset(ConfigUnsetArgs),
+    /// Open a validated staging copy in the configured text editor.
+    Edit,
+}
+
+#[derive(Args, Debug)]
+pub struct ConfigGetArgs {
+    /// Dotted setting path. Escape literal dots and backslashes with a backslash.
+    pub key: Option<String>,
+}
+
+#[derive(Args, Debug)]
+pub struct ConfigSetArgs {
+    /// Dotted setting path. Escape literal dots and backslashes with a backslash.
+    pub key: String,
+    /// JSON value, or a plain string when the input is not valid JSON.
+    #[arg(allow_hyphen_values = true)]
+    pub value: String,
+}
+
+#[derive(Args, Debug)]
+pub struct ConfigUnsetArgs {
+    /// Dotted setting path. Escape literal dots and backslashes with a backslash.
+    pub key: String,
 }
 
 #[derive(Args, Debug)]
