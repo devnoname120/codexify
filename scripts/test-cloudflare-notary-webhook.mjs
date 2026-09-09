@@ -7,6 +7,12 @@ import fs from "node:fs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const workerPath = path.join(root, "ops", "cloudflare-notary-webhook", "worker.mjs");
+const wranglerExamplePath = path.join(
+  root,
+  "ops",
+  "cloudflare-notary-webhook",
+  "wrangler.toml.example",
+);
 
 async function loadWorker() {
   assert.equal(fs.existsSync(workerPath), true, "Cloudflare Worker module must exist");
@@ -124,4 +130,9 @@ test("fails closed when required Worker settings are absent", async () => {
     async () => new Response(null, { status: 204 }),
   );
   assert.equal(response.status, 500);
+});
+
+test("disables public preview URLs for production deployments", () => {
+  const configuration = fs.readFileSync(wranglerExamplePath, "utf8");
+  assert.match(configuration, /^preview_urls = false$/m);
 });

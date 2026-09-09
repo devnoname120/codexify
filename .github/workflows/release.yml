@@ -138,6 +138,7 @@ jobs:
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
           security set-keychain-settings -lut 21600 "$KEYCHAIN"
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security list-keychains -d user -s "$KEYCHAIN"
           security import "$CERTIFICATE" \
             -k "$KEYCHAIN" \
             -P "$P12_PASSWORD" \
@@ -148,7 +149,7 @@ jobs:
             -k "$KEYCHAIN_PASSWORD" \
             "$KEYCHAIN" >/dev/null
           IDENTITIES="$(security find-identity -v -p codesigning "$KEYCHAIN" \
-            | sed -n 's/.*"\(Developer ID Application:.*\)"/\1/p')"
+            | awk '/"Developer ID Application:/{print $2}')"
           test "$(printf '%s\n' "$IDENTITIES" | sed '/^$/d' | wc -l | tr -d ' ')" = 1
           printf 'identity=%s\n' "$IDENTITIES" >> "$GITHUB_OUTPUT"
 

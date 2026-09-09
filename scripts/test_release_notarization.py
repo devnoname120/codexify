@@ -330,6 +330,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
         workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text()
         self.assertIn("MACOS_DEVELOPER_ID_P12_BASE64", workflow)
         self.assertIn("CODE_SIGN_KEYCHAIN", workflow)
+        self.assertIn('security list-keychains -d user -s "$KEYCHAIN"', workflow)
         self.assertIn("scripts/sign-macos-release.sh", workflow)
         self.assertIn("stage-release:", workflow)
         self.assertIn("python3 scripts/release_notarization.py stage", workflow)

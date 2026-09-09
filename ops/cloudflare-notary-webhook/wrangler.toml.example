@@ -2,6 +2,7 @@ name = "codexify-notary-webhook"
 main = "worker.mjs"
 compatibility_date = "2026-09-09"
 workers_dev = true
+preview_urls = false
 
 [vars]
 GITHUB_REPOSITORY = "devnoname120/codexify"
