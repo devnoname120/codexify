@@ -113,7 +113,7 @@ fn main() {
 
     function Invoke-RestMethod {
         param($Uri, $Headers)
-        return $script:FakeReleaseMetadata
+        return $global:CodexifyFakeReleaseMetadata
     }
     function Invoke-WebRequest {
         param($UseBasicParsing, $Uri, $Headers, $OutFile)
@@ -124,7 +124,7 @@ fn main() {
         [pscustomobject]@{ tag_name = $Version; draft = $true; prerelease = $false },
         [pscustomobject]@{ tag_name = $Version; draft = $false; prerelease = $true }
     )) {
-        $script:FakeReleaseMetadata = $Metadata
+        $global:CodexifyFakeReleaseMetadata = $Metadata
         $Rejected = $false
         try {
             & (Join-Path $RepositoryRoot 'install.ps1')
@@ -207,6 +207,7 @@ fn main() {
     Write-Host 'Windows installer replacement, checksum, PATH, and service integration test: PASS'
 }
 finally {
+    Remove-Variable -Name CodexifyFakeReleaseMetadata -Scope Global -ErrorAction SilentlyContinue
     if ($Server -and -not $Server.HasExited) {
         Stop-Process -Id $Server.Id -Force -ErrorAction SilentlyContinue
         $Server.WaitForExit()
