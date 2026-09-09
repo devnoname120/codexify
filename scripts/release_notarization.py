@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import os
 import re
 import subprocess
 import sys
@@ -66,9 +65,9 @@ class StageOptions:
 class FinalizeOptions:
     repo: str
     credentials: NotaryCredentials
+    team_id: str
+    identifier: str
     requested_tag: str | None = None
-    team_id: str = ""
-    identifier: str = ""
 
 
 class StageServices(Protocol):
@@ -440,10 +439,13 @@ def release_asset_map(release: dict[str, Any]) -> dict[str, dict[str, Any]]:
             raise ReleaseError("draft release contains malformed asset metadata")
         name = asset.get("name")
         asset_id = asset.get("id")
+        size = asset.get("size")
         if not isinstance(name, str) or Path(name).name != name:
             raise ReleaseError("draft release contains an invalid asset name")
         if not isinstance(asset_id, int) or asset_id <= 0:
             raise ReleaseError(f"draft release asset {name!r} has no valid ID")
+        if not isinstance(size, int) or size < 0:
+            raise ReleaseError(f"draft release asset {name!r} has no valid size")
         if name in result:
             raise ReleaseError(f"draft release contains duplicate asset {name!r}")
         result[name] = asset
@@ -508,7 +510,6 @@ def internal_asset_name(name: str) -> bool:
 def verify_downloaded_release(
     options: FinalizeOptions,
     services: FinalizeServices,
-    release: dict[str, Any],
     manifest: dict[str, Any],
     asset_map: dict[str, dict[str, Any]],
     temp: Path,
@@ -521,10 +522,12 @@ def verify_downloaded_release(
     manifest_records = {record["name"]: record for record in manifest["assets"]}
     downloaded: dict[str, Path] = {}
     for name in sorted(expected_names):
+        record = manifest_records[name]
+        if asset_map[name]["size"] != record["size"]:
+            raise ReleaseError(f"release asset metadata size changed after notarization staging: {name}")
         destination = temp / "assets" / name
         destination.parent.mkdir(parents=True, exist_ok=True)
         services.download_asset(options.repo, asset_map[name], destination)
-        record = manifest_records[name]
         if destination.stat().st_size != record["size"]:
             raise ReleaseError(f"release asset size changed after notarization staging: {name}")
         if sha256_file(destination) != record["sha256"]:
@@ -567,6 +570,8 @@ def finalize_one_release(
     manifest_asset = asset_map.get(MANIFEST_ASSET)
     if manifest_asset is None:
         return "ignored"
+    if manifest_asset["size"] > MAX_MANIFEST_BYTES:
+        raise ReleaseError("notarization manifest exceeds its size limit")
 
     with tempfile.TemporaryDirectory(prefix="codexify-finalize-") as temp_name:
         temp = Path(temp_name)
@@ -592,10 +597,12 @@ def finalize_one_release(
             )
             for platform in MAC_PLATFORMS
         }
-        if any(status == "In Progress" for status in statuses.values()):
-            return "pending"
-
         rejected = {platform: status for platform, status in statuses.items() if status != "Accepted"}
+        rejected = {
+            platform: status
+            for platform, status in rejected.items()
+            if status != "In Progress"
+        }
         if rejected:
             for platform in sorted(rejected):
                 log_path = temp / f"{NOTARIZATION_LOG_PREFIX}{platform}.json"
@@ -609,8 +616,10 @@ def finalize_one_release(
                 services.upload_internal_asset(options.repo, tag, log_path)
             detail = ", ".join(f"{platform}={status}" for platform, status in sorted(rejected.items()))
             raise ReleaseError(f"notarization rejected for {tag}: {detail}")
+        if any(status == "In Progress" for status in statuses.values()):
+            return "pending"
 
-        verify_downloaded_release(options, services, release, manifest, asset_map, temp)
+        verify_downloaded_release(options, services, manifest, asset_map, temp)
         version = stable_version(tag)
         assert version is not None
         make_latest = not published_versions or version > max(published_versions)

@@ -141,15 +141,12 @@ jobs:
           security import "$CERTIFICATE" \
             -k "$KEYCHAIN" \
             -P "$P12_PASSWORD" \
-            -A \
-            -t cert \
-            -f pkcs12
+            -T /usr/bin/codesign
           security set-key-partition-list \
             -S apple-tool:,apple:,codesign: \
             -s \
             -k "$KEYCHAIN_PASSWORD" \
             "$KEYCHAIN" >/dev/null
-          security list-keychains -d user -s "$KEYCHAIN"
           IDENTITIES="$(security find-identity -v -p codesigning "$KEYCHAIN" \
             | sed -n 's/.*"\(Developer ID Application:.*\)"/\1/p')"
           test "$(printf '%s\n' "$IDENTITIES" | sed '/^$/d' | wc -l | tr -d ' ')" = 1
@@ -167,6 +164,7 @@ jobs:
         env:
           SIGNING_IDENTITY: ${{ steps.signing.outputs.identity }}
           APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+          CODE_SIGN_KEYCHAIN: ${{ runner.temp }}/codexify-signing.keychain-db
         run: |
           set -euo pipefail
           scripts/sign-macos-release.sh \

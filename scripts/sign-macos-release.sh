@@ -18,13 +18,17 @@ identifier=$4
 [ -n "$team_id" ] || fail 'Team ID is empty'
 [ -n "$identifier" ] || fail 'identifier is empty'
 
-codesign \
-    --force \
+set -- --force
+if [ -n "${CODE_SIGN_KEYCHAIN:-}" ]; then
+    set -- "$@" --keychain "$CODE_SIGN_KEYCHAIN"
+fi
+set -- \
+    "$@" \
     --sign "$identity" \
     --identifier "$identifier" \
     --options runtime \
-    --timestamp \
-    "$binary"
+    --timestamp
+codesign "$@" "$binary"
 
 codesign --verify --strict --verbose=2 "$binary"
 

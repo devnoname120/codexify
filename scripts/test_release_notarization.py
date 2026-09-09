@@ -89,6 +89,15 @@ esac
         self.assertIn(f"--display --verbose=4 {self.binary}", calls)
         self.assertIn(f"--display --requirements - {self.binary}", calls)
 
+    def test_uses_an_explicit_temporary_keychain_when_provided(self) -> None:
+        result = self.run_signer(CODE_SIGN_KEYCHAIN="/tmp/codexify-signing.keychain-db")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = self.calls.read_text()
+        self.assertIn(
+            "--force --keychain /tmp/codexify-signing.keychain-db --sign Developer ID Application: Example",
+            calls,
+        )
+
     def test_rejects_wrong_team_identifier(self) -> None:
         result = self.run_signer(FAKE_TEAM_ID="WRONGTEAM1")
         self.assertNotEqual(result.returncode, 0)
@@ -320,6 +329,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
     def test_release_workflow_signs_mac_binaries_and_stages_a_draft_on_macos(self) -> None:
         workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text()
         self.assertIn("MACOS_DEVELOPER_ID_P12_BASE64", workflow)
+        self.assertIn("CODE_SIGN_KEYCHAIN", workflow)
         self.assertIn("scripts/sign-macos-release.sh", workflow)
         self.assertIn("stage-release:", workflow)
         self.assertIn("python3 scripts/release_notarization.py stage", workflow)
@@ -505,6 +515,15 @@ class FinalizeTests(unittest.TestCase):
         self.assertNotIn("publish", names)
         self.assertTrue(self.release["draft"])
 
+    def test_invalid_submission_wins_over_another_submission_still_processing(self) -> None:
+        services = self.services(x64="Invalid", arm64="In Progress")
+        with self.assertRaisesRegex(RuntimeError, "Invalid"):
+            self.module.finalize_releases(self.options(), services)
+        names = [event[0] for event in services.events]
+        self.assertIn("notary_log", names)
+        self.assertIn("upload_internal", names)
+        self.assertNotIn("publish", names)
+
     def test_accepted_submissions_verify_every_asset_and_publish(self) -> None:
         services = self.services()
         summary = self.module.finalize_releases(self.options(), services)
@@ -527,6 +546,26 @@ class FinalizeTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "changed"):
             self.module.finalize_releases(self.options(), services)
         self.assertNotIn("publish", [event[0] for event in services.events])
+
+    def test_oversized_manifest_metadata_is_rejected_before_download(self) -> None:
+        manifest_asset = next(
+            asset for asset in self.release["assets"] if asset["name"] == self.module.MANIFEST_ASSET
+        )
+        manifest_asset["size"] = self.module.MAX_MANIFEST_BYTES + 1
+        services = self.services()
+        with self.assertRaisesRegex(RuntimeError, "manifest exceeds"):
+            self.module.finalize_releases(self.options(), services)
+        self.assertNotIn("download_asset", [event[0] for event in services.events])
+
+    def test_public_asset_metadata_must_match_manifest_before_download(self) -> None:
+        name = f"codexify-{TAG}-darwin-arm64.tar.gz"
+        release_asset = next(asset for asset in self.release["assets"] if asset["name"] == name)
+        release_asset["size"] += 1
+        services = self.services()
+        with self.assertRaisesRegex(RuntimeError, "metadata size"):
+            self.module.finalize_releases(self.options(), services)
+        downloaded_names = [event[2] for event in services.events if event[0] == "download_asset"]
+        self.assertNotIn(name, downloaded_names)
 
     def test_manifest_cannot_choose_a_different_signing_identity(self) -> None:
         self.manifest["identifier"] = "dev.other"
