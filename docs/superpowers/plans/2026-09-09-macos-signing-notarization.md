@@ -44,7 +44,7 @@ self.assertIn("--timestamp", calls)
 self.assertIn("--sign Developer ID Application: Example", calls)
 ```
 
-The fake verification output must expose `Identifier=dev.codexify`, `TeamIdentifier=H6HYYFV7JW`, and a designated requirement containing `identifier "dev.codexify"` and `anchor apple generic`. Add negative fixtures for the wrong identifier and Team ID.
+The fake verification output must expose `Identifier=dev.codexify`, `TeamIdentifier=4HN6WUZ995`, and a designated requirement containing `identifier "dev.codexify"` and `anchor apple generic`. Add negative fixtures for the wrong identifier and Team ID.
 
 - [ ] **Step 2: Run the focused tests and verify RED**
 
@@ -138,7 +138,7 @@ Create dataclasses or validated dictionaries with this schema:
   "tag": "v9.8.7",
   "commit": "40 lowercase hex characters",
   "identifier": "dev.codexify",
-  "teamId": "H6HYYFV7JW",
+  "teamId": "4HN6WUZ995",
   "assets": [{"name": "...", "size": 123, "sha256": "64 lowercase hex"}],
   "submissions": {
     "darwin-x64": {"id": "UUID", "archive": "...", "binarySha256": "..."},
@@ -438,7 +438,7 @@ Use the signed-in Apple Developer account to submit the CSR for a Developer ID A
 
 - [ ] **Step 3: Import and package the certificate**
 
-Verify the returned certificate chains to Apple, has Team ID `H6HYYFV7JW`, and joins the generated private key. Create an encrypted P12, import it into the login Keychain, and perform a local `dev.codexify` test signature.
+Verify the returned certificate chains to Apple, has Team ID `4HN6WUZ995`, and joins the generated private key. Create an encrypted P12, import it into the login Keychain, and perform a local `dev.codexify` test signature.
 
 - [ ] **Step 4: Obtain a team App Store Connect API key**
 
@@ -459,7 +459,7 @@ APPLE_NOTARY_ISSUER_ID
 Set repository variable:
 
 ```text
-APPLE_TEAM_ID=H6HYYFV7JW
+APPLE_TEAM_ID=4HN6WUZ995
 ```
 
 Leave `APPLE_NOTARY_WEBHOOK_URL` unset until the user deploys the supplied Worker. After deployment, set it to the secret-path Worker URL and validate a manual finalizer dispatch.

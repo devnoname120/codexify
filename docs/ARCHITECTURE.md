@@ -459,7 +459,7 @@ adding control sequences to redirected or `NO_COLOR` output.
 ### Signed asynchronous releases (`release.yml`, `finalize-release.yml`)
 
 The release matrix signs each final Darwin Mach-O with the Developer ID
-identifier `dev.codexify`, team `H6HYYFV7JW`, hardened runtime, and an Apple
+identifier `dev.codexify`, team `4HN6WUZ995`, hardened runtime, and an Apple
 timestamp before packaging. Each job imports the encrypted P12 into a temporary
 keychain and removes the keychain and certificate material after use.
 

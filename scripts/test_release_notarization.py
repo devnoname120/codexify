@@ -18,7 +18,7 @@ SIGN_SCRIPT = ROOT / "scripts" / "sign-macos-release.sh"
 RELEASE_SCRIPT = ROOT / "scripts" / "release_notarization.py"
 TAG = "v9.8.7"
 COMMIT = "a" * 40
-TEAM_ID = "H6HYYFV7JW"
+TEAM_ID = "4HN6WUZ995"
 IDENTIFIER = "dev.codexify"
 
 
@@ -44,10 +44,10 @@ set -eu
 printf '%s\n' "$*" >> "$FAKE_CODESIGN_CALLS"
 case "$*" in
   '--display --verbose=4 '*)
-    printf 'Executable=%s\nIdentifier=%s\nTeamIdentifier=%s\n' "$3" "${FAKE_IDENTIFIER:-dev.codexify}" "${FAKE_TEAM_ID:-H6HYYFV7JW}" >&2
+    printf 'Executable=%s\nIdentifier=%s\nTeamIdentifier=%s\n' "$3" "${FAKE_IDENTIFIER:-dev.codexify}" "${FAKE_TEAM_ID:-4HN6WUZ995}" >&2
     ;;
   '--display --requirements - '*)
-    printf 'designated => identifier "%s" and anchor apple generic and certificate leaf[subject.OU] = %s\n' "${FAKE_REQUIREMENT_IDENTIFIER:-dev.codexify}" "${FAKE_REQUIREMENT_TEAM_ID:-H6HYYFV7JW}" >&2
+    printf 'designated => identifier "%s" and anchor apple generic and certificate leaf[subject.OU] = %s\n' "${FAKE_REQUIREMENT_IDENTIFIER:-dev.codexify}" "${FAKE_REQUIREMENT_TEAM_ID:-4HN6WUZ995}" >&2
     ;;
 esac
 """
@@ -67,7 +67,7 @@ esac
             [
                 str(SIGN_SCRIPT),
                 str(self.binary),
-                "Developer ID Application: Example (H6HYYFV7JW)",
+                "Developer ID Application: Example (4HN6WUZ995)",
                 TEAM_ID,
                 IDENTIFIER,
             ],
@@ -82,7 +82,7 @@ esac
         self.assertEqual(result.returncode, 0, result.stderr)
         calls = self.calls.read_text()
         self.assertIn(
-            f"--force --sign Developer ID Application: Example (H6HYYFV7JW) --identifier {IDENTIFIER} --options runtime --timestamp {self.binary}",
+            f"--force --sign Developer ID Application: Example (4HN6WUZ995) --identifier {IDENTIFIER} --options runtime --timestamp {self.binary}",
             calls,
         )
         self.assertIn(f"--verify --strict --verbose=2 {self.binary}", calls)

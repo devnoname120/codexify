@@ -8,7 +8,7 @@ Give every public macOS Codexify build one stable Developer ID identity so macOS
 
 The two macOS release binaries remain separate Intel and Apple-silicon artifacts. Each final Mach-O is signed after compilation and before archive creation with:
 
-- a Developer ID Application certificate from team `H6HYYFV7JW`;
+- a Developer ID Application certificate from team `4HN6WUZ995`;
 - identifier `dev.codexify`;
 - hardened runtime;
 - an Apple secure timestamp;
@@ -81,7 +81,7 @@ GitHub Actions uses these repository secrets:
 - `APPLE_NOTARY_ISSUER_ID`;
 - `APPLE_NOTARY_WEBHOOK_URL`.
 
-The public team identifier is stored as repository variable `APPLE_TEAM_ID=H6HYYFV7JW`.
+The public team identifier is stored as repository variable `APPLE_TEAM_ID=4HN6WUZ995`.
 
 The certificate private key and App Store Connect `.p8` key are generated or downloaded once, retained in a private local backup, and copied to GitHub only as encrypted secrets. Workflows materialize them under `$RUNNER_TEMP`, use a temporary keychain, and remove temporary files during job cleanup. Secret values never enter logs, release assets, caches, or repository files.
 

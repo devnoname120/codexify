@@ -147,7 +147,7 @@ testing.
 ### macOS release signing and notarization
 
 The Intel and Apple-silicon release executables are signed after linking with a
-Developer ID Application certificate from team `H6HYYFV7JW`, identifier
+Developer ID Application certificate from team `4HN6WUZ995`, identifier
 `dev.codexify`, hardened runtime, and an Apple secure timestamp. No recipient Mac
 registration or provisioning profile is required. The first transition from an
 older ad-hoc build may prompt once more for removable-volume or other macOS
