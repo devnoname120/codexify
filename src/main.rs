@@ -120,7 +120,13 @@ async fn main() {
     codexify::tls::ensure_crypto_provider();
 
     if let Err(error) = run(Cli::parse()).await {
-        eprintln!("Error: {error:#}");
+        let message = format!(
+            "{} {error:#}\n",
+            codexify::terminal::paint(codexify::terminal::FAILURE, "Error:")
+        );
+        if codexify::terminal::write_stderr(&message).is_err() {
+            eprintln!("Error: {error:#}");
+        }
         std::process::exit(1);
     }
 }

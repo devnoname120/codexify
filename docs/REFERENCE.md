@@ -148,10 +148,13 @@ Or run it directly from a source checkout:
 cargo run --release -- quickstart
 ```
 
-The wizard asks which project directory ChatGPT may access and whether that
-directory is one project or a multi-project access root. It then walks through
-creating an OpenAI Secure MCP Tunnel, entering the tunnel ID and runtime API key,
-and creating the matching ChatGPT developer-mode connector. Advanced policies,
+The wizard first asks whether to use single-project or multi-project mode. New
+setups default to multi-project mode; an existing `multiProject` value remains the
+rerun default. It then asks for a **Projects access root** or **Project directory**
+using mode-specific wording. The remaining steps create an OpenAI Secure MCP
+Tunnel, prompt directly for the tunnel ID and hidden runtime API key, and create
+the matching ChatGPT developer-mode connector. The suggested tunnel and connector
+name is `Codexify`; existing configurations are not renamed. Advanced policies,
 including optional per-conversation authorization, are configured manually rather
 than presented during first-run onboarding. The relevant OpenAI and ChatGPT links
 are printed together with the exact connection values to use.
@@ -163,7 +166,9 @@ The wizard writes `~/.codexify/codexify.config.json` by default; that file recei
 the absolute `workDir`, a `file:` reference to the runtime key, and the selected
 project mode; unrelated JSON settings are preserved. When the background service
 is installed, quickstart updates its definition and restarts it with this config.
-Otherwise, the wizard offers to start Codexify in the current terminal.
+Otherwise, the wizard first offers to install and start the background service;
+declining that retains the foreground-server option. Human-facing prompts,
+headings, paths, warnings, and completion messages use adaptive terminal colors.
 
 When an existing config already contains `conversationAuthToken`, quickstart
 preserves it, restricts the config file to the current user on Unix, and prints the
@@ -175,6 +180,10 @@ Set `CODEXIFY_CONFIG=/path/to/codexify.config.json` or use
 `codexify quickstart --config /path/to/codexify.config.json` to update a different
 config file. `--work-dir /path/to/project` changes the directory initially shown
 by the wizard.
+
+There is no intermediate “press Enter when ready” gate between the tunnel setup
+instructions and credential entry: paste the tunnel ID at its prompt, then paste
+the runtime API key at the hidden-input prompt.
 
 ### Manual native OpenAI tunnel setup
 

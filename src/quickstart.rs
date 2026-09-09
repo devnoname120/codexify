@@ -11,6 +11,7 @@ use zeroize::Zeroizing;
 
 use crate::conversation_auth::{conversation_auth_prompt, validate_conversation_auth_token};
 use crate::openai_tunnel::{validate_runtime_api_key, validate_tunnel_id};
+use crate::terminal::{ACCENT, EMPHASIS, FAILURE, HEADING, MUTED, SUCCESS, VALUE, WARNING, paint};
 use crate::util::home_dir;
 
 pub const TUNNEL_SETTINGS_URL: &str = "https://platform.openai.com/settings/organization/tunnels";
@@ -52,8 +53,7 @@ struct QuickstartEnvironment {
 
 pub fn run(args: QuickstartArgs) -> anyhow::Result<QuickstartOutcome> {
     let stdin = io::stdin();
-    let stdout = io::stdout();
-    if !stdin.is_terminal() || !stdout.is_terminal() {
+    if !stdin.is_terminal() || !io::stdout().is_terminal() {
         bail!("quickstart is interactive and requires a terminal");
     }
 
@@ -63,13 +63,15 @@ pub fn run(args: QuickstartArgs) -> anyhow::Result<QuickstartOutcome> {
         executable: std::env::current_exe().context("locate the running codexify binary")?,
     };
     let mut input = stdin.lock();
-    let mut output = stdout.lock();
-    run_with_io(
+    let output = anstream::stdout();
+    let mut output = output.lock();
+    run_with_io_mode(
         args,
         environment,
         &mut input,
         &mut output,
         prompt_hidden_password,
+        true,
     )
 }
 
@@ -168,12 +170,13 @@ impl TerminalEchoProbe {
     }
 }
 
-fn run_with_io<R, W, F>(
+fn run_with_io_mode<R, W, F>(
     args: QuickstartArgs,
     environment: QuickstartEnvironment,
     input: &mut R,
     output: &mut W,
     read_secret: F,
+    styled: bool,
 ) -> anyhow::Result<QuickstartOutcome>
 where
     R: BufRead,
@@ -184,6 +187,7 @@ where
         input,
         output,
         read_secret,
+        styled,
     };
     let config_path = absolute_path(&environment.current_dir, &args.config);
     refuse_symlinked_config(&config_path)?;
@@ -198,13 +202,25 @@ where
         );
     }
 
-    writeln!(wizard.output, "Codexify quickstart")?;
-    writeln!(
-        wizard.output,
-        "This wizard configures an OpenAI Secure MCP Tunnel and a ChatGPT developer-mode connector."
-    )?;
-    writeln!(wizard.output, "Config file: {}\n", config_path.display())?;
+    let title = wizard.decorate(HEADING, "Codexify quickstart");
+    writeln!(wizard.output, "{title}")?;
+    let introduction = wizard.decorate(
+        MUTED,
+        "This wizard configures an OpenAI Secure MCP Tunnel and a ChatGPT developer-mode connector.",
+    );
+    writeln!(wizard.output, "{introduction}")?;
+    let config_label = wizard.decorate(EMPHASIS, "Config file:");
+    let config_value = wizard.decorate(ACCENT, config_path.display());
+    writeln!(wizard.output, "{config_label} {config_value}\n")?;
 
+    let multi_project_default = file_config
+        .get("multiProject")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let multi_project = wizard.confirm(
+        "Use multi-project mode (recommended: select a project independently in each chat)?",
+        multi_project_default,
+    )?;
     let default_work_dir = args
         .work_dir
         .as_deref()
@@ -215,17 +231,10 @@ where
         &default_work_dir,
         &environment.current_dir,
         &environment.home_dir,
-    )?;
-    let multi_project_default = file_config
-        .get("multiProject")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let multi_project = wizard.confirm(
-        "Use this directory as an access root for several independent projects?",
-        multi_project_default,
+        multi_project,
     )?;
 
-    let default_connector_name = connector_name_default(&work_dir, multi_project);
+    let default_connector_name = connector_name_default();
     let connector_name = prompt_connector_name(&mut wizard, &default_connector_name)?;
     let conversation_auth_token = configured_conversation_auth_token(&file_config)?;
 
@@ -233,10 +242,11 @@ where
         .get("apiKey")
         .is_some_and(|value| !value.is_null())
     {
-        writeln!(
-            wizard.output,
-            "\nThe existing config contains apiKey, which cannot be combined with the native OpenAI tunnel."
-        )?;
+        let warning = wizard.decorate(
+            WARNING,
+            "The existing config contains apiKey, which cannot be combined with the native OpenAI tunnel.",
+        );
+        writeln!(wizard.output, "\n{warning}")?;
         if !wizard.confirm("Remove apiKey from the config?", true)? {
             bail!("quickstart cancelled without changing the config");
         }
@@ -245,7 +255,6 @@ where
 
     let existing_tunnel_id = configured_tunnel_id(&file_config);
     print_tunnel_creation_step(&mut wizard, &connector_name)?;
-    wizard.pause("Press Enter after the tunnel has been created")?;
     let tunnel_id = prompt_tunnel_id(&mut wizard, existing_tunnel_id.as_deref())?;
 
     let key_path = credential_path(&environment.home_dir, &tunnel_id);
@@ -266,15 +275,25 @@ where
         conversation_auth_token.is_some(),
     )?;
 
-    writeln!(wizard.output, "\nLocal configuration complete.")?;
-    writeln!(wizard.output, "  Config: {}", config_path.display())?;
-    writeln!(wizard.output, "  Runtime key: {}", key_path.display())?;
-    writeln!(wizard.output, "  Project directory: {}", work_dir.display())?;
+    let complete = wizard.decorate(SUCCESS, "Local configuration complete.");
+    writeln!(wizard.output, "\n{complete}")?;
+    write_summary_value(&mut wizard, "Config", config_path.display())?;
+    write_summary_value(&mut wizard, "Runtime key", key_path.display())?;
+    write_summary_value(
+        &mut wizard,
+        if multi_project {
+            "Projects access root"
+        } else {
+            "Project directory"
+        },
+        work_dir.display(),
+    )?;
     if conversation_auth_token.is_some() {
-        writeln!(
-            wizard.output,
-            "  Conversation authorization: enabled; do not commit or share that config file"
-        )?;
+        let authorization = wizard.decorate(
+            WARNING,
+            "  Conversation authorization: enabled; do not commit or share that config file",
+        );
+        writeln!(wizard.output, "{authorization}")?;
     }
     let command = launch_command(
         &environment.executable,
@@ -282,17 +301,30 @@ where
         &config_path,
         args.config_explicit,
     );
-    writeln!(wizard.output, "\nLaunch command:\n  {command}")?;
+    let launch_label = wizard.decorate(EMPHASIS, "Launch command:");
+    let command = wizard.decorate(ACCENT, command);
+    writeln!(wizard.output, "\n{launch_label}\n  {command}")?;
 
     print_connector_step(&mut wizard, &connector_name, &tunnel_id, multi_project)?;
     if let Some(token) = conversation_auth_token.as_deref() {
         print_conversation_auth_step(&mut wizard, token)?;
     }
     let (start_server, restart_service) = if args.service_installed {
-        writeln!(
-            wizard.output,
-            "\nThe installed Codexify service will be updated and restarted with this configuration."
-        )?;
+        let message = wizard.decorate(
+            SUCCESS,
+            "The installed Codexify service will be updated and restarted with this configuration.",
+        );
+        writeln!(wizard.output, "\n{message}")?;
+        (false, true)
+    } else if wizard.confirm(
+        "Install and start Codexify as a background service now?",
+        true,
+    )? {
+        let message = wizard.decorate(
+            SUCCESS,
+            "Codexify will install and start the background service with this configuration.",
+        );
+        writeln!(wizard.output, "\n{message}")?;
         (false, true)
     } else {
         let start_server = wizard.confirm(
@@ -300,15 +332,17 @@ where
             true,
         )?;
         if start_server {
-            writeln!(
-                wizard.output,
-                "\nStarting Codexify. Wait for `OpenAI Secure MCP Tunnel: ready`, then complete the ChatGPT steps above."
-            )?;
+            let message = wizard.decorate(
+                SUCCESS,
+                "Starting Codexify. Wait for `OpenAI Secure MCP Tunnel: ready`, then complete the ChatGPT steps above.",
+            );
+            writeln!(wizard.output, "\n{message}")?;
         } else {
-            writeln!(
-                wizard.output,
-                "\nRun the launch command above before scanning or using the connector."
-            )?;
+            let message = wizard.decorate(
+                WARNING,
+                "Run the launch command above before scanning or using the connector.",
+            );
+            writeln!(wizard.output, "\n{message}")?;
         }
         (start_server, false)
     };
@@ -325,6 +359,7 @@ struct Wizard<'a, R, W, F> {
     input: &'a mut R,
     output: &'a mut W,
     read_secret: F,
+    styled: bool,
 }
 
 impl<R, W, F> Wizard<'_, R, W, F>
@@ -333,9 +368,21 @@ where
     W: Write,
     F: FnMut(&str, &mut W) -> io::Result<String>,
 {
+    fn decorate(&self, style: anstyle::Style, value: impl std::fmt::Display) -> String {
+        if self.styled {
+            paint(style, value)
+        } else {
+            value.to_string()
+        }
+    }
+
     fn prompt(&mut self, label: &str, default: Option<&str>) -> anyhow::Result<String> {
+        let label = self.decorate(EMPHASIS, label);
         match default {
-            Some(default) => write!(self.output, "{label} [{default}]: ")?,
+            Some(default) => {
+                let default = self.decorate(VALUE, default);
+                write!(self.output, "{label} [{default}]: ")?
+            }
             None => write!(self.output, "{label}: ")?,
         }
         self.output.flush()?;
@@ -354,6 +401,8 @@ where
     fn confirm(&mut self, label: &str, default: bool) -> anyhow::Result<bool> {
         let suffix = if default { "Y/n" } else { "y/N" };
         loop {
+            let label = self.decorate(EMPHASIS, label);
+            let suffix = self.decorate(VALUE, suffix);
             write!(self.output, "{label} [{suffix}]: ")?;
             self.output.flush()?;
             let mut line = String::new();
@@ -364,27 +413,53 @@ where
                 "" => return Ok(default),
                 "y" | "yes" => return Ok(true),
                 "n" | "no" => return Ok(false),
-                _ => writeln!(self.output, "Please answer yes or no.")?,
+                _ => {
+                    let warning = self.decorate(WARNING, "Please answer yes or no.");
+                    writeln!(self.output, "{warning}")?
+                }
             }
         }
     }
 
-    fn pause(&mut self, label: &str) -> anyhow::Result<()> {
-        write!(self.output, "{label}: ")?;
-        self.output.flush()?;
-        let mut line = String::new();
-        if self.input.read_line(&mut line)? == 0 {
-            bail!("quickstart input ended before setup was complete");
-        }
-        Ok(())
-    }
-
     fn secret(&mut self, label: &str) -> anyhow::Result<Zeroizing<String>> {
+        let label = self.decorate(EMPHASIS, label);
         let value =
-            (self.read_secret)(label, self.output).context("read hidden runtime API key")?;
+            (self.read_secret)(&label, self.output).context("read hidden runtime API key")?;
         writeln!(self.output)?;
         Ok(Zeroizing::new(value))
     }
+}
+
+fn write_summary_value<R, W, F>(
+    wizard: &mut Wizard<'_, R, W, F>,
+    label: &str,
+    value: impl std::fmt::Display,
+) -> anyhow::Result<()>
+where
+    R: BufRead,
+    W: Write,
+    F: FnMut(&str, &mut W) -> io::Result<String>,
+{
+    let label = wizard.decorate(EMPHASIS, format!("  {label}:"));
+    let value = wizard.decorate(ACCENT, value);
+    writeln!(wizard.output, "{label} {value}")?;
+    Ok(())
+}
+
+fn write_setup_field<R, W, F>(
+    wizard: &mut Wizard<'_, R, W, F>,
+    label: &str,
+    value: impl std::fmt::Display,
+) -> anyhow::Result<()>
+where
+    R: BufRead,
+    W: Write,
+    F: FnMut(&str, &mut W) -> io::Result<String>,
+{
+    let label = wizard.decorate(EMPHASIS, format!("     {label}:"));
+    let value = wizard.decorate(VALUE, value);
+    writeln!(wizard.output, "{label} {value}")?;
+    Ok(())
 }
 
 fn prompt_existing_directory<R, W, F>(
@@ -392,6 +467,7 @@ fn prompt_existing_directory<R, W, F>(
     default: &Path,
     current_dir: &Path,
     home_dir: &Path,
+    multi_project: bool,
 ) -> anyhow::Result<PathBuf>
 where
     R: BufRead,
@@ -399,17 +475,30 @@ where
     F: FnMut(&str, &mut W) -> io::Result<String>,
 {
     let default = default.to_string_lossy();
+    let label = if multi_project {
+        "Projects access root"
+    } else {
+        "Project directory"
+    };
     loop {
-        let raw = wizard.prompt("Project directory", Some(&default))?;
+        let raw = wizard.prompt(label, Some(&default))?;
         let candidate = resolve_user_path(&raw, current_dir, home_dir);
         match fs::canonicalize(&candidate) {
             Ok(path) if path.is_dir() => return Ok(path),
-            Ok(path) => writeln!(
-                wizard.output,
-                "That path is not a directory: {}",
-                path.display()
-            )?,
-            Err(error) => writeln!(wizard.output, "Cannot use {}: {error}", candidate.display())?,
+            Ok(path) => {
+                let message = wizard.decorate(
+                    FAILURE,
+                    format!("That path is not a directory: {}", path.display()),
+                );
+                writeln!(wizard.output, "{message}")?;
+            }
+            Err(error) => {
+                let message = wizard.decorate(
+                    FAILURE,
+                    format!("Cannot use {}: {error}", candidate.display()),
+                );
+                writeln!(wizard.output, "{message}")?;
+            }
         }
     }
 }
@@ -426,10 +515,11 @@ where
     loop {
         let name = wizard.prompt("ChatGPT connector name", Some(default))?;
         if name.chars().any(char::is_control) {
-            writeln!(
-                wizard.output,
-                "The connector name cannot contain control characters."
-            )?;
+            let error = wizard.decorate(
+                FAILURE,
+                "The connector name cannot contain control characters.",
+            );
+            writeln!(wizard.output, "{error}")?;
             continue;
         }
         return Ok(name);
@@ -446,10 +536,13 @@ where
     F: FnMut(&str, &mut W) -> io::Result<String>,
 {
     loop {
-        let tunnel_id = wizard.prompt("Tunnel ID", default)?;
+        let tunnel_id = wizard.prompt("Paste the tunnel ID", default)?;
         match validate_tunnel_id(&tunnel_id) {
             Ok(()) => return Ok(tunnel_id),
-            Err(error) => writeln!(wizard.output, "{error}")?,
+            Err(error) => {
+                let error = wizard.decorate(FAILURE, error);
+                writeln!(wizard.output, "{error}")?;
+            }
         }
     }
 }
@@ -465,11 +558,14 @@ where
 {
     let can_keep = existing_runtime_key_is_valid(key_path);
     if can_keep {
-        writeln!(
-            wizard.output,
-            "A valid stored runtime key already exists at {}.",
-            key_path.display()
-        )?;
+        let message = wizard.decorate(
+            SUCCESS,
+            format!(
+                "A valid stored runtime key already exists at {}.",
+                key_path.display()
+            ),
+        );
+        writeln!(wizard.output, "{message}")?;
     }
 
     loop {
@@ -484,6 +580,7 @@ where
             return Ok(());
         }
         if let Err(error) = validate_runtime_api_key(&key) {
+            let error = wizard.decorate(FAILURE, error);
             writeln!(wizard.output, "{error}")?;
             continue;
         }
@@ -501,21 +598,29 @@ where
     W: Write,
     F: FnMut(&str, &mut W) -> io::Result<String>,
 {
-    writeln!(wizard.output, "\n1. Create an OpenAI Secure MCP Tunnel")?;
-    writeln!(wizard.output, "   Open: {TUNNEL_SETTINGS_URL}")?;
-    writeln!(wizard.output, "   Suggested name: {connector_name}")?;
-    writeln!(
-        wizard.output,
-        "   Associate the tunnel with the Platform organization that owns it and the ChatGPT workspace where the connector will be used."
-    )?;
-    writeln!(
-        wizard.output,
-        "   Creating a tunnel requires Tunnels Read + Manage; running it and selecting it in ChatGPT require Tunnels Read + Use."
-    )?;
-    writeln!(
-        wizard.output,
-        "   Create the tunnel, then copy the identifier beginning with `tunnel_`."
-    )?;
+    let heading = wizard.decorate(HEADING, "1. Create an OpenAI Secure MCP Tunnel");
+    let open = wizard.decorate(EMPHASIS, "   Open:");
+    let url = wizard.decorate(ACCENT, TUNNEL_SETTINGS_URL);
+    let suggested = wizard.decorate(EMPHASIS, "   Suggested name:");
+    let name = wizard.decorate(VALUE, connector_name);
+    writeln!(wizard.output, "\n{heading}")?;
+    writeln!(wizard.output, "{open} {url}")?;
+    writeln!(wizard.output, "{suggested} {name}")?;
+    let association = wizard.decorate(
+        MUTED,
+        "   Associate the tunnel with the Platform organization that owns it and the ChatGPT workspace where the connector will be used.",
+    );
+    writeln!(wizard.output, "{association}")?;
+    let permissions = wizard.decorate(
+        MUTED,
+        "   Creating a tunnel requires Tunnels Read + Manage; running it and selecting it in ChatGPT require Tunnels Read + Use.",
+    );
+    writeln!(wizard.output, "{permissions}")?;
+    let copy = wizard.decorate(
+        EMPHASIS,
+        "   Create the tunnel, then copy the identifier beginning with `tunnel_` and paste it below.",
+    );
+    writeln!(wizard.output, "{copy}")?;
     Ok(())
 }
 
@@ -528,17 +633,29 @@ where
     W: Write,
     F: FnMut(&str, &mut W) -> io::Result<String>,
 {
-    writeln!(wizard.output, "\n2. Create a runtime API key")?;
-    writeln!(wizard.output, "   Open: {API_KEYS_URL}")?;
-    writeln!(
-        wizard.output,
-        "   Use a key whose principal has Tunnels Read + Use for this tunnel. Keep tunnel-management credentials separate."
-    )?;
-    writeln!(
-        wizard.output,
-        "   The key will be stored outside the project at {}; the JSON config stores only a file reference. On Unix, the wizard restricts the credential file to the current user.",
-        key_path.display()
-    )?;
+    let heading = wizard.decorate(HEADING, "2. Create a runtime API key");
+    let open = wizard.decorate(EMPHASIS, "   Open:");
+    let url = wizard.decorate(ACCENT, API_KEYS_URL);
+    writeln!(wizard.output, "\n{heading}")?;
+    writeln!(wizard.output, "{open} {url}")?;
+    let permissions = wizard.decorate(
+        MUTED,
+        "   Use a key whose principal has Tunnels Read + Use for this tunnel. Keep tunnel-management credentials separate.",
+    );
+    writeln!(wizard.output, "{permissions}")?;
+    let storage = wizard.decorate(
+        MUTED,
+        format!(
+            "   The key will be stored outside the project at {}; the JSON config stores only a file reference. On Unix, the wizard restricts the credential file to the current user.",
+            key_path.display()
+        ),
+    );
+    writeln!(wizard.output, "{storage}")?;
+    let paste = wizard.decorate(
+        EMPHASIS,
+        "   Paste the runtime API key at the prompt below.",
+    );
+    writeln!(wizard.output, "{paste}")?;
     Ok(())
 }
 
@@ -558,33 +675,43 @@ where
     } else {
         "Local Codex-style file, shell, Git, and MCP tools"
     };
-    writeln!(wizard.output, "\n3. Add the connector in ChatGPT Web")?;
-    writeln!(
-        wizard.output,
-        "   Developer-mode guide: {DEVELOPER_MODE_GUIDE_URL}"
-    )?;
-    writeln!(
-        wizard.output,
-        "   In ChatGPT, open Settings > Security and login and enable Developer mode. Managed workspaces may first require an admin grant under Workspace Settings > Permissions & Roles > Connected Data, then expose the toggle under Settings > Apps > Advanced Settings."
-    )?;
-    writeln!(wizard.output, "   Open: {CHATGPT_PLUGINS_URL}")?;
-    writeln!(wizard.output, "   Click the + button and enter:")?;
-    writeln!(wizard.output, "     Name: {connector_name}")?;
-    writeln!(wizard.output, "     Description: {description}")?;
-    writeln!(wizard.output, "     Connection: Tunnel")?;
-    writeln!(
-        wizard.output,
-        "     Tunnel: select `{tunnel_id}` or paste that tunnel ID"
-    )?;
-    writeln!(wizard.output, "     Authentication: No Authentication")?;
-    writeln!(
-        wizard.output,
-        "   Wait until this terminal reports `OpenAI Secure MCP Tunnel: ready`, then scan the tools and create the connector. Enable the read/write actions you intend to use; full Codex-style operation needs both."
-    )?;
-    writeln!(
-        wizard.output,
-        "   In a new chat, open the + menu, choose Developer mode, and select `{connector_name}`."
-    )?;
+    let heading = wizard.decorate(HEADING, "3. Add the connector in ChatGPT Web");
+    let guide_label = wizard.decorate(EMPHASIS, "   Developer-mode guide:");
+    let guide_url = wizard.decorate(ACCENT, DEVELOPER_MODE_GUIDE_URL);
+    writeln!(wizard.output, "\n{heading}")?;
+    writeln!(wizard.output, "{guide_label} {guide_url}")?;
+    let settings = wizard.decorate(
+        MUTED,
+        "   In ChatGPT, open Settings > Security and login and enable Developer mode. Managed workspaces may first require an admin grant under Workspace Settings > Permissions & Roles > Connected Data, then expose the toggle under Settings > Apps > Advanced Settings.",
+    );
+    writeln!(wizard.output, "{settings}")?;
+    let open = wizard.decorate(EMPHASIS, "   Open:");
+    let plugins = wizard.decorate(ACCENT, CHATGPT_PLUGINS_URL);
+    let click = wizard.decorate(EMPHASIS, "   Click the + button and enter:");
+    writeln!(wizard.output, "{open} {plugins}")?;
+    writeln!(wizard.output, "{click}")?;
+    write_setup_field(wizard, "Name", connector_name)?;
+    write_setup_field(wizard, "Description", description)?;
+    write_setup_field(wizard, "Connection", "Tunnel")?;
+    let tunnel = wizard.decorate(
+        VALUE,
+        format!("select `{tunnel_id}` or paste that tunnel ID"),
+    );
+    let tunnel_label = wizard.decorate(EMPHASIS, "     Tunnel:");
+    writeln!(wizard.output, "{tunnel_label} {tunnel}")?;
+    write_setup_field(wizard, "Authentication", "No Authentication")?;
+    let scan = wizard.decorate(
+        MUTED,
+        "   Wait until this terminal reports `OpenAI Secure MCP Tunnel: ready`, then scan the tools and create the connector. Enable the read/write actions you intend to use; full Codex-style operation needs both.",
+    );
+    writeln!(wizard.output, "{scan}")?;
+    let selection = wizard.decorate(
+        EMPHASIS,
+        format!(
+            "   In a new chat, open the + menu, choose Developer mode, and select `{connector_name}`."
+        ),
+    );
+    writeln!(wizard.output, "{selection}")?;
     Ok(())
 }
 
@@ -597,29 +724,20 @@ where
     W: Write,
     F: FnMut(&str, &mut W) -> io::Result<String>,
 {
-    writeln!(
-        wizard.output,
-        "\n4. Configure ChatGPT conversation authorization"
-    )?;
-    writeln!(
-        wizard.output,
-        "   Paste this instruction into a chat, or add it to the ChatGPT Project's Project instructions:"
-    )?;
-    writeln!(wizard.output, "   {}", conversation_auth_prompt(token))?;
+    let heading = wizard.decorate(HEADING, "4. Configure ChatGPT conversation authorization");
+    writeln!(wizard.output, "\n{heading}")?;
+    let instruction = wizard.decorate(
+        MUTED,
+        "   Paste this instruction into a chat, or add it to the ChatGPT Project's Project instructions:",
+    );
+    writeln!(wizard.output, "{instruction}")?;
+    let prompt = wizard.decorate(VALUE, conversation_auth_prompt(token));
+    writeln!(wizard.output, "   {prompt}")?;
     Ok(())
 }
 
-fn connector_name_default(work_dir: &Path, multi_project: bool) -> String {
-    let suffix = if multi_project {
-        "Projects".to_string()
-    } else {
-        work_dir
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .filter(|name| !name.is_empty())
-            .unwrap_or_else(|| "Local".to_string())
-    };
-    format!("Codexify - {suffix}")
+fn connector_name_default() -> String {
+    "Codexify".to_string()
 }
 
 fn configured_tunnel_id(config: &Map<String, Value>) -> Option<String> {
@@ -936,10 +1054,20 @@ mod tests {
         input: &str,
         secrets: &[&str],
     ) -> (anyhow::Result<QuickstartOutcome>, String) {
+        run_test_wizard_styled(args, environment, input, secrets, false)
+    }
+
+    fn run_test_wizard_styled(
+        args: QuickstartArgs,
+        environment: QuickstartEnvironment,
+        input: &str,
+        secrets: &[&str],
+        styled: bool,
+    ) -> (anyhow::Result<QuickstartOutcome>, String) {
         let mut input = Cursor::new(input.as_bytes());
         let mut output = Vec::new();
         let mut secrets: VecDeque<String> = secrets.iter().map(|value| value.to_string()).collect();
-        let result = run_with_io(
+        let result = run_with_io_mode(
             args,
             environment,
             &mut input,
@@ -951,6 +1079,7 @@ mod tests {
                     io::Error::new(io::ErrorKind::UnexpectedEof, "no test secret remains")
                 })
             },
+            styled,
         );
         (result, String::from_utf8(output).unwrap())
     }
@@ -1056,7 +1185,7 @@ mod tests {
         let config_path = project.join("codexify.config.json");
         let environment = environment(&root, &project);
         let home_dir = environment.home_dir.clone();
-        let input = format!("\n\n\n\n{TUNNEL_ID}\nn\n");
+        let input = format!("\n\n\n{TUNNEL_ID}\n\n");
 
         let (result, output) = run_test_wizard(
             args(config_path.clone(), &project),
@@ -1066,7 +1195,7 @@ mod tests {
         );
         let outcome = result.unwrap();
         assert!(!outcome.start_server);
-        assert!(!outcome.restart_service);
+        assert!(outcome.restart_service);
         assert_eq!(outcome.work_dir, fs::canonicalize(&project).unwrap());
         assert_eq!(outcome.config_path, config_path);
 
@@ -1078,7 +1207,7 @@ mod tests {
             config["workDir"],
             json!(fs::canonicalize(&project).unwrap())
         );
-        assert_eq!(config["multiProject"], json!(false));
+        assert_eq!(config["multiProject"], json!(true));
         assert!(config.get("conversationAuthToken").is_none());
         assert_eq!(config["openaiTunnel"]["tunnelId"], json!(TUNNEL_ID));
         assert_eq!(
@@ -1097,6 +1226,15 @@ mod tests {
         assert!(output.contains(CHATGPT_PLUGINS_URL));
         assert!(output.contains("Connection: Tunnel"));
         assert!(output.contains("Authentication: No Authentication"));
+        assert!(output.contains("Suggested name: Codexify"));
+        assert!(output.contains("Name: Codexify"));
+        assert!(!output.contains("Codexify - Projects"));
+        assert!(!output.contains("Press Enter after the tunnel"));
+        assert!(
+            output.find("Use multi-project mode").unwrap()
+                < output.find("Projects access root").unwrap(),
+            "{output}"
+        );
         assert!(output.contains(TUNNEL_ID));
         assert!(!output.contains("Require each new ChatGPT conversation"));
         assert!(!output.contains("Configure ChatGPT conversation authorization"));
@@ -1118,6 +1256,69 @@ mod tests {
                 0o700
             );
         }
+    }
+
+    #[test]
+    fn single_project_mode_is_chosen_before_the_path_prompt() {
+        let root = TempDir::new().unwrap();
+        let project = root.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+        let config_path = project.join("codexify.config.json");
+        let environment = environment(&root, &project);
+        let input = format!("n\n\n\n{TUNNEL_ID}\n\n");
+
+        let (result, output) = run_test_wizard(
+            args(config_path.clone(), &project),
+            environment,
+            &input,
+            &[RUNTIME_KEY],
+        );
+        let outcome = result.unwrap();
+        assert!(outcome.restart_service);
+        let config: Value =
+            serde_json::from_str(&fs::read_to_string(config_path).unwrap()).unwrap();
+        assert_eq!(config["multiProject"], false);
+        assert!(output.contains("Project directory"), "{output}");
+        assert!(!output.contains("Projects access root"), "{output}");
+        assert!(
+            output.find("Use multi-project mode").unwrap()
+                < output.find("Project directory").unwrap(),
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn styled_quickstart_preserves_plain_content() {
+        fn execute(styled: bool) -> String {
+            let root = TempDir::new().unwrap();
+            let project = root.path().join("project");
+            fs::create_dir_all(&project).unwrap();
+            let config_path = project.join("codexify.config.json");
+            let environment = environment(&root, &project);
+            let input = format!("\n\n\n{TUNNEL_ID}\n\n");
+            let (result, output) = run_test_wizard_styled(
+                args(config_path, &project),
+                environment,
+                &input,
+                &[RUNTIME_KEY],
+                styled,
+            );
+            result.unwrap();
+            let canonical = fs::canonicalize(root.path())
+                .unwrap()
+                .to_string_lossy()
+                .into_owned();
+            let original = root.path().to_string_lossy().into_owned();
+            output
+                .replace(&canonical, "<ROOT>")
+                .replace(&original, "<ROOT>")
+        }
+
+        let plain = execute(false);
+        let styled = execute(true);
+        assert!(!plain.contains("\u{1b}["));
+        assert!(styled.contains("\u{1b}["));
+        assert_eq!(crate::terminal::strip_ansi(&styled), plain);
     }
 
     #[test]
@@ -1149,12 +1350,12 @@ mod tests {
         let (result, output) = run_test_wizard(
             args(config_path.clone(), &project),
             environment,
-            "\n\n\n\n\n\nn\n",
+            "\n\n\n\n\n\n",
             &[""],
         );
         let outcome = result.unwrap();
         assert!(!outcome.start_server);
-        assert!(!outcome.restart_service);
+        assert!(outcome.restart_service);
         assert!(output.contains("valid stored runtime key already exists"));
         assert_eq!(fs::read_to_string(&key_path).unwrap().trim(), RUNTIME_KEY);
 
@@ -1197,7 +1398,7 @@ mod tests {
         fs::create_dir_all(&project).unwrap();
         let config_path = project.join("codexify.config.json");
         let environment = environment(&root, &project);
-        let input = format!("\nn\n\n\ninvalid-tunnel\n{TUNNEL_ID}\nn\n");
+        let input = format!("\n\n\ninvalid-tunnel\n{TUNNEL_ID}\n\n");
         let invalid_key = "not a valid key!";
 
         let (result, output) = run_test_wizard(
@@ -1222,7 +1423,7 @@ mod tests {
         let environment = environment(&root, &project);
         let mut quickstart_args = args(config_path.clone(), &project);
         quickstart_args.service_installed = true;
-        let input = format!("\n\n\n\n{TUNNEL_ID}\n");
+        let input = format!("\n\n\n{TUNNEL_ID}\n");
 
         let (result, output) =
             run_test_wizard(quickstart_args, environment, &input, &[RUNTIME_KEY]);
@@ -1232,6 +1433,32 @@ mod tests {
         assert_eq!(outcome.config_path, config_path);
         assert!(output.contains("service will be updated and restarted"));
         assert!(!output.contains("Start Codexify now"));
+    }
+
+    #[test]
+    fn declining_background_service_keeps_the_foreground_option() {
+        let root = TempDir::new().unwrap();
+        let project = root.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+        let config_path = project.join("codexify.config.json");
+        let environment = environment(&root, &project);
+        let input = format!("\n\n\n{TUNNEL_ID}\nn\ny\n");
+
+        let (result, output) = run_test_wizard(
+            args(config_path, &project),
+            environment,
+            &input,
+            &[RUNTIME_KEY],
+        );
+        let outcome = result.unwrap();
+        assert!(outcome.start_server);
+        assert!(!outcome.restart_service);
+        assert!(
+            output.contains("Install and start Codexify as a background service now?"),
+            "{output}"
+        );
+        assert!(output.contains("Start Codexify now"), "{output}");
+        assert!(output.contains("Starting Codexify."), "{output}");
     }
 
     #[test]

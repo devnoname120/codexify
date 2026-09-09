@@ -67,9 +67,10 @@ The installer source is available for [macOS/Linux](https://github.com/devnoname
 codexify quickstart
 ```
 
-The wizard guides you through choosing a project directory, creating a tunnel and
-its runtime API key, and adding the connector in ChatGPT. It prints the links and
-exact settings to use, saves your configuration, and starts the connection.
+The wizard defaults to multi-project mode, asks for the matching projects root or
+single project directory, then guides you through creating a tunnel, its runtime
+API key, and the `Codexify` connector in ChatGPT. It prints the links and exact
+settings to use, saves your configuration, and starts the connection.
 Keep Codexify running while you use it; the background service handles that for a
 standard installation.
 

@@ -26,6 +26,14 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   colors while preserving plain redirected output and machine-readable JSON.
   `service logs` promotes the tool name to the start of tool events, removes
   legacy stored ANSI sequences, and pretty-prints request and response JSON.
+- Quickstart now asks for single- or multi-project mode before the directory,
+  defaults new setups to multi-project mode, uses mode-specific path wording,
+  prompts for tunnel credentials directly, and suggests `Codexify` for both the
+  tunnel and connector. Its interactive output and command errors use adaptive
+  terminal colors. Existing config values are preserved rather than renamed.
+- When no service is installed, quickstart now offers background-service
+  installation first and keeps the foreground-server path as an explicit
+  fallback.
 
 ### Fixed
 

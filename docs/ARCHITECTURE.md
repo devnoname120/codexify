@@ -448,7 +448,13 @@ result as a conversation authorization grant.
 ### `quickstart` CLI (`quickstart.rs`)
 The `quickstart` subcommand runs before server configuration is loaded. It uses a
 testable line-oriented wizard for ordinary prompts and terminal-hidden input for
-the runtime API key. Without an explicit CLI or environment override, it writes
+the runtime API key. Presentation is routed through the shared adaptive terminal
+styles in production while the injected test writer stays plain and deterministic.
+The mode prompt precedes path resolution, defaults new setups to multi-project,
+and selects either access-root or project-directory wording. Tunnel and connector
+suggestions default to `Codexify`; existing values are never migrated. Tunnel ID
+and API-key input follow their instructions directly without a separate pause.
+Without an explicit CLI or environment override, it writes
 `~/.codexify/codexify.config.json` and its generated launch command relies on normal
 user-config discovery rather than adding `--config`. The wizard canonicalizes the
 project directory, stores it as absolute `workDir`, validates the tunnel credentials
@@ -456,9 +462,9 @@ with the same helpers as normal startup, merges only the managed fields into the
 existing JSON object, and stores the key outside the project behind an absolute
 `file:` reference. Config and
 credential replacement use temporary files in the destination directory. Once
-setup is complete, quickstart either restarts an installed native service with the
-selected config or passes the selected work directory through `load_config` before
-entering the foreground server lifecycle.
+setup is complete, quickstart either installs/restarts the native service with the
+selected config or, after an explicit decline, passes the selected work directory
+through `load_config` before entering the foreground server lifecycle.
 The wizard does not expose the advanced `conversationAuthToken` policy as an
 onboarding choice. If an existing config already contains a valid token, it
 preserves the token, protects the config as a private file on Unix, and prints the

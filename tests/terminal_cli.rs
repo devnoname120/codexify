@@ -145,3 +145,33 @@ fn doctor_uses_adaptive_color_without_coloring_json_output() {
     assert!(!json.stdout.windows(2).any(|bytes| bytes == b"\x1b["));
     let _: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
 }
+
+#[test]
+fn command_errors_use_adaptive_color() {
+    let root = TempDir::new().unwrap();
+    let colored = isolated_command(&root)
+        .args(["config", "get", "missing.value"])
+        .output()
+        .unwrap();
+    assert_eq!(colored.status.code(), Some(1));
+    assert!(colored.stderr.windows(2).any(|bytes| bytes == b"\x1b["));
+    let plain = strip_ansi(&colored.stderr);
+    assert!(
+        plain.contains("Error: setting not found: missing.value"),
+        "{plain}"
+    );
+
+    let plain = isolated_command(&root)
+        .env_remove("CLICOLOR_FORCE")
+        .env("NO_COLOR", "1")
+        .args(["config", "get", "missing.value"])
+        .output()
+        .unwrap();
+    assert_eq!(plain.status.code(), Some(1));
+    assert!(!plain.stderr.windows(2).any(|bytes| bytes == b"\x1b["));
+    assert!(
+        String::from_utf8(plain.stderr)
+            .unwrap()
+            .contains("Error: setting not found: missing.value")
+    );
+}
