@@ -130,12 +130,12 @@ async fn run(mut cli: Cli) -> anyhow::Result<()> {
         match command {
             CliCommand::Doctor(args) => {
                 let report = doctor::run(cli).await;
-                if args.json {
-                    println!("{}", serde_json::to_string_pretty(&report)?);
+                let output = if args.json {
+                    format!("{}\n", serde_json::to_string_pretty(&report)?)
                 } else {
-                    print!("{}", report.render_human());
-                }
-                std::io::stdout().flush()?;
+                    report.render_terminal()
+                };
+                codexify::terminal::write_stdout(&output)?;
                 if !report.ok {
                     std::process::exit(1);
                 }

@@ -401,7 +401,7 @@ Each release ships a compiled binary per platform — `windows-x64`, `linux-x64`
 | `service disable` | Stop and disable the installed service |
 | `service remove` | Stop and remove the installed service definition |
 | `service status [--json]` | Report native service installation, running/enabled state, and definition details without changing the service |
-| `service logs [-f]` | Print the latest service log lines; `-f` follows new output |
+| `service logs [-f]` | Print formatted service logs with adaptive colors and expanded JSON payloads; `-f` follows new output |
 
 `quickstart` writes `~/.codexify/codexify.config.json` by default. It accepts
 `--config <PATH>` (or `CODEXIFY_CONFIG`) to select another file and
@@ -436,7 +436,8 @@ runtime is a warning because normal startup installs the pinned verified runtime
 incomplete or corrupt configured tunnel state is a failure. Warnings and skipped
 optional checks still exit `0`; any failure exits `1` after printing the complete
 report. JSON mode emits exactly one JSON document on stdout and does not include
-resolved secret values.
+resolved secret values. Human-readable reports use adaptive colors on capable
+terminals and remain plain when redirected or when `NO_COLOR` is set.
 
 ### Server flags
 
@@ -494,6 +495,12 @@ numbered generations retained. The native service manager also restarts the
 supervisor if the supervisor itself fails. On Windows, the supervised server is
 contained in a kill-on-close Job Object so stopping the scheduled task cannot
 leave its process tree behind.
+
+Persisted log files remain plain text. `codexify service logs` applies terminal
+colors only while displaying them, strips legacy ANSI control sequences, moves
+the tool name to the front of tool lifecycle messages, and expands valid request
+or response JSON. Redirected output and terminals honoring `NO_COLOR` remain
+uncolored.
 
 | Platform | Per-user service |
 |----------|------------------|

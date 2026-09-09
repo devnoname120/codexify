@@ -172,6 +172,73 @@ impl DoctorReport {
         );
         output
     }
+
+    pub fn render_terminal(&self) -> String {
+        use crate::terminal::{ACCENT, EMPHASIS, FAILURE, HEADING, MUTED, SUCCESS, WARNING, paint};
+
+        let mut output = String::new();
+        let _ = writeln!(
+            output,
+            "{} {}",
+            paint(HEADING, "Codexify doctor"),
+            paint(EMPHASIS, &self.version)
+        );
+        let _ = writeln!(
+            output,
+            "{} {}/{}",
+            paint(MUTED, "Platform:"),
+            self.platform.os,
+            self.platform.arch
+        );
+        output.push('\n');
+
+        for check in &self.checks {
+            let status_style = match check.status {
+                DoctorStatus::Pass => SUCCESS,
+                DoctorStatus::Warning => WARNING,
+                DoctorStatus::Failure => FAILURE,
+                DoctorStatus::Skipped => MUTED,
+            };
+            let _ = writeln!(
+                output,
+                "{} {}: {}",
+                paint(status_style, check.status.label()),
+                paint(ACCENT, &check.id),
+                check.summary
+            );
+            if let Some(detail) = &check.detail {
+                let _ = writeln!(output, "  {}", paint(MUTED, detail));
+            }
+            if let Some(remediation) = &check.remediation {
+                let _ = writeln!(
+                    output,
+                    "  {} {}",
+                    paint(WARNING, "Remediation:"),
+                    remediation
+                );
+            }
+        }
+
+        let result = if self.ok { "healthy" } else { "unhealthy" };
+        let result_style = if self.ok { SUCCESS } else { FAILURE };
+        let _ = write!(
+            output,
+            "\n{} {} {}\n",
+            paint(EMPHASIS, "Result:"),
+            paint(result_style, result),
+            paint(
+                MUTED,
+                format!(
+                    "({} passed, {} warnings, {} failures, {} skipped)",
+                    self.summary.passed,
+                    self.summary.warnings,
+                    self.summary.failures,
+                    self.summary.skipped
+                )
+            )
+        );
+        output
+    }
 }
 
 fn runtime_check() -> DoctorCheck {

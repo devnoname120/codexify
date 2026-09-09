@@ -31,6 +31,8 @@ tar = "0.4"
 semver = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 clap = { version = "4", features = ["derive"] }
+anstream = "1"
+anstyle = "1"
 anyhow = "1"
 thiserror = "2"
 tracing = "0.1"

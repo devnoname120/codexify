@@ -150,7 +150,7 @@ impl ToolCallLogger {
                 request_truncated = preview.truncated,
                 request_serialization_failed = preview.serialization_failed,
                 request = %preview.text,
-                "tool invocation started"
+                "[{}] tool invocation started", identity.downstream_tool
             );
         } else {
             tool_payload_event!(
@@ -162,7 +162,7 @@ impl ToolCallLogger {
                 mcp_server = identity.mcp_server.as_deref().unwrap_or("-"),
                 mcp_tool = identity.mcp_tool.as_deref().unwrap_or("-"),
                 status = "started",
-                "tool invocation started"
+                "[{}] tool invocation started", identity.downstream_tool
             );
         }
         call
@@ -198,7 +198,7 @@ impl ToolCallLogger {
                 response_truncated = preview.truncated,
                 response_serialization_failed = preview.serialization_failed,
                 response = %preview.text,
-                "tool invocation completed"
+                "[{}] tool invocation completed", identity.downstream_tool
             );
         } else {
             tool_payload_event!(
@@ -211,7 +211,7 @@ impl ToolCallLogger {
                 mcp_tool = identity.mcp_tool.as_deref().unwrap_or("-"),
                 status = if result.is_error { "error" } else { "ok" },
                 duration_ms,
-                "tool invocation completed"
+                "[{}] tool invocation completed", identity.downstream_tool
             );
         }
     }
@@ -790,6 +790,8 @@ mod tests {
             assert_eq!(events[0]["call_id"], events[1]["call_id"]);
             assert_eq!(events[0]["phase"], "start");
             assert_eq!(events[1]["phase"], "finish");
+            assert_eq!(events[0]["message"], "[fixture] tool invocation started");
+            assert_eq!(events[1]["message"], "[fixture] tool invocation completed");
             assert_eq!(events[0].contains_key("request"), request_present);
             assert_eq!(events[1].contains_key("response"), response_present);
         }

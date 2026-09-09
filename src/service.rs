@@ -14,7 +14,9 @@ use tokio::io::AsyncReadExt;
 use tokio::process::Command as TokioCommand;
 use tokio::time::Instant;
 
+use crate::log_view::LogPresenter;
 use crate::process_env::SERVICE_SUPERVISED_ENV;
+use crate::terminal::{MUTED, paint};
 use crate::util::home_dir;
 
 #[cfg(any(target_os = "macos", test))]
@@ -1897,35 +1899,52 @@ pub async fn print_logs(follow: bool) -> anyhow::Result<()> {
     let path = log_path()?;
     let mut position = 0;
     let mut identity = None;
+    let mut presenter = LogPresenter::default();
+    let mut output = anstream::stdout().lock();
     match tail_bytes(&path) {
         Ok((bytes, length, current_identity)) => {
-            io::stdout().write_all(&bytes)?;
-            io::stdout().flush()?;
+            presenter.write(&bytes, &mut output)?;
+            output.flush()?;
             position = length;
             identity = Some(current_identity);
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound && follow => {
-            eprintln!("Waiting for service log {}", path.display());
+            crate::terminal::write_stderr(&format!(
+                "{}\n",
+                paint(MUTED, format!("Waiting for service log {}", path.display()))
+            ))?;
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            println!("No service log exists at {}", path.display());
+            crate::terminal::write_stdout(&format!(
+                "{}\n",
+                paint(
+                    MUTED,
+                    format!("No service log exists at {}", path.display())
+                )
+            ))?;
             return Ok(());
         }
         Err(error) => return Err(error.into()),
     }
 
     if !follow {
+        presenter.finish(&mut output)?;
+        output.flush()?;
         return Ok(());
     }
 
     loop {
         tokio::select! {
-            _ = tokio::signal::ctrl_c() => return Ok(()),
+            _ = tokio::signal::ctrl_c() => {
+                presenter.finish(&mut output)?;
+                output.flush()?;
+                return Ok(());
+            },
             _ = tokio::time::sleep(Duration::from_millis(250)) => {
                 match append_from(&path, &mut position, &mut identity) {
                     Ok(bytes) if !bytes.is_empty() => {
-                        io::stdout().write_all(&bytes)?;
-                        io::stdout().flush()?;
+                        presenter.write(&bytes, &mut output)?;
+                        output.flush()?;
                     }
                     Ok(_) => {}
                     Err(error) if error.kind() == io::ErrorKind::NotFound => {

@@ -13,6 +13,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   without starting or changing it. Distinct exit codes identify running, stopped,
   absent, and query-failure states; no valid server configuration is required.
 
+### Changed
+
+- Human-facing Doctor output and service-log viewing now use adaptive terminal
+  colors while preserving plain redirected output and machine-readable JSON.
+  `service logs` promotes the tool name to the start of tool events, removes
+  legacy stored ANSI sequences, and pretty-prints request and response JSON.
+
 ### Fixed
 
 - Set diff code text to 12 px on desktop and 10 px on mobile while

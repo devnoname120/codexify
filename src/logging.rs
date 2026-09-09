@@ -1,3 +1,5 @@
+use std::io::IsTerminal;
+
 use tracing::{Level, Metadata};
 use tracing_subscriber::filter::{FilterExt, filter_fn};
 use tracing_subscriber::layer::SubscriberExt;
@@ -19,7 +21,11 @@ pub fn init(verbosity: u8) {
     // filter so operators cannot force transport payloads into the logs via
     // `RUST_LOG` (they can carry model/user content).
     let payload_guard = filter_fn(framework_metadata_allowed);
-    let layer = tracing_subscriber::fmt::layer().with_filter(env_filter.and(payload_guard));
+    let ansi = std::env::var_os(crate::process_env::SERVICE_SUPERVISED_ENV).is_none()
+        && std::io::stderr().is_terminal();
+    let layer = tracing_subscriber::fmt::layer()
+        .with_ansi(ansi)
+        .with_filter(env_filter.and(payload_guard));
 
     tracing_subscriber::registry().with(layer).init();
 }

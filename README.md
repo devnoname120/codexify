@@ -115,7 +115,7 @@ command restrictions, and the authority of connected MCP servers.
 | --- | --- |
 | Check configuration and connectivity | `codexify doctor` |
 | Check the background service state | `codexify service status` |
-| Follow the service log | `codexify service logs -f` |
+| Follow the formatted service log | `codexify service logs -f` |
 | Stop the background service | `codexify service disable` |
 | Start it again | `codexify service enable` |
 
