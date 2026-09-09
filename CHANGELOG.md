@@ -22,9 +22,9 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
-- Human-facing Doctor output and service-log viewing now use adaptive terminal
-  colors while preserving plain redirected output and machine-readable JSON.
-  `service logs` promotes the tool name to the start of tool events, removes
+- Human-facing Doctor, project-catalogue, and service-log output now use adaptive
+  terminal colors while preserving plain redirected output and machine-readable
+  JSON. `service logs` promotes the tool name to the start of tool events, removes
   legacy stored ANSI sequences, and pretty-prints request and response JSON.
 - Quickstart now asks for single- or multi-project mode before the directory,
   defaults new setups to multi-project mode, uses mode-specific path wording,

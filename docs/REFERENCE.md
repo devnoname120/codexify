@@ -521,6 +521,10 @@ codexify projects list --work-dir /path/to/projects --show-skipped
 
 `--show-skipped` is deliberately local-only: it prints the configured paths rejected as missing, untrusted, or outside the access root, plus duplicate entries that were merged. Normal CLI output and the MCP tool expose only aggregate warnings, so an agent does not learn absolute paths it cannot select.
 
+Human-readable project listings use adaptive terminal colors for names, selectors,
+trust state, warnings, and diagnostics. `--json`, redirected output, and
+`NO_COLOR` remain plain.
+
 ## Background service
 
 The installation scripts register a per-user native service, start it

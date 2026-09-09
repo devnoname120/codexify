@@ -555,7 +555,8 @@ Service-supervised tracing is emitted without terminal escapes. The public log
 viewer reassembles partial lines, strips escapes from older files, highlights
 stable structural fields, promotes tool identity to the event prefix, and renders
 valid request/response payloads as indented JSON. The same adaptive presentation
-layer colors Doctor reports while preserving plain redirected and JSON output.
+layer colors Doctor reports and human-readable project listings while preserving
+plain redirected and JSON output.
 
 macOS lifecycle changes are state-aware. `bootout --wait` is itself bounded so a
 wedged launchd operation cannot hang an update, exit status 37 is treated as a

@@ -175,3 +175,63 @@ fn command_errors_use_adaptive_color() {
             .contains("Error: setting not found: missing.value")
     );
 }
+
+#[test]
+fn project_catalog_uses_color_only_for_human_output() {
+    let root = TempDir::new().unwrap();
+    let access = root.path().join("projects");
+    let project = access.join("demo");
+    let codex_home = root.path().join("codex-home");
+    fs::create_dir_all(&project).unwrap();
+    fs::create_dir_all(&codex_home).unwrap();
+    let config = root.path().join("config.json");
+    fs::write(
+        &config,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "codexMcp": { "enabled": false },
+            "projectCatalog": {
+                "codexConfig": { "enabled": false },
+                "entries": [{
+                    "path": project,
+                    "name": "Demo",
+                    "description": "Example project"
+                }]
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let human = isolated_command(&root)
+        .env("CODEX_HOME", &codex_home)
+        .args(["projects", "list", "--work-dir"])
+        .arg(&access)
+        .args(["--config"])
+        .arg(&config)
+        .output()
+        .unwrap();
+    assert!(
+        human.status.success(),
+        "{}",
+        String::from_utf8_lossy(&human.stderr)
+    );
+    assert!(human.stdout.windows(2).any(|bytes| bytes == b"\x1b["));
+    let plain = strip_ansi(&human.stdout);
+    assert!(plain.contains("Access root:"), "{plain}");
+    assert!(plain.contains("Demo"), "{plain}");
+    assert!(plain.contains("Example project"), "{plain}");
+
+    let json = isolated_command(&root)
+        .env("CODEX_HOME", &codex_home)
+        .args(["projects", "list", "--work-dir"])
+        .arg(&access)
+        .args(["--config"])
+        .arg(&config)
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert!(json.status.success());
+    assert!(!json.stdout.windows(2).any(|bytes| bytes == b"\x1b["));
+    let parsed: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert_eq!(parsed["projects"][0]["name"], "Demo");
+}

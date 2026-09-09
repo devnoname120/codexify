@@ -66,21 +66,43 @@ fn run_projects_list(cli: &Cli, args: &ProjectsListArgs) -> Result<(), String> {
         return Ok(());
     }
 
-    println!("Access root: {}", output.access_root);
-    println!(
-        "Projects: showing {} of {} matches",
+    use codexify::terminal::{ACCENT, EMPHASIS, HEADING, MUTED, SUCCESS, WARNING, paint};
+
+    let mut rendered = format!(
+        "{} {}\n{} showing {} of {} matches\n",
+        paint(EMPHASIS, "Access root:"),
+        paint(ACCENT, &output.access_root),
+        paint(HEADING, "Projects:"),
         output.projects.len(),
         output.total
     );
     if output.projects.is_empty() {
-        println!("  No selectable projects matched.");
+        rendered.push_str(&format!(
+            "  {}\n",
+            paint(MUTED, "No selectable projects matched.")
+        ));
     }
     for project in &output.projects {
-        println!("- {}", project.name);
-        println!("  selector: {}", project.selector);
-        println!("  trust: {}", trust_name(project.trust_level));
-        println!(
-            "  sources: {}",
+        let trust = trust_name(project.trust_level);
+        let trust_style = match project.trust_level {
+            Some(ProjectTrustLevel::Trusted) => SUCCESS,
+            Some(ProjectTrustLevel::Untrusted) => WARNING,
+            None => MUTED,
+        };
+        rendered.push_str(&format!("- {}\n", paint(EMPHASIS, &project.name)));
+        rendered.push_str(&format!(
+            "  {} {}\n",
+            paint(MUTED, "selector:"),
+            paint(ACCENT, &project.selector)
+        ));
+        rendered.push_str(&format!(
+            "  {} {}\n",
+            paint(MUTED, "trust:"),
+            paint(trust_style, trust)
+        ));
+        rendered.push_str(&format!(
+            "  {} {}\n",
+            paint(MUTED, "sources:"),
             project
                 .sources
                 .iter()
@@ -88,26 +110,36 @@ fn run_projects_list(cli: &Cli, args: &ProjectsListArgs) -> Result<(), String> {
                 .map(source_name)
                 .collect::<Vec<_>>()
                 .join(", ")
-        );
+        ));
         if !project.aliases.is_empty() {
-            println!("  aliases: {}", project.aliases.join(", "));
+            rendered.push_str(&format!(
+                "  {} {}\n",
+                paint(MUTED, "aliases:"),
+                project.aliases.join(", ")
+            ));
         }
         if let Some(description) = &project.description {
-            println!("  description: {description}");
+            rendered.push_str(&format!(
+                "  {} {}\n",
+                paint(MUTED, "description:"),
+                description
+            ));
         }
     }
     if !output.warnings.is_empty() {
-        println!("Warnings:");
+        rendered.push_str(&format!("{}\n", paint(WARNING, "Warnings:")));
         for warning in &output.warnings {
-            println!("- {warning}");
+            rendered.push_str(&format!("- {}\n", paint(WARNING, warning)));
         }
     }
     if args.show_skipped && !catalog.diagnostics.is_empty() {
-        println!("Detailed diagnostics:");
+        rendered.push_str(&format!("{}\n", paint(WARNING, "Detailed diagnostics:")));
         for diagnostic in &catalog.diagnostics {
-            println!("- {}", diagnostic.render_local());
+            rendered.push_str(&format!("- {}\n", paint(MUTED, diagnostic.render_local())));
         }
     }
+    codexify::terminal::write_stdout(&rendered)
+        .map_err(|error| format!("write project catalogue: {error}"))?;
     Ok(())
 }
 
