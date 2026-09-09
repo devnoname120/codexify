@@ -7,6 +7,8 @@
 
 # Leftovers from the previous Bun/TypeScript build
 node_modules/
+/ops/cloudflare-notary-webhook/.wrangler/
+/ops/cloudflare-notary-webhook/wrangler.toml
 
 # Source archive drops (reference material, not part of the repo)
 *.zip
