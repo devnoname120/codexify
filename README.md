@@ -53,9 +53,11 @@ curl -q -fsSL https://codexify.dev/install.sh | sh
 powershell -ExecutionPolicy ByPass -c "irm https://codexify.dev/install.ps1 | iex"
 ```
 
-The installer verifies the downloaded binary's checksum and sets up a per-user
-background service. No Rust toolchain is needed. Open a new terminal after it
-finishes so the `codexify` command is available.
+The installer verifies the downloaded binary's checksum and adds it to your PATH.
+When a config already exists it also refreshes the per-user background service;
+on a first install, quickstart creates the config and installs the service. No
+Rust toolchain is needed. Open a new terminal after installation so the
+`codexify` command is available.
 
 Prefer a manual install? Get a [prebuilt binary](https://github.com/devnoname120/codexify/releases/latest)
 or read the [installation guide](https://github.com/devnoname120/codexify/wiki/Installation).

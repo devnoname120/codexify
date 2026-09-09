@@ -103,24 +103,47 @@ done
     exit 1
 }
 
-for run in 1 2; do
-    HOME=$home \
-    SHELL=/bin/zsh \
-    CODEXIFY_VERSION=$tag \
-    CODEXIFY_RELEASE_ROOT=http://127.0.0.1:$port \
-        sh ./install.sh > "$root/run-$run.log"
-done
+missing_config=$root/missing.json
+HOME=$home \
+SHELL=/bin/zsh \
+CODEXIFY_CONFIG=$missing_config \
+CODEXIFY_VERSION=$tag \
+CODEXIFY_RELEASE_ROOT=http://127.0.0.1:$port \
+    sh ./install.sh > "$root/run-no-config.log"
+
+custom_config=$root/custom-codexify.json
+printf '{}\n' > "$custom_config"
+HOME=$home \
+SHELL=/bin/zsh \
+CODEXIFY_CONFIG=$custom_config \
+CODEXIFY_VERSION=$tag \
+CODEXIFY_RELEASE_ROOT=http://127.0.0.1:$port \
+    sh ./install.sh > "$root/run-with-config.log"
 
 HOME=$home \
 SHELL=/bin/zsh \
+CODEXIFY_CONFIG=$custom_config \
 CODEXIFY_VERSION=$tag \
 CODEXIFY_RELEASE_ROOT=http://127.0.0.1:$port \
 CODEXIFY_SKIP_SERVICE=1 \
+CLICOLOR_FORCE=1 \
     sh ./install.sh > "$root/run-skip-service.log"
 
 [ "$("$home/.codexify/bin/codexify")" = fake-codexify ]
-[ "$(cat "$home/service-installs")" = 2 ]
+[ "$(cat "$home/service-installs")" = 1 ]
 [ "$(cat "$home/legacy-migrations")" = 3 ]
+grep -F 'Background service setup deferred until quickstart creates the selected config:' "$root/run-no-config.log" >/dev/null
+test ! -e "$missing_config"
+if LC_ALL=C grep "$(printf '\033')" "$root/run-no-config.log" >/dev/null; then
+    printf 'redirected installer output unexpectedly contained terminal escapes\n' >&2
+    exit 1
+fi
+LC_ALL=C grep -F "$(printf '\033[1;32m')Restart your terminal, then run:" "$root/run-skip-service.log" >/dev/null
+awk '
+    $0 == "Restart your terminal, then run:" && previous == "" { found = 1 }
+    { previous = $0 }
+    END { exit found ? 0 : 1 }
+' "$root/run-no-config.log"
 [ -f "$home/.zshrc" ]
 for profile in \
     "$home/.profile" \

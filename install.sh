@@ -3,6 +3,7 @@ set -eu
 
 REPOSITORY=${CODEXIFY_GITHUB_REPOSITORY:-devnoname120/codexify}
 INSTALL_DIR="$HOME/.codexify/bin"
+CONFIG_PATH=${CODEXIFY_CONFIG:-"$HOME/.codexify/codexify.config.json"}
 RELEASE_ROOT=${CODEXIFY_RELEASE_ROOT:-"https://github.com/$REPOSITORY/releases/download"}
 VERSION=${CODEXIFY_VERSION:-}
 
@@ -13,6 +14,24 @@ fail() {
 
 need() {
     command -v "$1" >/dev/null 2>&1 || fail "required command not found: $1"
+}
+
+stdout_supports_color() {
+    [ "${NO_COLOR+x}" != x ] || return 1
+    case ${CLICOLOR_FORCE:-0} in
+        0|'') ;;
+        *) return 0 ;;
+    esac
+    [ -t 1 ] && [ "${TERM:-}" != dumb ]
+}
+
+print_next_steps() {
+    printf '\n'
+    if stdout_supports_color; then
+        printf '\033[1;32mRestart your terminal, then run:\n  codexify quickstart\033[0m\n'
+    else
+        printf 'Restart your terminal, then run:\n  codexify quickstart\n'
+    fi
 }
 
 append_path_block() (
@@ -221,13 +240,17 @@ fi
 configure_path
 
 if [ "${CODEXIFY_SKIP_SERVICE:-0}" != 1 ]; then
-    if "$target" service --help >/dev/null 2>&1; then
-        "$target" service install \
-            || fail 'the executable was installed, but the background service could not be installed; rerun with CODEXIFY_SKIP_SERVICE=1 to install without it'
+    if [ -f "$CONFIG_PATH" ]; then
+        if "$target" service --help >/dev/null 2>&1; then
+            "$target" service install \
+                || fail 'the executable was installed, but the background service could not be installed; rerun with CODEXIFY_SKIP_SERVICE=1 to install without it'
+        else
+            printf 'The installed release does not provide service management; executable installation will continue.\n' >&2
+        fi
     else
-        printf 'The installed release does not provide service management; executable installation will continue.\n' >&2
+        printf 'Background service setup deferred until quickstart creates the selected config: %s\n' "$CONFIG_PATH"
     fi
 fi
 
 printf '\nInstalled Codexify %s to %s\n' "$VERSION" "$target"
-printf 'Restart your terminal, then run:\n  codexify quickstart\n'
+print_next_steps

@@ -9,6 +9,12 @@ $InstallDir = if ($env:CODEXIFY_INSTALL_DIR) {
 else {
     Join-Path $HOME '.codexify\bin'
 }
+$ConfigPath = if ($env:CODEXIFY_CONFIG) {
+    [IO.Path]::GetFullPath($env:CODEXIFY_CONFIG)
+}
+else {
+    Join-Path $HOME '.codexify\codexify.config.json'
+}
 $ReleaseRoot = if ($env:CODEXIFY_RELEASE_ROOT) { $env:CODEXIFY_RELEASE_ROOT.TrimEnd('/') } else { "https://github.com/$Repository/releases/download" }
 $Version = $env:CODEXIFY_VERSION
 $Headers = @{ 'User-Agent' = 'codexify-installer'; 'Accept' = 'application/vnd.github+json' }
@@ -137,21 +143,33 @@ try {
     }
 
     if ($env:CODEXIFY_SKIP_SERVICE -ne '1') {
-        & $Target service --help *> $null
-        if ($LASTEXITCODE -eq 0) {
-            & $Target service install
-            if ($LASTEXITCODE -ne 0) {
-                throw 'The executable was installed, but the background service could not be installed. Set CODEXIFY_SKIP_SERVICE=1 to install without it.'
+        if (Test-Path -LiteralPath $ConfigPath -PathType Leaf) {
+            & $Target service --help *> $null
+            if ($LASTEXITCODE -eq 0) {
+                & $Target service install
+                if ($LASTEXITCODE -ne 0) {
+                    throw 'The executable was installed, but the background service could not be installed. Set CODEXIFY_SKIP_SERVICE=1 to install without it.'
+                }
+            }
+            else {
+                Write-Warning 'The installed release does not provide service management; executable installation will continue.'
             }
         }
         else {
-            Write-Warning 'The installed release does not provide service management; executable installation will continue.'
+            Write-Host "Background service setup deferred until quickstart creates the selected config: $ConfigPath"
         }
     }
 
     Write-Host "Installed Codexify $Version to $Target"
-    Write-Host 'Restart your terminal, then run:'
-    Write-Host '  codexify quickstart'
+    Write-Host ''
+    if (Test-Path Env:NO_COLOR) {
+        Write-Host 'Restart your terminal, then run:'
+        Write-Host '  codexify quickstart'
+    }
+    else {
+        Write-Host 'Restart your terminal, then run:' -ForegroundColor Green
+        Write-Host '  codexify quickstart' -ForegroundColor Green
+    }
 }
 finally {
     Remove-Item -LiteralPath $TempDir -Recurse -Force -ErrorAction SilentlyContinue

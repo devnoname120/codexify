@@ -34,6 +34,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - When no service is installed, quickstart now offers background-service
   installation first and keeps the foreground-server path as an explicit
   fallback.
+- The macOS/Linux and Windows installers now defer service installation when the
+  selected config file does not exist. Quickstart creates the config and installs
+  the service afterward. Their final restart-and-quickstart instructions are
+  separated by a blank line and highlighted in green, with bold ANSI emphasis on
+  capable POSIX terminals.
 
 ### Fixed
 

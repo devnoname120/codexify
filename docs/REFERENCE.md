@@ -130,9 +130,19 @@ published SHA-256 checksums, and replaces the executable under
 `~/.codexify/bin`. On Unix it adds that directory to every recognized existing
 shell profile and creates the active shell's profile when needed. On Windows it
 updates the persistent user `PATH`. The macOS installer removes the executable's
-`com.apple.quarantine` attribute after installation. It also installs and starts
-the per-user Codexify background service. Set `CODEXIFY_SKIP_SERVICE=1` in the
-installer process to install only the executable and `PATH` entry.
+`com.apple.quarantine` attribute after installation. The selected config is
+`CODEXIFY_CONFIG` when set, otherwise `~/.codexify/codexify.config.json`. If that
+file already exists, the installer installs or refreshes the per-user background
+service. If it does not exist, service setup is deliberately deferred: quickstart
+creates the config and then offers to install and start the service. Set
+`CODEXIFY_SKIP_SERVICE=1` in the installer process to skip service handling even
+when a config exists.
+
+The final `Restart your terminal, then run: codexify quickstart` block is separated
+from the installation receipt by a blank line and displayed in green, with bold
+ANSI emphasis on capable POSIX terminals. Redirected output and `NO_COLOR` remain
+plain; the POSIX installer also honors `CLICOLOR_FORCE` for deterministic terminal
+testing.
 
 ### Interactive setup (recommended for a first install)
 

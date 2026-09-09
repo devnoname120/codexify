@@ -23,7 +23,10 @@ $EnvironmentNames = @(
     'CODEXIFY_VERSION',
     'CODEXIFY_RELEASE_ROOT',
     'CODEXIFY_INSTALL_DIR',
+    'CODEXIFY_CONFIG',
     'CODEXIFY_SKIP_SERVICE',
+    'NO_COLOR',
+    'CLICOLOR_FORCE',
     'CODEXIFY_TEST_SERVICE_MARKER'
 )
 $OriginalEnvironment = @{}
@@ -112,9 +115,13 @@ fn main() {
     $env:CODEXIFY_RELEASE_ROOT = "http://127.0.0.1:$Port"
     $env:CODEXIFY_INSTALL_DIR = $InstallDir
     $env:CODEXIFY_TEST_SERVICE_MARKER = $Marker
+    $env:CODEXIFY_CONFIG = Join-Path $Root 'missing.json'
     Remove-Item Env:CODEXIFY_SKIP_SERVICE -ErrorAction SilentlyContinue
 
-    & (Join-Path $RepositoryRoot 'install.ps1')
+    $NoConfigOutput = (& (Join-Path $RepositoryRoot 'install.ps1') *>&1 | Out-String)
+    $Config = Join-Path $Root 'custom-codexify.json'
+    '{}' | Set-Content -LiteralPath $Config -Encoding ascii
+    $env:CODEXIFY_CONFIG = $Config
     & (Join-Path $RepositoryRoot 'install.ps1')
     $env:CODEXIFY_SKIP_SERVICE = '1'
     & (Join-Path $RepositoryRoot 'install.ps1')
@@ -129,14 +136,28 @@ fn main() {
     }
 
     $Calls = @(Get-Content -LiteralPath $Marker)
-    if (@($Calls | Where-Object { $_ -eq 'install' }).Count -ne 2) {
-        throw 'Installer did not install the service after each executable replacement.'
+    if (@($Calls | Where-Object { $_ -eq 'install' }).Count -ne 1) {
+        throw 'Installer did not defer service installation until a config existed.'
     }
     if (@($Calls | Where-Object { $_ -eq 'disable' }).Count -ne 1) {
         throw 'Installer did not disable the existing service before replacement.'
     }
     if (@($Calls | Where-Object { $_ -eq 'migrate' }).Count -ne 3) {
         throw 'Installer did not run legacy state migration after each executable replacement.'
+    }
+    if ($NoConfigOutput -notmatch 'Background service setup deferred until quickstart creates the selected config:') {
+        throw "Installer did not explain deferred service setup.`n$NoConfigOutput"
+    }
+    if ($NoConfigOutput -notmatch "Installed Codexify[^\r\n]*\r?\n\r?\nRestart your terminal, then run:") {
+        throw "Installer did not place a blank line before the next-step block.`n$NoConfigOutput"
+    }
+    if (Test-Path -LiteralPath (Join-Path $Root 'missing.json')) {
+        throw 'Installer unexpectedly created the missing config file.'
+    }
+
+    $InstallerSource = Get-Content -LiteralPath (Join-Path $RepositoryRoot 'install.ps1') -Raw
+    if ($InstallerSource -notmatch "ForegroundColor\s+Green") {
+        throw 'PowerShell next-step output is not highlighted in green.'
     }
 
     $NormalizedInstallDir = [IO.Path]::GetFullPath($InstallDir).TrimEnd('\')

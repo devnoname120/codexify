@@ -445,6 +445,17 @@ OAuth and safety behavior; the implementation, persistence, and operator-facing
 documentation continue to treat the value as an authentication token and the
 result as a conversation authorization grant.
 
+### Release installers (`install.sh`, `install.ps1`)
+
+Both installers resolve the release, verify its published SHA-256 checksum,
+publish the executable, update user PATH state, and run legacy-state migration.
+They resolve the selected config from `CODEXIFY_CONFIG` or the default user path
+before touching the native service. An existing regular config enables the normal
+service-install path; a missing config defers all service enable/start work until
+quickstart has written it. `CODEXIFY_SKIP_SERVICE=1` remains an unconditional
+service bypass. Final first-run instructions use terminal-aware emphasis without
+adding control sequences to redirected or `NO_COLOR` output.
+
 ### `quickstart` CLI (`quickstart.rs`)
 The `quickstart` subcommand runs before server configuration is loaded. It uses a
 testable line-oriented wizard for ordinary prompts and terminal-hidden input for
