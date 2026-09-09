@@ -144,6 +144,32 @@ ANSI emphasis on capable POSIX terminals. Redirected output and `NO_COLOR` remai
 plain; the POSIX installer also honors `CLICOLOR_FORCE` for deterministic terminal
 testing.
 
+### macOS release signing and notarization
+
+The Intel and Apple-silicon release executables are signed after linking with a
+Developer ID Application certificate from team `H6HYYFV7JW`, identifier
+`dev.codexify`, hardened runtime, and an Apple secure timestamp. No recipient Mac
+registration or provisioning profile is required. The first transition from an
+older ad-hoc build may prompt once more for removable-volume or other macOS
+privacy access; subsequent releases preserve the same designated identity.
+
+Tagged builds upload all final assets to a draft GitHub release. A macOS staging
+job submits both signed binaries to Apple with `notarytool --no-wait` and exits,
+so Apple's processing time consumes no idle GitHub runner. Apple calls a bounded
+Cloudflare Worker that sends only a `repository_dispatch` wake-up. The Worker is
+not trusted with Apple credentials or release state.
+
+A short macOS finalizer independently queries both Apple submission IDs. Pending
+submissions leave the draft unchanged; rejected submissions leave diagnostic logs
+on the private draft; two accepted submissions trigger signature, identifier,
+Team ID, asset-hash, and checksum revalidation before that exact draft is
+published. A manual finalizer dispatch is the fallback for a lost callback.
+
+Normal installation, Doctor, setup update checks, and self-update resolve only
+GitHub's latest published stable release. Draft and prerelease metadata is also
+rejected explicitly by the Rust updater and PowerShell installer. Therefore a
+staged draft cannot be offered or installed before notarization completes.
+
 ### Interactive setup (recommended for a first install)
 
 Run the guided setup from an installed binary:

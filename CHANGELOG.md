@@ -19,6 +19,10 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `codexify service start`, `stop`, and `restart` control the running service
   without changing whether it starts at login. Existing `enable` and `disable`
   retain their enablement semantics on systemd, launchd, and Task Scheduler.
+- macOS release binaries now use the stable Developer ID identity `dev.codexify`
+  with hardened runtime and timestamping. Releases are staged as drafts and
+  published only after both architecture-specific Apple notarizations are
+  independently accepted and reverified.
 
 ### Changed
 
@@ -39,6 +43,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the service afterward. Their final restart-and-quickstart instructions are
   separated by a blank line and highlighted in green, with bold ANSI emphasis on
   capable POSIX terminals.
+- Apple notarization submission is asynchronous: tag workflows exit after
+  uploading signed drafts, a bounded Cloudflare relay wakes a short macOS
+  finalizer, and no runner waits for Apple's processing. Installers and self-update
+  remain restricted to the latest published stable release and reject unpublished
+  metadata explicitly.
 
 ### Fixed
 

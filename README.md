@@ -59,6 +59,11 @@ on a first install, quickstart creates the config and installs the service. No
 Rust toolchain is needed. Open a new terminal after installation so the
 `codexify` command is available.
 
+macOS release binaries use the stable Developer ID identity `dev.codexify` and
+are published only after Apple accepts both Intel and Apple-silicon
+notarizations. The first signed update from an older ad-hoc build may require one
+final macOS privacy reapproval; later signed updates retain the same identity.
+
 Prefer a manual install? Get a [prebuilt binary](https://github.com/devnoname120/codexify/releases/latest)
 or read the [installation guide](https://github.com/devnoname120/codexify/wiki/Installation).
 The installer source is available for [macOS/Linux](https://github.com/devnoname120/codexify/blob/main/install.sh) and [Windows](https://github.com/devnoname120/codexify/blob/main/install.ps1).

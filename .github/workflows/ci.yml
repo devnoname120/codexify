@@ -46,6 +46,12 @@ jobs:
             }
           }
 
+      - name: Test release notarization orchestration
+        run: python3 -m unittest scripts.test_release_notarization -v
+
+      - name: Test notarization webhook relay
+        run: node --test scripts/test-cloudflare-notary-webhook.mjs
+
       - name: Format
         run: cargo fmt --all --check
 

@@ -456,6 +456,35 @@ quickstart has written it. `CODEXIFY_SKIP_SERVICE=1` remains an unconditional
 service bypass. Final first-run instructions use terminal-aware emphasis without
 adding control sequences to redirected or `NO_COLOR` output.
 
+### Signed asynchronous releases (`release.yml`, `finalize-release.yml`)
+
+The release matrix signs each final Darwin Mach-O with the Developer ID
+identifier `dev.codexify`, team `H6HYYFV7JW`, hardened runtime, and an Apple
+timestamp before packaging. Each job imports the encrypted P12 into a temporary
+keychain and removes the keychain and certificate material after use.
+
+The macOS staging job downloads all platform archives, generates post-signing
+checksums, and creates or refreshes only a draft release for the existing tag. It
+extracts both signed Darwin executables, rechecks their identities, submits ZIPs
+to Apple with `notarytool --no-wait`, and uploads a strict manifest containing the
+tag commit, public asset hashes, signed-binary hashes, and submission IDs. It then
+sends one immediate finalizer dispatch and exits; Apple processing has no active
+runner.
+
+Apple's webhook reaches the small Worker under
+`ops/cloudflare-notary-webhook/`. The Worker validates a secret path, bounds and
+discards the callback body, and translates the request into an authenticated
+`repository_dispatch`. It is a wake-up mechanism only. The macOS finalizer reads
+the draft manifest, resolves the tag commit, queries Apple itself, and either
+leaves a pending draft unchanged, attaches rejection logs, or verifies every
+asset and code signature before publishing. Duplicate and obsolete callbacks are
+idempotent. Out-of-order accepted releases are published without replacing a
+newer stable release as GitHub's latest.
+
+The public installer and updater boundary remains GitHub's `/releases/latest`
+surface. Rust and PowerShell additionally reject metadata marked draft or
+prerelease, so draft assets never become an implicit update source.
+
 ### `quickstart` CLI (`quickstart.rs`)
 The `quickstart` subcommand runs before server configuration is loaded. It uses a
 testable line-oriented wizard for ordinary prompts and terminal-hidden input for
