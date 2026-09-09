@@ -68,6 +68,12 @@ jobs:
       - name: Install browser test dependencies
         run: |
           npm install --no-save --package-lock=false --ignore-scripts playwright@1.62.1
+          # Playwright only needs Ubuntu packages here. The runner's optional
+          # Chrome repository can be mid-publish and make apt reject unrelated
+          # dependency installs with a transient hash mismatch.
+          sudo rm -f \
+            /etc/apt/sources.list.d/google-chrome.list \
+            /etc/apt/sources.list.d/google-chrome.sources
           npx --no-install playwright install --with-deps chromium webkit
 
       - name: Test diff layout on mobile and desktop
