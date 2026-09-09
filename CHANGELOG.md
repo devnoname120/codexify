@@ -6,6 +6,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-09-10
+
 ### Added
 
 - `codexify service status [--json]` reports the native background service's
@@ -324,7 +326,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   drained through bounded head/tail buffers, while component-only `_meta` remains
   outside the model-visible limit.
 
-[Unreleased]: https://github.com/devnoname120/codexify/compare/v1.3.0...HEAD
+[Unreleased]: https://github.com/devnoname120/codexify/compare/v1.4.0...HEAD
+[1.4.0]: https://github.com/devnoname120/codexify/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/devnoname120/codexify/compare/v1.2.4...v1.3.0
 [1.2.4]: https://github.com/devnoname120/codexify/compare/v1.2.3...v1.2.4
 [1.2.3]: https://github.com/devnoname120/codexify/compare/v1.2.2...v1.2.3
