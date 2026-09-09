@@ -667,6 +667,15 @@ fn launchd_bootout_arguments(target: &str) -> Vec<&str> {
 }
 
 #[cfg(any(target_os = "macos", test))]
+fn launchd_kickstart_arguments(target: &str, restart: bool) -> Vec<&str> {
+    if restart {
+        vec!["kickstart", "-k", target]
+    } else {
+        vec!["kickstart", target]
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
 fn retry_launchctl_transition<Run, Pause>(
     action: &str,
     max_attempts: usize,
@@ -1273,14 +1282,15 @@ fn launchd_start_service(
     start_launchd_service(
         || launchd_is_loaded(target),
         || {
-            if restart_existing {
-                launchctl_output("restart the Codexify launch agent", |command| {
-                    command.args(["kickstart", "-k", target]);
-                })
-                .map(drop)
+            let action = if restart_existing {
+                "restart the Codexify launch agent"
             } else {
-                Ok(())
-            }
+                "start the Codexify launch agent"
+            };
+            launchctl_output(action, |command| {
+                command.args(launchd_kickstart_arguments(target, restart_existing));
+            })
+            .map(drop)
         },
         || {
             launchctl_output("load the Codexify launch agent", |command| {
@@ -2434,6 +2444,19 @@ mod tests {
         assert_eq!(
             launchd_bootout_arguments(target),
             vec!["bootout", "--wait", target]
+        );
+    }
+
+    #[test]
+    fn launchd_start_and_restart_use_distinct_kickstart_modes() {
+        let target = "gui/501/dev.codexify.service";
+        assert_eq!(
+            launchd_kickstart_arguments(target, false),
+            vec!["kickstart", target]
+        );
+        assert_eq!(
+            launchd_kickstart_arguments(target, true),
+            vec!["kickstart", "-k", target]
         );
     }
 
