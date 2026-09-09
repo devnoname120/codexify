@@ -35,6 +35,8 @@ KEY_ID_PATTERN = re.compile(r"^[A-Za-z0-9]{10,}$")
 TEAM_ID_PATTERN = re.compile(r"^[A-Z0-9]{10}$")
 IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9.-]+$")
 MAX_BINARY_BYTES = 256 * 1024 * 1024
+MAX_MANIFEST_BYTES = 1024 * 1024
+MAX_NOTARIZATION_LOG_BYTES = 4 * 1024 * 1024
 
 
 class ReleaseError(RuntimeError):
@@ -58,6 +60,15 @@ class StageOptions:
     webhook_url: str
     team_id: str
     identifier: str
+
+
+@dataclass(frozen=True)
+class FinalizeOptions:
+    repo: str
+    credentials: NotaryCredentials
+    requested_tag: str | None = None
+    team_id: str = ""
+    identifier: str = ""
 
 
 class StageServices(Protocol):
@@ -85,6 +96,35 @@ class StageServices(Protocol):
     def upload_internal_asset(self, repo: str, tag: str, path: Path) -> None: ...
 
     def dispatch_finalizer(self, repo: str, tag: str) -> None: ...
+
+
+class FinalizeServices(Protocol):
+    def list_releases(self, repo: str) -> list[dict[str, Any]]: ...
+
+    def download_asset(self, repo: str, asset: dict[str, Any], destination: Path) -> None: ...
+
+    def resolve_tag_commit(self, repo: str, tag: str) -> str: ...
+
+    def notarization_status(
+        self,
+        submission_id: str,
+        credentials: NotaryCredentials,
+    ) -> str: ...
+
+    def download_notarization_log(
+        self,
+        submission_id: str,
+        credentials: NotaryCredentials,
+        destination: Path,
+    ) -> None: ...
+
+    def upload_internal_asset(self, repo: str, tag: str, path: Path) -> None: ...
+
+    def verify_signed_binary(self, binary: Path, team_id: str, identifier: str) -> None: ...
+
+    def delete_asset(self, repo: str, asset_id: int) -> None: ...
+
+    def publish_release(self, repo: str, release_id: int, make_latest: bool) -> None: ...
 
 
 def expected_archive_names(tag: str) -> tuple[str, ...]:
@@ -329,8 +369,6 @@ def stage_release(options: StageOptions, services: StageServices) -> dict[str, A
 
     if release.get("tag_name") != options.tag:
         raise ReleaseError("draft release tag does not match the requested tag")
-    if release.get("target_commitish") != options.commit:
-        raise ReleaseError("draft release target does not match the requested commit")
     release_id = release.get("id")
     if not isinstance(release_id, int) or release_id <= 0:
         raise ReleaseError("draft release has no valid database ID")
@@ -385,6 +423,257 @@ def stage_release(options: StageOptions, services: StageServices) -> dict[str, A
     return manifest
 
 
+def stable_version(tag: str) -> tuple[int, int, int] | None:
+    if not TAG_PATTERN.fullmatch(tag):
+        return None
+    major, minor, patch = tag[1:].split(".")
+    return int(major), int(minor), int(patch)
+
+
+def release_asset_map(release: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    assets = release.get("assets")
+    if not isinstance(assets, list):
+        raise ReleaseError("draft release assets are not an array")
+    result: dict[str, dict[str, Any]] = {}
+    for asset in assets:
+        if not isinstance(asset, dict):
+            raise ReleaseError("draft release contains malformed asset metadata")
+        name = asset.get("name")
+        asset_id = asset.get("id")
+        if not isinstance(name, str) or Path(name).name != name:
+            raise ReleaseError("draft release contains an invalid asset name")
+        if not isinstance(asset_id, int) or asset_id <= 0:
+            raise ReleaseError(f"draft release asset {name!r} has no valid ID")
+        if name in result:
+            raise ReleaseError(f"draft release contains duplicate asset {name!r}")
+        result[name] = asset
+    return result
+
+
+def read_manifest(path: Path, tag: str, release_id: int) -> dict[str, Any]:
+    if path.stat().st_size > MAX_MANIFEST_BYTES:
+        raise ReleaseError("notarization manifest exceeds its size limit")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise ReleaseError("notarization manifest is not valid UTF-8 JSON") from error
+    if not isinstance(value, dict):
+        raise ReleaseError("notarization manifest root must be an object")
+    validate_manifest(value, tag, release_id)
+    return value
+
+
+def parse_checksums(path: Path, expected_names: set[str]) -> dict[str, str]:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError) as error:
+        raise ReleaseError("checksums.txt is not valid UTF-8") from error
+    checksums: dict[str, str] = {}
+    for line in lines:
+        match = re.fullmatch(r"([0-9a-f]{64})  (\S+)", line)
+        if match is None:
+            raise ReleaseError("checksums.txt contains a malformed line")
+        digest, name = match.groups()
+        if Path(name).name != name or name in checksums:
+            raise ReleaseError("checksums.txt contains an invalid or duplicate filename")
+        checksums[name] = digest
+    if set(checksums) != expected_names:
+        raise ReleaseError("checksums.txt does not cover the exact release archive set")
+    return checksums
+
+
+def validate_finalize_options(options: FinalizeOptions) -> None:
+    if not re.fullmatch(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", options.repo):
+        raise ReleaseError(f"invalid GitHub repository: {options.repo!r}")
+    if not options.credentials.key_path.is_file():
+        raise ReleaseError(f"notary API key does not exist: {options.credentials.key_path}")
+    if not KEY_ID_PATTERN.fullmatch(options.credentials.key_id):
+        raise ReleaseError("notary API key ID is malformed")
+    try:
+        uuid.UUID(options.credentials.issuer)
+    except ValueError as error:
+        raise ReleaseError("notary API issuer is malformed") from error
+    if options.requested_tag is not None:
+        validate_tag(options.requested_tag)
+    if not TEAM_ID_PATTERN.fullmatch(options.team_id):
+        raise ReleaseError("Apple Team ID is malformed")
+    if not IDENTIFIER_PATTERN.fullmatch(options.identifier):
+        raise ReleaseError("code-signing identifier is malformed")
+
+
+def internal_asset_name(name: str) -> bool:
+    return name == MANIFEST_ASSET or name.startswith(NOTARIZATION_LOG_PREFIX)
+
+
+def verify_downloaded_release(
+    options: FinalizeOptions,
+    services: FinalizeServices,
+    release: dict[str, Any],
+    manifest: dict[str, Any],
+    asset_map: dict[str, dict[str, Any]],
+    temp: Path,
+) -> None:
+    expected_names = set(expected_public_asset_names(manifest["tag"]))
+    actual_public = {name for name in asset_map if not internal_asset_name(name)}
+    if actual_public != expected_names:
+        raise ReleaseError("draft release public asset set is incomplete or unexpected")
+
+    manifest_records = {record["name"]: record for record in manifest["assets"]}
+    downloaded: dict[str, Path] = {}
+    for name in sorted(expected_names):
+        destination = temp / "assets" / name
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        services.download_asset(options.repo, asset_map[name], destination)
+        record = manifest_records[name]
+        if destination.stat().st_size != record["size"]:
+            raise ReleaseError(f"release asset size changed after notarization staging: {name}")
+        if sha256_file(destination) != record["sha256"]:
+            raise ReleaseError(f"release asset hash changed after notarization staging: {name}")
+        downloaded[name] = destination
+
+    archive_names = set(expected_archive_names(manifest["tag"]))
+    checksums = parse_checksums(downloaded["checksums.txt"], archive_names)
+    for name in archive_names:
+        if checksums[name] != manifest_records[name]["sha256"]:
+            raise ReleaseError(f"checksums.txt disagrees with the notarization manifest for {name}")
+
+    for platform in MAC_PLATFORMS:
+        archive_name = f"codexify-{manifest['tag']}-{platform}.tar.gz"
+        binary = extract_macos_binary(
+            downloaded[archive_name],
+            temp / "verified" / platform / "codexify",
+        )
+        if sha256_file(binary) != manifest["submissions"][platform]["binarySha256"]:
+            raise ReleaseError(f"signed binary hash changed for {platform}")
+        services.verify_signed_binary(binary, manifest["teamId"], manifest["identifier"])
+
+
+def finalize_one_release(
+    options: FinalizeOptions,
+    services: FinalizeServices,
+    release: dict[str, Any],
+    published_versions: list[tuple[int, int, int]],
+) -> str:
+    tag = release.get("tag_name")
+    release_id = release.get("id")
+    if not isinstance(tag, str) or stable_version(tag) is None:
+        raise ReleaseError("draft release tag is not a stable semantic version")
+    if not isinstance(release_id, int) or release_id <= 0:
+        raise ReleaseError(f"draft release {tag} has no valid database ID")
+    if release.get("prerelease"):
+        raise ReleaseError(f"draft release {tag} must not be a prerelease")
+
+    asset_map = release_asset_map(release)
+    manifest_asset = asset_map.get(MANIFEST_ASSET)
+    if manifest_asset is None:
+        return "ignored"
+
+    with tempfile.TemporaryDirectory(prefix="codexify-finalize-") as temp_name:
+        temp = Path(temp_name)
+        manifest_path = temp / MANIFEST_ASSET
+        services.download_asset(options.repo, manifest_asset, manifest_path)
+        manifest = read_manifest(manifest_path, tag, release_id)
+
+        if manifest["teamId"] != options.team_id:
+            raise ReleaseError(f"notarization manifest Team ID does not equal {options.team_id}")
+        if manifest["identifier"] != options.identifier:
+            raise ReleaseError(
+                f"notarization manifest identifier does not equal {options.identifier}"
+            )
+
+        resolved_commit = services.resolve_tag_commit(options.repo, tag)
+        if resolved_commit != manifest["commit"]:
+            raise ReleaseError(f"tag {tag} no longer resolves to the notarized commit")
+
+        statuses = {
+            platform: services.notarization_status(
+                manifest["submissions"][platform]["id"],
+                options.credentials,
+            )
+            for platform in MAC_PLATFORMS
+        }
+        if any(status == "In Progress" for status in statuses.values()):
+            return "pending"
+
+        rejected = {platform: status for platform, status in statuses.items() if status != "Accepted"}
+        if rejected:
+            for platform in sorted(rejected):
+                log_path = temp / f"{NOTARIZATION_LOG_PREFIX}{platform}.json"
+                services.download_notarization_log(
+                    manifest["submissions"][platform]["id"],
+                    options.credentials,
+                    log_path,
+                )
+                if not log_path.is_file() or log_path.stat().st_size > MAX_NOTARIZATION_LOG_BYTES:
+                    raise ReleaseError(f"notarization log for {platform} is missing or oversized")
+                services.upload_internal_asset(options.repo, tag, log_path)
+            detail = ", ".join(f"{platform}={status}" for platform, status in sorted(rejected.items()))
+            raise ReleaseError(f"notarization rejected for {tag}: {detail}")
+
+        verify_downloaded_release(options, services, release, manifest, asset_map, temp)
+        version = stable_version(tag)
+        assert version is not None
+        make_latest = not published_versions or version > max(published_versions)
+
+        logs = [asset for name, asset in asset_map.items() if name.startswith(NOTARIZATION_LOG_PREFIX)]
+        for asset in logs:
+            services.delete_asset(options.repo, asset["id"])
+        services.delete_asset(options.repo, manifest_asset["id"])
+        try:
+            services.publish_release(options.repo, release_id, make_latest)
+        except Exception:
+            services.upload_internal_asset(options.repo, tag, manifest_path)
+            raise
+        published_versions.append(version)
+        return "published"
+
+
+def finalize_releases(
+    options: FinalizeOptions,
+    services: FinalizeServices,
+) -> dict[str, int]:
+    validate_finalize_options(options)
+    releases = services.list_releases(options.repo)
+    if not isinstance(releases, list):
+        raise ReleaseError("GitHub releases response is not an array")
+
+    published_versions = [
+        version
+        for release in releases
+        if isinstance(release, dict)
+        and not release.get("draft")
+        and not release.get("prerelease")
+        and isinstance(release.get("tag_name"), str)
+        if (version := stable_version(release["tag_name"])) is not None
+    ]
+    drafts = [
+        release
+        for release in releases
+        if isinstance(release, dict)
+        and release.get("draft") is True
+        and (
+            options.requested_tag is None
+            or release.get("tag_name") == options.requested_tag
+        )
+    ]
+    drafts.sort(
+        key=lambda release: stable_version(release.get("tag_name", "")) or (-1, -1, -1),
+        reverse=True,
+    )
+
+    summary = {"ignored": 0, "pending": 0, "published": 0}
+    errors: list[str] = []
+    for release in drafts:
+        try:
+            outcome = finalize_one_release(options, services, release, published_versions)
+            summary[outcome] += 1
+        except ReleaseError as error:
+            errors.append(str(error))
+    if errors:
+        raise ReleaseError("; ".join(errors))
+    return summary
+
+
 class CliServices:
     def _run(
         self,
@@ -407,6 +696,26 @@ class CliServices:
         for value in redactions:
             if value:
                 detail = detail.replace(value, "<redacted>")
+        raise ReleaseError(f"{action} failed with exit code {result.returncode}: {detail}")
+
+    def _run_to_file(
+        self,
+        args: Sequence[str],
+        action: str,
+        destination: Path,
+    ) -> None:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        with destination.open("wb") as output:
+            result = subprocess.run(
+                list(args),
+                stdout=output,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+        if result.returncode == 0:
+            return
+        destination.unlink(missing_ok=True)
+        detail = result.stderr[-4096:].decode("utf-8", "replace").strip()
         raise ReleaseError(f"{action} failed with exit code {result.returncode}: {detail}")
 
     def _json(
@@ -443,6 +752,9 @@ class CliServices:
             releases.extend(item for item in page if isinstance(item, dict))
         return releases
 
+    def list_releases(self, repo: str) -> list[dict[str, Any]]:
+        return self._all_releases(repo)
+
     def resolve_tag_commit(self, repo: str, tag: str) -> str:
         result = self._run(
             ["gh", "api", f"repos/{repo}/commits/{quote(tag, safe='')}", "--jq", ".sha"],
@@ -455,6 +767,23 @@ class CliServices:
         if len(matches) > 1:
             raise ReleaseError(f"GitHub returned multiple releases for tag {tag}")
         return matches[0] if matches else None
+
+    def download_asset(self, repo: str, asset: dict[str, Any], destination: Path) -> None:
+        asset_id = asset.get("id")
+        name = asset.get("name")
+        if not isinstance(asset_id, int) or asset_id <= 0 or not isinstance(name, str):
+            raise ReleaseError("cannot download malformed release asset metadata")
+        self._run_to_file(
+            [
+                "gh",
+                "api",
+                "-H",
+                "Accept: application/octet-stream",
+                f"repos/{repo}/releases/assets/{asset_id}",
+            ],
+            f"download draft release asset {name}",
+            destination,
+        )
 
     def create_draft(self, repo: str, tag: str, commit: str) -> dict[str, Any]:
         self._run(
@@ -554,6 +883,55 @@ class CliServices:
             raise ReleaseError("notary submission response does not contain an ID")
         return response["id"]
 
+    def notarization_status(
+        self,
+        submission_id: str,
+        credentials: NotaryCredentials,
+    ) -> str:
+        response = self._json(
+            [
+                "xcrun",
+                "notarytool",
+                "info",
+                submission_id,
+                "--key",
+                str(credentials.key_path),
+                "--key-id",
+                credentials.key_id,
+                "--issuer",
+                credentials.issuer,
+                "--output-format",
+                "json",
+            ],
+            "query macOS notarization",
+        )
+        if not isinstance(response, dict) or not isinstance(response.get("status"), str):
+            raise ReleaseError("notary status response does not contain a status")
+        return response["status"]
+
+    def download_notarization_log(
+        self,
+        submission_id: str,
+        credentials: NotaryCredentials,
+        destination: Path,
+    ) -> None:
+        self._run(
+            [
+                "xcrun",
+                "notarytool",
+                "log",
+                submission_id,
+                str(destination),
+                "--key",
+                str(credentials.key_path),
+                "--key-id",
+                credentials.key_id,
+                "--issuer",
+                credentials.issuer,
+            ],
+            "download macOS notarization log",
+        )
+
     def upload_internal_asset(self, repo: str, tag: str, path: Path) -> None:
         self._run(
             [
@@ -591,6 +969,29 @@ class CliServices:
             input_data=payload,
         )
 
+    def publish_release(self, repo: str, release_id: int, make_latest: bool) -> None:
+        payload = json.dumps(
+            {
+                "draft": False,
+                "prerelease": False,
+                "make_latest": "true" if make_latest else "false",
+            }
+        ).encode("utf-8")
+        self._run(
+            [
+                "gh",
+                "api",
+                "--method",
+                "PATCH",
+                f"repos/{repo}/releases/{release_id}",
+                "--input",
+                "-",
+                "--silent",
+            ],
+            "publish notarized GitHub release",
+            input_data=payload,
+        )
+
 
 def stage_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     parser = subparsers.add_parser("stage", help="stage a draft release and submit macOS assets")
@@ -606,10 +1007,22 @@ def stage_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]
     parser.add_argument("--identifier", required=True)
 
 
+def finalize_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    parser = subparsers.add_parser("finalize", help="publish accepted notarized draft releases")
+    parser.add_argument("--repo", required=True)
+    parser.add_argument("--notary-key", type=Path, required=True)
+    parser.add_argument("--notary-key-id", required=True)
+    parser.add_argument("--notary-issuer", required=True)
+    parser.add_argument("--tag")
+    parser.add_argument("--team-id", required=True)
+    parser.add_argument("--identifier", required=True)
+
+
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Codexify release notarization orchestration")
     subparsers = parser.add_subparsers(dest="command", required=True)
     stage_parser(subparsers)
+    finalize_parser(subparsers)
     return parser.parse_args(argv)
 
 
@@ -634,6 +1047,28 @@ def main(argv: Sequence[str] | None = None) -> int:
             manifest = stage_release(options, CliServices())
             print(
                 f"Staged draft {manifest['tag']} with two asynchronous notarization submissions"
+            )
+            return 0
+        if args.command == "finalize":
+            summary = finalize_releases(
+                FinalizeOptions(
+                    repo=args.repo,
+                    credentials=NotaryCredentials(
+                        key_path=args.notary_key,
+                        key_id=args.notary_key_id,
+                        issuer=args.notary_issuer,
+                    ),
+                    requested_tag=args.tag or None,
+                    team_id=args.team_id,
+                    identifier=args.identifier,
+                ),
+                CliServices(),
+            )
+            print(
+                "Notarization finalizer: "
+                f"{summary['published']} published, "
+                f"{summary['pending']} pending, "
+                f"{summary['ignored']} ignored"
             )
             return 0
         raise ReleaseError(f"unsupported command: {args.command}")
