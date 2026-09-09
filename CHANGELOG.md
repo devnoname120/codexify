@@ -16,6 +16,9 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   set, or unset escaped dotted settings, and edit a validated staging copy via
   `VISUAL`, `EDITOR`, `nano`/`vi`, or Notepad. Mutations use atomic replacement,
   preserve unrelated fields and existing permissions, and refuse symlink targets.
+- `codexify service start`, `stop`, and `restart` control the running service
+  without changing whether it starts at login. Existing `enable` and `disable`
+  retain their enablement semantics on systemd, launchd, and Task Scheduler.
 
 ### Changed
 
@@ -25,6 +28,10 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   legacy stored ANSI sequences, and pretty-prints request and response JSON.
 
 ### Fixed
+
+- Windows service tasks now launch through a hidden PowerShell host, and the
+  supervised server child uses `CREATE_NO_WINDOW`, preventing empty console
+  windows while preserving the interactive-logon tunnel and network context.
 
 - Set diff code text to 12 px on desktop and 10 px on mobile while
   retaining larger file labels and controls. Indented identifiers now wrap within

@@ -402,6 +402,9 @@ Each release ships a compiled binary per platform — `windows-x64`, `linux-x64`
 | `doctor` | Run read-only local diagnostics for configuration, command dependencies, service/update state, local health, and native tunnel prerequisites; add `--json` for machine-readable output |
 | `quickstart` | Interactively configure the project scope, native OpenAI tunnel credentials, JSON config, and ChatGPT developer-mode connector; restart the installed service or optionally start a foreground server |
 | `service install` | Install, enable, and start the native per-user service using the selected absolute config path |
+| `service start` | Start the installed service without changing whether it starts at login |
+| `service stop` | Stop the service without changing whether it starts at login |
+| `service restart` | Restart the service without changing whether it starts at login |
 | `service enable` | Enable and start an installed service |
 | `service disable` | Stop and disable the installed service |
 | `service remove` | Stop and remove the installed service definition |
@@ -536,6 +539,9 @@ given an explicit path:
 ```bash
 codexify service install
 codexify service install --config /absolute/path/to/codexify.config.json
+codexify service start
+codexify service stop
+codexify service restart
 codexify service disable
 codexify service enable
 codexify service status
@@ -544,6 +550,16 @@ codexify service logs
 codexify service logs -f
 codexify service remove
 ```
+
+`start`, `stop`, and `restart` change only the current running state. They do not
+enable or disable login startup. Use `enable` to enable and start the definition,
+or `disable` to stop it and disable future automatic startup.
+
+On Windows, the Task Scheduler action starts the supervisor through the current
+PowerShell host with `-WindowStyle Hidden` and an encoded fixed command. The
+supervisor also creates its ordinary server child with `CREATE_NO_WINDOW`. This
+prevents the otherwise empty console window without changing the Interactive
+logon principal required for tunnel and network access.
 
 `service status` queries the native service manager without loading the server
 configuration, starting the MCP server, or changing the service. It works even

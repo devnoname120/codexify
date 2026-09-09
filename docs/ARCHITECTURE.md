@@ -502,7 +502,8 @@ and requires the server's `{ "status": "ok" }` health JSON.
 
 ### Native user service (`service.rs`)
 
-The public `service install|enable|disable|remove|status|logs` commands manage one
+The public `service install|start|stop|restart|enable|disable|remove|status|logs`
+commands manage one
 per-user native definition: an XDG-aware systemd user unit on Linux, a launchd agent on
 macOS, or an at-logon Scheduled Task on Windows. Installation stores the current
 executable path and the selected config path as absolute arguments. The hidden
@@ -526,6 +527,12 @@ restart the runner if the runner itself fails. On shutdown, the runner terminate
 the server process group/tree before exiting. Windows children are assigned to a
 kill-on-close Job Object so Task Scheduler termination cannot orphan the server
 or its descendants.
+
+`start`, `stop`, and `restart` preserve the manager's enablement state. The older
+`enable` and `disable` commands intentionally combine enablement and runtime
+changes. On Windows, the scheduled action launches the fixed supervisor command
+through the active PowerShell engine with a hidden window and Interactive logon;
+the supervisor sets `CREATE_NO_WINDOW` on its server child as a second boundary.
 
 Service-supervised tracing is emitted without terminal escapes. The public log
 viewer reassembles partial lines, strips escapes from older files, highlights

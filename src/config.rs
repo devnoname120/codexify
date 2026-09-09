@@ -251,6 +251,12 @@ pub enum ProjectsCommand {
 pub enum ServiceCommand {
     /// Install, enable, and start the background service.
     Install,
+    /// Start the installed service without changing login enablement.
+    Start,
+    /// Stop the service without changing login enablement.
+    Stop,
+    /// Restart the installed service without changing login enablement.
+    Restart,
     /// Enable and start the installed background service.
     Enable,
     /// Stop and disable the installed background service.
@@ -2588,6 +2594,23 @@ mod tests {
                 panic!("service status subcommand was not parsed");
             };
             assert_eq!(args.json, json);
+        }
+    }
+
+    #[test]
+    fn service_lifecycle_cli_parses_start_stop_and_restart() {
+        for (name, expected) in [("start", "start"), ("stop", "stop"), ("restart", "restart")] {
+            let parsed = Cli::try_parse_from(["codexify", "service", name]).unwrap();
+            let Some(CliCommand::Service { command }) = parsed.command else {
+                panic!("service {name} subcommand was not parsed");
+            };
+            let actual = match command {
+                ServiceCommand::Start => "start",
+                ServiceCommand::Stop => "stop",
+                ServiceCommand::Restart => "restart",
+                _ => "other",
+            };
+            assert_eq!(actual, expected);
         }
     }
 

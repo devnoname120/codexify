@@ -118,8 +118,9 @@ command restrictions, and the authority of connected MCP servers.
 | Edit configuration | `codexify config edit` |
 | Check the background service state | `codexify service status` |
 | Follow the formatted service log | `codexify service logs -f` |
-| Stop the background service | `codexify service disable` |
-| Start it again | `codexify service enable` |
+| Stop the background service | `codexify service stop` |
+| Start it again | `codexify service start` |
+| Restart it without changing login startup | `codexify service restart` |
 
 To update a standard installation, ask ChatGPT to update Codexify. After the
 service restarts, open the connector in ChatGPT Settings and click **Refresh** at

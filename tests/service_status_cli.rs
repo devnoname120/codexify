@@ -5,18 +5,22 @@ fn binary() -> &'static str {
 }
 
 #[test]
-fn service_help_lists_status() {
+fn service_help_lists_public_lifecycle_commands() {
     let output = Command::new(binary())
         .args(["service", "--help"])
         .output()
         .unwrap();
     assert!(output.status.success());
     let text = String::from_utf8(output.stdout).unwrap();
-    assert!(
-        text.lines()
-            .any(|line| line.trim_start().starts_with("status ")),
-        "{text}"
-    );
+    for command in [
+        "start", "stop", "restart", "enable", "disable", "status", "logs",
+    ] {
+        assert!(
+            text.lines()
+                .any(|line| line.trim_start().starts_with(&format!("{command} "))),
+            "missing {command}:\n{text}"
+        );
+    }
 }
 
 #[test]
@@ -102,6 +106,7 @@ case "$*" in
     if [ "$FIXTURE_RUNNING" = true ]; then printf 'active\n'; else printf 'inactive\n'; exit 3; fi ;;
   '--user is-enabled codexify.service')
     if [ "$FIXTURE_ENABLED" = true ]; then printf 'enabled\n'; else printf 'disabled\n'; exit 1; fi ;;
+  '--user start codexify.service'|'--user stop codexify.service'|'--user restart codexify.service') ;;
   *) printf 'unexpected service command\n' >&2; exit 91 ;;
 esac
 "#,
@@ -112,9 +117,15 @@ esac
                 r#"
 case "$1" in
   print)
-    if [ "$FIXTURE_RUNNING" = true ]; then printf 'state = running\npid = 4242\n'; else printf 'state = waiting\n'; fi ;;
+    running="$FIXTURE_RUNNING"
+    if [ -n "$FIXTURE_STATE" ] && [ -f "$FIXTURE_STATE" ]; then IFS= read -r running < "$FIXTURE_STATE"; fi
+    if [ "$running" = true ]; then printf 'state = running\npid = 4242\n'; else exit 3; fi ;;
   print-disabled)
     if [ "$FIXTURE_ENABLED" = true ]; then printf '"dev.codexify.service" => false\n'; else printf '"dev.codexify.service" => true\n'; fi ;;
+  bootout)
+    printf 'false' > "$FIXTURE_STATE" ;;
+  bootstrap|kickstart)
+    printf 'true' > "$FIXTURE_STATE" ;;
   *) printf 'unexpected service command\n' >&2; exit 91 ;;
 esac
 "#,
@@ -143,6 +154,7 @@ esac
                 .env("CODEXIFY_CONFIG", &self.config)
                 .env("PATH", &self.bin)
                 .env("FIXTURE_CALLS", self.root.path().join("calls"))
+                .env("FIXTURE_STATE", self.root.path().join("state"))
                 .env("FIXTURE_RUNNING", "true")
                 .env("FIXTURE_ENABLED", "true");
             command
@@ -282,6 +294,64 @@ esac
         let error = String::from_utf8(output.stderr).unwrap();
         assert!(error.contains("fixture query failure"), "{error}");
         fixture.assert_unchanged(true);
+    }
+
+    #[test]
+    fn service_start_stop_and_restart_preserve_enablement() {
+        let expectations = [("start", "start"), ("stop", "stop"), ("restart", "restart")];
+        for (operation, expected) in expectations {
+            let fixture = Fixture::new(true);
+            fs::write(
+                fixture.root.path().join("state"),
+                if operation == "start" {
+                    "false"
+                } else {
+                    "true"
+                },
+            )
+            .unwrap();
+            let output = fixture
+                .command()
+                .env("NO_COLOR", "1")
+                .args(["service", operation])
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{operation}: stdout={} stderr={}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(
+                String::from_utf8(output.stdout)
+                    .unwrap()
+                    .to_ascii_lowercase()
+                    .contains(expected)
+            );
+            let calls = fs::read_to_string(fixture.root.path().join("calls")).unwrap();
+            assert!(
+                !calls.lines().any(|line| {
+                    let line = line.to_ascii_lowercase();
+                    line.contains(" enable") || line.contains(" disable")
+                }),
+                "{operation}: {calls}"
+            );
+            #[cfg(target_os = "linux")]
+            assert!(
+                calls.contains(&format!("--user {operation} codexify.service")),
+                "{calls}"
+            );
+            #[cfg(target_os = "macos")]
+            match operation {
+                "start" | "restart" => assert!(
+                    calls.contains("kickstart") || calls.contains("bootstrap"),
+                    "{calls}"
+                ),
+                "stop" => assert!(calls.contains("bootout --wait"), "{operation}: {calls}"),
+                _ => unreachable!(),
+            }
+            fixture.assert_unchanged(true);
+        }
     }
 
     #[test]

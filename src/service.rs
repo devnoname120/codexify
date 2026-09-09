@@ -16,7 +16,7 @@ use tokio::time::Instant;
 
 use crate::log_view::LogPresenter;
 use crate::process_env::SERVICE_SUPERVISED_ENV;
-use crate::terminal::{MUTED, paint};
+use crate::terminal::{ACCENT, EMPHASIS, MUTED, SUCCESS, WARNING, paint};
 use crate::util::home_dir;
 
 #[cfg(any(target_os = "macos", test))]
@@ -121,6 +121,50 @@ impl ServiceStatus {
             report.push_str(&format!("Definition: {}\n", path.display()));
         }
         report.push_str(&format!("Details: {}\n", self.detail));
+        report
+    }
+
+    pub fn render_terminal(&self) -> String {
+        let state = if !self.installed {
+            paint(WARNING, "not installed")
+        } else if self.running {
+            paint(SUCCESS, "running")
+        } else {
+            paint(WARNING, "stopped")
+        };
+        let enabled = match self.enabled {
+            Some(true) => paint(SUCCESS, "yes"),
+            Some(false) => paint(WARNING, "no"),
+            None => paint(MUTED, "unknown"),
+        };
+        let yes_no = |value| {
+            if value {
+                paint(SUCCESS, "yes")
+            } else {
+                paint(WARNING, "no")
+            }
+        };
+        let mut report = format!(
+            "{} {state}\n{} {}\n{} {}\n{} {enabled}\n",
+            paint(EMPHASIS, "Codexify service:"),
+            paint(EMPHASIS, "Installed:"),
+            yes_no(self.installed),
+            paint(EMPHASIS, "Running:"),
+            yes_no(self.running),
+            paint(EMPHASIS, "Enabled:"),
+        );
+        if let Some(path) = &self.definition_path {
+            report.push_str(&format!(
+                "{} {}\n",
+                paint(EMPHASIS, "Definition:"),
+                paint(ACCENT, path.display())
+            ));
+        }
+        report.push_str(&format!(
+            "{} {}\n",
+            paint(EMPHASIS, "Details:"),
+            paint(MUTED, &self.detail)
+        ));
         report
     }
 
@@ -401,40 +445,66 @@ pub fn log_path() -> anyhow::Result<PathBuf> {
     Ok(service_root()?.join("logs").join(LOG_FILE))
 }
 
+fn print_service_message(message: impl std::fmt::Display) -> anyhow::Result<()> {
+    crate::terminal::write_stdout(&format!("{}\n", paint(SUCCESS, message)))?;
+    Ok(())
+}
+
 pub fn install(config: &Path) -> anyhow::Result<()> {
     let spec = ServiceSpec::resolve(config)?;
     let config_exists = spec.config.is_file();
     ensure_log_directory(&spec.home)?;
     platform_install(&spec)?;
-    println!(
-        "Installed and enabled the Codexify service with config {}",
-        spec.config.display()
-    );
-    println!("Service logs: {}", log_path()?.display());
+    crate::terminal::write_stdout(&format!(
+        "{} {}\n{} {}\n",
+        paint(
+            SUCCESS,
+            "Installed and enabled the Codexify service with config"
+        ),
+        paint(ACCENT, spec.config.display()),
+        paint(EMPHASIS, "Service logs:"),
+        paint(ACCENT, log_path()?.display())
+    ))?;
     if !config_exists {
-        println!(
-            "The service is waiting for that config file; run `codexify quickstart` or create it with an absolute workDir."
-        );
+        crate::terminal::write_stdout(&format!(
+            "{}\n",
+            paint(
+                WARNING,
+                "The service is waiting for that config file; run `codexify quickstart` or create it with an absolute workDir."
+            )
+        ))?;
     }
     Ok(())
 }
 
+pub fn start() -> anyhow::Result<()> {
+    platform_start()?;
+    print_service_message("Started the Codexify service")
+}
+
+pub fn stop() -> anyhow::Result<()> {
+    platform_stop()?;
+    print_service_message("Stopped the Codexify service; login enablement was unchanged")
+}
+
+pub fn restart() -> anyhow::Result<()> {
+    platform_restart()?;
+    print_service_message("Restarted the Codexify service")
+}
+
 pub fn enable() -> anyhow::Result<()> {
     platform_enable()?;
-    println!("Enabled and started the Codexify service");
-    Ok(())
+    print_service_message("Enabled and started the Codexify service")
 }
 
 pub fn disable() -> anyhow::Result<()> {
     platform_disable()?;
-    println!("Stopped and disabled the Codexify service");
-    Ok(())
+    print_service_message("Stopped and disabled the Codexify service")
 }
 
 pub fn remove() -> anyhow::Result<()> {
     platform_remove()?;
-    println!("Removed the Codexify service");
-    Ok(())
+    print_service_message("Removed the Codexify service")
 }
 
 pub fn is_installed() -> anyhow::Result<bool> {
@@ -822,18 +892,64 @@ fn powershell_quote(value: &str) -> String {
 }
 
 #[cfg(any(target_os = "windows", test))]
-fn windows_action_arguments(config: &Path) -> String {
-    format!("service run --config \"{}\"", config.display())
+fn encode_powershell_script(script: &str) -> String {
+    use base64::Engine;
+
+    let mut bytes = Vec::with_capacity(script.len() * 2);
+    for unit in script.encode_utf16() {
+        bytes.extend_from_slice(&unit.to_le_bytes());
+    }
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_hidden_service_script(spec: &ServiceSpec) -> String {
+    let executable = powershell_quote(&spec.executable.to_string_lossy());
+    let config = powershell_quote(&spec.config.to_string_lossy());
+    format!(
+        "$ErrorActionPreference = 'Stop'\n& {executable} service run --config {config}\nif ($LASTEXITCODE -ne 0) {{ exit $LASTEXITCODE }}\n"
+    )
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_action_arguments(spec: &ServiceSpec) -> String {
+    let encoded = encode_powershell_script(&windows_hidden_service_script(spec));
+    format!(
+        "-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -EncodedCommand {encoded}"
+    )
 }
 
 #[cfg(any(target_os = "windows", test))]
 fn windows_install_script(spec: &ServiceSpec) -> String {
-    let executable = powershell_quote(&spec.executable.to_string_lossy());
-    let arguments = powershell_quote(&windows_action_arguments(&spec.config));
+    let arguments = powershell_quote(&windows_action_arguments(spec));
     let working_dir = powershell_quote(&spec.working_dir.to_string_lossy());
     let task = powershell_quote(WINDOWS_TASK);
     format!(
-        "$ErrorActionPreference = 'Stop'\n$taskName = {task}\n$existing = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue\nif ($existing) {{ Stop-ScheduledTask -InputObject $existing -ErrorAction SilentlyContinue }}\n$identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name\n$action = New-ScheduledTaskAction -Execute {executable} -Argument {arguments} -WorkingDirectory {working_dir}\n$trigger = New-ScheduledTaskTrigger -AtLogOn -User $identity\n$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew\n$principal = New-ScheduledTaskPrincipal -UserId $identity -LogonType Interactive -RunLevel Limited\nRegister-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Force | Out-Null\nEnable-ScheduledTask -TaskName $taskName | Out-Null\nStart-ScheduledTask -TaskName $taskName\n"
+        "$ErrorActionPreference = 'Stop'\n$taskName = {task}\n$existing = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue\nif ($existing) {{ Stop-ScheduledTask -InputObject $existing -ErrorAction SilentlyContinue }}\n$identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name\n$engine = (Get-Process -Id $PID).Path\n$action = New-ScheduledTaskAction -Execute $engine -Argument {arguments} -WorkingDirectory {working_dir}\n$trigger = New-ScheduledTaskTrigger -AtLogOn -User $identity\n$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew\n$principal = New-ScheduledTaskPrincipal -UserId $identity -LogonType Interactive -RunLevel Limited\nRegister-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Force | Out-Null\nEnable-ScheduledTask -TaskName $taskName | Out-Null\nStart-ScheduledTask -TaskName $taskName\n"
+    )
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_start_script() -> String {
+    let task = powershell_quote(WINDOWS_TASK);
+    format!(
+        "$ErrorActionPreference = 'Stop'\n$task = Get-ScheduledTask -TaskName {task} -ErrorAction Stop\nStart-ScheduledTask -InputObject $task\n"
+    )
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_stop_script() -> String {
+    let task = powershell_quote(WINDOWS_TASK);
+    format!(
+        "$ErrorActionPreference = 'Stop'\n$task = Get-ScheduledTask -TaskName {task} -ErrorAction Stop\nStop-ScheduledTask -InputObject $task -ErrorAction SilentlyContinue\n"
+    )
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_restart_script() -> String {
+    let task = powershell_quote(WINDOWS_TASK);
+    format!(
+        "$ErrorActionPreference = 'Stop'\n$task = Get-ScheduledTask -TaskName {task} -ErrorAction Stop\nStop-ScheduledTask -InputObject $task -ErrorAction SilentlyContinue\nStart-ScheduledTask -InputObject $task\n"
     )
 }
 
@@ -867,13 +983,7 @@ fn launchd_target() -> String {
 
 #[cfg(target_os = "windows")]
 fn powershell_command(script: &str) -> StdCommand {
-    use base64::Engine;
-
-    let mut bytes = Vec::with_capacity(script.len() * 2);
-    for unit in script.encode_utf16() {
-        bytes.extend_from_slice(&unit.to_le_bytes());
-    }
-    let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+    let encoded = encode_powershell_script(script);
     let program = if which_program("powershell.exe") {
         "powershell.exe"
     } else {
@@ -934,7 +1044,49 @@ fn platform_install(spec: &ServiceSpec) -> anyhow::Result<()> {
 }
 
 #[cfg(target_os = "linux")]
-fn platform_enable() -> anyhow::Result<()> {
+fn platform_start() -> anyhow::Result<()> {
+    require_systemd_unit()?;
+    command_output(
+        {
+            let mut command = StdCommand::new("systemctl");
+            command.args(["--user", "start", SYSTEMD_UNIT]);
+            command
+        },
+        "start the Codexify systemd unit",
+    )?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn platform_stop() -> anyhow::Result<()> {
+    require_systemd_unit()?;
+    command_output(
+        {
+            let mut command = StdCommand::new("systemctl");
+            command.args(["--user", "stop", SYSTEMD_UNIT]);
+            command
+        },
+        "stop the Codexify systemd unit",
+    )?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn platform_restart() -> anyhow::Result<()> {
+    require_systemd_unit()?;
+    command_output(
+        {
+            let mut command = StdCommand::new("systemctl");
+            command.args(["--user", "restart", SYSTEMD_UNIT]);
+            command
+        },
+        "restart the Codexify systemd unit",
+    )?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn require_systemd_unit() -> anyhow::Result<PathBuf> {
     let home = service_root()?
         .parent()
         .context("service root has no home directory")?
@@ -943,6 +1095,12 @@ fn platform_enable() -> anyhow::Result<()> {
     if !unit_path.exists() {
         bail!("Codexify service is not installed; run `codexify service install`");
     }
+    Ok(unit_path)
+}
+
+#[cfg(target_os = "linux")]
+fn platform_enable() -> anyhow::Result<()> {
+    require_systemd_unit()?;
     command_output(
         {
             let mut command = StdCommand::new("systemctl");
@@ -956,14 +1114,7 @@ fn platform_enable() -> anyhow::Result<()> {
 
 #[cfg(target_os = "linux")]
 fn platform_disable() -> anyhow::Result<()> {
-    let home = service_root()?
-        .parent()
-        .context("service root has no home directory")?
-        .to_path_buf();
-    let unit_path = systemd_path(&home);
-    if !unit_path.exists() {
-        bail!("Codexify service is not installed");
-    }
+    require_systemd_unit()?;
     command_output(
         {
             let mut command = StdCommand::new("systemctl");
@@ -1114,17 +1265,22 @@ fn launchd_bootout_if_loaded(target: &str) -> anyhow::Result<()> {
 }
 
 #[cfg(target_os = "macos")]
-fn launchd_enable_and_start(plist_path: &Path, target: &str) -> anyhow::Result<()> {
-    launchctl_output("enable the Codexify launch agent", |command| {
-        command.args(["enable", target]);
-    })?;
+fn launchd_start_service(
+    plist_path: &Path,
+    target: &str,
+    restart_existing: bool,
+) -> anyhow::Result<()> {
     start_launchd_service(
         || launchd_is_loaded(target),
         || {
-            launchctl_output("restart the Codexify launch agent", |command| {
-                command.args(["kickstart", "-k", target]);
-            })
-            .map(drop)
+            if restart_existing {
+                launchctl_output("restart the Codexify launch agent", |command| {
+                    command.args(["kickstart", "-k", target]);
+                })
+                .map(drop)
+            } else {
+                Ok(())
+            }
         },
         || {
             launchctl_output("load the Codexify launch agent", |command| {
@@ -1139,6 +1295,27 @@ fn launchd_enable_and_start(plist_path: &Path, target: &str) -> anyhow::Result<(
 }
 
 #[cfg(target_os = "macos")]
+fn launchd_enable_and_start(plist_path: &Path, target: &str) -> anyhow::Result<()> {
+    launchctl_output("enable the Codexify launch agent", |command| {
+        command.args(["enable", target]);
+    })?;
+    launchd_start_service(plist_path, target, true)
+}
+
+#[cfg(target_os = "macos")]
+fn require_launchd_plist() -> anyhow::Result<PathBuf> {
+    let home = service_root()?
+        .parent()
+        .context("service root has no home directory")?
+        .to_path_buf();
+    let plist_path = launchd_path(&home);
+    if !plist_path.exists() {
+        bail!("Codexify service is not installed; run `codexify service install`");
+    }
+    Ok(plist_path)
+}
+
+#[cfg(target_os = "macos")]
 fn platform_install(spec: &ServiceSpec) -> anyhow::Result<()> {
     let plist_path = launchd_path(&spec.home);
     let target = launchd_target();
@@ -1149,15 +1326,26 @@ fn platform_install(spec: &ServiceSpec) -> anyhow::Result<()> {
 }
 
 #[cfg(target_os = "macos")]
+fn platform_start() -> anyhow::Result<()> {
+    let plist_path = require_launchd_plist()?;
+    launchd_start_service(&plist_path, &launchd_target(), false)
+}
+
+#[cfg(target_os = "macos")]
+fn platform_stop() -> anyhow::Result<()> {
+    require_launchd_plist()?;
+    launchd_bootout_if_loaded(&launchd_target())
+}
+
+#[cfg(target_os = "macos")]
+fn platform_restart() -> anyhow::Result<()> {
+    let plist_path = require_launchd_plist()?;
+    launchd_start_service(&plist_path, &launchd_target(), true)
+}
+
+#[cfg(target_os = "macos")]
 fn platform_enable() -> anyhow::Result<()> {
-    let home = service_root()?
-        .parent()
-        .context("service root has no home directory")?
-        .to_path_buf();
-    let plist_path = launchd_path(&home);
-    if !plist_path.exists() {
-        bail!("Codexify service is not installed; run `codexify service install`");
-    }
+    let plist_path = require_launchd_plist()?;
     let target = launchd_target();
     launchd_enable_and_start(&plist_path, &target)?;
     Ok(())
@@ -1165,14 +1353,7 @@ fn platform_enable() -> anyhow::Result<()> {
 
 #[cfg(target_os = "macos")]
 fn platform_disable() -> anyhow::Result<()> {
-    let home = service_root()?
-        .parent()
-        .context("service root has no home directory")?
-        .to_path_buf();
-    let plist_path = launchd_path(&home);
-    if !plist_path.exists() {
-        bail!("Codexify service is not installed");
-    }
+    require_launchd_plist()?;
     let target = launchd_target();
     launchctl_output("disable the Codexify launch agent", |command| {
         command.args(["disable", &target]);
@@ -1275,6 +1456,33 @@ fn platform_install(spec: &ServiceSpec) -> anyhow::Result<()> {
 }
 
 #[cfg(target_os = "windows")]
+fn platform_start() -> anyhow::Result<()> {
+    command_output(
+        powershell_command(&windows_start_script()),
+        "start the Codexify scheduled task",
+    )?;
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn platform_stop() -> anyhow::Result<()> {
+    command_output(
+        powershell_command(&windows_stop_script()),
+        "stop the Codexify scheduled task",
+    )?;
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn platform_restart() -> anyhow::Result<()> {
+    command_output(
+        powershell_command(&windows_restart_script()),
+        "restart the Codexify scheduled task",
+    )?;
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
 fn platform_enable() -> anyhow::Result<()> {
     let task = powershell_quote(WINDOWS_TASK);
     let script = format!(
@@ -1344,6 +1552,21 @@ fn platform_status() -> anyhow::Result<ServiceStatus> {
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 fn platform_install(_spec: &ServiceSpec) -> anyhow::Result<()> {
+    bail!("Codexify services are supported on Linux, macOS, and Windows")
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+fn platform_start() -> anyhow::Result<()> {
+    bail!("Codexify services are supported on Linux, macOS, and Windows")
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+fn platform_stop() -> anyhow::Result<()> {
+    bail!("Codexify services are supported on Linux, macOS, and Windows")
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+fn platform_restart() -> anyhow::Result<()> {
     bail!("Codexify services are supported on Linux, macOS, and Windows")
 }
 
@@ -1531,6 +1754,16 @@ fn taskkill(pid: u32, force: bool) {
         command.arg("/F");
     }
     best_effort(command);
+}
+
+#[cfg(windows)]
+fn windows_server_creation_flags() -> u32 {
+    windows_sys::Win32::System::Threading::CREATE_NO_WINDOW
+}
+
+#[cfg(all(test, not(windows)))]
+fn windows_server_creation_flags() -> u32 {
+    0x0800_0000
 }
 
 #[cfg(windows)]
@@ -1726,6 +1959,8 @@ where
             .kill_on_drop(true);
         #[cfg(unix)]
         command.process_group(0);
+        #[cfg(windows)]
+        command.creation_flags(windows_server_creation_flags());
 
         let started = Instant::now();
         let mut child = match command.spawn() {
@@ -2101,7 +2336,16 @@ mod tests {
         assert!(script.contains("New-ScheduledTaskTrigger -AtLogOn"));
         assert!(script.contains("-RestartCount 999"));
         assert!(script.contains("New-TimeSpan -Minutes 1"));
-        assert!(script.contains(&windows_action_arguments(&spec.config)));
+        assert!(script.contains("-WindowStyle Hidden"));
+        assert!(script.contains("-EncodedCommand"));
+        assert!(script.contains("(Get-Process -Id $PID).Path"));
+        assert!(
+            !script.contains("New-ScheduledTaskAction -Execute '/tmp/codexify-test/bin/codexify'")
+        );
+        let launcher = windows_hidden_service_script(&spec);
+        assert!(launcher.contains(&powershell_quote(&spec.executable.to_string_lossy())));
+        assert!(launcher.contains(&powershell_quote(&spec.config.to_string_lossy())));
+        assert_eq!(windows_server_creation_flags(), 0x0800_0000);
     }
 
     #[test]
@@ -2113,6 +2357,26 @@ mod tests {
         assert!(unit.contains("codexify & test"));
         assert!(unit.contains("$$HOME"));
         assert_eq!(powershell_quote("a'b"), "'a''b'");
+    }
+
+    #[test]
+    fn windows_lifecycle_scripts_preserve_task_enablement() {
+        let start = windows_start_script();
+        assert!(start.contains("Start-ScheduledTask"));
+        assert!(!start.contains("Stop-ScheduledTask"));
+
+        let stop = windows_stop_script();
+        assert!(stop.contains("Stop-ScheduledTask"));
+        assert!(!stop.contains("Start-ScheduledTask"));
+
+        let restart = windows_restart_script();
+        assert!(restart.contains("Stop-ScheduledTask"));
+        assert!(restart.contains("Start-ScheduledTask"));
+
+        for script in [start, stop, restart] {
+            assert!(!script.contains("Enable-ScheduledTask"), "{script}");
+            assert!(!script.contains("Disable-ScheduledTask"), "{script}");
+        }
     }
 
     #[tokio::test]
