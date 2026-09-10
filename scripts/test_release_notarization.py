@@ -11,6 +11,7 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -323,6 +324,36 @@ class StageTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "already published"):
             module.stage_release(self.options(), services)
         self.assertNotIn("upload_public", [event[0] for event in services.events])
+
+    def test_created_draft_readback_retries_github_eventual_consistency(self) -> None:
+        module = release_module()
+
+        class DelayedDraftServices(module.CliServices):
+            def __init__(self) -> None:
+                self.lookups = 0
+
+            def _run(self, args, action, **kwargs):
+                return subprocess.CompletedProcess(args, 0, b"", b"")
+
+            def find_release(self, repo, tag):
+                self.lookups += 1
+                if self.lookups < 3:
+                    return None
+                return {
+                    "id": 77,
+                    "tag_name": tag,
+                    "target_commitish": COMMIT,
+                    "draft": True,
+                    "prerelease": False,
+                    "assets": [],
+                }
+
+        services = DelayedDraftServices()
+        with mock.patch.object(module.time, "sleep") as sleep:
+            release = services.create_draft("devnoname120/codexify", TAG, COMMIT)
+        self.assertEqual(release["id"], 77)
+        self.assertEqual(services.lookups, 3)
+        self.assertEqual(sleep.call_count, 2)
 
 
 class ReleaseWorkflowTests(unittest.TestCase):

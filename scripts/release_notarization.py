@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -812,10 +813,13 @@ class CliServices:
             ],
             "create draft GitHub release",
         )
-        release = self.find_release(repo, tag)
-        if release is None:
-            raise ReleaseError("created draft release could not be read back")
-        return release
+        for attempt in range(10):
+            release = self.find_release(repo, tag)
+            if release is not None:
+                return release
+            if attempt < 9:
+                time.sleep(1)
+        raise ReleaseError("created draft release could not be read back after 10 attempts")
 
     def delete_asset(self, repo: str, asset_id: int) -> None:
         self._run(

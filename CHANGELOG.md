@@ -6,6 +6,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- Release staging now retries draft-release readback to tolerate GitHub's brief
+  post-creation consistency delay without requiring a failed-job rerun.
+
 ## [1.4.0] - 2026-09-10
 
 ### Added
