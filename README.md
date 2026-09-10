@@ -1,4 +1,8 @@
-# Codexify
+# [Codexify](https://codexify.dev/)
+
+Landing page: **https://codexify.dev/**
+
+---------------
 
 **Turn ChatGPT into a Codex-like coding environment — without using your Codex/Work quota.**
 
