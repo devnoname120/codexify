@@ -1,4 +1,4 @@
-name: Finalize notarized release
+name: Handle Apple notarization event
 
 on:
   repository_dispatch:
@@ -19,6 +19,7 @@ concurrency:
 
 jobs:
   finalize:
+    name: Evaluate pending Codexify notarizations
     runs-on: macos-14
     timeout-minutes: 10
     env:

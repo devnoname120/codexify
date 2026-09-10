@@ -635,10 +635,12 @@ class FinalizeTests(unittest.TestCase):
 
 
 class FinalizerWorkflowTests(unittest.TestCase):
-    def test_finalizer_is_dispatch_driven_and_runs_on_macos(self) -> None:
+    def test_finalizer_is_named_as_an_event_handler_and_runs_on_macos(self) -> None:
         path = ROOT / ".github" / "workflows" / "finalize-release.yml"
         self.assertTrue(path.exists(), "finalizer workflow must exist")
         workflow = path.read_text()
+        self.assertIn("name: Handle Apple notarization event", workflow)
+        self.assertIn("    name: Evaluate pending Codexify notarizations", workflow)
         self.assertIn("repository_dispatch:", workflow)
         self.assertIn("apple-notarization-complete", workflow)
         self.assertIn("workflow_dispatch:", workflow)
