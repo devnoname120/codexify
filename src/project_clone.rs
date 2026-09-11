@@ -1727,15 +1727,15 @@ mod tests {
         assert!(https.same_identity(&commit));
         assert!(!https.same_selection(&commit));
 
-        let wiki = ProjectReference::parse("https://github.com/hypnguyen1209/codex-free.wiki.git")
+        let wiki = ProjectReference::parse("https://github.com/devnoname120/codexify.wiki.git")
             .unwrap();
         let ProjectReference::Git(wiki) = wiki else {
             panic!("expected Git reference");
         };
-        assert_eq!(wiki.name(), "codex-free.wiki");
+        assert_eq!(wiki.name(), "codexify.wiki");
         assert_eq!(
             wiki.clone_url(),
-            "https://github.com/hypnguyen1209/codex-free.wiki.git"
+            "https://github.com/devnoname120/codexify.wiki.git"
         );
     }
 
