@@ -1727,7 +1727,8 @@ mod tests {
         assert!(https.same_identity(&commit));
         assert!(!https.same_selection(&commit));
 
-        let wiki = ProjectReference::parse("https://github.com/devnoname120/codexify.wiki.git").unwrap();
+        let wiki =
+            ProjectReference::parse("https://github.com/devnoname120/codexify.wiki.git").unwrap();
         let ProjectReference::Git(wiki) = wiki else {
             panic!("expected Git reference");
         };
