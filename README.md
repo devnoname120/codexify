@@ -26,13 +26,15 @@ workflow uses your ChatGPT allowance, leaving your Codex/Work quota untouched.
 
 Codexify runs inside an ordinary ChatGPT **Chat**, so the relevant limits are the Chat allowances rather than the Work/Codex quota. Codexify doesn’t use any Codex/Work quota, it only uses Chat quota which is independent:
 
-| Plan | GPT-5.6 Luna | GPT-5.6 Sol | GPT-5.6 Sol Pro | GPT-6 Astra Pro | Context window size |
-| --- | --- | --- | --- | --- | --- |
+| Plan | 5.6&nbsp;Luna | 5.6&nbsp;Sol | 5.6&nbsp;Sol&nbsp;Pro | 6&nbsp;Astra&nbsp;Pro | Context<br>window |
+| :--- | :---: | :---: | :---: | :---: | ---: |
 | **Free** | ∞ | — | — | — | Varies |
-| **Go** ($20/month) | ∞ | — | — | — | 256K |
-| **Plus** | ∞ | ∞ **High** | — | — | 256K |
-| **Pro 5x** ($100/month) | ∞ | ∞ **Extra High** | **50 messages/week**, shared with GPT-6 Astra Pro | **50 messages/week**, shared with GPT-5.6 Sol Pro | 400K |
-| **Pro 20x** ($200/month) | ∞ | ∞ **Extra High** | **1,190 messages/week** (170 messages/day max) | **200 messages/week** | 400K |
+| **Go**<br><sub>$8/month</sub> | ∞ | — | — | — | 256K |
+| **Plus**<br><sub>$20/month</sub> | ∞ | ∞<br><sub>High</sub> | — | — | 256K |
+| **Pro 5x**<br><sub>$100/month</sub> | ∞ | ∞<br><sub>Extra High</sub> | **50/week**<sup>1</sup> | **50/week**<sup>1</sup> | 400K |
+| **Pro 20x**<br><sub>$200/month</sub> | ∞ | ∞<br><sub>Extra High</sub> | **1,190/week**<br><sub>170/day max</sub> | **200/week** | 400K |
+
+<sup>1</sup> One shared 50-message weekly allowance across 5.6 Sol Pro and 6 Astra Pro.
 
 Note: the context window is the total shared reasoning window, not the amount reserved exclusively for user input: system instructions, tools, memory, internal reasoning, and the
 response also consume it.
