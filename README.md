@@ -22,6 +22,23 @@ workflow uses your ChatGPT allowance, leaving your Codex/Work quota untouched.
 
 [Get started](#get-started) · [Documentation](#documentation) · [Website](https://codexify.dev) · [Downloads](https://github.com/devnoname120/codexify/releases/latest)
 
+## ChatGPT plan comparison
+
+Codexify runs inside an ordinary ChatGPT **Chat**, so the relevant limits are the Chat allowances rather than the Work/Codex quota. Codexify doesn’t use any Codex/Work quota, it only uses Chat quota which is independent:
+
+| Plan | GPT-5.6 Luna | GPT-5.6 Sol | GPT-5.6 Sol Pro | GPT-6 Astra Pro | Context window size |
+| --- | --- | --- | --- | --- | --- |
+| **Free** | ∞ | — | — | — | Varies |
+| **Go** ($20/month) | ∞ | — | — | — | 256K |
+| **Plus** | ∞ | ∞ **High** | — | — | 256K |
+| **Pro 5x** ($100/month) | ∞ | ∞ **Extra High** | **50 messages/week**, shared with GPT-6 Astra Pro | **50 messages/week**, shared with GPT-5.6 Sol Pro | 400K |
+| **Pro 20x** ($200/month) | ∞ | ∞ **Extra High** | **1,190 messages/week** (170 messages/day max) | **200 messages/week** | 400K |
+
+Note: the context window is the total shared reasoning window, not the amount reserved exclusively for user input: system instructions, tools, memory, internal reasoning, and the
+response also consume it.
+
+See OpenAI's [Plan tiers details](https://chatgpt.com/pricing/#:~:text=Compare%20features%20across%20plans) for more information.
+
 ## A Codex-like workflow in ChatGPT
 
 - **Explore, edit, and test.** Search a codebase, apply patches, run your project's
