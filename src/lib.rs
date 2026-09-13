@@ -30,6 +30,7 @@ pub mod instructions;
 pub mod legacy_migration;
 pub mod log_view;
 pub mod logging;
+pub mod markdown_chat;
 mod mcp_catalog;
 pub mod memory;
 pub mod openai_tunnel;

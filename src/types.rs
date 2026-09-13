@@ -809,6 +809,7 @@ pub struct AppConfig {
     pub artifact_ingress: ArtifactIngressConfig,
     pub artifact_egress: ArtifactEgressConfig,
     pub memory: MemoryConfig,
+    pub markdown_chat: crate::markdown_chat::MarkdownChatConfig,
     pub skills: SkillsConfig,
     pub ignore: IgnoreConfig,
     pub tool_logging: ToolLoggingConfig,

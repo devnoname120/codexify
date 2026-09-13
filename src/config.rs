@@ -607,6 +607,7 @@ struct FileConfig {
     artifact_ingress: Option<ArtifactIngressConfig>,
     artifact_egress: Option<ArtifactEgressConfig>,
     memory: Option<MemoryConfig>,
+    markdown_chat: Option<crate::markdown_chat::MarkdownChatConfig>,
     skills: Option<SkillsConfig>,
     ignore: Option<IgnoreConfig>,
     tool_logging: Option<PartialToolLogging>,
@@ -839,6 +840,7 @@ pub fn default_config(work_dir: std::path::PathBuf) -> AppConfig {
         artifact_ingress: ArtifactIngressConfig::default(),
         artifact_egress: ArtifactEgressConfig::default(),
         memory: MemoryConfig::default(),
+        markdown_chat: crate::markdown_chat::MarkdownChatConfig::default(),
         skills: SkillsConfig::default(),
         ignore: IgnoreConfig::default(),
         tool_logging: ToolLoggingConfig::default(),
@@ -1533,6 +1535,8 @@ fn load_config_with_announcements(cli: Cli, announce: bool) -> Result<AppConfig,
     artifact_egress.validate()?;
     let output = file.output.unwrap_or_default();
     output.validate()?;
+    let markdown_chat = file.markdown_chat.unwrap_or_default();
+    markdown_chat.validate()?;
 
     Ok(AppConfig {
         work_dir,
@@ -1554,6 +1558,7 @@ fn load_config_with_announcements(cli: Cli, announce: bool) -> Result<AppConfig,
         artifact_ingress,
         artifact_egress,
         memory: file.memory.unwrap_or_default(),
+        markdown_chat,
         skills: file.skills.unwrap_or_default(),
         ignore: file.ignore.unwrap_or_default(),
         tool_logging,
