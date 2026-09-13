@@ -149,7 +149,14 @@ new conversation. `get_agent_brief` reports that conversation's `CHAT.md` path,
 stored with project metadata outside the repository by default. Every
 conversation has its own file, even when several use the same checkout.
 
-Append your instructions at the bottom and save. The agent uses `chat_read`,
+With UI widgets enabled, `chat_write` and `chat_await` open a chat card. Send with
+the arrow button or Return; Shift+Return inserts a newline. Every card in the
+conversation shows the same history, so older cards remain usable. One grey tick
+means saved to `CHAT.md`; two blue ticks mean included in an agent-facing tool
+response, not proof that the model understood or acted on it. Widget sends do not
+start a new ChatGPT turn.
+
+You can also append your instructions to the file and save. The agent uses `chat_read`,
 `chat_write`, and `chat_await`; other tool results also deliver unread messages
 without consuming them. Optional ntfy notifications send the agent's Markdown to
 your configured topic. The feature is disabled by default and does not guarantee

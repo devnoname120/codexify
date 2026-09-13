@@ -497,6 +497,28 @@ refreshing live status, so a same-version enable/disable is not mistaken for an
 up-to-date schema. Host cancellation and model-imposed limits remain outside the
 communication subsystem's control.
 
+The optional `markdown_chat_ui` resource is linked by `chat_write` and
+`chat_await`. App-only `chat_ui_send` and `chat_ui_state` share the same resolved
+channel and file lock; the UI never supplies a path or conversation identity.
+User appends carry a request ID for idempotent retries, while history reads parse
+agent/user boundaries and plain editor appends into paged component-only data.
+The normal user-text parser strips framing but preserves complete user Markdown.
+
+A separate `delivered_through` byte boundary in `cursor.json` drives grey/blue
+receipt state. Chat tools record the exact snapshot or append end in private
+`ToolResult` bookkeeping, and ordinary tools record their peek end. Dispatch
+persists that boundary only when a nonempty user message is attached to an
+agent-facing response. App-only tools never trigger passive delivery. This tracks
+response construction, not host acknowledgement or model comprehension.
+
+Each rendered card polls the same conversation state, retaining its own unfinished
+composer draft in private widget state. History revisions avoid retransmitting
+unchanged pages; inactive cards suspend polling, and failures use bounded backoff.
+Safe DOM rendering supports basic Markdown without raw HTML or remote images.
+The UI supports MCP Apps and the existing `window.openai` bridge, including nested
+tool-result envelopes. The browser suite runs in Chromium and WebKit on the
+existing widget CI runner, with dispatch/storage tests on all supported platforms.
+
 ### Signed asynchronous releases (`release.yml`, `finalize-release.yml`)
 
 The release matrix signs each final Darwin Mach-O with the Developer ID

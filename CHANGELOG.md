@@ -17,6 +17,12 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   when Markdown chat is enabled. User messages bypass ordinary output truncation,
   remain pending until a chat tool acknowledges them, and do not enter payload
   logs. The brief directs communication and waiting through the chat tools.
+- `chat_write` and `chat_await` open a synchronized, conversation-specific chat
+  widget with an arrow/Return send action and Shift+Return newlines. App-only
+  tools append user messages and read history without starting a ChatGPT turn.
+  One grey tick means saved; two blue ticks mean included in an agent-facing
+  response. Cards preserve drafts, offer earlier history, and retry sends without
+  duplicating messages. Inactive cards stop polling.
 
 ### Fixed
 

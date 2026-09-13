@@ -1412,8 +1412,9 @@ explicit errors without acknowledging unread text. Restore the transcript before
 retrying. Do not delete cursor state to clear an error.
 
 Agent messages are surrounded by reserved `codexify-agent-message` Markdown
-comments so replay does not mistake them for user instructions. Do not edit or
-copy those boundary comments into user messages. Ordinary agent file operations
+comments so replay does not mistake them for user instructions. Widget-submitted
+user messages have `codexify-user-message` boundaries; plain editor appends need
+no markers. Do not edit the boundary comments. Ordinary agent file operations
 must treat chat history as read-only; use `chat_write` to send messages. The exact
 current chat path is accepted by `read_file` and `grep` for historical lookup,
 without advancing the read cursor. Other conversation paths do not receive this
@@ -1432,6 +1433,8 @@ When enabled, **every top-level tool** advertises the optional string field
 `new_chat_message_from_user`, including bridged, gateway, catalog, and widget
 tools. It is omitted when there is no pending text. Ordinary tool results only
 peek, so they repeat the full unread message until a chat tool acknowledges it.
+App-only calls omit this field and do not mark agent delivery: widget polling
+must not count as the agent receiving a message.
 Errors also deliver pending text when the conversation is authorized and has a
 workspace. A failed chat delivery does not undo or request reexecution of a
 successful file, command, or upstream operation.
@@ -1458,6 +1461,51 @@ voluntarily ending their turn. Timeouts request another wait until a reply
 arrives. Explicit user stop/disable instructions, cancellation, and higher-priority
 requirements still apply. No server-side instruction can guarantee that ChatGPT
 never ends a turn.
+
+### Chat widget
+
+When both `markdownChat.enabled` and `uiWidgets` are enabled, `chat_write` and
+`chat_await` advertise `ui://codexify/markdown-chat/v1/mcp-app.html`. The card shows
+this conversation's history and a multiline composer. Return or the arrow sends;
+Shift+Return inserts a newline. Input-method composition does not send a message.
+The card can connect before the invoking tool returns if the host mounts it then;
+an existing `chat_write` card also stays usable while `chat_await` is pending.
+
+All cards in the same conversation use the same server-side transcript, not
+independent threads. They load the latest page and offer **Load earlier messages**
+for history. Visible cards recheck state every two seconds; collapsed, off-screen,
+hidden, or torn-down cards stop polling. Connection errors back off and retain
+the draft. Each card keeps its own unfinished composer text in private widget
+state. No background follow-up message is posted to ChatGPT, and the widget does
+not claim that a stopped agent can be restarted by sending to the file.
+
+| Indicator | Meaning |
+| --- | --- |
+| Sending | The append has not yet been confirmed. |
+| One grey tick | Codexify confirmed the user message was saved to `CHAT.md`. |
+| Two blue ticks | Codexify included the complete message in an agent-facing tool response, including a read, wait, write, ordinary tool, or tool-error response. |
+| Not confirmed / Retry | The send failed or its response was lost. Retrying the same request ID does not append the message twice. |
+
+Delivery receipts use a persisted byte boundary separate from the consuming read
+cursor. Therefore passive delivery can turn ticks blue while `chat_read` still
+returns the unread text. Viewing the card or polling history never advances either
+boundary. The server cannot prove that ChatGPT received a response after a network
+failure, that the model understood it, or that it acted on the message; blue ticks
+are not such a guarantee.
+
+`chat_ui_send` and `chat_ui_state` are app-only tools, hidden from the model using
+MCP Apps visibility and the ChatGPT compatibility fields. They resolve the current
+authorized conversation and workspace on the server; they accept no file path
+or conversation selector. UI history travels only in component metadata, whereas
+new user instructions reach the agent through `new_chat_message_from_user`.
+See the [OpenAI UI reference](https://developers.openai.com/plugins/reference)
+for visibility and tool-result metadata contracts. The history payload is excluded
+from ordinary tool logs. Rendering uses safe text nodes for Markdown, without raw
+HTML execution or remote resource loading.
+
+Set `uiWidgets` to `false` to keep the three agent chat tools and file-based
+communication but disable the cards and their two app-only tools. The feature
+remains disabled by default; installation alone does not enable it.
 
 ### Waiting and notifications
 
