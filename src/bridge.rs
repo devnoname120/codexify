@@ -336,6 +336,7 @@ fn map_call_result_with(
         is_error: result.is_error.unwrap_or(false),
         structured_content: result.structured_content,
         meta: result.meta,
+        new_chat_message_from_user: None,
         audit: Default::default(),
     }
 }

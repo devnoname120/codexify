@@ -15,6 +15,7 @@ pub fn load_tools() -> Vec<Box<dyn Tool>> {
         false,
         true,
         true,
+        false,
         DEFAULT_ARTIFACT_MAX_CONCURRENT_DOWNLOADS,
     )
 }
@@ -25,6 +26,7 @@ pub fn load_tools_for_mode(multi_project: bool) -> Vec<Box<dyn Tool>> {
         false,
         true,
         true,
+        false,
         DEFAULT_ARTIFACT_MAX_CONCURRENT_DOWNLOADS,
     )
 }
@@ -35,6 +37,7 @@ pub fn load_tools_for_config(config: &AppConfig) -> Vec<Box<dyn Tool>> {
         config.conversation_auth_token.is_some(),
         config.artifact_ingress.enabled,
         config.artifact_egress.enabled,
+        config.markdown_chat.enabled,
         config.artifact_ingress.max_concurrent_downloads,
     )
 }
@@ -44,9 +47,15 @@ fn load_tools_with_options(
     conversation_auth: bool,
     artifact_ingress_enabled: bool,
     artifact_egress_enabled: bool,
+    markdown_chat_enabled: bool,
     max_concurrent_downloads: usize,
 ) -> Vec<Box<dyn Tool>> {
     let mut all: Vec<Box<dyn Tool>> = Vec::new();
+    if markdown_chat_enabled {
+        all.push(Box::new(tools::markdown_chat::ChatTool::Read));
+        all.push(Box::new(tools::markdown_chat::ChatTool::Write));
+        all.push(Box::new(tools::markdown_chat::ChatTool::Await));
+    }
     if conversation_auth {
         all.push(Box::new(tools::setup::ConversationAuthorization));
     }

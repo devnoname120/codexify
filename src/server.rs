@@ -108,6 +108,7 @@ pub struct CodexHandler {
     tools: Arc<Vec<Box<dyn Tool>>>,
     project_bindings: Arc<ProjectBindingStore>,
     connector_schemas: Arc<crate::connector_schema::ConnectorSchemaStore>,
+    markdown_chat: Arc<crate::markdown_chat::MarkdownChatStore>,
     conversation_authorizations: Arc<ConversationAuthorizationStore>,
     conversation_exec_sessions: Arc<ConversationExecSessionStore>,
     diff_checkpoints: Arc<DiffCheckpointManager>,
@@ -263,7 +264,20 @@ fn advertised_tool(tool: &dyn Tool, config: &AppConfig) -> rmcp::model::Tool {
     if let Some(meta) = meta {
         advertised = advertised.with_meta(meta);
     }
-    if let Some(output) = tool.output_schema()
+    let output = if config.markdown_chat.enabled {
+        let mut schema = crate::markdown_chat::output::schema(tool.output_schema());
+        if tool.permits_missing_structured_content() {
+            // Passthrough tools can legitimately return only content blocks.
+            schema
+                .as_object_mut()
+                .expect("object output schema")
+                .remove("required");
+        }
+        Some(schema)
+    } else {
+        tool.output_schema()
+    };
+    if let Some(output) = output
         && let Some(object) = output.as_object()
     {
         advertised = advertised.with_raw_output_schema(Arc::new(object.clone()));
@@ -331,9 +345,10 @@ impl ServerHandler for CodexHandler {
                 .and_then(crate::connector_schema::caller_key)
         });
         if let Some(caller) = caller
-            && let Err(error) = self
-                .connector_schemas
-                .record_reload(&caller, env!("CARGO_PKG_VERSION"))
+            && let Err(error) = self.connector_schemas.record_reload(
+                &caller,
+                &crate::connector_schema::schema_version(&self.config),
+            )
         {
             tracing::warn!(%error, "could not save connector schema reload version");
         }
@@ -483,10 +498,19 @@ impl ServerHandler for CodexHandler {
             .arguments
             .map(Value::Object)
             .unwrap_or_else(|| json!({}));
+        let reported_schema = (name == AUTHORIZATION_TOOL_WIRE_NAME)
+            .then(|| args.get("connectorVersion").and_then(Value::as_str))
+            .flatten()
+            .filter(|value| !value.is_empty() && value.len() <= 64)
+            .map(str::to_owned);
         let call_id = self.next_tool_call_id.fetch_add(1, Ordering::Relaxed);
         let tool_context = ToolRequestContext {
             conversation: conversation.clone(),
             connector_schema_version,
+            conversation_schema_version: conversation
+                .as_ref()
+                .and_then(|identity| self.connector_schemas.conversation_version(identity)),
+            markdown_chat: self.markdown_chat.clone(),
             conversation_authorizations: self.conversation_authorizations.clone(),
             project_bindings: self.project_bindings.clone(),
             diff_checkpoints: self.diff_checkpoints.clone(),
@@ -702,6 +726,51 @@ impl ServerHandler for CodexHandler {
             ));
         }
 
+        if !result.is_error
+            && self
+                .conversation_auth_error("chat_read", conversation.as_ref())
+                .is_none()
+            && let Some(identity) = conversation.as_ref()
+            && let Err(error) = self.connector_schemas.remember_conversation_version(
+                identity,
+                reported_schema
+                    .as_deref()
+                    .unwrap_or(&crate::connector_schema::schema_version(&self.config)),
+            )
+        {
+            tracing::warn!(%error, "could not save conversation schema baseline");
+        }
+
+        if self.config.markdown_chat.enabled
+            && !context.ct.is_cancelled()
+            && self
+                .conversation_auth_error("chat_read", conversation.as_ref())
+                .is_none()
+            && let Some(root) = self.selected_project_root(conversation.as_ref())
+        {
+            let mut effective = self.config.as_ref().clone();
+            effective.work_dir = root;
+            let chat = self
+                .markdown_chat
+                .chat(&effective, conversation.as_ref(), &self.session);
+            let pending = match chat {
+                Ok(chat) if !matches!(name.as_str(), "chat_read" | "chat_write" | "chat_await") => {
+                    chat.read(false).await.map(|snapshot| snapshot.text)
+                }
+                Ok(chat) => chat.ensure().await.map(|_| String::new()),
+                Err(error) => Err(error),
+            };
+            match pending {
+                Ok(text) if !text.is_empty() => result.new_chat_message_from_user = Some(format!(
+                    "The user wrote a new message in CHAT.md. Read it before continuing; use chat_read to acknowledge it:\n\n{text}"
+                )),
+                Ok(_) => {},
+                Err(error) => result.content.push(ToolContent::Text(format!(
+                    "Markdown chat is unavailable: {error}. The original tool result above is unchanged; do not repeat a successful operation just to retry chat delivery."
+                ))),
+            }
+        }
+
         let duration_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
         widget_debug::attach_configured_tool_timing(&self.config, &mut result, &name, duration_ms);
         if let (Some(logger), Some(call)) = (&self.tool_logging, tool_log_call.as_ref()) {
@@ -741,6 +810,12 @@ impl ServerHandler for CodexHandler {
             } else {
                 audit.finish_tool(call, &call_identity, &result, duration_ms, start_scope);
             }
+        }
+        if self.config.markdown_chat.enabled {
+            crate::markdown_chat::output::attach(
+                &mut result,
+                tool.and_then(|tool| tool.output_schema()).as_ref(),
+            );
         }
         Ok(to_call_tool_result(result).into())
     }
@@ -874,6 +949,7 @@ pub async fn start_http_server(mut config: AppConfig) -> anyhow::Result<()> {
     let factory_tools = tools.clone();
     let factory_project_bindings = project_bindings.clone();
     let factory_connector_schemas = connector_schemas.clone();
+    let factory_markdown_chat = Arc::new(crate::markdown_chat::MarkdownChatStore::default());
     let factory_conversation_authorizations = conversation_authorizations.clone();
     let factory_conversation_exec_sessions = conversation_exec_sessions.clone();
     let factory_diff_checkpoints = diff_checkpoints.clone();
@@ -891,6 +967,7 @@ pub async fn start_http_server(mut config: AppConfig) -> anyhow::Result<()> {
                 tools: factory_tools.clone(),
                 project_bindings: factory_project_bindings.clone(),
                 connector_schemas: factory_connector_schemas.clone(),
+                markdown_chat: factory_markdown_chat.clone(),
                 conversation_authorizations: factory_conversation_authorizations.clone(),
                 conversation_exec_sessions: factory_conversation_exec_sessions.clone(),
                 diff_checkpoints: factory_diff_checkpoints.clone(),
@@ -1551,6 +1628,8 @@ mod tests {
         }
     }
 
+    include!("server_markdown_chat_tests.rs");
+
     fn handler_with_tools(
         root: &std::path::Path,
         tools: Vec<Box<dyn Tool>>,
@@ -1567,6 +1646,7 @@ mod tests {
             config: Arc::new(config),
             tools: Arc::new(tools),
             connector_schemas: Arc::new(crate::connector_schema::ConnectorSchemaStore::default()),
+            markdown_chat: Arc::new(crate::markdown_chat::MarkdownChatStore::default()),
             project_bindings: Arc::new(ProjectBindingStore::new(root.join("bindings"))),
             conversation_authorizations: Arc::new(ConversationAuthorizationStore::new()),
             conversation_exec_sessions: Arc::new(ConversationExecSessionStore::new()),
@@ -2206,6 +2286,7 @@ mod tests {
             config: Arc::new(crate::config::default_config(root.path().to_path_buf())),
             tools: Arc::new(crate::registry::load_tools()),
             connector_schemas: Arc::new(crate::connector_schema::ConnectorSchemaStore::default()),
+            markdown_chat: Arc::new(crate::markdown_chat::MarkdownChatStore::default()),
             project_bindings: Arc::new(ProjectBindingStore::new(root.path().join("bindings"))),
             conversation_authorizations: Arc::new(ConversationAuthorizationStore::new()),
             conversation_exec_sessions: Arc::new(ConversationExecSessionStore::new()),
@@ -2309,6 +2390,7 @@ mod tests {
             config: Arc::new(config),
             tools: Arc::new(crate::registry::load_tools()),
             connector_schemas: Arc::new(crate::connector_schema::ConnectorSchemaStore::default()),
+            markdown_chat: Arc::new(crate::markdown_chat::MarkdownChatStore::default()),
             project_bindings: Arc::new(ProjectBindingStore::new(root.path().join("bindings"))),
             conversation_authorizations: Arc::new(ConversationAuthorizationStore::new()),
             conversation_exec_sessions: Arc::new(ConversationExecSessionStore::new()),
@@ -2347,6 +2429,7 @@ mod tests {
             config: Arc::new(config),
             tools: Arc::new(tools),
             connector_schemas: Arc::new(crate::connector_schema::ConnectorSchemaStore::default()),
+            markdown_chat: Arc::new(crate::markdown_chat::MarkdownChatStore::default()),
             project_bindings: Arc::new(ProjectBindingStore::new(root.path().join("bindings"))),
             conversation_authorizations: authorizations.clone(),
             conversation_exec_sessions: Arc::new(ConversationExecSessionStore::new()),
@@ -2434,6 +2517,7 @@ mod tests {
             is_error: false,
             structured_content: Some(json!({ "value": 1 })),
             meta: Some(meta),
+            new_chat_message_from_user: None,
             audit: Default::default(),
         });
 
@@ -2504,6 +2588,7 @@ mod tests {
             is_error: false,
             structured_content: None,
             meta: None,
+            new_chat_message_from_user: None,
             audit: Default::default(),
         });
         let value = serde_json::to_value(converted).unwrap();

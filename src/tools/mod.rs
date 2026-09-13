@@ -20,6 +20,7 @@ pub mod grep;
 pub mod import_host_file;
 pub mod list_directory;
 pub mod list_projects;
+pub mod markdown_chat;
 pub mod read_file;
 pub mod recall;
 pub mod remember;

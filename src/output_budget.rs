@@ -611,6 +611,7 @@ mod tests {
             is_error: false,
             structured_content: None,
             meta: Some(meta),
+            new_chat_message_from_user: None,
             audit: Default::default(),
         };
 

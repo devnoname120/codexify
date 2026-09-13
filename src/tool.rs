@@ -26,10 +26,13 @@ pub struct ToolRequestContext {
     pub conversation: Option<ConversationIdentity>,
     /// Last version served on an identified connector reload; never from a widget echo.
     pub connector_schema_version: Option<String>,
+    /// Conversation marker or first observed server schema, never proof of a connector reload.
+    pub conversation_schema_version: Option<String>,
     pub conversation_authorizations: Arc<ConversationAuthorizationStore>,
     pub project_bindings: Arc<ProjectBindingStore>,
     pub diff_checkpoints: Arc<DiffCheckpointManager>,
     pub artifact_egress: Arc<ArtifactEgressStore>,
+    pub markdown_chat: Arc<crate::markdown_chat::MarkdownChatStore>,
     /// Cancelled when the transport drops or a per-call deadline (e.g. the
     /// artifact-ingress idle timeout) fires, so long-running tools can abort.
     pub cancellation: CancellationToken,

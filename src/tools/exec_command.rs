@@ -245,12 +245,14 @@ impl Tool for ExecCommand {
             is_error,
             structured_content: Some(structured),
             meta: None,
+            new_chat_message_from_user: None,
             audit: ToolAuditMetadata {
                 truncated: Some(buffer_truncated || truncated),
                 original_output_tokens: truncated.then_some(original_token_count),
                 exec_session_id: Some(exec_session.id),
                 process_id: exec_session.pid,
                 resident: Some(!exited),
+                sensitive_output: false,
             },
         }
     }

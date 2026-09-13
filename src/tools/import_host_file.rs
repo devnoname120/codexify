@@ -304,6 +304,8 @@ mod tests {
         let context = ToolRequestContext {
             conversation: None,
             connector_schema_version: None,
+            conversation_schema_version: None,
+            markdown_chat: Arc::new(crate::markdown_chat::MarkdownChatStore::default()),
             conversation_authorizations: Arc::new(
                 crate::conversation_auth::ConversationAuthorizationStore::new(),
             ),

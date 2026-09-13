@@ -73,6 +73,7 @@ impl ExportHostFile {
                 "fallbackToSource": registered.fallback_to_source
             })),
             meta: None,
+            new_chat_message_from_user: None,
             audit: Default::default(),
         }
     }

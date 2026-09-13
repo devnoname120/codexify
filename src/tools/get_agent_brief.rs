@@ -3,7 +3,7 @@ use serde_json::{Value, json};
 
 use crate::exec_sessions::SessionState;
 use crate::instructions::build_instructions;
-use crate::tool::{Tool, ToolBehavior, empty_object_schema};
+use crate::tool::{Tool, ToolBehavior, ToolRequestContext, empty_object_schema};
 use crate::types::{AppConfig, ToolResult};
 
 pub struct GetAgentBrief;
@@ -52,5 +52,30 @@ impl Tool for GetAgentBrief {
 
     async fn call(&self, _args: Value, config: &AppConfig, _session: &SessionState) -> ToolResult {
         ToolResult::text(build_instructions(config))
+    }
+
+    async fn call_with_context(
+        &self,
+        _args: Value,
+        config: &AppConfig,
+        session: &SessionState,
+        context: &ToolRequestContext,
+    ) -> ToolResult {
+        let mut brief = build_instructions(config);
+        if config.markdown_chat.enabled {
+            let chat =
+                match context
+                    .markdown_chat
+                    .chat(config, context.conversation.as_ref(), session)
+                {
+                    Ok(chat) => chat,
+                    Err(error) => return ToolResult::error(error),
+                };
+            if let Err(error) = chat.ensure().await {
+                return ToolResult::error(error);
+            }
+            brief.push_str(&format!("\n\n## This conversation's Markdown chat\n\nCHAT.md: `{}`\n\nRead this conversation's new messages using chat_read whenever possible. Direct read_file or grep is for finding previous messages only and does not acknowledge new messages. You have read-only access to the transcript through ordinary file tools; send or append messages only with chat_write. Other conversations have separate files, even in this same workspace.\n", chat.path().display()));
+        }
+        ToolResult::text(brief)
     }
 }

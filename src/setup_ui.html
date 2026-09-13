@@ -708,16 +708,24 @@ button { font: inherit; }
       );
     } else if (schema.status === "stale") {
       copy.append(
-        el("span", "status-version", `v${schema.connectorVersion || "unknown"}`),
+        el("span", "status-version", `v${schema.connectorVersion || schema.observedVersion || schema.advertisedVersion}`),
         el("span", "status-state status-warning", "refresh required")
       );
+    }
+
+    const previousSchema = schema.status === "conversation_stale"
+      ? schema.observedVersion : (schema.connectorVersion || schema.observedVersion);
+    if (previousSchema && schema.advertisedVersion
+      && previousSchema.endsWith("+markdown-chat") !== schema.advertisedVersion.endsWith("+markdown-chat")) {
+      const mode = schema.advertisedVersion.endsWith("+markdown-chat") ? "enabled" : "disabled";
+      copy.append(el("span", "status-help", `Markdown chat was ${mode}; this changes the tool schema even though the Codexify version may be unchanged.`));
     }
 
     if (schema.status === "stale" && schema.refreshRecommended) {
       copy.append(el(
         "span",
         "status-help",
-        "Select Codexify if needed, scroll below the list of tools, then click Refresh."
+        "Select Codexify if needed, scroll below the list of tools, then click Refresh. Start a new conversation to load the changed tools."
       ));
     }
 

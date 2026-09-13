@@ -1,6 +1,9 @@
 //! Optional conversation-scoped Markdown communication, separate from repository files.
 
+pub mod notification;
+pub(crate) mod output;
 mod storage;
+mod wait;
 
 use std::collections::HashMap;
 use std::fmt;
@@ -15,6 +18,7 @@ use crate::project_bindings::ConversationIdentity;
 use crate::types::AppConfig;
 
 pub use storage::{AppendReceipt, ChatFile, ChatSnapshot, NotificationState};
+pub use wait::WaitOutcome;
 
 pub const DEFAULT_MAX_WAIT_MS: u64 = 270_000;
 pub const MAX_UNREAD_BYTES: usize = 16 * 1024 * 1024;
@@ -124,6 +128,13 @@ impl MarkdownChatStore {
             .join("chats")
             .join(owner)
             .join("CHAT.md");
+        let path = if path.is_absolute() {
+            path
+        } else {
+            std::env::current_dir()
+                .map_err(|_| "Cannot resolve the Markdown chat directory")?
+                .join(path)
+        };
         let mut channels = self
             .channels
             .lock()
@@ -133,4 +144,39 @@ impl MarkdownChatStore {
             .or_insert_with(|| Arc::new(ChatFile::new(path, conversation.is_some())))
             .clone())
     }
+}
+
+pub(crate) async fn history_call(
+    args: &serde_json::Value,
+    config: &AppConfig,
+    session: &SessionState,
+    context: &crate::tool::ToolRequestContext,
+) -> Result<Option<(serde_json::Value, AppConfig)>, String> {
+    if !config.markdown_chat.enabled {
+        return Ok(None);
+    }
+    let Some(input) = args.get("path").and_then(serde_json::Value::as_str) else {
+        return Ok(None);
+    };
+    let chat = context
+        .markdown_chat
+        .chat(config, context.conversation.as_ref(), session)?;
+    let requested = crate::safe_path::lexical_normalize(&config.work_dir.join(input));
+    let file = crate::safe_path::lexical_normalize(chat.path());
+    let channel_dir = file.parent().ok_or("CHAT.md has no parent")?;
+    let chats_dir = channel_dir
+        .parent()
+        .ok_or("CHAT.md has no metadata directory")?;
+    if !requested.starts_with(chats_dir) {
+        return Ok(None);
+    }
+    if requested != file {
+        return Err("Only this conversation's CHAT.md is available through chat history reads. Use chat_read for new messages.".into());
+    }
+    chat.ensure().await?;
+    let mut args = args.clone();
+    args["path"] = serde_json::Value::String("CHAT.md".into());
+    let mut config = config.clone();
+    config.work_dir = channel_dir.to_path_buf();
+    Ok(Some((args, config)))
 }

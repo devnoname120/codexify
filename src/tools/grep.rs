@@ -13,7 +13,7 @@ use crate::output_budget::{
     approx_bytes_for_tokens, entry_budget, tool_output_token_budget, truncate_text,
 };
 use crate::safe_path::resolve_safe_path;
-use crate::tool::{Tool, ToolBehavior, parse_tool_args, text_output_schema};
+use crate::tool::{Tool, ToolBehavior, ToolRequestContext, parse_tool_args, text_output_schema};
 use crate::types::{AppConfig, ToolResult};
 
 pub struct Grep;
@@ -54,6 +54,19 @@ fn collect_files(
     matcher: &IgnoreMatcher,
     out: &mut Vec<PathBuf>,
 ) {
+    if dir.is_file() {
+        let extension = dir
+            .extension()
+            .map(|ext| format!(".{}", ext.to_string_lossy()))
+            .unwrap_or_default();
+        if !BINARY_EXTENSIONS.contains(&extension.as_str())
+            && !matcher.is_ignored(dir, false)
+            && include.is_none_or(|include| include.is_match(dir, dir.parent().unwrap_or(root)))
+        {
+            out.push(dir.to_path_buf());
+        }
+        return;
+    }
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
         Err(_) => return,
@@ -164,6 +177,24 @@ impl Tool for Grep {
 
     fn output_schema(&self) -> Option<Value> {
         Some(text_output_schema())
+    }
+
+    async fn call_with_context(
+        &self,
+        args: Value,
+        config: &AppConfig,
+        session: &SessionState,
+        context: &ToolRequestContext,
+    ) -> ToolResult {
+        match crate::markdown_chat::history_call(&args, config, session, context).await {
+            Ok(Some((args, history_config))) => {
+                let mut result = self.call(args, &history_config, session).await;
+                result.audit.sensitive_output = true;
+                result
+            }
+            Ok(None) => self.call(args, config, session).await,
+            Err(error) => ToolResult::error(error),
+        }
     }
 
     async fn call(&self, args: Value, config: &AppConfig, _session: &SessionState) -> ToolResult {

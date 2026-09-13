@@ -27,6 +27,7 @@ pub enum ToolContent {
 /// Metadata retained for operational accounting without retaining tool output.
 #[derive(Debug, Clone, Default)]
 pub struct ToolAuditMetadata {
+    pub sensitive_output: bool,
     pub truncated: Option<bool>,
     pub original_output_tokens: Option<u64>,
     pub exec_session_id: Option<u64>,
@@ -44,6 +45,8 @@ pub struct ToolResult {
     pub structured_content: Option<Value>,
     pub meta: Option<MetaObject>,
     pub audit: ToolAuditMetadata,
+    /// Kept outside ordinary output budgeting and logging until MCP serialization.
+    pub new_chat_message_from_user: Option<String>,
 }
 
 impl ToolResult {
@@ -54,6 +57,7 @@ impl ToolResult {
             is_error: false,
             structured_content: None,
             meta: None,
+            new_chat_message_from_user: None,
             audit: ToolAuditMetadata::default(),
         }
     }
@@ -65,6 +69,7 @@ impl ToolResult {
             is_error: true,
             structured_content: None,
             meta: None,
+            new_chat_message_from_user: None,
             audit: ToolAuditMetadata::default(),
         }
     }
@@ -79,6 +84,7 @@ impl ToolResult {
             is_error: false,
             structured_content: None,
             meta: None,
+            new_chat_message_from_user: None,
             audit: ToolAuditMetadata::default(),
         }
     }

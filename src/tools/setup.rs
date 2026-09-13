@@ -74,6 +74,9 @@ fn schema_info(
             Some(version) if version == server => ConnectorSchemaStatus::Current,
             _ => ConnectorSchemaStatus::ConversationStale,
         },
+        None if conversation.is_some_and(|version| version != server) => {
+            ConnectorSchemaStatus::Stale
+        }
         None => ConnectorSchemaStatus::Unknown,
     };
     ConnectorSchemaInfo {
@@ -260,6 +263,7 @@ fn next_step_for_project(project: &SetupProjectInfo) -> String {
 struct SetupResultInput<'a> {
     scope_description: Option<&'a str>,
     worktree_mode: WorktreeMode,
+    markdown_chat_enabled: bool,
     next_step: &'a str,
     project: SetupProjectInfo,
     observed_connector_version: Option<&'a str>,
@@ -273,6 +277,7 @@ fn setup_result(input: SetupResultInput<'_>) -> ToolResult {
     let SetupResultInput {
         scope_description,
         worktree_mode,
+        markdown_chat_enabled,
         next_step,
         project,
         observed_connector_version,
@@ -282,11 +287,12 @@ fn setup_result(input: SetupResultInput<'_>) -> ToolResult {
         update_check_ms,
     } = input;
     let advertised_version = env!("CARGO_PKG_VERSION");
+    let schema_version = crate::connector_schema::version_for_markdown_chat(markdown_chat_enabled);
     let observed_connector_version = observed_connector_version
         .map(str::trim)
         .filter(|version| !version.is_empty());
     let connector_schema = schema_info(
-        advertised_version,
+        &schema_version,
         reloaded_connector_version,
         observed_connector_version,
     );
@@ -310,7 +316,9 @@ fn setup_result(input: SetupResultInput<'_>) -> ToolResult {
         }
         UpdateCheckStatus::UpToDate | UpdateCheckStatus::AheadOfLatest => {}
     }
-    if connector_schema.refresh_recommended {
+    if connector_schema.refresh_recommended && connector_schema.connector_version.is_none() {
+        text.push_str(" This conversation's schema or its first observed server configuration differs from the current tool set. Refresh the connector and start a new conversation. No connector reload has been observed for this caller.");
+    } else if connector_schema.refresh_recommended {
         text.push_str(
             " The connector's last recorded schema reload differs from the running server version. Use Refresh in the setup panel to open the connector settings, then click Refresh below the tool list.",
         );
@@ -476,9 +484,12 @@ impl ConversationAuthorization {
         setup_result(SetupResultInput {
             scope_description: Some(scope.description()),
             worktree_mode: config.worktrees.mode,
+            markdown_chat_enabled: config.markdown_chat.enabled,
             next_step: &next_step,
             project,
-            observed_connector_version: connector_version.as_deref(),
+            observed_connector_version: connector_version
+                .as_deref()
+                .or(context.conversation_schema_version.as_deref()),
             reloaded_connector_version: context.connector_schema_version.as_deref(),
             update_result,
             debug: config.debug,
@@ -515,6 +526,13 @@ impl Tool for ConversationAuthorization {
         format!(
             "Call this function once when using the codexify connector for the first time in a conversation. Provide the SHA-256-shaped `ref` supplied by the user or system prompt. Connector version marker: `{}`; when the `connectorVersion` argument is available, copy this marker into it unchanged. After setup completes, continue as directed. The submitted reference is not retained.",
             env!("CARGO_PKG_VERSION")
+        )
+    }
+
+    fn describe(&self, config: &AppConfig) -> String {
+        self.description().replace(
+            &format!("`{}`", env!("CARGO_PKG_VERSION")),
+            &format!("`{}`", crate::connector_schema::schema_version(config)),
         )
     }
 
@@ -654,9 +672,13 @@ impl Tool for SetupStatus {
         setup_result(SetupResultInput {
             scope_description: None,
             worktree_mode: config.worktrees.mode,
+            markdown_chat_enabled: config.markdown_chat.enabled,
             next_step: &next_step,
             project,
-            observed_connector_version: args.conversation_version.as_deref(),
+            observed_connector_version: args
+                .conversation_version
+                .as_deref()
+                .or(context.conversation_schema_version.as_deref()),
             reloaded_connector_version: context.connector_schema_version.as_deref(),
             update_result,
             debug: config.debug,
@@ -730,7 +752,7 @@ mod tests {
             (Some("1.2.4"), Some("1.2.3"), "conversation_stale"),
             (Some("1.2.4"), None, "conversation_stale"),
             (None, Some("1.2.4"), "unknown"),
-            (None, Some("1.2.3"), "unknown"),
+            (None, Some("1.2.3"), "stale"),
             (None, None, "unknown"),
         ] {
             let info = serde_json::to_value(schema_info("1.2.4", connector, conversation)).unwrap();
@@ -744,6 +766,54 @@ mod tests {
             ConnectorSchemaStatus::Stale,
             "a server rollback requires a reload too"
         );
+    }
+
+    #[test]
+    fn markdown_chat_toggles_are_stale_even_without_reload_identity() {
+        for enabled in [true, false] {
+            let root = tempfile::tempdir().unwrap();
+            let mut config = default_config(root.path().into());
+            config.markdown_chat.enabled = enabled;
+            let current = crate::connector_schema::schema_version(&config);
+            let previous = crate::connector_schema::version_for_markdown_chat(!enabled);
+            assert!(
+                ConversationAuthorization
+                    .describe(&config)
+                    .contains(&format!("`{current}`"))
+            );
+            assert_eq!(
+                schema_info(&current, None, Some(&previous)).status,
+                ConnectorSchemaStatus::Stale
+            );
+            assert_eq!(
+                schema_info(&current, Some(&current), Some(&previous)).status,
+                ConnectorSchemaStatus::ConversationStale
+            );
+            assert_eq!(
+                schema_info(&current, Some(&current), Some(&current)).status,
+                ConnectorSchemaStatus::Current
+            );
+            let result = setup_result(SetupResultInput {
+                scope_description: None,
+                worktree_mode: WorktreeMode::Never,
+                markdown_chat_enabled: enabled,
+                next_step: "",
+                project: fixture_project_info(),
+                observed_connector_version: Some(&previous),
+                reloaded_connector_version: None,
+                update_result: Err("offline".into()),
+                debug: false,
+                update_check_ms: 0,
+            });
+            let data = result.structured_content.unwrap();
+            assert_eq!(data["serverVersion"], env!("CARGO_PKG_VERSION"));
+            assert_eq!(data["connectorSchema"]["advertisedVersion"], current);
+            assert_eq!(data["connectorSchema"]["refreshRecommended"], true);
+            assert!(jsonschema::is_valid(
+                &ConversationAuthorization::output_schema_value(),
+                &data
+            ));
+        }
     }
 
     #[test]
@@ -776,6 +846,7 @@ mod tests {
             let result = setup_result(SetupResultInput {
                 scope_description: None,
                 worktree_mode: mode,
+                markdown_chat_enabled: false,
                 next_step: "",
                 project: fixture_project_info(),
                 observed_connector_version: None,
@@ -810,6 +881,7 @@ mod tests {
         let result = setup_result(SetupResultInput {
             scope_description: Some("this ChatGPT conversation"),
             worktree_mode: WorktreeMode::Auto,
+            markdown_chat_enabled: false,
             next_step: "Call `get_agent_brief` before using project tools.",
             project: fixture_project_info(),
             observed_connector_version: Some("1.0.0"),
@@ -858,6 +930,7 @@ mod tests {
         let result = setup_result(SetupResultInput {
             scope_description: Some("this MCP transport session"),
             worktree_mode: WorktreeMode::Auto,
+            markdown_chat_enabled: false,
             next_step: "Call `get_agent_brief` before using project tools.",
             project: fixture_project_info(),
             observed_connector_version: None,
@@ -881,6 +954,8 @@ mod tests {
         ToolRequestContext {
             conversation: identity,
             connector_schema_version: None,
+            conversation_schema_version: None,
+            markdown_chat: Arc::new(crate::markdown_chat::MarkdownChatStore::default()),
             conversation_authorizations: authorizations,
             project_bindings: Arc::new(ProjectBindingStore::new(
                 state_root.join("project-bindings"),

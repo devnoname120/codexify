@@ -53,7 +53,9 @@ jobs:
         run: node --test scripts/test-cloudflare-notary-webhook.mjs
 
       - name: Format
-        run: cargo fmt --all --check
+        run: |
+          cargo fmt --all --check
+          rustfmt --edition 2024 --check src/server_markdown_chat_tests.rs
 
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
@@ -113,3 +115,9 @@ jobs:
 
       - name: Test self-update contracts
         run: cargo test self_update
+
+      - name: Test Markdown chat storage and tools
+        run: cargo test --test markdown_chat --test markdown_chat_tools
+
+      - name: Test Markdown chat dispatch, watching, and schemas
+        run: cargo test --lib markdown_chat

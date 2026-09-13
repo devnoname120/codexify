@@ -52,6 +52,7 @@ rpassword = "7"
 bytes = "1"
 cap-std = "4.0.3"
 same-file = "1"
+notify = "8.2"
 schemars = "1.2.2"
 jsonschema = { version = "0.52.0", default-features = false }
 

@@ -259,6 +259,12 @@ fn collect_secret_values(
     redact_all_mcp_values: bool,
 ) -> Zeroizing<Vec<String>> {
     let mut values = Vec::new();
+    if let Some(ntfy) = &config.markdown_chat.ntfy {
+        push_secret(&mut values, &ntfy.url, false);
+        if let Some(token) = &ntfy.token {
+            push_secret(&mut values, token, false);
+        }
+    }
     if let Some(api_key) = config.api_key.as_deref() {
         push_secret(&mut values, api_key, false);
     }
@@ -441,6 +447,7 @@ fn sensitive_json_key(key: &str) -> bool {
     matches!(
         normalized.as_str(),
         "token"
+            | "newchatmessagefromuser"
             | "secret"
             | "password"
             | "passphrase"
@@ -560,6 +567,24 @@ mod tests {
 
     use super::*;
     use crate::config::default_config;
+
+    #[test]
+    fn markdown_chat_notification_secrets_and_user_messages_are_redacted() {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = default_config(root.path().to_path_buf());
+        config.markdown_chat.ntfy = Some(crate::markdown_chat::NtfyConfig {
+            url: "https://ntfy.example/private-topic".into(),
+            token: Some("private-notification-token".into()),
+        });
+        let redactor = SecretRedactor::for_tool_logging(&config);
+        let flags = Cell::new(false);
+        let value = json!({"new_chat_message_from_user":"private conversation text", "message":"https://ntfy.example/private-topic private-notification-token"});
+        let preview =
+            serde_json::to_string(&redactor.redacted_json(&value, None, 4096, &flags)).unwrap();
+        assert!(!preview.contains("private conversation text"));
+        assert!(!preview.contains("private-topic"));
+        assert!(!preview.contains("private-notification-token"));
+    }
 
     #[test]
     fn json_redaction_preserves_useful_values_and_removes_credentials() {

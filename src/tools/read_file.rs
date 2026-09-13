@@ -6,7 +6,9 @@ use serde_json::Value;
 use crate::exec_sessions::SessionState;
 use crate::output_budget::{file_budget, window_file_lines};
 use crate::safe_path::resolve_safe_path;
-use crate::tool::{Tool, ToolBehavior, parse_tool_args, schema_for, text_output_schema};
+use crate::tool::{
+    Tool, ToolBehavior, ToolRequestContext, parse_tool_args, schema_for, text_output_schema,
+};
 use crate::types::{AppConfig, ToolResult};
 
 pub struct ReadFile;
@@ -103,5 +105,23 @@ impl Tool for ReadFile {
             None => numbered,
         };
         ToolResult::text(body).with_truncation(truncated)
+    }
+
+    async fn call_with_context(
+        &self,
+        args: Value,
+        config: &AppConfig,
+        session: &SessionState,
+        context: &ToolRequestContext,
+    ) -> ToolResult {
+        match crate::markdown_chat::history_call(&args, config, session, context).await {
+            Ok(Some((args, history_config))) => {
+                let mut result = self.call(args, &history_config, session).await;
+                result.audit.sensitive_output = true;
+                result
+            }
+            Ok(None) => self.call(args, config, session).await,
+            Err(error) => ToolResult::error(error),
+        }
     }
 }

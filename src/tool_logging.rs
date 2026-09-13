@@ -229,6 +229,13 @@ impl ToolCallLogger {
 
     fn preview_response(&self, result: &ToolResult) -> PayloadPreview {
         let traversal_truncated = Cell::new(false);
+        if result.audit.sensitive_output {
+            return preview_serializable(
+                &"<private Markdown chat history>",
+                self.max_response_bytes,
+                &traversal_truncated,
+            );
+        }
         let response = LoggableToolResult {
             result,
             redactor: &self.redactor,
@@ -714,6 +721,7 @@ mod tests {
                 "original_token_count": 12,
             })),
             meta: None,
+            new_chat_message_from_user: None,
             audit: Default::default(),
         };
 
@@ -724,6 +732,43 @@ mod tests {
         assert!(preview.text.contains("base64Bytes"));
         assert!(preview.text.contains("original_token_count"));
         assert!(preview.text.contains("12"));
+    }
+
+    #[test]
+    fn markdown_chat_body_never_enters_payload_preview() {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = default_config(root.path().to_path_buf());
+        config.tool_logging.mode = ToolLogMode::All;
+        let logger = ToolCallLogger::new(&config).unwrap();
+        let tool = crate::tools::markdown_chat::ChatTool::Write;
+        let schema = crate::tool::Tool::input_schema(&tool);
+        let request = logger.preview_request(
+            &serde_json::json!({"message":"private agent text"}),
+            Some(&schema),
+        );
+        assert!(!request.text.contains("private agent text"));
+        let mut result = ToolResult::text("New user message available");
+        result.new_chat_message_from_user = Some("private user text".into());
+        assert!(
+            !logger
+                .preview_response(&result)
+                .text
+                .contains("private user text")
+        );
+    }
+
+    #[test]
+    fn markdown_chat_history_never_enters_payload_preview() {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = default_config(root.path().into());
+        config.tool_logging.mode = ToolLogMode::All;
+        let logger = ToolCallLogger::new(&config).unwrap();
+        let mut result = ToolResult::text("private history excerpt")
+            .with_structured(serde_json::json!({"content":"private history excerpt"}));
+        result.audit.sensitive_output = true;
+        let preview = logger.preview_response(&result);
+        assert!(!preview.text.contains("private history excerpt"));
+        assert!(preview.text.contains("private Markdown chat history"));
     }
 
     #[test]
@@ -744,6 +789,7 @@ mod tests {
             is_error: false,
             structured_content: None,
             meta: None,
+            new_chat_message_from_user: None,
             audit: Default::default(),
         };
 

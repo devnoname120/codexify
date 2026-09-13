@@ -68,6 +68,10 @@ pub const AGENT_BRIEF: &str = concat!(
 );
 
 fn configured_agent_brief(config: &AppConfig) -> String {
+    let mut brief = AGENT_BRIEF.to_string();
+    if config.markdown_chat.enabled {
+        brief.push_str("\n\n## Markdown-driven communication\n\nMarkdown chat is enabled. Complete setup and workspace selection first, then obtain this conversation's CHAT.md path from get_agent_brief. Use chat_write for all user-facing questions, progress and completion reports instead of ChatGPT replies. Inspect optional new_chat_message_from_user after every tool result and use chat_read to acknowledge new instructions; ordinary tool deliveries do not consume them. Do not voluntarily finish, stop, complete, or checkpoint your turn while this communication mode is active: when blocked or out of work, explain through chat_write and call chat_await. After each normal timeout call chat_await again until the user replies. Do not turn wait timeouts into a final answer. An explicit user stop or disable request, host cancellation, and higher-priority requirements still apply. Codexify cannot prevent a host-imposed turn limit. The chat tools and new_chat_message_from_user bypass Codexify's ordinary output truncation.\n");
+    }
     let mut host_file_guidance = Vec::new();
     if config.artifact_ingress.enabled {
         host_file_guidance.push("- Use import_host_file when the user attaches a file or asks you to place a ChatGPT-generated file into the project. Do not reconstruct binary files through write_file or substitute an arbitrary URL.");
@@ -76,11 +80,11 @@ fn configured_agent_brief(config: &AppConfig) -> String {
         host_file_guidance.push("- Use export_host_file when the user asks to receive, download, or open a file that exists in the active project. Return the resource from that tool instead of pasting base64 data or merely reporting a local path.");
     }
     if host_file_guidance.is_empty() {
-        return AGENT_BRIEF.to_string();
+        return brief;
     }
 
     format!(
-        "{AGENT_BRIEF}\n\n## Host files\n\n{}",
+        "{brief}\n\n## Host files\n\n{}",
         host_file_guidance.join("\n")
     )
 }

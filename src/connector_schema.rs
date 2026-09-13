@@ -11,6 +11,19 @@ use sha2::{Digest, Sha256};
 
 use crate::types::AppConfig;
 
+pub(crate) fn schema_version(config: &AppConfig) -> String {
+    version_for_markdown_chat(config.markdown_chat.enabled)
+}
+
+pub(crate) fn version_for_markdown_chat(enabled: bool) -> String {
+    let version = env!("CARGO_PKG_VERSION");
+    if enabled {
+        format!("{version}+markdown-chat")
+    } else {
+        version.to_string()
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct ConnectorSchemaStore {
     versions: Mutex<HashMap<String, String>>,
@@ -44,6 +57,24 @@ fn private_key(parts: &[&str]) -> String {
 }
 
 impl ConnectorSchemaStore {
+    pub(crate) fn conversation_version(
+        &self,
+        conversation: &crate::project_bindings::ConversationIdentity,
+    ) -> Option<String> {
+        self.version(&format!("conversation-{}", conversation.stable_key()))
+    }
+
+    pub(crate) fn remember_conversation_version(
+        &self,
+        conversation: &crate::project_bindings::ConversationIdentity,
+        version: &str,
+    ) -> std::io::Result<()> {
+        let key = format!("conversation-{}", conversation.stable_key());
+        if self.version(&key).is_none() {
+            self.record_reload(&key, version)?;
+        }
+        Ok(())
+    }
     pub(crate) fn for_current_user(config: &AppConfig) -> Self {
         let scope = match &config.openai_tunnel {
             Some(tunnel) => private_key(&["tunnel", &tunnel.tunnel_id]),
@@ -98,6 +129,45 @@ impl ConnectorSchemaStore {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn markdown_toggle_changes_schema_without_changing_release_version() {
+        assert_ne!(
+            version_for_markdown_chat(false),
+            version_for_markdown_chat(true)
+        );
+        assert_eq!(version_for_markdown_chat(false), env!("CARGO_PKG_VERSION"));
+    }
+
+    #[test]
+    fn conversation_baseline_survives_restart_without_becoming_a_connector_reload() {
+        let root = tempfile::tempdir().unwrap();
+        let identity =
+            crate::project_bindings::ConversationIdentity::from_openai_session("chat").unwrap();
+        let store = ConnectorSchemaStore {
+            directory: Some(root.path().into()),
+            ..Default::default()
+        };
+        store
+            .remember_conversation_version(&identity, "1.4.0")
+            .unwrap();
+        store
+            .remember_conversation_version(&identity, "1.4.0+markdown-chat")
+            .unwrap();
+        let restarted = ConnectorSchemaStore {
+            directory: Some(root.path().into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            restarted.conversation_version(&identity).as_deref(),
+            Some("1.4.0")
+        );
+        assert!(
+            restarted
+                .version(&caller_key(&meta("user", "org", "chat")).unwrap())
+                .is_none()
+        );
+    }
 
     fn meta(subject: &str, organization: &str, conversation: &str) -> RequestMetaObject {
         serde_json::from_value(json!({"openai/subject":subject,"openai/organization":organization,"openai/session":conversation})).unwrap()

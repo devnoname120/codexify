@@ -519,6 +519,7 @@ impl Tool for FakeTool {
             is_error: false,
             structured_content: None,
             meta: None,
+            new_chat_message_from_user: None,
             audit: Default::default(),
         }
     }
@@ -545,6 +546,7 @@ fn derives_content_from_text_blocks() {
         is_error: false,
         structured_content: None,
         meta: None,
+        new_chat_message_from_user: None,
         audit: Default::default(),
     };
     let filled = apply_default_structured(&tool, &result);
@@ -569,6 +571,7 @@ fn joins_multiple_text_blocks_and_skips_non_text() {
         is_error: false,
         structured_content: None,
         meta: None,
+        new_chat_message_from_user: None,
         audit: Default::default(),
     };
     let filled = apply_default_structured(&tool, &result);
@@ -586,6 +589,7 @@ fn leaves_tools_own_structured_content_alone() {
         is_error: false,
         structured_content: Some(json!({ "current_time": "2026-01-01 00:00:00 UTC" })),
         meta: None,
+        new_chat_message_from_user: None,
         audit: Default::default(),
     };
     let filled = apply_default_structured(&tool, &result);
@@ -603,6 +607,7 @@ fn adds_nothing_when_tool_declares_no_output_schema() {
         is_error: false,
         structured_content: None,
         meta: None,
+        new_chat_message_from_user: None,
         audit: Default::default(),
     };
     let filled = apply_default_structured(&tool, &result);
@@ -617,6 +622,7 @@ fn adds_nothing_to_an_error_result() {
         is_error: true,
         structured_content: None,
         meta: None,
+        new_chat_message_from_user: None,
         audit: Default::default(),
     };
     let filled = apply_default_structured(&tool, &result);
@@ -631,6 +637,7 @@ fn does_not_mutate_the_result_it_was_given() {
         is_error: false,
         structured_content: None,
         meta: None,
+        new_chat_message_from_user: None,
         audit: Default::default(),
     };
     let _ = apply_default_structured(&tool, &result);
