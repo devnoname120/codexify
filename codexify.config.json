@@ -2,6 +2,11 @@
   "workDir": null,
   "debug": false,
   "uiWidgets": true,
+  "markdownChat": {
+    "enabled": false,
+    "maxWaitMs": 270000,
+    "ntfy": null
+  },
   "conversationAuthToken": null,
   "port": 3000,
   "tree": {

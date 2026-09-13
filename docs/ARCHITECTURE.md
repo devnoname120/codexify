@@ -456,6 +456,47 @@ quickstart has written it. `CODEXIFY_SKIP_SERVICE=1` remains an unconditional
 service bypass. Final first-run instructions use terminal-aware emphasis without
 adding control sequences to redirected or `NO_COLOR` output.
 
+### Optional Markdown chat (`markdown_chat`, `tools/markdown_chat.rs`)
+
+`markdownChat` is default-disabled and owns conversation-scoped `CHAT.md` files
+under the existing workspace metadata base. A shared `MarkdownChatStore` resolves
+one channel per active root and conversation identity, with unique ephemeral
+transport identities for clients lacking stable metadata. Channels are initialized
+only after authorization and workspace resolution. Cursor persistence is separate
+from project notes and remains active when ordinary working memory is disabled.
+
+The store serializes file operations per channel and persists a UTF-8 byte offset
+plus a small boundary anchor. Agent appends snapshot pending input first and use
+the actual append position, not a later EOF, to preserve user input racing before
+or after the write. Recognizable agent blocks prevent accidental replay as user
+instructions. Invalid boundaries or oversized unread segments fail without partial
+delivery or silent acknowledgment. Arbitrary external editor rewrites are not
+transactional with server writes.
+
+The three tools consume messages; the common dispatch boundary only peeks.
+Waiting uses `notify` on the directory plus a fallback timer and cancellation;
+optional ntfy publication is bounded and independent of transcript persistence.
+`get_agent_brief` supplies the current channel path and directs communication
+through the chat tools. Historical file reads get a narrowly scoped exception for
+that file, retain ordinary output budgets, and suppress their payload previews.
+
+Dispatch validates and budgets each original result before adding the optional
+`new_chat_message_from_user` field. User text stays in a separate internal result
+member until after payload logging and audit accounting. Schema augmentation is
+centralized alongside this boundary; complex or conflicting upstream results
+receive an `upstream_result` envelope rather than corrupting the original schema.
+Text mirrors preserve visibility in hosts that ignore structured output. Disabled
+installations retain the original advertised schemas and do not expose chat tools.
+
+Schema revisions use an explicit `+markdown-chat` suffix only when enabled, not a
+schema fingerprint. Connector reloads record the version actually advertised by
+the current configuration. A persisted conversation baseline supplies toggle
+warnings when discovery identity is absent; that baseline is not evidence of a
+connector reload. The setup widget keeps the old conversation marker while
+refreshing live status, so a same-version enable/disable is not mistaken for an
+up-to-date schema. Host cancellation and model-imposed limits remain outside the
+communication subsystem's control.
+
 ### Signed asynchronous releases (`release.yml`, `finalize-release.yml`)
 
 The release matrix signs each final Darwin Mach-O with the Developer ID
@@ -1024,7 +1065,7 @@ command sessions, and diff checkpoints retain the new conversation's identity.
 No raw conversation ID or setup ref is included. Clipboard denial leaves a
 selectable textarea; periodic status checks preserve the textarea while disabling
 actions during revalidation. Failed checks remove the continuation offer.
-New cards use setup resource v5; v1-v4 remain readable.
+New cards use setup resource v6; v1-v5 remain readable.
 
 The same compact card retains its user-driven update and diagnostic actions.
 

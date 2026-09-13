@@ -6,10 +6,28 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Opt-in `markdownChat` communication gives each conversation its own `CHAT.md`
+  outside the repository by default. `chat_read`, `chat_write`, and `chat_await`
+  support complete unread Markdown, persistent cursors, native directory watches
+  with polling fallback, a configurable 270-second default wait, and optional
+  ntfy delivery using a token stored directly in local configuration.
+- Every advertised tool gains an optional `new_chat_message_from_user` output
+  when Markdown chat is enabled. User messages bypass ordinary output truncation,
+  remain pending until a chat tool acknowledges them, and do not enter payload
+  logs. The brief directs communication and waiting through the chat tools.
+
 ### Fixed
 
 - Release staging now retries draft-release readback to tolerate GitHub's brief
   post-creation consistency delay without requiring a failed-job rerun.
+- Setup status detects Markdown-chat schema toggles without a package-version
+  change, preserves each conversation's baseline, and distinguishes an observed
+  connector reload from an older conversation. The widget explains the toggle
+  and directs the user to refresh or start a new conversation as appropriate.
+- `grep` accepts an explicit file as well as a directory, including the current
+  conversation's read-only Markdown chat history.
 
 ## [1.4.0] - 2026-09-10
 

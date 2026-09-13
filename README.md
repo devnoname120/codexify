@@ -130,6 +130,34 @@ A conversation stays attached to its selected project. Start another chat for a
 different project; see the [workspace guide](https://github.com/devnoname120/codexify/wiki/Multi-Project-Mode)
 for project selection and worktree options.
 
+## Markdown chat (optional)
+
+Steer an active conversation by appending to a local Markdown file instead of
+sending another ChatGPT message. Enable the feature in your Codexify config:
+
+```json
+{
+  "markdownChat": {
+    "enabled": true,
+    "maxWaitMs": 270000
+  }
+}
+```
+
+Restart Codexify, refresh the connector's tools in ChatGPT Settings, and start a
+new conversation. `get_agent_brief` reports that conversation's `CHAT.md` path,
+stored with project metadata outside the repository by default. Every
+conversation has its own file, even when several use the same checkout.
+
+Append your instructions at the bottom and save. The agent uses `chat_read`,
+`chat_write`, and `chat_await`; other tool results also deliver unread messages
+without consuming them. Optional ntfy notifications send the agent's Markdown to
+your configured topic. The feature is disabled by default and does not guarantee
+unlimited ChatGPT runtime or alter OpenAI's usage limits.
+
+See [Markdown chat configuration and semantics](docs/REFERENCE.md#markdown-chat)
+for notifications, timeouts, schema refreshes, and append-only editing rules.
+
 ## Use it safely
 
 **Codexify runs real commands with your user account's permissions.** Shell

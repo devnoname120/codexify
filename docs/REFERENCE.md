@@ -13,6 +13,7 @@ For a first setup, start with the [README](../README.md#get-started) or the
 - [File import](#native-host-file-ingress) and [file export](#native-host-file-egress)
 - [Multiple projects](#multi-project-mode) and [diffs](#diff-checkpoints-and-chatgpt-ui)
 - [Saved context](#context-and-memory), [agent instructions](#acting-as-a-codex-agent), and [shells](#shells-and-the-host)
+- [Optional Markdown chat](#markdown-chat)
 - [Project conventions](#agentsmd) and [skills](#skills)
 - [Bridging MCP servers](#bridging-other-mcp-servers)
 - [ChatGPT connection](#connecting-to-chatgpt), [host allowlist](#host-allowlist), and [security](#security)
@@ -389,8 +390,8 @@ A static connector uses its fixed workspace without a selection call; transport-
 workspaces cannot use `resumePath`. No setup secret or raw conversation ID is
 embedded in the prompt.
 
-Existing v1–v4 setup resource URLs remain readable, while new cards use
-v5. Already mounted copies of the old widget must be reloaded after deployment to
+Existing v1–v5 setup resource URLs remain readable, while new cards use
+v6. Already mounted copies of the old widget must be reloaded after deployment to
 receive this behavior. The model-facing setup continuation remains in the tool
 result but is not rendered to the user.
 
@@ -1340,6 +1341,152 @@ ChatGPT project bindings live separately under `~/.codexify/conversation-project
 In single-project mode, `instructions` is rebuilt for every MCP session, so a new conversation opens with the saved plan and notes already in front of it, under a `## Saved state` heading between the environment and `AGENTS.md`. In multi-project mode the initialize-time instructions deliberately remain project-neutral: ChatGPT supplies its stable conversation identifier on tool calls, after the MCP initialize exchange. Calling `get_agent_brief` restores an existing project or scratch binding automatically; for a new conversation it reports that one workspace choice is required and directs the model to an exact `set_project_root` call or the setup-card/listing flow. After binding, `get_agent_brief` returns the environment, saved state, skills, and applicable project instructions from the active root.
 
 The division of labour is worth keeping straight: `AGENTS.md` is what is true of the **project** and belongs in the repo; notes are what is true of the **task in flight** and belong here.
+
+**Budget exception:** when Markdown chat is enabled, its three tools and the
+`new_chat_message_from_user` field bypass the ordinary output token limit.
+Historical `read_file` and `grep` calls still use normal limits.
+
+## Markdown chat
+
+`markdownChat` is disabled by default. When enabled, it provides a local
+communication channel for an active conversation without requiring a new
+ChatGPT message for every user instruction. It does not bypass model limits,
+guarantee quota savings, or keep a host-terminated turn alive.
+
+```json
+{
+  "markdownChat": {
+    "enabled": true,
+    "maxWaitMs": 270000,
+    "ntfy": {
+      "url": "https://ntfy.example/codexify",
+      "token": "replace-with-your-ntfy-access-token"
+    }
+  }
+}
+```
+
+`enabled` defaults to `false`; `maxWaitMs` defaults to **270000 ms (4 min 30 s)**
+and must be between 1000 and 300000. The tools do not accept a timeout override.
+Omit `ntfy` or set it to `null` for file-only communication. Its `token` is optional
+and, when configured, is stored directly in the JSON file. Use HTTPS unless an
+explicitly trusted local notification server requires HTTP. Keep the config and
+private topic URL out of source control.
+
+For example, `codexify config set markdownChat.enabled true` enables the setting.
+Configuration is loaded when the service starts: restart the service after a
+change. Enabling or disabling this feature changes the advertised tools and
+output schemas, so also refresh the connector in ChatGPT Settings and start a
+new conversation to load the new schema. The setup card warns about a changed
+schema even when the executable version is unchanged. An observed connector
+reload updates connector state, not the schema already loaded in older chats.
+
+### Files and conversation identity
+
+After setup and workspace selection, Codexify creates the channel on the first
+authorized tool call, including setup for a previously selected workspace,
+selection, or resumption. Existing files are never overwritten during setup.
+`get_agent_brief` reports the exact absolute path:
+
+```text
+~/.codexify/projects/<workspace-key>/chats/<conversation-key>/CHAT.md
+~/.codexify/projects/<workspace-key>/chats/<conversation-key>/cursor.json
+```
+
+The base directory follows `memory.dir` when customized; `memory.enabled` does
+not disable Markdown chat. Keep a custom metadata directory outside the project
+to avoid including conversations in repository searches, commits, or exports.
+Different conversations use different files even with worktrees disabled.
+Reconnecting the same ChatGPT conversation preserves its file and cursor.
+Resuming a workspace from a new conversation creates a new channel rather than
+silently importing the previous chat. Clients without stable conversation
+metadata have transport-scoped files and in-memory cursors instead.
+
+Append user messages at the bottom and save as UTF-8. Do not rewrite prior text,
+change line endings, or delete the file while an agent is active. An editor's
+atomic replace-on-save is supported when it preserves the preceding content.
+Avoid saving a stale editor buffer over an agent message: arbitrary external
+editors do not participate in Codexify's append lock. Detected cursor-boundary
+changes, malformed UTF-8, missing files, and incomplete message records produce
+explicit errors without acknowledging unread text. Restore the transcript before
+retrying. Do not delete cursor state to clear an error.
+
+Agent messages are surrounded by reserved `codexify-agent-message` Markdown
+comments so replay does not mistake them for user instructions. Do not edit or
+copy those boundary comments into user messages. Ordinary agent file operations
+must treat chat history as read-only; use `chat_write` to send messages. The exact
+current chat path is accepted by `read_file` and `grep` for historical lookup,
+without advancing the read cursor. Other conversation paths do not receive this
+metadata-directory exception. This is not an OS sandbox: unrestricted shell
+commands still have the user's filesystem permissions.
+
+### Tools and passive message delivery
+
+| Tool | Arguments | Behavior |
+| --- | --- | --- |
+| `chat_read` | None | Returns all unread user Markdown and advances the cursor. With no new text, directs the agent to continue useful work or write and await when blocked. |
+| `chat_write` | `message`: Markdown string | Reads pending user text, appends the agent message, optionally notifies, and returns that pending text explicitly labelled as sent before the agent wrote. |
+| `chat_await` | None | Immediately returns pending text, otherwise waits for a user append, the configured deadline, or cancellation. A normal timeout directs another wait; cancellation does not. |
+
+When enabled, **every top-level tool** advertises the optional string field
+`new_chat_message_from_user`, including bridged, gateway, catalog, and widget
+tools. It is omitted when there is no pending text. Ordinary tool results only
+peek, so they repeat the full unread message until a chat tool acknowledges it.
+Errors also deliver pending text when the conversation is authorized and has a
+workspace. A failed chat delivery does not undo or request reexecution of a
+successful file, command, or upstream operation.
+
+Native structured outputs retain their original fields. Schema-less object
+results can also retain their fields. Scalar, array, conflicting, or complex/open
+upstream structured results use `upstream_result` to preserve the original value
+without overwriting it. Content blocks, images, resource links, and widget
+metadata are preserved. User messages are model-visible structured data, with a
+text-content mirror for clients that ignore structured results; they are not
+hidden in component-only metadata.
+
+The new user-message field and chat-tool responses bypass Codexify's ordinary
+output token budget. No prefix or tail is silently substituted for the message.
+Unread segments and agent messages above **16 MiB** instead fail explicitly
+without consuming the unread input. ChatGPT and other hosts may impose their own
+transport or context limits; Codexify cannot guarantee acceptance of arbitrarily
+large tool results. Historical `read_file` and `grep` results keep their normal
+pagination and output limits.
+
+The agent brief directs questions, progress, and completion reports to
+`chat_write`, and directs blocked or idle agents to `chat_await` rather than
+voluntarily ending their turn. Timeouts request another wait until a reply
+arrives. Explicit user stop/disable instructions, cancellation, and higher-priority
+requirements still apply. No server-side instruction can guarantee that ChatGPT
+never ends a turn.
+
+### Waiting and notifications
+
+Waiting uses a native watch on the parent directory so replace-on-save editors
+are detected. A 500 ms polling fallback handles unavailable watchers, with a
+2-second safety recheck even when native watching is available. The file is
+checked after watcher registration and once more at the deadline to avoid a
+missed wake-up. No background polling continues after the tool returns.
+
+The 270-second default is a configurable choice, **not a documented ChatGPT
+maximum**. A [first-hand report](https://community.openai.com/t/agentsdk-and-chatgpt-ui-fails-running-time-consuming-mcp-tool-with-typeerror-fetch-failed/1366562)
+describes approximately five-minute and later shorter timeouts; [OpenAI Support](https://community.openai.com/t/progress-notifications-not-working-in-chatgpt-mcp-ts-sdk-1-20-0/1367559/5)
+states that no fixed ChatGPT web MCP timeout is documented. Reduce `maxWaitMs`
+when a host or proxy terminates calls earlier.
+
+Each successful `chat_write` sends the exact agent Markdown to the configured
+ntfy topic using POST, `Markdown: yes`, and an optional bearer token. Requests have
+a bounded timeout and do not follow redirects. See [ntfy publishing](https://docs.ntfy.sh/publish/)
+for its own payload limits, attachment handling, and subscriber behavior. The
+provider receives the message content; configure it only when that destination
+is appropriate for your project's messages.
+
+The transcript append is independent of notification delivery. A network failure
+returns `notification: failed` while preserving the written message; do not resend
+the same `chat_write` merely to retry notification delivery. Normal await timeouts
+do not resend notifications. The status distinguishes a file-only message from a
+notification accepted by ntfy, and never claims the human has read it. Chat bodies,
+explicit chat-history payloads, topic URLs, and tokens are excluded or redacted
+from Codexify's ordinary tool payload diagnostics.
 
 ## Acting as a Codex agent
 
