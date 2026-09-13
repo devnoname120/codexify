@@ -754,7 +754,10 @@ impl ServerHandler for CodexHandler {
                 .markdown_chat
                 .chat(&effective, conversation.as_ref(), &self.session);
             let pending = match chat {
-                Ok(chat) if !matches!(name.as_str(), "chat_read" | "chat_write" | "chat_await") => {
+                Ok(chat)
+                    if result.is_error
+                        || !matches!(name.as_str(), "chat_read" | "chat_write" | "chat_await") =>
+                {
                     chat.read(false).await.map(|snapshot| snapshot.text)
                 }
                 Ok(chat) => chat.ensure().await.map(|_| String::new()),
