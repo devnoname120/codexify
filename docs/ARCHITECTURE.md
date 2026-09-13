@@ -450,11 +450,13 @@ result as a conversation authorization grant.
 Both installers resolve the release, verify its published SHA-256 checksum,
 publish the executable, update user PATH state, and run legacy-state migration.
 They resolve the selected config from `CODEXIFY_CONFIG` or the default user path
-before touching the native service. An existing regular config enables the normal
-service-install path; a missing config defers all service enable/start work until
-quickstart has written it. `CODEXIFY_SKIP_SERVICE=1` remains an unconditional
-service bypass. Final first-run instructions use terminal-aware emphasis without
-adding control sequences to redirected or `NO_COLOR` output.
+before touching the native service. An existing regular config must pass the same
+effective-config validation as server startup before the normal service-install
+path runs; a missing or invalid config defers all service enable/start work until
+the selected configuration is valid. `CODEXIFY_SKIP_SERVICE=1` remains an
+unconditional service bypass. Final first-run instructions direct deferred setups
+through quickstart and use terminal-aware emphasis without adding control sequences
+to redirected or `NO_COLOR` output.
 
 ### Optional Markdown chat (`markdown_chat`, `tools/markdown_chat.rs`)
 

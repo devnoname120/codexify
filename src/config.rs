@@ -211,6 +211,9 @@ pub enum ConfigCommand {
     Unset(ConfigUnsetArgs),
     /// Open a validated staging copy in the configured text editor.
     Edit,
+    /// Validate the selected configuration using server startup rules.
+    #[command(hide = true)]
+    Validate,
 }
 
 #[derive(Args, Debug)]
@@ -1462,9 +1465,9 @@ fn resolve_audit(file: Option<PartialAudit>, cli: &Cli) -> Result<AuditConfig, S
 
 /// Load and merge config. Errors are returned as strings for the caller to
 /// print and exit on, mirroring the TS which validates and `process.exit`s.
-fn load_config_with_announcements(cli: Cli, announce: bool) -> Result<AppConfig, String> {
-    let mut file = load_file_config(&cli, announce)?;
-    let work_dir = resolve_configured_work_dir(&cli, file.work_dir.as_deref())?;
+fn load_config_with_announcements(cli: &Cli, announce: bool) -> Result<AppConfig, String> {
+    let mut file = load_file_config(cli, announce)?;
+    let work_dir = resolve_configured_work_dir(cli, file.work_dir.as_deref())?;
     let project_clone_dir = resolve_project_clone_dir(
         &work_dir,
         cli.project_clone_dir.as_deref(),
@@ -1516,12 +1519,12 @@ fn load_config_with_announcements(cli: Cli, announce: bool) -> Result<AppConfig,
     }
 
     let project_catalog = resolve_project_catalog(&mut file);
-    let mcp_servers = resolve_mcp_servers(&mut file, &cli, announce)?;
-    let openai_tunnel = resolve_openai_tunnel(file.openai_tunnel, &cli)?;
-    let tool_logging = resolve_tool_logging(file.tool_logging, &cli)?;
-    let audit = resolve_audit(file.audit, &cli)?;
-    let worktrees = resolve_worktree_config(file.worktrees.take(), &cli, announce);
-    let api_key = cli.api_key.or(file.api_key);
+    let mcp_servers = resolve_mcp_servers(&mut file, cli, announce)?;
+    let openai_tunnel = resolve_openai_tunnel(file.openai_tunnel, cli)?;
+    let tool_logging = resolve_tool_logging(file.tool_logging, cli)?;
+    let audit = resolve_audit(file.audit, cli)?;
+    let worktrees = resolve_worktree_config(file.worktrees.take(), cli, announce);
+    let api_key = cli.api_key.clone().or(file.api_key);
     if api_key.is_some() && openai_tunnel.is_some() {
         return Err(
             "apiKey/--api-key cannot be combined with openaiTunnel: native tunnel mode generates a private per-process bearer for the loopback MCP hop"
@@ -1571,11 +1574,15 @@ fn load_config_with_announcements(cli: Cli, announce: bool) -> Result<AppConfig,
 }
 
 pub fn load_config(cli: Cli) -> Result<AppConfig, String> {
-    load_config_with_announcements(cli, true)
+    load_config_with_announcements(&cli, true)
 }
 
 pub fn load_config_quiet(cli: Cli) -> Result<AppConfig, String> {
-    load_config_with_announcements(cli, false)
+    load_config_with_announcements(&cli, false)
+}
+
+pub fn validate_config_quiet(cli: &Cli) -> Result<(), String> {
+    load_config_with_announcements(cli, false).map(|_| ())
 }
 
 pub fn load_project_catalog_for_cli(cli: &Cli) -> Result<ProjectCatalog, String> {

@@ -147,15 +147,21 @@ try {
 
     if ($env:CODEXIFY_SKIP_SERVICE -ne '1') {
         if (Test-Path -LiteralPath $ConfigPath -PathType Leaf) {
-            & $Target service --help *> $null
+            & $Target --config $ConfigPath config validate *> $null
             if ($LASTEXITCODE -eq 0) {
-                & $Target service install
-                if ($LASTEXITCODE -ne 0) {
-                    throw 'The executable was installed, but the background service could not be installed. Set CODEXIFY_SKIP_SERVICE=1 to install without it.'
+                & $Target service --help *> $null
+                if ($LASTEXITCODE -eq 0) {
+                    & $Target service install
+                    if ($LASTEXITCODE -ne 0) {
+                        throw 'The executable was installed, but the background service could not be installed. Set CODEXIFY_SKIP_SERVICE=1 to install without it.'
+                    }
+                }
+                else {
+                    Write-Warning 'The installed release does not provide service management; executable installation will continue.'
                 }
             }
             else {
-                Write-Warning 'The installed release does not provide service management; executable installation will continue.'
+                Write-Host "Background service setup deferred because the selected config is not valid for startup: $ConfigPath"
             }
         }
         else {
