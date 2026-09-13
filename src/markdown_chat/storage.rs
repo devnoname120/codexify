@@ -9,6 +9,10 @@ use tokio_util::sync::CancellationToken;
 
 use super::MAX_UNREAD_BYTES;
 
+#[path = "widget.rs"]
+mod widget;
+pub use widget::{UserSendReceipt, WidgetPage};
+
 const HEADER: &str = "# Codexify Chat\n\nAppend user messages at the bottom and save the file. Do not change earlier content\nwhile the agent is active. The agent sends messages only through chat_write.\n";
 const AGENT_START: &str = "\n\n<!-- codexify-agent-message:v1:start id=\"";
 const ANCHOR_BYTES: usize = 64;
@@ -35,12 +39,14 @@ struct Cursor {
     last_agent_end: Option<u64>,
     #[serde(default)]
     notification: NotificationState,
+    #[serde(default)]
+    delivered_through: u64,
 }
 
 pub struct ChatSnapshot {
     pub text: String,
     pub notification: NotificationState,
-    end: u64,
+    pub end: u64,
 }
 
 pub struct AppendReceipt {
@@ -390,36 +396,7 @@ fn snapshot(file: &mut File, cursor: &Cursor) -> Result<ChatSnapshot, String> {
 }
 
 fn user_text(text: &str) -> Result<String, String> {
-    let mut output = String::new();
-    let mut position = 0;
-    while let Some(relative) = text[position..].find(AGENT_START) {
-        let start = position + relative;
-        output.push_str(&text[position..start]);
-        let id_start = start + AGENT_START.len();
-        let Some(id_end) = text[id_start..].find("\" -->\n") else {
-            return Err("CHAT.md ends in an incomplete agent message; finish restoring the append before retrying".into());
-        };
-        let id = &text[id_start..id_start + id_end];
-        if id.len() > 80
-            || id.is_empty()
-            || !id.bytes().all(|byte| byte.is_ascii_digit() || byte == b'-')
-        {
-            output.push_str(AGENT_START);
-            position = id_start;
-            continue;
-        }
-        let ending = format!("\n\n<!-- codexify-agent-message:v1:end id=\"{id}\" -->\n");
-        let body_start = id_start + id_end + "\" -->\n".len();
-        let Some(end) = text[body_start..].find(&ending) else {
-            return Err(
-                "CHAT.md contains an incomplete agent message; restore its end before retrying"
-                    .into(),
-            );
-        };
-        position = body_start + end + ending.len();
-    }
-    output.push_str(&text[position..]);
-    Ok(output)
+    widget::user_text(text)
 }
 
 #[cfg(test)]

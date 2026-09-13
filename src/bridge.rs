@@ -337,6 +337,7 @@ fn map_call_result_with(
         structured_content: result.structured_content,
         meta: result.meta,
         new_chat_message_from_user: None,
+        chat_delivery_end: None,
         audit: Default::default(),
     }
 }

@@ -32,14 +32,19 @@ pub fn load_tools_for_mode(multi_project: bool) -> Vec<Box<dyn Tool>> {
 }
 
 pub fn load_tools_for_config(config: &AppConfig) -> Vec<Box<dyn Tool>> {
-    load_tools_with_options(
+    let mut tools = load_tools_with_options(
         config.multi_project,
         config.conversation_auth_token.is_some(),
         config.artifact_ingress.enabled,
         config.artifact_egress.enabled,
         config.markdown_chat.enabled,
         config.artifact_ingress.max_concurrent_downloads,
-    )
+    );
+    if config.markdown_chat.enabled && config.ui_widgets {
+        tools.push(Box::new(tools::markdown_chat_ui::ChatUiTool::Send));
+        tools.push(Box::new(tools::markdown_chat_ui::ChatUiTool::State));
+    }
+    tools
 }
 
 fn load_tools_with_options(

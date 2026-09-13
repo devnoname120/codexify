@@ -47,6 +47,8 @@ pub struct ToolResult {
     pub audit: ToolAuditMetadata,
     /// Kept outside ordinary output budgeting and logging until MCP serialization.
     pub new_chat_message_from_user: Option<String>,
+    /// Delivery receipts do not consume the Markdown-chat read cursor.
+    pub chat_delivery_end: Option<u64>,
 }
 
 impl ToolResult {
@@ -58,6 +60,7 @@ impl ToolResult {
             structured_content: None,
             meta: None,
             new_chat_message_from_user: None,
+            chat_delivery_end: None,
             audit: ToolAuditMetadata::default(),
         }
     }
@@ -70,6 +73,7 @@ impl ToolResult {
             structured_content: None,
             meta: None,
             new_chat_message_from_user: None,
+            chat_delivery_end: None,
             audit: ToolAuditMetadata::default(),
         }
     }
@@ -85,6 +89,7 @@ impl ToolResult {
             structured_content: None,
             meta: None,
             new_chat_message_from_user: None,
+            chat_delivery_end: None,
             audit: ToolAuditMetadata::default(),
         }
     }

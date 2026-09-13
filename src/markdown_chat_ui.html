@@ -1,0 +1,378 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Markdown chat</title>
+<style>
+:root { color-scheme: light dark; --bg:#fff; --surface:#f6f7f8; --ink:#202427; --muted:#697177; --border:#dbe0e3; --user:#e4f3ed; --agent:#f0f2f4; --accent:#136f50; --tick:#6e777d; --read:#0078bc; --error:#ad2d30; }
+@media (prefers-color-scheme:dark) { :root:not([data-theme="light"]) { --bg:#181b1b; --surface:#232727; --ink:#eef1f1; --muted:#adb7b6; --border:#3a4241; --user:#174c3e; --agent:#2b3130; --accent:#82d9b1; --tick:#b5c0bd; --read:#59c9f6; --error:#ffadae; } }
+:root[data-theme="dark"] { --bg:#181b1b; --surface:#232727; --ink:#eef1f1; --muted:#adb7b6; --border:#3a4241; --user:#174c3e; --agent:#2b3130; --accent:#82d9b1; --tick:#b5c0bd; --read:#59c9f6; --error:#ffadae; }
+* { box-sizing:border-box; }
+body { margin:0; color:var(--ink); background:transparent; font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+button,textarea { font:inherit; }
+button { cursor:pointer; }
+button:disabled { cursor:default; opacity:.5; }
+button:focus-visible,textarea:focus-visible,a:focus-visible { outline:2px solid var(--accent); outline-offset:3px; }
+[hidden] { display:none!important; }
+#chat { max-width:640px; margin:auto; overflow:hidden; border:1px solid var(--border); border-radius:18px; background:var(--bg); }
+.header { display:flex; align-items:center; gap:12px; padding:13px 16px; border-bottom:1px solid var(--border); }
+.heading { flex:1; min-width:0; }
+h1 { font-size:15px; font-weight:650; margin:0; }
+.subtitle { font-size:12px; color:var(--muted); }
+.icon-button { width:34px; height:34px; padding:6px; border:0; background:transparent; color:var(--muted); border-radius:50%; }
+svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; stroke-width:1.9; stroke-linecap:round; stroke-linejoin:round; }
+#messages { overflow:auto; overscroll-behavior:contain; max-height:360px; min-height:130px; padding:16px; display:flex; flex-direction:column; gap:12px; scrollbar-width:thin; }
+#older { align-self:center; background:transparent; color:var(--accent); border:1px solid var(--border); border-radius:14px; padding:4px 12px; font-size:12px; }
+#empty { text-align:center; margin:auto; padding:24px 10px; color:var(--muted); font-size:13px; }
+.message { max-width:92%; border-radius:13px; padding:10px 12px 6px; align-self:flex-start; background:var(--agent); min-width:75px; }
+.message.user { align-self:flex-end; background:var(--user); border-bottom-right-radius:4px; }
+.message.agent { border-bottom-left-radius:4px; }
+.author { font-size:11px; font-weight:650; margin-bottom:3px; color:var(--muted); }
+.markdown { overflow-wrap:anywhere; min-width:0; }
+.markdown p { margin:0 0 7px; white-space:pre-wrap; }
+.markdown p:last-child { margin-bottom:0; }
+.markdown h2,.markdown h3,.markdown h4 { font-size:1em; margin:8px 0 4px; }
+.markdown h2:first-child,.markdown h3:first-child,.markdown h4:first-child { margin-top:0; }
+.markdown ul,.markdown ol { margin:5px 0; padding-left:20px; }
+.markdown blockquote { margin:6px 0; padding:2px 9px; border-left:2px solid var(--muted); }
+.markdown pre { white-space:pre-wrap; overflow-wrap:anywhere; padding:10px; border-radius:8px; background:var(--bg); overflow:auto; margin:8px 0; }
+.markdown code { font:12px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace; }
+.markdown :not(pre)>code { background:var(--bg); padding:1px 4px; border-radius:4px; }
+.markdown a { color:var(--accent); text-decoration:underline; }
+.receipt { display:flex; align-items:center; justify-content:flex-end; min-height:20px; margin-top:3px; gap:5px; color:var(--muted); font-size:11px; }
+.ticks { width:22px; height:15px; color:var(--tick); }
+.ticks.delivered { color:var(--read); }
+.retry { border:0; background:transparent; color:var(--error); padding:0 4px; font-size:12px; }
+.footer { border-top:1px solid var(--border); padding:10px 12px 9px; background:var(--surface); }
+#composer { display:flex; gap:8px; align-items:flex-end; }
+#draft { flex:1; width:0; min-width:0; max-height:150px; resize:none; border:1px solid var(--border); border-radius:19px; background:var(--bg); color:var(--ink); padding:9px 13px; line-height:1.4; }
+#send { flex:0 0 38px; width:38px; height:38px; border:0; border-radius:50%; background:var(--accent); color:var(--bg); padding:9px; }
+#status { display:flex; align-items:center; gap:6px; color:var(--muted); font-size:11px; margin:7px 4px 0; }
+#status.error { color:var(--error); }
+#refresh { border:0; background:transparent; color:inherit; text-decoration:underline; padding:0 3px; font-size:11px; }
+@media(max-width:400px) { .header { padding:11px 12px; } #messages { padding:12px; max-height:310px; } .message { max-width:96%; } #draft { font-size:16px; } }
+</style>
+</head>
+<body>
+<section id="chat" aria-label="Markdown chat for this conversation">
+  <header class="header">
+    <div class="heading"><h1>Markdown chat</h1><div class="subtitle">This conversation only</div></div>
+    <button id="collapse" class="icon-button" aria-label="Collapse chat" aria-expanded="true" title="Collapse chat"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 14 6-6 6 6"/></svg></button>
+  </header>
+  <div id="panel">
+    <div id="messages" role="log" aria-label="Chat messages" aria-live="polite" aria-relevant="additions">
+      <button id="older" hidden>Load earlier messages</button>
+      <div id="empty">Loading this conversation...</div>
+    </div>
+    <div class="footer">
+      <form id="composer">
+        <textarea id="draft" rows="1" aria-label="Message the agent" placeholder="Message the agent..." spellcheck="true"></textarea>
+        <button id="send" type="submit" aria-label="Send message" title="Send message" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5m-6 6 6-6 6 6"/></svg></button>
+      </form>
+      <div id="status" role="status"><span id="status-text">Enter to send. Shift + Enter for a new line.</span><button id="refresh" hidden>Retry connection</button></div>
+    </div>
+  </div>
+</section>
+<script>
+(() => {
+  "use strict";
+  const META = "io.github.devnoname120/codexify/markdown-chat";
+  const el = id => document.getElementById(id);
+  const list = el("messages"), input = el("draft"), send = el("send"), older = el("older");
+  const records = new Map(), nodes = new Map(), pendingSends = new Map(), rpcPending = new Map();
+  let rpcId = 1, initialized = false, tornDown = false, pollTimer = null, saveTimer = null;
+  let refreshing = false, sending = false, loadingOlder = false, visible = true, collapsed = false;
+  let revision = null, before = null, hasMore = false, delivered = 0, chatFile = null, failures = 0, snapshotEnd = 0;
+  const saved = window.openai?.widgetState?.privateContent || {};
+  input.value = typeof saved.draft === "string" ? saved.draft : "";
+  collapsed = saved.collapsed === true;
+  for (const message of Array.isArray(saved.pending) ? saved.pending : []) {
+    if (typeof message.id === "string" && typeof message.markdown === "string") {
+      pendingSends.set(message.id, { ...message, failed:true, pending:false });
+    }
+  }
+
+  function make(tag, className = "", text) {
+    const node = document.createElement(tag);
+    node.className = className;
+    if (text !== undefined) node.textContent = text;
+    return node;
+  }
+  function icon(paths, className = "") {
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("viewBox", "0 0 24 18");
+    svg.setAttribute("aria-hidden", "true");
+    if (className) svg.setAttribute("class", className);
+    for (const d of paths) {
+      const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      path.setAttribute("d", d); svg.append(path);
+    }
+    return svg;
+  }
+  function post(message) { window.parent.postMessage({ jsonrpc:"2.0", ...message }, "*"); }
+  function rpc(method, params, timeout = 8000) {
+    return new Promise((resolve, reject) => {
+      const id = rpcId++;
+      const timer = setTimeout(() => { rpcPending.delete(id); reject(new Error("The connector did not respond. Your unsent message is retained.")); }, timeout);
+      rpcPending.set(id, { resolve, reject, timer });
+      post({ id, method, params });
+    });
+  }
+  async function call(name, args) {
+    if (tornDown) throw new Error("This widget has closed.");
+    let result;
+    if (typeof window.openai?.callTool === "function") {
+      let timer;
+      try {
+        result = await Promise.race([
+          window.openai.callTool(name, args),
+          new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("The connector did not respond. Retry uses the same message ID.")), 8000); })
+        ]);
+      } finally { clearTimeout(timer); }
+    } else if (initialized) {
+      result = await rpc("tools/call", { name, arguments:args });
+    } else { throw new Error("Waiting for the widget connection."); }
+    const queue = [result], seen = new Set();
+    let payload;
+    for (let i = 0; i < queue.length && i < 64; i++) {
+      const value = queue[i];
+      if (!value || typeof value !== "object" || seen.has(value)) continue;
+      seen.add(value);
+      if (value.isError || value.is_error) {
+        const detail = (Array.isArray(value.content) ? value.content : []).filter(part => part.type === "text").map(part => part.text).join("\n");
+        throw new Error(detail || "The chat operation failed.");
+      }
+      payload ||= value[META];
+      for (const key of ["_meta", "meta", "result", "call_tool_result", "callToolResult", "mcp_tool_result", "mcpToolResult", "toolResponseMetadata"]) {
+        if (value[key] && typeof value[key] === "object") queue.push(value[key]);
+      }
+    }
+    if (!payload) throw new Error("The connector returned no chat widget data. Refresh the connector tools.");
+    return payload;
+  }
+  function save() {
+    clearTimeout(saveTimer);
+    const state = { privateContent:{ draft:input.value, collapsed, pending:[...pendingSends.values()] } };
+    try { Promise.resolve(window.openai?.setWidgetState?.(state)).catch(() => {}); } catch {}
+  }
+  function status(text, error = false) {
+    el("status-text").textContent = text;
+    el("status").classList.toggle("error", error);
+    el("refresh").hidden = !error;
+  }
+  function resizeInput() {
+    input.style.height = "auto";
+    input.style.height = Math.min(150, input.scrollHeight) + "px";
+    send.disabled = sending || !input.value.trim();
+    size();
+  }
+  function size() {
+    if (initialized && !tornDown) post({ method:"ui/notifications/size-changed", params:{ width:document.documentElement.clientWidth, height:el("chat").offsetHeight } });
+  }
+  function theme(context) {
+    if (context?.theme === "dark" || context?.theme === "light") document.documentElement.dataset.theme = context.theme;
+  }
+  function inline(parent, text, depth = 0) {
+    if (depth > 3) { parent.append(document.createTextNode(text)); return; }
+    const pattern = /(`[^`\n]+`|\*\*[^*\n]+\*\*|\*[^*\n]+\*|\[[^\]\n]+\]\(https?:\/\/[^\s)]+\))/g;
+    let position = 0;
+    for (const match of text.matchAll(pattern)) {
+      parent.append(document.createTextNode(text.slice(position, match.index)));
+      const token = match[0]; let node;
+      if (token.startsWith("`")) node = make("code", "", token.slice(1, -1));
+      else if (token.startsWith("**")) { node = make("strong"); inline(node, token.slice(2, -2), depth + 1); }
+      else if (token.startsWith("*")) { node = make("em"); inline(node, token.slice(1, -1), depth + 1); }
+      else {
+        const split = token.indexOf("](");
+        node = make("a", "", token.slice(1, split));
+        node.href = token.slice(split + 2, -1); node.target = "_blank"; node.rel = "noopener noreferrer";
+        node.addEventListener("click", event => {
+          event.preventDefault();
+          const href = node.href;
+          const action = typeof window.openai?.openExternal === "function"
+            ? window.openai.openExternal({ href }) : rpc("ui/open-link", { url:href });
+          Promise.resolve(action).catch(() => status("The link could not be opened.", true));
+        });
+      }
+      parent.append(node); position = match.index + token.length;
+    }
+    parent.append(document.createTextNode(text.slice(position)));
+  }
+  function markdown(container, text) {
+    const lines = text.split("\n"); let paragraph = [], code = null, fence = null, bullets = null;
+    const flush = () => { if (paragraph.length) { const p = make("p"); inline(p, paragraph.join("\n")); container.append(p); paragraph = []; } };
+    for (const line of lines) {
+      const marker = line.match(/^\s*(`{3,}|~{3,})(.*)$/);
+      if (code !== null) {
+        if (marker && marker[1][0] === fence[0] && marker[1].length >= fence.length && !marker[2].trim()) {
+          const pre = make("pre"); pre.append(make("code", "", code.join("\n"))); container.append(pre); code = null; fence = null;
+        } else code.push(line);
+        continue;
+      }
+      if (marker) { flush(); bullets = null; code = []; fence = marker[1]; continue; }
+      if (!line.trim()) { flush(); bullets = null; continue; }
+      const heading = line.match(/^(#{1,6})\s+(.*)$/), item = line.match(/^\s*(?:([-*+])|\d+\.)\s+(.*)$/);
+      if (heading) { flush(); bullets = null; const h = make("h" + Math.min(4, heading[1].length + 1)); inline(h, heading[2]); container.append(h); }
+      else if (item) { flush(); const tag = item[1] ? "UL" : "OL"; if (!bullets || bullets.tagName !== tag) { bullets = make(tag.toLowerCase()); container.append(bullets); } const li = make("li"); inline(li, item[2]); bullets.append(li); }
+      else if (line.startsWith("> ")) { flush(); bullets = null; const quote = make("blockquote"); inline(quote, line.slice(2)); container.append(quote); }
+      else { bullets = null; paragraph.push(line); }
+    }
+    flush();
+    if (code !== null) { const pre = make("pre"); pre.append(make("code", "", code.join("\n"))); container.append(pre); }
+  }
+  function receipt(node, message) {
+    const state = message.role !== "user" ? "agent" : message.failed ? "failed" : message.pending ? "pending" : message.end <= delivered ? "delivered" : "saved";
+    if (node.dataset.state === state) return;
+    node.dataset.state = state;
+    node.replaceChildren();
+    if (message.role !== "user") return;
+    if (message.failed) {
+      node.append(make("span", "", "Not confirmed"));
+      const retry = make("button", "retry", "Retry"); retry.type = "button";
+      retry.addEventListener("click", () => { if (!sending) void deliver(message); }); node.append(retry); return;
+    }
+    if (message.pending) { node.append(make("span", "", "Sending...")); return; }
+    const read = message.end <= delivered;
+    const label = read ? "Delivered to agent" : "Saved to CHAT.md";
+    const mark = make("span", "ticks" + (read ? " delivered" : ""));
+    mark.setAttribute("role", "img"); mark.setAttribute("aria-label", label); mark.title = read ? "Included in an agent-facing tool response. This does not prove comprehension." : "Saved. Not yet returned to the agent.";
+    mark.append(icon(read ? ["m1 9 4 4L16 2", "m10 12 2 2L23 3"] : ["m5 9 4 4L20 2"])); node.append(mark);
+  }
+  function render() {
+    const atBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 50;
+    const messages = [...records.values()].sort((a, b) => a.start - b.start).concat([...pendingSends.values()]);
+    el("empty").hidden = messages.length > 0;
+    if (!messages.length && chatFile) el("empty").textContent = "Messages here stay in this conversation. Send an instruction to the agent below.";
+    let previousNode = el("empty");
+    for (const message of messages) {
+      let node = nodes.get(message.id);
+      if (!node) {
+        node = make("article", "message " + message.role); node.dataset.messageId = message.id;
+        node.append(make("div", "author", message.role === "user" ? "You" : "Agent"), make("div", "markdown"), make("div", "receipt"));
+        nodes.set(message.id, node);
+      }
+      if (node._markdown !== message.markdown) {
+        const body = node.querySelector(".markdown"); body.replaceChildren(); markdown(body, message.markdown); node._markdown = message.markdown;
+      }
+      receipt(node.querySelector(".receipt"), message);
+      if (previousNode.nextSibling !== node) list.insertBefore(node, previousNode.nextSibling);
+      previousNode = node;
+    }
+    older.hidden = !hasMore; older.disabled = loadingOlder;
+    if (atBottom && !loadingOlder) list.scrollTop = list.scrollHeight;
+    size();
+  }
+  function applyPage(page, history = false) {
+    const pendingCount = pendingSends.size;
+    if (typeof page.chat_file !== "string" || !Number.isSafeInteger(page.delivered_through)) throw new Error("Invalid chat state from connector.");
+    if (chatFile && chatFile !== page.chat_file) throw new Error("This widget's conversation binding changed. Open a new chat widget.");
+    chatFile = page.chat_file;
+    delivered = Math.max(delivered, page.delivered_through);
+    if (!history) revision = page.revision;
+    if (!page.unchanged) {
+      const gap = !history && snapshotEnd > 0 && page.has_more && page.messages?.[0]?.start > snapshotEnd;
+      for (const message of page.messages || []) {
+        if (!Number.isSafeInteger(message.start) || !Number.isSafeInteger(message.end) || typeof message.id !== "string" || typeof message.markdown !== "string" || !["user", "agent"].includes(message.role)) throw new Error("Invalid chat message from connector.");
+        const previous = records.get(message.id);
+        if (!previous || message.end >= previous.end) records.set(message.id, message);
+        pendingSends.delete(message.id);
+      }
+      if (before === null || history || !records.size || gap) { before = page.before; hasMore = page.has_more; }
+      if (!history) snapshotEnd = Math.max(snapshotEnd, ...[...(page.messages || [])].map(message => message.end));
+    }
+    render();
+    if (pendingCount !== pendingSends.size) save();
+  }
+  function schedule() {
+    clearTimeout(pollTimer);
+    if (tornDown || collapsed || !visible || document.hidden) return;
+    pollTimer = setTimeout(() => { void refresh(); }, failures ? Math.min(30000, 2000 * 2 ** failures) : 2000);
+  }
+  async function refresh() {
+    if (refreshing || tornDown || collapsed || !visible || document.hidden) return;
+    refreshing = true;
+    try {
+      applyPage(await call("chat_ui_state", revision ? { revision } : {})); failures = 0;
+      status("Enter to send. Shift + Enter for a new line.");
+    } catch (error) { failures++; status(error.message || "Connection unavailable. Messages are retained.", true); }
+    finally { refreshing = false; schedule(); }
+  }
+  async function deliver(message) {
+    if (sending || tornDown) return;
+    sending = true; message.failed = false; message.pending = true;
+    pendingSends.set(message.id, message); render(); resizeInput(); save();
+    try {
+      const payload = await call("chat_ui_send", { request_id:message.id, message:message.markdown });
+      if (payload.sent?.id !== message.id || !Number.isSafeInteger(payload.sent.end)) throw new Error("The send receipt was incomplete. Retry uses the same message ID.");
+      pendingSends.delete(message.id);
+      if (!records.has(message.id)) records.set(message.id, { ...message, pending:false, failed:false, start:payload.sent.end - 1, end:payload.sent.end });
+      status("Saved to CHAT.md. The agent receives it on a tool response."); revision = null;
+      void refresh();
+    } catch (error) {
+      if (!records.has(message.id)) { message.failed = true; message.pending = false; pendingSends.set(message.id, message); }
+      status(error.message || "Message delivery is unconfirmed. Retry without duplicating it.", true);
+    } finally { sending = false; render(); resizeInput(); save(); }
+  }
+  el("composer").addEventListener("submit", event => {
+    event.preventDefault();
+    if (sending || !input.value.trim()) return;
+    const message = { id:crypto.randomUUID(), role:"user", markdown:input.value, pending:true, failed:false };
+    input.value = ""; resizeInput(); void deliver(message); input.focus(); list.scrollTop = list.scrollHeight;
+  });
+  input.addEventListener("keydown", event => {
+    if (event.key === "Enter" && !event.shiftKey && !event.isComposing && event.keyCode !== 229) { event.preventDefault(); el("composer").requestSubmit(); }
+  });
+  input.addEventListener("input", () => { resizeInput(); clearTimeout(saveTimer); saveTimer = setTimeout(save, 150); });
+  older.addEventListener("click", async () => {
+    if (loadingOlder || before === null) return;
+    loadingOlder = true; older.disabled = true;
+    const height = list.scrollHeight, top = list.scrollTop;
+    try { applyPage(await call("chat_ui_state", { before }), true); list.scrollTop = top + list.scrollHeight - height; }
+    catch (error) { status(error.message, true); }
+    finally { loadingOlder = false; older.disabled = false; }
+  });
+  function setCollapsed() {
+    el("panel").hidden = collapsed;
+    el("collapse").setAttribute("aria-expanded", String(!collapsed));
+    el("collapse").setAttribute("aria-label", collapsed ? "Expand chat" : "Collapse chat");
+    el("collapse").title = collapsed ? "Expand chat" : "Collapse chat";
+    el("collapse").style.transform = collapsed ? "rotate(180deg)" : "";
+    save(); schedule(); size();
+  }
+  el("collapse").addEventListener("click", () => { collapsed = !collapsed; setCollapsed(); if (!collapsed) void refresh(); });
+  el("refresh").addEventListener("click", () => { revision = null; void refresh(); });
+  function teardown() {
+    tornDown = true; clearTimeout(pollTimer); clearTimeout(saveTimer);
+    for (const waiter of rpcPending.values()) { clearTimeout(waiter.timer); waiter.reject(new Error("Widget closed.")); }
+    rpcPending.clear();
+  }
+  window.addEventListener("message", event => {
+    if (event.source !== window.parent || event.data?.jsonrpc !== "2.0") return;
+    const message = event.data;
+    if (rpcPending.has(message.id)) { const waiter = rpcPending.get(message.id); rpcPending.delete(message.id); clearTimeout(waiter.timer); message.error ? waiter.reject(new Error(message.error.message || "Widget request failed")) : waiter.resolve(message.result); return; }
+    if (message.method === "ui/notifications/host-context-changed") theme(message.params);
+    else if (message.method === "ui/notifications/tool-input" || message.method === "ui/notifications/tool-result") { revision = null; void refresh(); }
+    else if (message.method === "ui/resource-teardown") { teardown(); if (message.id !== undefined) post({ id:message.id, result:{} }); }
+  });
+  window.addEventListener("openai:set_globals", event => {
+    const globals = event.detail?.globals;
+    theme(globals);
+    if (globals && ["toolInput", "toolOutput", "toolResponseMetadata"].some(key => Object.prototype.hasOwnProperty.call(globals, key))) {
+      revision = null; void refresh();
+    }
+  });
+  window.addEventListener("focus", () => { void refresh(); });
+  window.addEventListener("pagehide", teardown);
+  document.addEventListener("visibilitychange", () => { schedule(); if (!document.hidden) void refresh(); });
+  if (typeof IntersectionObserver === "function") new IntersectionObserver(entries => { visible = entries[0].isIntersecting; schedule(); if (visible) void refresh(); }).observe(el("chat"));
+  if (typeof ResizeObserver === "function") new ResizeObserver(size).observe(el("chat"));
+  theme(window.openai); setCollapsed(); render(); resizeInput();
+  rpc("ui/initialize", { appInfo:{ name:"Codexify Markdown chat", version:"1" }, protocolVersion:"2026-01-26", appCapabilities:{} }, 5000)
+    .then(result => { initialized = true; theme(result?.hostContext); post({ method:"ui/notifications/initialized", params:{} }); void refresh(); size(); })
+    .catch(() => { if (!window.openai?.callTool) status("This host has not connected the chat widget.", true); });
+  if (window.openai?.callTool) void refresh();
+})();
+</script>
+</body>
+</html>

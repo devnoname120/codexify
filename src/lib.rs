@@ -31,6 +31,7 @@ pub mod legacy_migration;
 pub mod log_view;
 pub mod logging;
 pub mod markdown_chat;
+pub mod markdown_chat_ui;
 mod mcp_catalog;
 pub mod memory;
 pub mod openai_tunnel;

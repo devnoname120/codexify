@@ -17,7 +17,9 @@ use crate::exec_sessions::SessionState;
 use crate::project_bindings::ConversationIdentity;
 use crate::types::AppConfig;
 
-pub use storage::{AppendReceipt, ChatFile, ChatSnapshot, NotificationState};
+pub use storage::{
+    AppendReceipt, ChatFile, ChatSnapshot, NotificationState, UserSendReceipt, WidgetPage,
+};
 pub use wait::WaitOutcome;
 
 pub const DEFAULT_MAX_WAIT_MS: u64 = 270_000;

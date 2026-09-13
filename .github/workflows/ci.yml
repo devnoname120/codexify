@@ -55,7 +55,7 @@ jobs:
       - name: Format
         run: |
           cargo fmt --all --check
-          rustfmt --edition 2024 --check src/server_markdown_chat_tests.rs
+          rustfmt --edition 2024 --check src/server_markdown_chat_tests.rs src/server_markdown_chat_widget_tests.rs
 
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
@@ -86,6 +86,9 @@ jobs:
 
       - name: Test diff layout on mobile and desktop
         run: node --test scripts/test-diff-widget.mjs
+
+      - name: Test Markdown chat composer, synchronization, and receipts
+        run: node --test scripts/test-markdown-chat-widget.mjs
 
   service-platforms:
     name: Service integration (${{ matrix.os }})

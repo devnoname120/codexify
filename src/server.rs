@@ -285,6 +285,17 @@ fn advertised_tool(tool: &dyn Tool, config: &AppConfig) -> rmcp::model::Tool {
     advertised
 }
 
+fn app_only_tool(tool: &dyn Tool) -> bool {
+    tool.meta().is_some_and(|meta| {
+        meta.get("openai/visibility").and_then(Value::as_str) == Some("private")
+            || meta
+                .get("ui")
+                .and_then(|ui| ui.get("visibility"))
+                .and_then(Value::as_array)
+                .is_some_and(|visibility| !visibility.contains(&json!("model")))
+    })
+}
+
 fn builtin_ui_resources(ui_widgets: bool) -> Vec<rmcp::model::Resource> {
     if !ui_widgets {
         return Vec::new();
@@ -380,8 +391,11 @@ impl ServerHandler for CodexHandler {
         _request: Option<PaginatedRequestParams>,
         context: RequestContext<RoleServer>,
     ) -> Result<ListResourcesResult, McpError> {
-        let mut result =
-            ListResourcesResult::with_all_items(builtin_ui_resources(self.config.ui_widgets));
+        let mut resources = builtin_ui_resources(self.config.ui_widgets);
+        if self.config.ui_widgets && self.config.markdown_chat.enabled {
+            resources.push(crate::markdown_chat_ui::resource());
+        }
+        let mut result = ListResourcesResult::with_all_items(resources);
         ensure_modern_cache_hints(
             context.protocol_version().as_ref(),
             &mut result.ttl_ms,
@@ -459,7 +473,12 @@ impl ServerHandler for CodexHandler {
                 None,
             ));
         }
-        let Some(contents) = builtin_ui_contents(self.config.ui_widgets, &request.uri) else {
+        let contents = builtin_ui_contents(self.config.ui_widgets, &request.uri).or_else(|| {
+            (self.config.ui_widgets && self.config.markdown_chat.enabled)
+                .then(|| crate::markdown_chat_ui::contents_for_uri(&request.uri))
+                .flatten()
+        });
+        let Some(contents) = contents else {
             return Err(McpError::resource_not_found(
                 format!("Unknown resource: {}", request.uri),
                 None,
@@ -741,7 +760,9 @@ impl ServerHandler for CodexHandler {
             tracing::warn!(%error, "could not save conversation schema baseline");
         }
 
+        let mut delivery = None;
         if self.config.markdown_chat.enabled
+            && !tool.is_some_and(|tool| app_only_tool(tool.as_ref()))
             && !context.ct.is_cancelled()
             && self
                 .conversation_auth_error("chat_read", conversation.as_ref())
@@ -753,15 +774,20 @@ impl ServerHandler for CodexHandler {
             let chat = self
                 .markdown_chat
                 .chat(&effective, conversation.as_ref(), &self.session);
-            let pending = match chat {
+            let pending = match &chat {
                 Ok(chat)
                     if result.is_error
                         || !matches!(name.as_str(), "chat_read" | "chat_write" | "chat_await") =>
                 {
-                    chat.read(false).await.map(|snapshot| snapshot.text)
+                    chat.read(false).await.map(|snapshot| {
+                        if !snapshot.text.is_empty() {
+                            result.chat_delivery_end = Some(snapshot.end);
+                        }
+                        snapshot.text
+                    })
                 }
                 Ok(chat) => chat.ensure().await.map(|_| String::new()),
-                Err(error) => Err(error),
+                Err(error) => Err(error.clone()),
             };
             match pending {
                 Ok(text) if !text.is_empty() => result.new_chat_message_from_user = Some(format!(
@@ -771,6 +797,15 @@ impl ServerHandler for CodexHandler {
                 Err(error) => result.content.push(ToolContent::Text(format!(
                     "Markdown chat is unavailable: {error}. The original tool result above is unchanged; do not repeat a successful operation just to retry chat delivery."
                 ))),
+            }
+            if let Ok(chat) = chat
+                && let Some(end) = result.chat_delivery_end
+                && result
+                    .new_chat_message_from_user
+                    .as_ref()
+                    .is_some_and(|text| !text.is_empty())
+            {
+                delivery = Some((chat, end));
             }
         }
 
@@ -819,6 +854,12 @@ impl ServerHandler for CodexHandler {
                 &mut result,
                 tool.and_then(|tool| tool.output_schema()).as_ref(),
             );
+        }
+        if !context.ct.is_cancelled()
+            && let Some((chat, end)) = delivery
+            && let Err(error) = chat.mark_delivered(end).await
+        {
+            tracing::warn!(%error, "could not persist Markdown chat delivery receipt");
         }
         Ok(to_call_tool_result(result).into())
     }
@@ -1632,6 +1673,7 @@ mod tests {
     }
 
     include!("server_markdown_chat_tests.rs");
+    include!("server_markdown_chat_widget_tests.rs");
 
     fn handler_with_tools(
         root: &std::path::Path,
@@ -2521,6 +2563,7 @@ mod tests {
             structured_content: Some(json!({ "value": 1 })),
             meta: Some(meta),
             new_chat_message_from_user: None,
+            chat_delivery_end: None,
             audit: Default::default(),
         });
 
@@ -2592,6 +2635,7 @@ mod tests {
             structured_content: None,
             meta: None,
             new_chat_message_from_user: None,
+            chat_delivery_end: None,
             audit: Default::default(),
         });
         let value = serde_json::to_value(converted).unwrap();

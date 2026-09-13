@@ -169,6 +169,7 @@ impl Tool for WriteStdin {
             structured_content: Some(structured),
             meta: None,
             new_chat_message_from_user: None,
+            chat_delivery_end: None,
             audit: ToolAuditMetadata {
                 truncated: Some(buffer_truncated || truncated),
                 original_output_tokens: truncated.then_some(original_token_count),

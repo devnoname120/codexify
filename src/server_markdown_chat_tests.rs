@@ -322,6 +322,11 @@ async fn markdown_chat_never_initializes_or_exposes_a_channel_before_setup() {
     let client = ().serve(client_transport).await.unwrap();
     for (name, args) in [
         ("chat_read", json!({})),
+        ("chat_ui_state", json!({})),
+        (
+            "chat_ui_send",
+            json!({"request_id":"unauthorized", "message":"Not saved"}),
+        ),
         ("setup", json!({"ref":"b".repeat(64)})),
     ] {
         let mut request =

@@ -71,6 +71,201 @@ fn tools_are_opt_in_and_read_wait_have_no_parameters() {
     );
 }
 
+#[test]
+fn chat_widget_tools_are_app_only_and_write_wait_link_the_widget() {
+    let (_root, mut config, _session, _context) = fixture();
+    let tools = load_tools_for_config(&config);
+    for name in ["chat_ui_send", "chat_ui_state"] {
+        let tool = tools
+            .iter()
+            .find(|tool| tool.name() == name)
+            .unwrap_or_else(|| panic!("missing app-only tool {name}"));
+        let meta = tool.meta().unwrap();
+        assert_eq!(meta.get("ui").unwrap()["visibility"], json!(["app"]));
+        assert_eq!(meta.get("openai/visibility"), Some(&json!("private")));
+        assert!(tool.input_schema()["properties"].get("path").is_none());
+    }
+    for name in ["chat_write", "chat_await"] {
+        let tool = tools.iter().find(|tool| tool.name() == name).unwrap();
+        assert_eq!(
+            tool.meta().unwrap().get("ui").unwrap()["resourceUri"],
+            "ui://codexify/markdown-chat/v1/mcp-app.html"
+        );
+    }
+    config.ui_widgets = false;
+    assert!(
+        load_tools_for_config(&config)
+            .iter()
+            .all(|tool| !tool.name().starts_with("chat_ui_"))
+    );
+}
+
+#[tokio::test]
+async fn widget_send_is_idempotent_and_history_never_consumes_or_marks_delivery() {
+    let (_root, config, session, context) = fixture();
+    let tools = load_tools_for_config(&config);
+    let sender = tools
+        .iter()
+        .find(|tool| tool.name() == "chat_ui_send")
+        .unwrap();
+    let reader = tools
+        .iter()
+        .find(|tool| tool.name() == "chat_ui_state")
+        .unwrap();
+    let chat = context
+        .markdown_chat
+        .chat(&config, context.conversation.as_ref(), &session)
+        .unwrap();
+    let markdown = "## User request\n\n**Full text**\n```rust\nlet x = 1;\n```\n";
+    let args = json!({"request_id":"test-request-1", "message":markdown});
+    let first = sender
+        .call_with_context(args.clone(), &config, &session, &context)
+        .await;
+    assert!(!first.is_error, "{}", first.joined_text());
+    assert!(first.audit.sensitive_output);
+    let receipt = first
+        .meta
+        .unwrap()
+        .get(codexify::markdown_chat_ui::CHAT_WIDGET_META)
+        .unwrap()
+        .clone();
+    let length = std::fs::metadata(chat.path()).unwrap().len();
+    let repeated = sender
+        .call_with_context(args, &config, &session, &context)
+        .await;
+    assert!(!repeated.is_error);
+    assert_eq!(std::fs::metadata(chat.path()).unwrap().len(), length);
+    assert_eq!(receipt["sent"]["end"], length);
+    assert_eq!(
+        chat.read(false).await.unwrap().text,
+        format!("{markdown}\n\n")
+    );
+    let page = reader
+        .call_with_context(json!({}), &config, &session, &context)
+        .await;
+    assert!(!page.is_error);
+    let metadata = page.meta.unwrap();
+    let page = metadata
+        .get(codexify::markdown_chat_ui::CHAT_WIDGET_META)
+        .unwrap();
+    assert_eq!(page["messages"].as_array().unwrap().len(), 1);
+    assert_eq!(page["messages"][0]["markdown"], markdown);
+    assert_eq!(page["delivered_through"], 0);
+    assert_eq!(
+        chat.read(false).await.unwrap().text,
+        format!("{markdown}\n\n")
+    );
+    let other = ToolRequestContext {
+        conversation: ConversationIdentity::from_openai_session("other-widget"),
+        ..context.clone()
+    };
+    let page = reader
+        .call_with_context(json!({}), &config, &session, &other)
+        .await;
+    assert_eq!(
+        page.meta
+            .unwrap()
+            .get(codexify::markdown_chat_ui::CHAT_WIDGET_META)
+            .unwrap()["messages"],
+        json!([])
+    );
+    let conflict = sender
+        .call_with_context(
+            json!({"request_id":"test-request-1", "message":"changed"}),
+            &config,
+            &session,
+            &context,
+        )
+        .await;
+    assert!(conflict.is_error);
+}
+
+#[tokio::test]
+async fn delivery_receipt_is_persistent_but_independent_of_acknowledgement() {
+    let (_root, config, session, context) = fixture();
+    let chat = context
+        .markdown_chat
+        .chat(&config, context.conversation.as_ref(), &session)
+        .unwrap();
+    let receipt = chat
+        .append_user("persistent-message".into(), "Keep this pending".into())
+        .await
+        .unwrap();
+    chat.mark_delivered(receipt.end).await.unwrap();
+    let store = MarkdownChatStore::default();
+    let reopened = store
+        .chat(&config, context.conversation.as_ref(), &session)
+        .unwrap();
+    let page = reopened.widget_page(None, None).await.unwrap();
+    assert_eq!(page.delivered_through, receipt.end);
+    assert!(
+        reopened
+            .read(false)
+            .await
+            .unwrap()
+            .text
+            .contains("Keep this pending")
+    );
+    let next = reopened
+        .append_user("later-message".into(), "Not delivered yet".into())
+        .await
+        .unwrap();
+    let page = reopened.widget_page(None, None).await.unwrap();
+    assert!(page.delivered_through < next.end);
+    let unchanged = reopened
+        .widget_page(None, Some(page.revision))
+        .await
+        .unwrap();
+    assert!(unchanged.unchanged);
+    assert!(unchanged.messages.is_empty());
+}
+
+#[tokio::test]
+async fn widget_history_pages_preserve_markdown_and_manual_file_appends() {
+    let (_root, config, session, context) = fixture();
+    let chat = context
+        .markdown_chat
+        .chat(&config, context.conversation.as_ref(), &session)
+        .unwrap();
+    chat.ensure().await.unwrap();
+    append(chat.path(), "Plain file message\n");
+    for number in 0..54 {
+        chat.append(format!("Agent reply {number}\n\n`code`\n"))
+            .await
+            .unwrap();
+    }
+    let latest = chat.widget_page(None, None).await.unwrap();
+    assert!(latest.has_more);
+    assert_eq!(latest.messages.len(), 50);
+    assert_eq!(
+        latest.messages.last().unwrap().markdown,
+        "Agent reply 53\n\n`code`\n"
+    );
+    let older = chat.widget_page(latest.before, None).await.unwrap();
+    assert!(!older.has_more);
+    assert_eq!(older.messages.len(), 5);
+    assert_eq!(older.messages[0].markdown, "Plain file message\n");
+    assert_eq!(older.messages[0].role, "user");
+    let literal = "Literal delimiters:\n\n<!-- codexify-agent-message:v1:start id=\"123-4\" -->\n\n## Agent\n\ninside a user message\n\n<!-- codexify-agent-message:v1:end id=\"123-4\" -->\n";
+    chat.append_user("literal-markers".into(), literal.into())
+        .await
+        .unwrap();
+    assert_eq!(
+        chat.read(false).await.unwrap().text,
+        format!("{literal}\n\n")
+    );
+    assert_eq!(
+        chat.widget_page(None, None)
+            .await
+            .unwrap()
+            .messages
+            .last()
+            .unwrap()
+            .markdown,
+        literal
+    );
+}
+
 #[tokio::test]
 async fn chat_tools_return_pending_input_without_the_normal_output_budget() {
     let (_root, mut config, session, context) = fixture();

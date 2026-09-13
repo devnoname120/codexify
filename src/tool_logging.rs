@@ -722,6 +722,7 @@ mod tests {
             })),
             meta: None,
             new_chat_message_from_user: None,
+            chat_delivery_end: None,
             audit: Default::default(),
         };
 
@@ -766,8 +767,12 @@ mod tests {
         let mut result = ToolResult::text("private history excerpt")
             .with_structured(serde_json::json!({"content":"private history excerpt"}));
         result.audit.sensitive_output = true;
+        result.meta = Some(serde_json::from_value(serde_json::json!({
+            crate::markdown_chat_ui::CHAT_WIDGET_META: {"messages":[{"markdown":"private widget history"}]}
+        })).unwrap());
         let preview = logger.preview_response(&result);
         assert!(!preview.text.contains("private history excerpt"));
+        assert!(!preview.text.contains("private widget history"));
         assert!(preview.text.contains("private Markdown chat history"));
     }
 
@@ -790,6 +795,7 @@ mod tests {
             structured_content: None,
             meta: None,
             new_chat_message_from_user: None,
+            chat_delivery_end: None,
             audit: Default::default(),
         };
 

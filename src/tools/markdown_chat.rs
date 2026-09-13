@@ -42,7 +42,7 @@ fn result(
     }))
 }
 
-fn with_message(mut result: ToolResult, text: String, before_write: bool) -> ToolResult {
+fn with_message(mut result: ToolResult, text: String, before_write: bool, end: u64) -> ToolResult {
     if !text.is_empty() {
         let introduction = if before_write {
             "Before you wrote your message, the user sent the following in CHAT.md:\n\n"
@@ -50,6 +50,7 @@ fn with_message(mut result: ToolResult, text: String, before_write: bool) -> Too
             "The user wrote a new message in CHAT.md:\n\n"
         };
         result.new_chat_message_from_user = Some(format!("{introduction}{text}"));
+        result.chat_delivery_end = Some(end);
     }
     result
 }
@@ -71,6 +72,14 @@ impl Tool for ChatTool {
             Self::Await => "Wait for the user's reply",
         }
         .into()
+    }
+
+    fn meta(&self) -> Option<rmcp::model::MetaObject> {
+        if matches!(self, Self::Write | Self::Await) {
+            Some(crate::markdown_chat_ui::tool_meta())
+        } else {
+            None
+        }
     }
 
     fn description(&self) -> String {
@@ -181,6 +190,7 @@ impl Tool for ChatTool {
                 result("written", content, chat.path(), state),
                 receipt.user_text,
                 true,
+                receipt.end_offset,
             );
         }
         if let Err(error) = parse_tool_args::<EmptyArgs>(args) {
@@ -194,12 +204,12 @@ impl Tool for ChatTool {
                     } else {
                         ("message", "New user text is included in new_chat_message_from_user. Read it before continuing.".to_string())
                     };
-                    with_message(result(status, content, chat.path(), snapshot.notification), snapshot.text, false)
+                    with_message(result(status, content, chat.path(), snapshot.notification), snapshot.text, false, snapshot.end)
                 }
                 Err(error) => ToolResult::error(error),
             },
             Self::Await => match chat.wait(Duration::from_millis(config.markdown_chat.max_wait_ms), context.cancellation.clone()).await {
-                Ok(WaitOutcome::Message(snapshot)) => with_message(result("message", "The user replied. Read new_chat_message_from_user before continuing.".into(), chat.path(), snapshot.notification), snapshot.text, false),
+                Ok(WaitOutcome::Message(snapshot)) => with_message(result("message", "The user replied. Read new_chat_message_from_user before continuing.".into(), chat.path(), snapshot.notification), snapshot.text, false, snapshot.end),
                 Ok(WaitOutcome::TimedOut(state)) => result("timeout", format!("The user has not replied yet. {} {KEEP_WAITING}", notification::description(state)), chat.path(), state),
                 Ok(WaitOutcome::Cancelled) => result("cancelled", "The wait was cancelled. Do not restart a cancelled wait without user direction.".into(), chat.path(), NotificationState::Cancelled),
                 Err(error) => ToolResult::error(error),
