@@ -30,6 +30,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Chat history has more reading space: up to 480 px on desktop and 420 px on
+  narrow screens, with the composer outside the scrolling message area.
 - Markdown chat renders tables, nested formatting, reference links, and balanced
   URLs with an embedded Markdown parser. Exported and project-relative file links
   use a private workspace-scoped resolver and host-mediated downloads, with an

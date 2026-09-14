@@ -160,6 +160,25 @@ for (const [engineName, engine] of [["Chromium", chromium], ["WebKit", webkit]])
   test(`${engineName}: Markdown chat composer, synchronization and receipts`, { timeout:180000 }, async t => {
     const browser = await engine.launch();
     try {
+      await t.test("chat history is taller without moving the composer into its scroller", async () => {
+        for (const [width, expected] of [[390, 420], [640, 480]]) {
+          const backend = new ChatBackend();
+          for (let i = 0; i < 14; i++) backend.add("agent", `Message ${i}\n\nEnough text to exercise the scrolling history.`);
+          const { page, frames:[frame], errors } = await mount(browser, backend, { width, combined:true });
+          const layout = await frame.locator("#messages").evaluate(node => ({
+            limit:parseFloat(getComputedStyle(node).maxHeight),
+            height:node.getBoundingClientRect().height,
+            scrolls:node.scrollHeight > node.clientHeight,
+            ownsComposer:node.contains(node.getRootNode().getElementById("composer"))
+          }));
+          assert.equal(layout.limit, expected);
+          assert.equal(layout.height, expected);
+          assert.equal(layout.scrolls, true);
+          assert.equal(layout.ownsComposer, false);
+          assert.equal(await frame.locator("html").evaluate(node => node.scrollWidth > innerWidth), false);
+          assert.deepEqual(errors, []); await page.close();
+        }
+      });
       await t.test("Markdown tables, reference links, balanced URLs and exported files", async () => {
         const backend = new ChatBackend();
         backend.add("agent", [
