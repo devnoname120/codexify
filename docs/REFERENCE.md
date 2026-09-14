@@ -133,11 +133,12 @@ shell profile and creates the active shell's profile when needed. On Windows it
 updates the persistent user `PATH`. The macOS installer removes the executable's
 `com.apple.quarantine` attribute after installation. The selected config is
 `CODEXIFY_CONFIG` when set, otherwise `~/.codexify/codexify.config.json`. If that
-file already exists, the installer installs or refreshes the per-user background
-service. If it does not exist, service setup is deliberately deferred: quickstart
-creates the config and then offers to install and start the service. Set
-`CODEXIFY_SKIP_SERVICE=1` in the installer process to skip service handling even
-when a config exists.
+file already exists and passes the same validation used by server startup, the
+installer installs or refreshes the per-user background service. Missing or
+startup-invalid configs deliberately defer service setup until the selected
+configuration is valid; the installer's next step directs the user to quickstart.
+Set `CODEXIFY_SKIP_SERVICE=1` in the installer process to skip service handling
+even when a valid config exists.
 
 The final `Restart your terminal, then run: codexify quickstart` block is separated
 from the installation receipt by a blank line and displayed in green, with bold

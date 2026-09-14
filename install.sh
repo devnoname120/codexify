@@ -241,11 +241,15 @@ configure_path
 
 if [ "${CODEXIFY_SKIP_SERVICE:-0}" != 1 ]; then
     if [ -f "$CONFIG_PATH" ]; then
-        if "$target" service --help >/dev/null 2>&1; then
-            "$target" service install \
-                || fail 'the executable was installed, but the background service could not be installed; rerun with CODEXIFY_SKIP_SERVICE=1 to install without it'
+        if "$target" --config "$CONFIG_PATH" config validate >/dev/null 2>&1; then
+            if "$target" service --help >/dev/null 2>&1; then
+                "$target" service install \
+                    || fail 'the executable was installed, but the background service could not be installed; rerun with CODEXIFY_SKIP_SERVICE=1 to install without it'
+            else
+                printf 'The installed release does not provide service management; executable installation will continue.\n' >&2
+            fi
         else
-            printf 'The installed release does not provide service management; executable installation will continue.\n' >&2
+            printf 'Background service setup deferred because the selected config is not valid for startup: %s\n' "$CONFIG_PATH"
         fi
     else
         printf 'Background service setup deferred until quickstart creates the selected config: %s\n' "$CONFIG_PATH"

@@ -30,6 +30,10 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Release installers now validate an existing selected config with the same
+  startup rules as the server before installing the background service. Invalid
+  configs, including migrated configs missing `workDir`, now defer service setup
+  instead of installing a service that immediately exits.
 - Release staging now retries draft-release readback to tolerate GitHub's brief
   post-creation consistency delay without requiring a failed-job rerun.
 - Setup status detects Markdown-chat schema toggles without a package-version

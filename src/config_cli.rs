@@ -10,7 +10,7 @@ use tempfile::{Builder, NamedTempFile};
 
 use crate::config::{
     Cli, ConfigArgs, ConfigCommand, ConfigGetArgs, ConfigSetArgs, ConfigUnsetArgs,
-    config_path_selection,
+    config_path_selection, validate_config_quiet,
 };
 use crate::terminal::{ACCENT, MUTED, SUCCESS, paint, write_stdout};
 
@@ -25,6 +25,7 @@ pub fn run(cli: &Cli, args: ConfigArgs) -> anyhow::Result<()> {
         Some(ConfigCommand::Set(args)) => set(&path, args),
         Some(ConfigCommand::Unset(args)) => unset(&path, args),
         Some(ConfigCommand::Edit) => edit(&path),
+        Some(ConfigCommand::Validate) => validate_config_quiet(cli).map_err(anyhow::Error::msg),
     }
 }
 

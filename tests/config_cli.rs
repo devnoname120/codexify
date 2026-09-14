@@ -160,6 +160,35 @@ fn config_get_missing_path_and_unset_missing_path_are_explicit() {
 }
 
 #[test]
+fn config_validate_uses_server_startup_validation() {
+    let root = TempDir::new().unwrap();
+    let path = config_path(&root);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, b"{\"multiProject\":true}\n").unwrap();
+
+    let invalid = run(&root, &["config", "validate"]);
+    assert_eq!(invalid.status.code(), Some(1));
+    assert!(invalid.stdout.is_empty());
+    assert!(
+        String::from_utf8(invalid.stderr)
+            .unwrap()
+            .contains("missing required --work-dir or workDir in codexify.config.json")
+    );
+
+    let project = root.path().join("project");
+    fs::create_dir(&project).unwrap();
+    fs::write(
+        &path,
+        serde_json::to_vec_pretty(&json!({"workDir": project})).unwrap(),
+    )
+    .unwrap();
+
+    let valid = run(&root, &["config", "validate"]);
+    assert_success(&valid);
+    assert!(valid.stderr.is_empty());
+}
+
+#[test]
 fn malformed_paths_and_non_object_intermediates_fail_without_writes() {
     let root = TempDir::new().unwrap();
     let path = config_path(&root);

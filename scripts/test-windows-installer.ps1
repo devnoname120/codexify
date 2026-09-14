@@ -53,7 +53,7 @@ try {
     $Source = Join-Path $Root 'fake-codexify.rs'
     @'
 use std::env;
-use std::fs::OpenOptions;
+use std::fs::{self, OpenOptions};
 use std::io::Write;
 
 fn record(value: &str) {
@@ -68,6 +68,14 @@ fn main() {
         [arg] if arg == "--help" => {}
         [migration] if migration == "migrate-legacy-install" => record("migrate"),
         [migration, arg] if migration == "migrate-legacy-install" && arg == "--help" => {}
+        [config, path, command, action]
+            if config == "--config" && command == "config" && action == "validate" =>
+        {
+            let text = fs::read_to_string(path).unwrap_or_default();
+            if !text.contains("\"workDir\"") {
+                std::process::exit(1);
+            }
+        }
         [service, arg] if service == "service" && arg == "--help" => {}
         [service, action] if service == "service" && action == "install" => record("install"),
         [service, action] if service == "service" && action == "disable" => record("disable"),
@@ -153,8 +161,12 @@ fn main() {
 
     $NoConfigOutput = (& (Join-Path $RepositoryRoot 'install.ps1') *>&1 | Out-String)
     $Config = Join-Path $Root 'custom-codexify.json'
-    '{}' | Set-Content -LiteralPath $Config -Encoding ascii
+    @{ multiProject = $true } | ConvertTo-Json | Set-Content -LiteralPath $Config -Encoding ascii
     $env:CODEXIFY_CONFIG = $Config
+    $InvalidConfigOutput = (& (Join-Path $RepositoryRoot 'install.ps1') *>&1 | Out-String)
+    $Project = Join-Path $Root 'project'
+    New-Item -ItemType Directory -Path $Project | Out-Null
+    @{ workDir = $Project } | ConvertTo-Json | Set-Content -LiteralPath $Config -Encoding ascii
     & (Join-Path $RepositoryRoot 'install.ps1')
     $env:CODEXIFY_SKIP_SERVICE = '1'
     & (Join-Path $RepositoryRoot 'install.ps1')
@@ -170,16 +182,19 @@ fn main() {
 
     $Calls = @(Get-Content -LiteralPath $Marker)
     if (@($Calls | Where-Object { $_ -eq 'install' }).Count -ne 1) {
-        throw 'Installer did not defer service installation until a config existed.'
+        throw 'Installer did not defer service installation until a valid config existed.'
     }
-    if (@($Calls | Where-Object { $_ -eq 'disable' }).Count -ne 1) {
+    if (@($Calls | Where-Object { $_ -eq 'disable' }).Count -ne 2) {
         throw 'Installer did not disable the existing service before replacement.'
     }
-    if (@($Calls | Where-Object { $_ -eq 'migrate' }).Count -ne 3) {
+    if (@($Calls | Where-Object { $_ -eq 'migrate' }).Count -ne 4) {
         throw 'Installer did not run legacy state migration after each executable replacement.'
     }
     if ($NoConfigOutput -notmatch 'Background service setup deferred until quickstart creates the selected config:') {
         throw "Installer did not explain deferred service setup.`n$NoConfigOutput"
+    }
+    if ($InvalidConfigOutput -notmatch 'Background service setup deferred because the selected config is not valid for startup:') {
+        throw "Installer did not defer service setup for an invalid existing config.`n$InvalidConfigOutput"
     }
     if ($NoConfigOutput -notmatch "Installed Codexify[^\r\n]*\r?\n\r?\nRestart your terminal, then run:") {
         throw "Installer did not place a blank line before the next-step block.`n$NoConfigOutput"

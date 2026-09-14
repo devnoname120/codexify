@@ -33,6 +33,13 @@ cat > "$stage/codexify" <<'SCRIPT'
 #!/bin/sh
 case "${1:-}" in
     --help) exit 0 ;;
+    --config)
+        [ "$#" -eq 4 ] || exit 2
+        [ "$3" = config ] || exit 2
+        [ "$4" = validate ] || exit 2
+        grep -F '"workDir"' "$2" >/dev/null 2>&1 || exit 1
+        exit 0
+        ;;
     migrate-legacy-install)
         if [ "${2:-}" = --help ]; then
             exit 0
@@ -118,7 +125,17 @@ CODEXIFY_RELEASE_ROOT=http://127.0.0.1:$port \
     sh ./install.sh > "$root/run-no-config.log"
 
 custom_config=$root/custom-codexify.json
-printf '{}\n' > "$custom_config"
+printf '{"multiProject":true}\n' > "$custom_config"
+HOME=$home \
+SHELL=/bin/zsh \
+CODEXIFY_CONFIG=$custom_config \
+CODEXIFY_VERSION=$tag \
+CODEXIFY_RELEASE_ROOT=http://127.0.0.1:$port \
+    sh ./install.sh > "$root/run-invalid-config.log"
+
+project=$root/project
+mkdir -p "$project"
+printf '{"workDir":"%s"}\n' "$project" > "$custom_config"
 HOME=$home \
 SHELL=/bin/zsh \
 CODEXIFY_CONFIG=$custom_config \
@@ -137,8 +154,9 @@ CLICOLOR_FORCE=1 \
 
 [ "$("$home/.codexify/bin/codexify")" = fake-codexify ]
 [ "$(cat "$home/service-installs")" = 1 ]
-[ "$(cat "$home/legacy-migrations")" = 3 ]
+[ "$(cat "$home/legacy-migrations")" = 4 ]
 grep -F 'Background service setup deferred until quickstart creates the selected config:' "$root/run-no-config.log" >/dev/null
+grep -F 'Background service setup deferred because the selected config is not valid for startup:' "$root/run-invalid-config.log" >/dev/null
 test ! -e "$missing_config"
 if LC_ALL=C grep "$(printf '\033')" "$root/run-no-config.log" >/dev/null; then
     printf 'redirected installer output unexpectedly contained terminal escapes\n' >&2
