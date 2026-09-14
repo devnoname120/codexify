@@ -3,6 +3,7 @@ use std::{fs, path::Path};
 fn workflow(path: &str) -> String {
     fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(path))
         .unwrap_or_else(|error| panic!("failed to read {path}: {error}"))
+        .replace("\r\n", "\n")
 }
 
 fn job_section<'a>(workflow: &'a str, job: &str, next_job: &str) -> &'a str {
@@ -14,6 +15,15 @@ fn job_section<'a>(workflow: &'a str, job: &str, next_job: &str) -> &'a str {
         .find(&format!("\n  {next_job}:\n"))
         .unwrap_or(rest.len());
     &rest[..end]
+}
+
+#[test]
+fn workflow_contracts_accept_windows_checkout_line_endings() {
+    let file = tempfile::NamedTempFile::new().unwrap();
+    fs::write(file.path(), "jobs:\r\n  check:\r\n    runs-on: ubuntu-latest\r\n  service-platforms:\r\n    runs-on: windows-latest\r\n").unwrap();
+    let contents = workflow(file.path().to_str().unwrap());
+    assert!(job_section(&contents, "check", "service-platforms").contains("ubuntu-latest"));
+    assert!(!job_section(&contents, "check", "service-platforms").contains("windows-latest"));
 }
 
 #[test]
