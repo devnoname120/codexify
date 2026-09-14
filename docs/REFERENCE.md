@@ -1527,6 +1527,21 @@ boundary. The server cannot prove that ChatGPT received a response after a netwo
 failure, that the model understood it, or that it acted on the message; blue ticks
 are not such a guarantee.
 
+Both user and agent messages display a small `HH:mm` timestamp at the bottom
+right inside the bubble. For user messages the time is immediately left of the
+ticks. A message from an earlier day in the viewer's local timezone displays
+`YYYY-MM-DD HH:mm`; this is a calendar-day comparison, not a rolling 24-hour
+threshold. The widget updates dates at local midnight, including when history
+is unchanged or a polling request fails.
+
+New agent and widget-user messages persist their creation time as UTC epoch
+milliseconds in the message's hidden start marker. The widget converts that
+instant to the viewer's timezone, not the server's timezone. A retried user send
+keeps its original saved timestamp. Earlier generated agent IDs already encode
+their creation time and can be displayed without rewriting the transcript.
+Old user messages and plain editor appends without a stored timestamp remain
+undated; Codexify does not fabricate historical times from the file's last edit.
+
 The header's **Agent** indicator uses the time of the last agent tool invocation
 in this conversation, including failed calls and calls still running:
 

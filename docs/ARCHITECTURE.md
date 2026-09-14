@@ -535,6 +535,14 @@ persists that boundary only when a nonempty user message is attached to an
 agent-facing response. App-only tools never trigger passive delivery. This tracks
 response construction, not host acknowledgement or model comprehension.
 
+New message start markers include an optional `created_at_ms` value; history
+and send receipts expose it as component-only data. Both parsers accept the old
+marker format, and framing metadata is excluded from delivered user Markdown.
+Old generated agent IDs supply their encoded microsecond time; other undated
+history stays undated. The client formats immutable UTC instants in the viewer's
+local timezone, places them before user ticks or at the agent bubble's lower
+right, and updates earlier-day labels at local calendar midnight.
+
 Agent invocation timestamps are recorded at the common dispatch entry, isolated
 by conversation (or transport fallback), and persisted alongside the cursor when
 a workspace is available. A small in-memory record covers calls before selection.

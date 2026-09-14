@@ -13,6 +13,7 @@ pub struct WidgetMessage {
     pub markdown: String,
     pub start: u64,
     pub end: u64,
+    pub created_at_ms: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -33,6 +34,7 @@ pub struct WidgetPage {
 pub struct UserSendReceipt {
     pub id: String,
     pub end: u64,
+    pub created_at_ms: Option<u64>,
 }
 
 struct Span {
@@ -42,6 +44,7 @@ struct Span {
     body_start: u64,
     body_end: u64,
     end: u64,
+    created_at_ms: Option<u64>,
 }
 
 fn valid_id(id: &str) -> bool {
@@ -52,14 +55,44 @@ fn valid_id(id: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
 }
 
-fn start_marker(line: &str) -> Option<(&'static str, String)> {
+fn marker_fields<'a>(role: &str, fields: &'a str) -> Option<(&'a str, Option<u64>)> {
+    let (id, time) = match fields.split_once("\" created_at_ms=\"") {
+        Some((id, timestamp)) => {
+            let timestamp = timestamp.parse::<u64>().ok()?;
+            if timestamp > 8_640_000_000_000_000 {
+                return None;
+            }
+            (id, Some(timestamp))
+        }
+        None => (fields, None),
+    };
+    if !valid_id(id) {
+        return None;
+    }
+    // Earlier agent IDs already encode UTC microseconds; user IDs do not.
+    let legacy_time = || {
+        if role != "agent" {
+            return None;
+        }
+        let (micros, counter) = id.split_once('-')?;
+        if micros.len() < 16 {
+            return None;
+        }
+        counter.parse::<u64>().ok()?;
+        let timestamp = micros.parse::<u64>().ok()? / 1000;
+        (timestamp <= 8_640_000_000_000_000).then_some(timestamp)
+    };
+    Some((id, time.or_else(legacy_time)))
+}
+
+fn start_marker(line: &str) -> Option<(&'static str, String, Option<u64>)> {
     for role in ["agent", "user"] {
-        if let Some(id) = line
+        if let Some((id, time)) = line
             .strip_prefix(&format!("<!-- codexify-{role}-message:v1:start id=\""))
             .and_then(|line| line.strip_suffix("\" -->\n"))
-            .filter(|id| valid_id(id))
+            .and_then(|fields| marker_fields(role, fields))
         {
-            return Some((role, id.to_string()));
+            return Some((role, id.to_string(), time));
         }
     }
     None
@@ -73,6 +106,7 @@ fn raw_span(start: u64, end: u64) -> Span {
         body_start: start,
         body_end: end,
         end,
+        created_at_ms: None,
     }
 }
 
@@ -111,7 +145,7 @@ fn spans(file: &mut File) -> Result<Vec<Span>, String> {
             }
             continue;
         }
-        if let Some((role, id)) = start_marker(&line) {
+        if let Some((role, id, created_at_ms)) = start_marker(&line) {
             let block_start = start.saturating_sub(2).max(raw_start);
             if raw_start < block_start {
                 result.push(raw_span(raw_start, block_start));
@@ -125,6 +159,7 @@ fn spans(file: &mut File) -> Result<Vec<Span>, String> {
                     body_start: offset,
                     body_end: offset,
                     end: offset,
+                    created_at_ms,
                 },
                 ending,
                 3,
@@ -222,6 +257,7 @@ impl ChatFile {
                         markdown,
                         start: span.start,
                         end: span.end,
+                        created_at_ms: span.created_at_ms,
                     });
                 }
                 page.messages.reverse();
@@ -254,10 +290,11 @@ impl ChatFile {
                     if read_range(file, span.body_start, span.body_end, MAX_UNREAD_BYTES)? != message.as_bytes() {
                         return Err("This request ID already belongs to a different message.".into());
                     }
-                    return Ok(UserSendReceipt { id, end: span.end });
+                    return Ok(UserSendReceipt { id, end: span.end, created_at_ms: span.created_at_ms });
                 }
             }
-            let block = format!("{USER_START}{id}\" -->\n\n## User\n\n{message}\n\n<!-- codexify-user-message:v1:end id=\"{id}\" -->\n");
+            let created_at_ms = super::super::now_ms();
+            let block = format!("{USER_START}{id}\" created_at_ms=\"{created_at_ms}\" -->\n\n## User\n\n{message}\n\n<!-- codexify-user-message:v1:end id=\"{id}\" -->\n");
             file.write_all(block.as_bytes()).map_err(io_error)?;
             let end = file.stream_position().map_err(io_error)?;
             file.sync_all().map_err(io_error)?;
@@ -265,7 +302,7 @@ impl ChatFile {
                 .and_then(|handle| same_file::Handle::from_path(&chat.path).map(|current| current == handle))
                 .map_err(io_error)?;
             if !same { return Err("CHAT.md changed during send; reload and retry with the same request ID.".into()); }
-            Ok(UserSendReceipt { id, end })
+            Ok(UserSendReceipt { id, end, created_at_ms: Some(created_at_ms) })
         })).await
     }
 
@@ -304,12 +341,12 @@ pub(super) fn user_text(text: &str) -> Result<String, String> {
         let marker = &remaining[start + prefix.len()..];
         let heading = if role == "user" { "User" } else { "Agent" };
         let opening = format!("\" -->\n\n## {heading}\n\n");
-        let Some((id, body)) = marker.split_once(&opening) else {
+        let Some((fields, body)) = marker.split_once(&opening) else {
             return Err("CHAT.md has an incomplete message; finish saving before retrying.".into());
         };
-        if !valid_id(id) {
+        let Some((id, _)) = marker_fields(role, fields) else {
             return Err("CHAT.md has a malformed message marker.".into());
-        }
+        };
         let ending = format!("\n\n<!-- codexify-{role}-message:v1:end id=\"{id}\" -->\n");
         let Some((message, tail)) = body.split_once(&ending) else {
             return Err("CHAT.md has an incomplete message; finish saving before retrying.".into());

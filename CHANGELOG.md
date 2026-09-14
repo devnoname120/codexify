@@ -8,6 +8,10 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- User and agent chat bubbles show small local times at the bottom right, with
+  user times before the ticks and `YYYY-MM-DD` prefixes for earlier local days.
+  Timestamps persist across reloads and retries; midnight changes update locally
+  without another server response. Undated historical user text is not backfilled.
 - Markdown chat can notify multiple services through the local Apprise library,
   using `markdownChat.notifications.urls`, an optional Python interpreter path,
   and a bounded timeout. Existing ntfy-only configuration remains compatible and

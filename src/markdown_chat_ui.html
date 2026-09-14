@@ -51,6 +51,7 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
 .markdown a[aria-busy="true"] { opacity:.6; }
 .markdown .image-reference { display:inline-block; border:1px solid var(--border); padding:4px 8px; border-radius:6px; }
 .receipt { display:flex; align-items:center; justify-content:flex-end; min-height:20px; margin-top:3px; gap:5px; color:var(--muted); font-size:11px; }
+.message-time { flex:none; white-space:nowrap; font-variant-numeric:tabular-nums; }
 .ticks { width:22px; height:15px; color:var(--tick); }
 .ticks.read { color:var(--read); }
 .retry { border:0; background:transparent; color:var(--error); padding:0 4px; font-size:12px; }
@@ -98,6 +99,7 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
   let refreshing = false, sending = false, loadingOlder = false, visible = true, collapsed = false;
   let revision = null, before = null, hasMore = false, delivered = 0, readThrough = 0, chatFile = null, failures = 0, snapshotEnd = 0;
   let lastAgentCall = null, clockOffset = 0, presenceTimer = null;
+  let messageClockTimer = null;
   let hostCapabilities = {};
   let statusKind = "normal";
   let available = bridge === null;
@@ -245,11 +247,37 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
       error(error) { status(error.message || "The link could not be opened.", true); }
     });
   }
+  function messageTime(timestamp, now = Date.now()) {
+    if (!Number.isSafeInteger(timestamp) || timestamp < 0) return null;
+    const date = new Date(timestamp);
+    if (!Number.isFinite(date.getTime())) return null;
+    const today = new Date(now);
+    today.setHours(0, 0, 0, 0);
+    const pad = value => String(value).padStart(2, "0");
+    const calendar = `${String(date.getFullYear()).padStart(4, "0")}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+    const clock = `${pad(date.getHours())}:${pad(date.getMinutes())}`;
+    return { label:(date < today ? calendar + " " : "") + clock, iso:date.toISOString(), title:date.toLocaleString() };
+  }
+  function scheduleMessageClock() {
+    clearTimeout(messageClockTimer);
+    if (!available || tornDown || document.hidden) return;
+    const now = new Date();
+    const midnight = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
+    messageClockTimer = setTimeout(render, Math.max(1, midnight.getTime() - now.getTime()));
+  }
   function receipt(node, message) {
     const state = message.role !== "user" ? "agent" : message.failed ? "failed" : message.pending ? "pending" : message.end <= readThrough ? "read" : message.end <= delivered ? "delivered" : "sent";
-    if (node.dataset.state === state) return;
+    const time = messageTime(message.created_at_ms);
+    const signature = JSON.stringify([state, time]);
+    if (node._receiptSignature === signature) return;
+    node._receiptSignature = signature;
     node.dataset.state = state;
     node.replaceChildren();
+    if (time) {
+      const stamp = make("time", "message-time", time.label);
+      stamp.dateTime = time.iso; stamp.title = time.title;
+      node.append(stamp);
+    }
     if (message.role !== "user") return;
     if (message.failed) {
       node.append(make("span", "", "Not confirmed"));
@@ -264,6 +292,7 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
     mark.append(icon(state !== "sent" ? ["m1 9 4 4L16 2", "m10 12 2 2L23 3"] : ["m5 9 4 4L20 2"])); node.append(mark);
   }
   function render() {
+    if (tornDown) return;
     const atBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 50;
     const messages = [...records.values()].sort((a, b) => a.start - b.start).concat([...pendingSends.values()]);
     el("empty").hidden = messages.length > 0;
@@ -285,6 +314,7 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
     }
     older.hidden = !hasMore; older.disabled = loadingOlder;
     if (atBottom && !loadingOlder) list.scrollTop = list.scrollHeight;
+    scheduleMessageClock();
     size();
   }
   function applyPage(page, history = false) {
@@ -336,7 +366,7 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
       const payload = await call("chat_ui_send", { request_id:message.id, message:message.markdown });
       if (payload.sent?.id !== message.id || !Number.isSafeInteger(payload.sent.end)) throw new Error("The send receipt was incomplete. Retry uses the same message ID.");
       pendingSends.delete(message.id);
-      if (!records.has(message.id)) records.set(message.id, { ...message, pending:false, failed:false, start:payload.sent.end - 1, end:payload.sent.end });
+      if (!records.has(message.id)) records.set(message.id, { ...message, pending:false, failed:false, start:payload.sent.end - 1, end:payload.sent.end, created_at_ms:payload.sent.created_at_ms });
       status("Saved to CHAT.md. The agent receives it on a tool response."); revision = null;
       void refresh();
     } catch (error) {
@@ -347,7 +377,7 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
   el("composer").addEventListener("submit", event => {
     event.preventDefault();
     if (!available || sending || !input.value.trim()) return;
-    const message = { id:crypto.randomUUID(), role:"user", markdown:input.value, pending:true, failed:false };
+    const message = { id:crypto.randomUUID(), role:"user", markdown:input.value, pending:true, failed:false, created_at_ms:Date.now() };
     input.value = ""; resizeInput(); void deliver(message); input.focus(); list.scrollTop = list.scrollHeight;
   });
   input.addEventListener("keydown", event => {
@@ -370,10 +400,10 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
     el("collapse").style.transform = collapsed ? "rotate(180deg)" : "";
     save(); schedule(); size();
   }
-  el("collapse").addEventListener("click", () => { collapsed = !collapsed; setCollapsed(); if (!collapsed) void refresh(); });
+  el("collapse").addEventListener("click", () => { collapsed = !collapsed; setCollapsed(); if (!collapsed) { render(); void refresh(); } });
   el("refresh").addEventListener("click", () => { revision = null; void refresh(); });
   function teardown() {
-    tornDown = true; clearTimeout(pollTimer); clearTimeout(saveTimer); clearTimeout(presenceTimer);
+    tornDown = true; clearTimeout(pollTimer); clearTimeout(saveTimer); clearTimeout(presenceTimer); clearTimeout(messageClockTimer);
     for (const waiter of rpcPending.values()) { clearTimeout(waiter.timer); waiter.reject(new Error("Widget closed.")); }
     rpcPending.clear();
   }
@@ -393,9 +423,9 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
       revision = null; void refresh();
     }
   });
-  window.addEventListener("focus", () => { void refresh(); });
+  window.addEventListener("focus", () => { render(); void refresh(); });
   window.addEventListener("pagehide", teardown);
-  document.addEventListener("visibilitychange", () => { updatePresence(); schedule(); if (!document.hidden) void refresh(); });
+  document.addEventListener("visibilitychange", () => { updatePresence(); render(); schedule(); if (!document.hidden) void refresh(); });
   const intersection = typeof IntersectionObserver === "function" ? new IntersectionObserver(entries => {
     const nextVisible = entries[0].isIntersecting;
     if (nextVisible === visible) return;
@@ -413,7 +443,7 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
     setAvailable(value) {
       const changed = available !== value;
       available = value;
-      if (!value) { clearTimeout(pollTimer); el("empty").textContent = "Select a workspace above to start this conversation's chat."; }
+      if (!value) { clearTimeout(pollTimer); clearTimeout(messageClockTimer); el("empty").textContent = "Select a workspace above to start this conversation's chat."; }
       resizeInput();
       if (changed && value) { revision = null; void refresh(); }
     },

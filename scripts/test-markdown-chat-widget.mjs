@@ -55,7 +55,7 @@ class ChatBackend {
   add(role, markdown, id = `fixture-${this.messages.length}`) {
     const start = this.end;
     this.end += markdown.length + 150;
-    const message = { id, role, markdown, start, end:this.end };
+    const message = { id, role, markdown, start, end:this.end, created_at_ms:Date.now() };
     this.messages.push(message); this.revision++;
     return message;
   }
@@ -77,7 +77,7 @@ class ChatBackend {
       if (message) assert.equal(message.markdown, args.message);
       else message = this.add("user", args.message, args.request_id);
       if (this.failAfterSave) { this.failAfterSave = false; throw new Error("Response lost after save"); }
-      return { content:[{ type:"text", text:"Message saved." }], _meta:{ [META]:{ sent:{ id:message.id, end:message.end } } } };
+      return { content:[{ type:"text", text:"Message saved." }], _meta:{ [META]:{ sent:{ id:message.id, end:message.end, created_at_ms:message.created_at_ms } } } };
     }
     assert.equal(name, "chat_ui_state", "UI must use only app-only chat tools");
     if (this.failState) throw new Error("Temporary state failure");
@@ -98,8 +98,8 @@ class ChatBackend {
   }
 }
 
-async function mount(browser, backend, { width = 390, theme = "light", count = 1, bridge = "legacy", nested = false, saved = {}, combined = false, clock = null, scale = 1 } = {}) {
-  const page = await browser.newPage({ viewport:{ width, height:1400 }, colorScheme:theme, deviceScaleFactor:scale });
+async function mount(browser, backend, { width = 390, theme = "light", count = 1, bridge = "legacy", nested = false, saved = {}, combined = false, clock = null, scale = 1, timezone } = {}) {
+  const page = await browser.newPage({ viewport:{ width, height:1400 }, colorScheme:theme, deviceScaleFactor:scale, timezoneId:timezone });
   page.setDefaultTimeout(8000);
   if (clock !== null) await page.clock.install({ time:clock });
   const errors = [], hostMessages = [], widgetStates = [], downloads = [];
@@ -511,6 +511,97 @@ for (const [engineName, engine] of [["Chromium", chromium], ["WebKit", webkit]])
           assert.deepEqual(errors, []); await page.close();
         });
       }
+    } finally { await browser.close(); }
+  });
+}
+
+for (const [engineName, engine] of [["Chromium", chromium], ["WebKit", webkit]]) {
+  test(`${engineName}: timestamp UI`, { timeout:120000 }, async t => {
+    const browser = await engine.launch();
+    try {
+      for (const [timezone, theme, expected] of [
+        ["Europe/Paris", "light", ["2026-09-14 23:58", "00:03", "2026-09-13 22:30", "2026-09-14 01:02"]],
+        ["America/Los_Angeles", "dark", ["14:58", "15:03", "2026-09-13 13:30", "2026-09-13 16:02"]],
+        ["Asia/Kolkata", "light", ["03:28", "03:33", "2026-09-14 02:00", "2026-09-14 04:32"]]
+      ]) {
+        await t.test(`local time, previous calendar dates, and placement in ${timezone}`, async () => {
+          const backend = new ChatBackend();
+          const fixtures = [
+            ["user", "Use the existing worktree.", "2026-09-14T21:58:00Z"],
+            ["agent", "I am using the existing worktree.", "2026-09-14T22:03:00Z"],
+            ["user", "Check the mobile layout too.", "2026-09-13T20:30:00Z"],
+            ["agent", "The layout checks passed.", "2026-09-13T23:02:00Z"]
+          ];
+          for (const [role, body, time] of fixtures) backend.add(role, body).created_at_ms = Date.parse(time);
+          backend.delivered = backend.read = backend.end;
+          const now = Date.parse("2026-09-14T22:05:00Z");
+          backend.lastAgentCall = now; backend.serverTime = now;
+          const { page, frames:[frame], errors } = await mount(browser, backend, { combined:true, timezone, theme, scale:2, clock:now });
+          await page.locator("iframe").evaluate(node => { node.style.height = "1100px"; });
+          await frame.locator(".message time").first().waitFor();
+          assert.deepEqual(await frame.locator(".message time").allTextContents(), expected);
+          assert.deepEqual(await frame.locator(".message time").evaluateAll(nodes => nodes.map(node => node.dateTime)), fixtures.map(([, , time]) => new Date(time).toISOString()));
+          const geometry = await frame.locator(".message").evaluateAll(nodes => nodes.map(node => {
+            const box = node.getBoundingClientRect(), time = node.querySelector("time"), tick = node.querySelector(".ticks");
+            const bounds = time.getBoundingClientRect();
+            return { role:node.classList.contains("user") ? "user" : "agent", font:getComputedStyle(time).fontSize,
+              inside:bounds.bottom <= box.bottom && bounds.right <= box.right,
+              atBottom:box.bottom - bounds.bottom < 20,
+              beforeTicks:!tick || bounds.right <= tick.getBoundingClientRect().left,
+              rightAligned:Boolean(tick) || box.right - bounds.right < 20 };
+          }));
+          for (const item of geometry) {
+            assert.equal(item.font, "11px");
+            assert(item.inside && item.atBottom && item.beforeTicks && item.rightAligned, JSON.stringify(item));
+          }
+          assert.equal(await frame.locator(".message.agent .ticks").count(), 0);
+          assert.equal(await frame.locator("html").evaluate(node => node.scrollWidth > innerWidth), false);
+          mkdirSync(new URL("../target/chat-time-previews/", import.meta.url), { recursive:true });
+          const name = `${engineName.toLowerCase()}-${timezone.split("/")[1].toLowerCase()}-${theme}.png`;
+          await frame.locator("#chat").screenshot({ path:new URL(`../target/chat-time-previews/${name}`, import.meta.url).pathname });
+          assert.deepEqual(errors, []); await page.close();
+        });
+      }
+      await t.test("dates update at local midnight even when polling fails", async () => {
+        const backend = new ChatBackend();
+        const now = Date.parse("2026-09-14T21:59:00Z");
+        backend.add("user", "Just before midnight.").created_at_ms = now - 30000;
+        backend.add("agent", "Still working.").created_at_ms = now;
+        const { page, frames:[frame], errors } = await mount(browser, backend, { combined:true, timezone:"Europe/Paris", clock:now });
+        await frame.locator(".message time").first().waitFor();
+        assert.deepEqual(await frame.locator(".message time").allTextContents(), ["23:58", "23:59"]);
+        backend.failState = true;
+        await page.clock.fastForward(120000);
+        assert.deepEqual(await frame.locator(".message time").allTextContents(), ["2026-09-14 23:58", "2026-09-14 23:59"]);
+        assert.equal(await frame.locator(".ticks.sent").count(), 1);
+        assert.deepEqual(errors, []); await page.close();
+      });
+      await t.test("retry uses the server timestamp even without a subsequent history response", async () => {
+        const backend = new ChatBackend();
+        const { page, frames:[frame], errors } = await mount(browser, backend);
+        backend.failAfterSave = true; backend.failState = true;
+        await frame.getByRole("textbox").fill("Keep my original timestamp.");
+        await frame.getByRole("button", { name:"Send message", exact:true }).click();
+        await frame.getByRole("button", { name:"Retry", exact:true }).waitFor();
+        const timestamp = backend.messages[0].created_at_ms;
+        await frame.getByRole("button", { name:"Retry", exact:true }).click();
+        await frame.getByRole("img", { name:"Saved to CHAT.md", exact:true }).waitFor();
+        assert.equal(await frame.locator(".message time").getAttribute("datetime"), new Date(timestamp).toISOString());
+        assert.equal(backend.messages.length, 1);
+        assert.deepEqual(errors, []); await page.close();
+      });
+      await t.test("unknown or invalid legacy times are not fabricated", async () => {
+        const backend = new ChatBackend();
+        backend.add("user", "Unknown old user time").created_at_ms = null;
+        delete backend.add("agent", "Unknown old agent time").created_at_ms;
+        backend.add("agent", "Invalid timestamp").created_at_ms = 8640000000000001;
+        backend.add("user", "Known epoch").created_at_ms = 0;
+        const { page, frames:[frame], errors } = await mount(browser, backend, { timezone:"UTC" });
+        await frame.locator(".message time").waitFor();
+        assert.deepEqual(await frame.locator(".message time").allTextContents(), ["1970-01-01 00:00"]);
+        assert.equal(await frame.getByText("Invalid Date", { exact:true }).count(), 0);
+        assert.deepEqual(errors, []); await page.close();
+      });
     } finally { await browser.close(); }
   });
 }

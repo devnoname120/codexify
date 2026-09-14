@@ -158,6 +158,10 @@ shows online for calls under four minutes old, last seen from four to under ten 
 and offline thereafter. These are tool-activity receipts, not proof of model
 comprehension. Widget sends do not start a new ChatGPT turn.
 
+Messages show a small local `HH:mm` timestamp at the bottom right, before the
+ticks on user messages. Earlier local calendar days also show `YYYY-MM-DD`
+before the time. Dates follow the viewer's timezone and update at midnight.
+
 The panel renders Markdown tables, reference links, nested lists, and code.
 For files, use the `chatLink` returned by `export_host_file` in the agent's
 Markdown message; supported hosts download it without starting another turn.
