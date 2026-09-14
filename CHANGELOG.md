@@ -30,6 +30,10 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Legacy migration preserves `workDir`, accepts an explicit `--work-dir` for old
+  command-line-only roots, and validates every candidate with the current server
+  startup loader before replacing configs or removing legacy state. Regression
+  tests exercise the generated file on Linux, macOS, and Windows.
 - Chat history has more reading space: up to 480 px on desktop and 420 px on
   narrow screens, with the composer outside the scrolling message area.
 - Markdown chat renders tables, nested formatting, reference links, and balanced

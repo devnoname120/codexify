@@ -3,6 +3,7 @@ use std::io::{self, BufReader, Read, Write};
 use std::path::Path;
 
 use anyhow::{Context, bail};
+use clap::Parser;
 use serde_json::{Map, Value, json};
 use tempfile::NamedTempFile;
 
@@ -24,12 +25,25 @@ pub struct LegacyMigrationOutcome {
 }
 
 pub fn migrate_default_home() -> anyhow::Result<LegacyMigrationOutcome> {
+    migrate_default_home_with_work_dir(None)
+}
+
+pub fn migrate_default_home_with_work_dir(
+    work_dir: Option<&Path>,
+) -> anyhow::Result<LegacyMigrationOutcome> {
     let home =
         home_dir().context("cannot locate the user's home directory for legacy migration")?;
-    migrate_legacy_state(&home)
+    migrate_legacy_state_with_work_dir(&home, work_dir)
 }
 
 pub fn migrate_legacy_state(home: &Path) -> anyhow::Result<LegacyMigrationOutcome> {
+    migrate_legacy_state_with_work_dir(home, None)
+}
+
+pub fn migrate_legacy_state_with_work_dir(
+    home: &Path,
+    work_dir: Option<&Path>,
+) -> anyhow::Result<LegacyMigrationOutcome> {
     let legacy_root = home.join(LEGACY_HOME_DIR);
     let current_root = home.join(CURRENT_HOME_DIR);
     let mut outcome = LegacyMigrationOutcome::default();
@@ -59,7 +73,7 @@ pub fn migrate_legacy_state(home: &Path) -> anyhow::Result<LegacyMigrationOutcom
 
     prepare_current_root(&current_root)?;
 
-    migrate_config(&legacy_root, &current_root, &mut outcome)?;
+    migrate_config(&legacy_root, &current_root, work_dir, &mut outcome)?;
 
     let entries = fs::read_dir(&legacy_root)
         .with_context(|| format!("read legacy state root {}", legacy_root.display()))?;
@@ -93,6 +107,7 @@ pub fn migrate_legacy_state(home: &Path) -> anyhow::Result<LegacyMigrationOutcom
 fn migrate_config(
     legacy_root: &Path,
     current_root: &Path,
+    work_dir: Option<&Path>,
     outcome: &mut LegacyMigrationOutcome,
 ) -> anyhow::Result<()> {
     let legacy_path = legacy_root.join(LEGACY_CONFIG_FILE);
@@ -108,7 +123,7 @@ fn migrate_config(
     };
     let mut legacy = read_json_object(&legacy_path, "legacy Codex Free config")?;
     let defaults = legacy_defaults();
-    legacy.retain(|key, _| defaults.get(key).is_some());
+    legacy.retain(|key, _| key == "workDir" || defaults.get(key).is_some());
     let mut migrated = strip_defaults(&Value::Object(legacy), Some(&defaults))
         .and_then(|value| value.as_object().cloned())
         .unwrap_or_default();
@@ -160,15 +175,26 @@ fn migrate_config(
 
     let before = current.clone();
     merge_missing(&mut current, migrated, &mut outcome.config_conflicts);
+    if let Some(work_dir) = work_dir {
+        let absolute = fs::canonicalize(work_dir)
+            .with_context(|| format!("resolve migration --work-dir {}", work_dir.display()))?;
+        current.insert("workDir".into(), json!(absolute));
+    }
+    if current.get("workDir").is_none_or(|value| {
+        value.is_null() || value.as_str().is_some_and(|path| path.trim().is_empty())
+    }) {
+        bail!(
+            "migration requires workDir in a configuration or an explicit --work-dir; rerun `codexify migrate-legacy-install --work-dir /path/to/project-or-access-root`. No configuration or legacy state was replaced. The old command-line access root cannot safely be guessed."
+        );
+    }
     outcome.config_fields_added = count_added_leaves(&before, &current);
 
-    if current != before || (!current_path.exists() && !current.is_empty()) {
-        write_json_object(
-            &current_path,
-            &current,
-            current_permissions.or(Some(legacy_permissions)),
-        )?;
-    }
+    write_json_object(
+        &current_path,
+        &current,
+        current_permissions.or(Some(legacy_permissions)),
+        current != before || !current_path.exists(),
+    )?;
 
     fs::remove_file(&legacy_path)
         .with_context(|| format!("remove migrated legacy config {}", legacy_path.display()))?;
@@ -436,6 +462,7 @@ fn write_json_object(
     path: &Path,
     object: &Map<String, Value>,
     permissions: Option<fs::Permissions>,
+    replace: bool,
 ) -> anyhow::Result<()> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent)
@@ -450,6 +477,17 @@ fn write_json_object(
     temp.as_file()
         .sync_all()
         .with_context(|| format!("sync temporary migrated config for {}", path.display()))?;
+    let cli = crate::config::Cli::try_parse_from([
+        std::ffi::OsStr::new("codexify"),
+        std::ffi::OsStr::new("--config"),
+        temp.path().as_os_str(),
+    ])?;
+    crate::config::validate_config_quiet(&cli)
+        .map_err(anyhow::Error::msg)
+        .context("migrated configuration does not pass current server startup validation; original configurations and legacy state were preserved")?;
+    if !replace {
+        return Ok(());
+    }
     if let Some(permissions) = permissions {
         fs::set_permissions(temp.path(), permissions).with_context(|| {
             format!(
@@ -707,14 +745,14 @@ mod tests {
                 },
                 "review": { "maxPatchBytes": 8388608 },
                 "openaiTunnel": {
-                    "tunnelId": "tunnel_0123456789abcdefghijklmnopqrstuv",
+                    "tunnelId": "tunnel_0123456789abcdef0123456789abcdef",
                     "apiKeyRef": format!("file:{}", credential.display())
                 },
                 "codexMcp": { "enabled": true, "useCli": true }
             }),
         );
 
-        let outcome = migrate_legacy_state(home.path()).unwrap();
+        let outcome = migrate_legacy_state_with_work_dir(home.path(), Some(home.path())).unwrap();
         assert!(outcome.found);
         assert!(!outcome.legacy_root_remaining);
         assert!(current.join("projects/demo/memory.json").is_file());
@@ -768,7 +806,7 @@ mod tests {
             }),
         );
 
-        let outcome = migrate_legacy_state(home.path()).unwrap();
+        let outcome = migrate_legacy_state_with_work_dir(home.path(), Some(home.path())).unwrap();
         assert_eq!(outcome.config_conflicts, 2);
         let config = read_json(&current.join(CURRENT_CONFIG_FILE));
         assert_eq!(config["port"], 7777);
@@ -802,21 +840,23 @@ mod tests {
     }
 
     #[test]
-    fn ignores_config_keys_unknown_to_the_legacy_release() {
+    fn preserves_work_dir_while_ignoring_unrecognized_legacy_keys() {
         let home = TempDir::new().unwrap();
         let legacy = home.path().join(LEGACY_HOME_DIR);
         let current = home.path().join(CURRENT_HOME_DIR);
         write_json(
             &legacy.join(LEGACY_CONFIG_FILE),
             json!({
-                "workDir": "/would-be-meaningful-only-in-codexify",
+                "workDir": home.path(),
+                "unknownLegacyKey": "ignored",
                 "port": 4567
             }),
         );
 
         migrate_legacy_state(home.path()).unwrap();
         let config = read_json(&current.join(CURRENT_CONFIG_FILE));
-        assert!(config.get("workDir").is_none());
+        assert_eq!(config["workDir"], json!(home.path()));
+        assert!(config.get("unknownLegacyKey").is_none());
         assert_eq!(config["port"], 4567);
     }
 
@@ -851,9 +891,12 @@ mod tests {
             }),
         );
 
-        migrate_legacy_state(home.path()).unwrap();
+        migrate_legacy_state_with_work_dir(home.path(), Some(home.path())).unwrap();
         let config = read_json(&current.join(CURRENT_CONFIG_FILE));
-        assert_eq!(config, json!({ "port": 4567 }));
+        assert_eq!(
+            config,
+            json!({ "port": 4567, "workDir": fs::canonicalize(home.path()).unwrap() })
+        );
     }
 
     #[cfg(unix)]

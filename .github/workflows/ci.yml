@@ -122,5 +122,8 @@ jobs:
       - name: Test Markdown chat storage and tools
         run: cargo test --test markdown_chat --test markdown_chat_tools
 
+      - name: Test legacy configuration migration against startup validation
+        run: cargo test --test legacy_migration
+
       - name: Test Markdown chat dispatch, watching, and schemas
         run: cargo test --lib markdown_chat

@@ -146,6 +146,29 @@ ANSI emphasis on capable POSIX terminals. Redirected output and `NO_COLOR` remai
 plain; the POSIX installer also honors `CLICOLOR_FORCE` for deterministic terminal
 testing.
 
+### Migrating a Codex Free installation
+
+`codexify migrate-legacy-install` imports the legacy configuration and private
+state from `~/.codex-free`. It preserves `workDir`, translates the old `review`
+section to `diff`, and keeps existing Codexify settings when values conflict.
+Every candidate configuration passes the same startup loader as
+`codexify config validate` before the destination is replaced or legacy data is
+removed. Validation is not based on a separate, frozen copy of the config schema.
+
+Some legacy installations supplied their access root only on the command line.
+That path cannot be recovered from the old JSON. Migration then leaves the
+original configurations and legacy state intact instead of producing an invalid
+config or guessing a broader root. Supply the original project or access root:
+
+```sh
+codexify migrate-legacy-install --work-dir /absolute/path/to/project-or-access-root
+```
+
+An explicit `--work-dir` is resolved to an absolute directory and overrides the
+stored value for this migration. Other invalid candidate settings must be
+corrected before retrying. The installer still defers service setup when no
+valid configuration is available.
+
 ### macOS release signing and notarization
 
 The Intel and Apple-silicon release executables are signed after linking with a

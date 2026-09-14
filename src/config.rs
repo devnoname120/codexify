@@ -38,8 +38,7 @@ const CONFIG_HOME_DIR: &str = ".codexify";
 #[command(
     name = "codexify",
     about = "Codexify MCP bridge (Rust): expose Codex-style agent tools over Streamable HTTP.",
-    subcommand_negates_reqs = true,
-    args_conflicts_with_subcommands = true
+    subcommand_negates_reqs = true
 )]
 pub struct Cli {
     /// Increase codexify diagnostics. Repeat for trace-level diagnostics.

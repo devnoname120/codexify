@@ -191,7 +191,9 @@ async fn run(mut cli: Cli) -> anyhow::Result<()> {
                 return run_service(&cli, command).await;
             }
             CliCommand::MigrateLegacyInstall => {
-                let outcome = legacy_migration::migrate_default_home()?;
+                let outcome = legacy_migration::migrate_default_home_with_work_dir(
+                    cli.work_dir.as_deref().map(std::path::Path::new),
+                )?;
                 if outcome.found {
                     println!(
                         "Migrated Codex Free state to ~/.codexify ({} config fields, {} state entries).",
