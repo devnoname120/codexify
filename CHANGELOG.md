@@ -8,6 +8,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Markdown chat can notify multiple services through the local Apprise library,
+  using `markdownChat.notifications.urls`, an optional Python interpreter path,
+  and a bounded timeout. Existing ntfy-only configuration remains compatible and
+  needs no Python. CI checks the real ntfy/Pushover/webhook adapters and the
+  subprocess path on Linux, macOS, and Windows without contacting real recipients.
 - Opt-in `markdownChat` communication gives each conversation its own `CHAT.md`
   outside the repository by default. `chat_read`, `chat_write`, and `chat_await`
   support complete unread Markdown, persistent cursors, native directory watches

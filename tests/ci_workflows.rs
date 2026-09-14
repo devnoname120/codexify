@@ -37,6 +37,22 @@ fn legacy_migration_regressions_run_on_the_service_platforms() {
 }
 
 #[test]
+fn notification_integration_is_not_silently_skipped_in_ci() {
+    let ci = workflow(".github/workflows/ci.yml");
+    for section in [
+        job_section(&ci, "check", "diff-widget"),
+        job_section(&ci, "service-platforms", "unused"),
+    ] {
+        assert!(section.contains("scripts/requirements-notifications.txt"));
+        assert!(section.contains("python -m unittest scripts.test_apprise_notifications"));
+        assert!(section.contains("CODEXIFY_TEST_APPRISE_PYTHON:"));
+        assert!(
+            section.contains("cargo test --test markdown_chat_notifications -- --include-ignored")
+        );
+    }
+}
+
+#[test]
 fn release_builds_run_parallel_to_validation_and_publish_only_after_both() {
     let release = workflow(".github/workflows/release.yml");
     let build = job_section(&release, "build", "deploy-installers");

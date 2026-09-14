@@ -1382,9 +1382,10 @@ guarantee quota savings, or keep a host-terminated turn alive.
   "markdownChat": {
     "enabled": true,
     "maxWaitMs": 270000,
-    "ntfy": {
-      "url": "https://ntfy.example/codexify",
-      "token": "replace-with-your-ntfy-access-token"
+    "notifications": {
+      "urls": ["ntfys://ntfy.example/codexify?image=no"],
+      "pythonPath": "/absolute/path/to/notifications-venv/bin/python",
+      "timeoutMs": 15000
     }
   }
 }
@@ -1392,10 +1393,11 @@ guarantee quota savings, or keep a host-terminated turn alive.
 
 `enabled` defaults to `false`; `maxWaitMs` defaults to **270000 ms (4 min 30 s)**
 and must be between 1000 and 300000. The tools do not accept a timeout override.
-Omit `ntfy` or set it to `null` for file-only communication. Its `token` is optional
-and, when configured, is stored directly in the JSON file. Use HTTPS unless an
-explicitly trusted local notification server requires HTTP. Keep the config and
-private topic URL out of source control.
+Omit both `notifications` and the legacy `ntfy` section, or set them to `null`,
+for file-only communication. Configure only one notification backend. Credentials
+can be stored directly in the JSON configuration; keep the config and private
+service URLs out of source control. See the installation steps and URL examples
+in [Waiting and notifications](#waiting-and-notifications).
 
 For example, `codexify config set markdownChat.enabled true` enables the setting.
 Configuration is loaded when the service starts: restart the service after a
@@ -1591,18 +1593,69 @@ describes approximately five-minute and later shorter timeouts; [OpenAI Support]
 states that no fixed ChatGPT web MCP timeout is documented. Reduce `maxWaitMs`
 when a host or proxy terminates calls earlier.
 
-Each successful `chat_write` sends the exact agent Markdown to the configured
-ntfy topic using POST, `Markdown: yes`, and an optional bearer token. Requests have
-a bounded timeout and do not follow redirects. See [ntfy publishing](https://docs.ntfy.sh/publish/)
-for its own payload limits, attachment handling, and subscriber behavior. The
-provider receives the message content; configure it only when that destination
-is appropriate for your project's messages.
+The provider-agnostic `notifications` backend uses the local
+[Apprise Python library](https://appriseit.com/library/), not a hosted relay or
+an Apprise API server. Install it once in a dedicated virtual environment:
+
+```sh
+python3 -m venv ~/.codexify/notifications-venv
+~/.codexify/notifications-venv/bin/python -m pip install 'apprise>=1.13.1,<2'
+```
+
+On Windows PowerShell:
+
+```powershell
+python -m venv "$env:USERPROFILE\.codexify\notifications-venv"
+& "$env:USERPROFILE\.codexify\notifications-venv\Scripts\python.exe" -m pip install 'apprise>=1.13.1,<2'
+```
+
+Set `markdownChat.notifications.pythonPath` to that interpreter's absolute path.
+The default is `python3` on macOS/Linux and `python` on Windows. The interpreter
+runs in isolated mode, so user-site-only Python packages are not used. Codexify
+does not download packages or alter the Python installation at runtime.
+
+`notifications.urls` accepts 1 to 32 Apprise service URLs. For example:
+
+| Destination | URL shape |
+| --- | --- |
+| ntfy with a token | `ntfys://TOKEN@ntfy.example/TOPIC?auth=token&image=no` |
+| Pushover | `pover://USER_KEY@APP_TOKEN` |
+| JSON webhook | `jsons://hooks.example/notifications` |
+
+Use the [Apprise service reference](https://appriseit.com/services/) for each
+provider's URL syntax and options. Prefer secure protocols. Delivery sends the
+message content to those configured destinations, which must be appropriate for
+the project's messages.
+
+The embedded helper passes the complete source to Apprise as Markdown. Apprise
+then applies provider-specific formatting, whitespace normalization, and message
+limits; notification bodies are not a byte-exact replacement for `CHAT.md`.
+Codexify defaults to `format=markdown`, `overflow=split`, and `redirect=no`, while
+preserving explicit service URL options. Splitting can produce several
+notifications for a long message. The default total subprocess deadline is
+15000 ms; `timeoutMs` accepts 1000 to 60000. Timeout or cancellation terminates
+the helper. URLs and message bodies travel over standard input, not command-line
+arguments, and provider output is not copied into logs. No console is opened on
+Windows. All URLs are parsed by Apprise before any notification is sent.
+
+Existing `markdownChat.ntfy` configurations remain supported without Python:
+
+```json
+{"markdownChat":{"enabled":true,"ntfy":{"url":"https://ntfy.example/codexify","token":"TOKEN"}}}
+```
+
+That compatibility backend still POSTs the exact source with `Markdown: yes`
+and optional bearer authentication, with bounded timeouts and no redirects.
+It is not silently migrated to Apprise. Setting both backends is an error.
 
 The transcript append is independent of notification delivery. A network failure
 returns `notification: failed` while preserving the written message; do not resend
 the same `chat_write` merely to retry notification delivery. Normal await timeouts
 do not resend notifications. The status distinguishes a file-only message from a
-notification accepted by ntfy, and never claims the human has read it. Chat bodies,
+notification reported successful by its provider, and never claims the human has read it.
+For multiple destinations, partial failure is reported as failure under Apprise's
+configured delivery policy; some destinations may already have received it.
+Chat bodies,
 explicit chat-history payloads, topic URLs, and tokens are excluded or redacted
 from Codexify's ordinary tool payload diagnostics.
 

@@ -259,6 +259,11 @@ fn collect_secret_values(
     redact_all_mcp_values: bool,
 ) -> Zeroizing<Vec<String>> {
     let mut values = Vec::new();
+    if let Some(notifications) = &config.markdown_chat.notifications {
+        for url in &notifications.urls {
+            push_secret(&mut values, url, false);
+        }
+    }
     if let Some(ntfy) = &config.markdown_chat.ntfy {
         push_secret(&mut values, &ntfy.url, false);
         if let Some(token) = &ntfy.token {

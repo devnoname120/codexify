@@ -40,6 +40,7 @@ pub struct MarkdownChatConfig {
     pub enabled: bool,
     pub max_wait_ms: u64,
     pub ntfy: Option<NtfyConfig>,
+    pub notifications: Option<NotificationsConfig>,
 }
 
 impl Default for MarkdownChatConfig {
@@ -48,6 +49,7 @@ impl Default for MarkdownChatConfig {
             enabled: false,
             max_wait_ms: DEFAULT_MAX_WAIT_MS,
             ntfy: None,
+            notifications: None,
         }
     }
 }
@@ -58,6 +60,61 @@ pub struct NtfyConfig {
     pub url: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct NotificationsConfig {
+    pub urls: Vec<String>,
+    #[serde(default = "default_notification_python")]
+    pub python_path: String,
+    #[serde(default = "default_notification_timeout")]
+    pub timeout_ms: u64,
+}
+
+fn default_notification_python() -> String {
+    if cfg!(windows) { "python" } else { "python3" }.into()
+}
+
+fn default_notification_timeout() -> u64 {
+    15_000
+}
+
+impl fmt::Debug for NotificationsConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("NotificationsConfig")
+            .field("destinations", &self.urls.len())
+            .field("python_path", &self.python_path)
+            .field("timeout_ms", &self.timeout_ms)
+            .finish()
+    }
+}
+
+impl NotificationsConfig {
+    fn validate(&self) -> Result<(), String> {
+        if self.urls.is_empty() || self.urls.len() > 32 {
+            return Err(
+                "markdownChat.notifications.urls must contain 1 to 32 Apprise service URLs".into(),
+            );
+        }
+        if self.urls.iter().any(|url| {
+            url.len() > 16_384
+                || !url.contains("://")
+                || url.chars().any(char::is_control)
+                || reqwest::Url::parse(url).is_err()
+        }) {
+            return Err("markdownChat.notifications.urls contains an invalid service URL".into());
+        }
+        if self.python_path.trim().is_empty() || self.python_path.contains('\0') {
+            return Err("markdownChat.notifications.pythonPath must name a Python interpreter with Apprise installed".into());
+        }
+        if !(1_000..=60_000).contains(&self.timeout_ms) {
+            return Err(
+                "markdownChat.notifications.timeoutMs must be between 1000 and 60000".into(),
+            );
+        }
+        Ok(())
+    }
 }
 
 impl fmt::Debug for NtfyConfig {
@@ -73,6 +130,15 @@ impl MarkdownChatConfig {
     pub fn validate(&self) -> Result<(), String> {
         if !(1_000..=300_000).contains(&self.max_wait_ms) {
             return Err("markdownChat.maxWaitMs must be between 1000 and 300000".into());
+        }
+        if let Some(notifications) = &self.notifications {
+            if self.ntfy.is_some() {
+                return Err(
+                    "configure markdownChat.notifications or legacy markdownChat.ntfy, not both"
+                        .into(),
+                );
+            }
+            notifications.validate()?;
         }
         if let Some(ntfy) = &self.ntfy {
             let url = reqwest::Url::parse(&ntfy.url)

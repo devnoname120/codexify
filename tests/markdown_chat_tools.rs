@@ -194,6 +194,40 @@ async fn chat_file_links_resolve_real_exports_and_reject_ambiguous_or_foreign_fi
     );
 }
 
+#[tokio::test]
+async fn apprise_runtime_failure_does_not_undo_or_duplicate_a_chat_write() {
+    let (root, mut config, session, context) = fixture();
+    config.markdown_chat.notifications = Some(
+        serde_json::from_value(json!({
+            "urls":["ntfys://test-topic"],"pythonPath":root.path().join("missing-python")
+        }))
+        .unwrap(),
+    );
+    let result = load_tools_for_config(&config)
+        .into_iter()
+        .find(|tool| tool.name() == "chat_write")
+        .unwrap()
+        .call_with_context(
+            json!({"message":"Persist even when delivery fails"}),
+            &config,
+            &session,
+            &context,
+        )
+        .await;
+    assert!(!result.is_error);
+    assert_eq!(result.structured_content.unwrap()["notification"], "failed");
+    let chat = context
+        .markdown_chat
+        .chat(&config, context.conversation.as_ref(), &session)
+        .unwrap();
+    let history = chat.widget_page(None, None).await.unwrap();
+    assert_eq!(history.messages.len(), 1);
+    assert_eq!(
+        history.messages[0].markdown,
+        "Persist even when delivery fails"
+    );
+}
+
 #[test]
 fn chat_widget_tools_are_app_only_and_chat_calls_never_link_a_widget() {
     let (_root, mut config, _session, _context) = fixture();

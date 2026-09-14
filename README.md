@@ -165,9 +165,11 @@ Older sandbox links work when they identify an unambiguous export in this worksp
 
 You can also append your instructions to the file and save. The agent uses `chat_read`,
 `chat_write`, and `chat_await`; other tool results also deliver unread messages
-without consuming them. Optional ntfy notifications send the agent's Markdown to
-your configured topic. The feature is disabled by default and does not guarantee
-unlimited ChatGPT runtime or alter OpenAI's usage limits.
+without consuming them. Optional Apprise notifications send the agent's Markdown
+to ntfy, Pushover, and other supported services through one URL-based configuration.
+This opt-in backend needs Python with Apprise installed; existing `ntfy` settings
+continue to work without Python. The feature is disabled by default and does not
+guarantee unlimited ChatGPT runtime or alter OpenAI's usage limits.
 
 See [Markdown chat configuration and semantics](docs/REFERENCE.md#markdown-chat)
 for notifications, timeouts, schema refreshes, and append-only editing rules.

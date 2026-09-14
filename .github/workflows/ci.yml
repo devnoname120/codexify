@@ -63,6 +63,24 @@ jobs:
       - name: Test
         run: cargo test --all
 
+      - uses: actions/setup-python@v7
+        id: notification-python
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: scripts/requirements-notifications.txt
+
+      - name: Install notification test dependencies
+        run: python -m pip install -r scripts/requirements-notifications.txt
+
+      - name: Test real notification adapters without external delivery
+        run: python -m unittest scripts.test_apprise_notifications -v
+
+      - name: Test notification subprocesses with a local HTTP receiver
+        env:
+          CODEXIFY_TEST_APPRISE_PYTHON: ${{ steps.notification-python.outputs.python-path }}
+        run: cargo test --test markdown_chat_notifications -- --include-ignored
+
       - name: Test setup widget transitions
         run: node --test scripts/test-setup-widget.mjs
 
@@ -127,3 +145,21 @@ jobs:
 
       - name: Test Markdown chat dispatch, watching, and schemas
         run: cargo test --lib markdown_chat
+
+      - uses: actions/setup-python@v7
+        id: notification-python
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: scripts/requirements-notifications.txt
+
+      - name: Install notification test dependencies
+        run: python -m pip install -r scripts/requirements-notifications.txt
+
+      - name: Test real notification adapters without external delivery
+        run: python -m unittest scripts.test_apprise_notifications -v
+
+      - name: Test notification subprocesses with a local HTTP receiver
+        env:
+          CODEXIFY_TEST_APPRISE_PYTHON: ${{ steps.notification-python.outputs.python-path }}
+        run: cargo test --test markdown_chat_notifications -- --include-ignored

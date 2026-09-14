@@ -84,7 +84,7 @@ impl Tool for ChatTool {
     fn description(&self) -> String {
         match self {
             Self::Read => "Read and acknowledge all new user text in this conversation's CHAT.md, without truncation. Prefer this over direct file reads. If there is no message, continue useful work; when blocked or out of work, send a message with chat_write then call chat_await instead of ending the turn.",
-            Self::Write => "Append a Markdown message to this conversation's CHAT.md and optionally notify the user through the configured ntfy provider. This is the only supported way for the agent to write this file. Returns any complete unread user text that arrived before the append; read that text before continuing. Use this for questions, progress and completion reports instead of ChatGPT replies.",
+            Self::Write => "Append a Markdown message to this conversation's CHAT.md and optionally notify the user through configured notification services. This is the only supported way for the agent to write this file. Returns any complete unread user text that arrived before the append; read that text before continuing. Use this for questions, progress and completion reports instead of ChatGPT replies.",
             Self::Await => "Wait for new user text in this conversation's CHAT.md, then return and acknowledge it in full without truncation. The server config controls the wait deadline; no tool argument can change it. After an ordinary timeout, call chat_await again rather than voluntarily finishing, stopping or checkpointing the turn. Explicit user stop requests and host cancellation still apply.",
         }.into()
     }
@@ -164,7 +164,9 @@ impl Tool for ChatTool {
                 Ok(receipt) => receipt,
                 Err(error) => return ToolResult::error(error),
             };
-            let state = if let Some(ntfy) = &config.markdown_chat.ntfy {
+            let state = if config.markdown_chat.ntfy.is_some()
+                || config.markdown_chat.notifications.is_some()
+            {
                 let _ = chat
                     .set_notification(receipt.end_offset, NotificationState::Pending)
                     .await;
@@ -173,7 +175,13 @@ impl Tool for ChatTool {
                     .file_name()
                     .unwrap_or_default()
                     .to_string_lossy();
-                notification::publish(ntfy, &workspace, message, &context.cancellation).await
+                notification::publish_config(
+                    &config.markdown_chat,
+                    &workspace,
+                    message,
+                    &context.cancellation,
+                )
+                .await
             } else {
                 NotificationState::NotConfigured
             };
