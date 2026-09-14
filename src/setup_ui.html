@@ -298,6 +298,7 @@ button { font: inherit; }
   let nextId = 1;
   let resizeObserver;
   let initialized = false;
+  let hostCapabilities = {};
   let currentData = null;
   let currentMetadata = null;
   let conversationSchemaVersion = null;
@@ -654,11 +655,16 @@ button { font: inherit; }
       const scope = chatHost.attachShadow({ mode:"open" });
       scope.append(template.content.cloneNode(true));
       root.after(chatHost);
-      chatController = window.mountCodexifyChat(scope, { callTool, openLink, reportSize:scheduleSizeReport });
+      chatController = window.mountCodexifyChat(scope, { callTool, openLink, downloadFile, reportSize:scheduleSizeReport });
     }
     chatHost.hidden = false;
     chatController.setTheme({ theme:document.documentElement.dataset.theme || window.openai?.theme });
     chatController.setAvailable(["selected", "without_project", "static"].includes(currentData.project?.status));
+  }
+
+  async function downloadFile(file) {
+    if (!initialized || !hostCapabilities.downloadFile) throw new Error("This host cannot download files from a widget. Open the exported attachment in the ChatGPT conversation.");
+    return accepted(await request("ui/download-file", { contents:[file] }), "File download");
   }
 
   function plural(count, singular, pluralForm) {
@@ -1697,6 +1703,7 @@ button { font: inherit; }
     appCapabilities: {}
   }).then(result => {
     initialized = true;
+    hostCapabilities = result?.hostCapabilities || {};
     applyHostContext(result && result.hostContext);
     notify("ui/notifications/initialized", {});
     maybeStartProjectLoad();

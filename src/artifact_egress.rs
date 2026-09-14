@@ -105,6 +105,73 @@ impl ArtifactEgressStore {
         })?
     }
 
+    pub async fn chat_file_link(
+        &self,
+        work_dir: &Path,
+        href: &str,
+        cancellation: &CancellationToken,
+    ) -> Result<Resource, ArtifactEgressError> {
+        if !self.config.enabled {
+            return Err(ArtifactEgressError::new(
+                "artifact_egress_disabled",
+                "File export is disabled by configuration.",
+            ));
+        }
+        if cancellation.is_cancelled() {
+            return Err(ArtifactEgressError::new(
+                "cancelled",
+                "File request was cancelled.",
+            ));
+        }
+        let href = href.split(['#', '?']).next().unwrap_or_default();
+        let decoded = percent_encoding::percent_decode_str(href)
+            .decode_utf8()
+            .map_err(|_| {
+                ArtifactEgressError::new("invalid_reference", "The file link is not valid UTF-8.")
+            })?;
+        let token = parse_token(&decoded).map(str::to_owned);
+        let sandbox_name = decoded
+            .strip_prefix("sandbox:/mnt/data/")
+            .map(str::to_owned);
+        if token.is_none() && sandbox_name.is_none() {
+            if decoded.contains(':') || decoded.starts_with('/') || decoded.contains('\\') {
+                return Err(ArtifactEgressError::new(
+                    "invalid_reference",
+                    "Only an exported file or a project-relative file link can be opened here.",
+                ));
+            }
+            return self
+                .export_project_file(work_dir, &decoded, cancellation)
+                .await
+                .map(|export| export.resource);
+        }
+        if sandbox_name.as_ref().is_some_and(|name| {
+            name.is_empty() || name.contains(['/', '\\']) || name == "." || name == ".."
+        }) {
+            return Err(ArtifactEgressError::new(
+                "invalid_reference",
+                "The sandbox link must name one exported file.",
+            ));
+        }
+        let root = work_dir.to_path_buf();
+        let store = self.store.clone();
+        let record = tokio::task::spawn_blocking(move || {
+            let root = std::fs::canonicalize(root).map_err(|_| "Could not resolve the active workspace")?;
+            let root = root.to_string_lossy();
+            let record = if let Some(token) = token { store.load_record(&token)? }
+                else { store.find_project_export(&root, sandbox_name.as_deref().unwrap())? };
+            record.filter(|record| record.source_root == root)
+                .ok_or_else(|| "This file is not an export from the active workspace. Open its original ChatGPT attachment, or export the file again and use its chatLink.".to_string())
+        }).await.map_err(|_| ArtifactEgressError::new("resource_read_failed", "File resolution was interrupted."))?
+          .map_err(|error| ArtifactEgressError::new("file_unavailable", error))?;
+        Ok(Resource::new(
+            format!("{ARTIFACT_RESOURCE_URI_PREFIX}{}", record.token),
+            record.name,
+        )
+        .with_mime_type(record.mime_type)
+        .with_size(record.original_bytes))
+    }
+
     pub async fn read_resource(
         &self,
         uri: &str,

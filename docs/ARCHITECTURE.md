@@ -490,7 +490,7 @@ receive an `upstream_result` envelope rather than corrupting the original schema
 Text mirrors preserve visibility in hosts that ignore structured output. Disabled
 installations retain the original advertised schemas and do not expose chat tools.
 
-Schema revisions use an explicit `+markdown-chat-v2` suffix only when enabled, not a
+Schema revisions use an explicit `+markdown-chat-v3` suffix only when enabled, not a
 schema fingerprint. Connector reloads record the version actually advertised by
 the current configuration. A persisted conversation baseline supplies toggle
 warnings when discovery identity is absent; that baseline is not evidence of a
@@ -499,7 +499,7 @@ refreshing live status, so a same-version enable/disable is not mistaken for an
 up-to-date schema. Host cancellation and model-imposed limits remain outside the
 communication subsystem's control.
 
-The optional `setup-chat/v1` resource is linked only by `setup`, combining the
+The optional `setup-chat/v2` resource is linked only by `setup`, combining the
 setup UI with one chat panel in a shadow root. The panel lives outside the setup
 controls' rerendered root; both use the setup bridge without a second handshake.
 The old standalone chat resource remains readable for existing cards, but no
@@ -512,6 +512,14 @@ channel and file lock; the UI never supplies a path or conversation identity.
 User appends carry a request ID for idempotent retries, while history reads parse
 agent/user boundaries and plain editor appends into paged component-only data.
 The normal user-text parser strips framing but preserves complete user Markdown.
+
+The widget embeds markdown-it and converts its tokens to allowlisted DOM nodes,
+not raw HTML. A private file-link resolver reuses the artifact egress store and
+workspace checks. Explicit `chatLink` capabilities select exact exports; legacy
+sandbox names require an unambiguous workspace-scoped record. Downloads use the
+host's optional `ui/download-file` capability and keep file payloads out of the
+agent's context. Missing host support or missing/ambiguous files yield explicit
+errors, never a guessed filesystem path or an external sandbox URL.
 
 A separate `delivered_through` byte boundary in `cursor.json` drives the two-grey
 receipt state; `read_through` exposes the existing consumption offset for two

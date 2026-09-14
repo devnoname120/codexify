@@ -53,25 +53,30 @@ impl ExportHostFile {
         } else {
             "No immutable snapshot was retained and source fallback is disabled."
         };
-        let text = format!(
+        let mut text = format!(
             "Exported `{path}` as `{}` ({} bytes, SHA-256 {}). {durability}",
             registered.name, registered.byte_count, registered.sha256
         );
+        let mut structured = json!({
+            "path": path,
+            "name": registered.name,
+            "bytes": registered.byte_count,
+            "sha256": registered.sha256,
+            "mimeType": registered.mime_type,
+            "snapshotStored": registered.snapshot_stored,
+            "fallbackToSource": registered.fallback_to_source
+        });
+        if config.markdown_chat.enabled {
+            structured["chatLink"] = json!(registered.resource.uri);
+            text.push_str(&format!(" Use `{}` as the Markdown link destination in chat_write; do not substitute a sandbox path.", registered.resource.uri));
+        }
         ToolResult {
             content: vec![
                 ToolContent::Text(text),
                 ToolContent::ResourceLink(registered.resource),
             ],
             is_error: false,
-            structured_content: Some(json!({
-                "path": path,
-                "name": registered.name,
-                "bytes": registered.byte_count,
-                "sha256": registered.sha256,
-                "mimeType": registered.mime_type,
-                "snapshotStored": registered.snapshot_stored,
-                "fallbackToSource": registered.fallback_to_source
-            })),
+            structured_content: Some(structured),
             meta: None,
             new_chat_message_from_user: None,
             chat_delivery_end: None,
@@ -129,7 +134,8 @@ impl Tool for ExportHostFile {
                 "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
                 "mimeType": { "type": "string" },
                 "snapshotStored": { "type": "boolean" },
-                "fallbackToSource": { "type": "boolean" }
+                "fallbackToSource": { "type": "boolean" },
+                "chatLink": { "type": "string", "description":"Exact Markdown destination for this exported file inside chat_write. Prefer it to a sandbox filename." }
             },
             "required": [
                 "path",

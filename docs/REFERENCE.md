@@ -1466,7 +1466,7 @@ never ends a turn.
 ### Chat widget
 
 When both `markdownChat.enabled` and `uiWidgets` are enabled, `setup` advertises
-`ui://codexify/setup-chat/v1/mcp-app.html`. Call setup once per conversation: its
+`ui://codexify/setup-chat/v2/mcp-app.html`. Call setup once per conversation: its
 card contains the workspace controls and one persistent chat panel. `chat_read`,
 `chat_write`, and `chat_await` do not advertise a widget or create additional
 cards. Their messages appear in the existing panel, which remains usable during
@@ -1529,10 +1529,27 @@ for visibility and tool-result metadata contracts. The history payload is exclud
 from ordinary tool logs. Rendering uses safe text nodes for Markdown, without raw
 HTML execution or remote resource loading.
 
+The embedded markdown-it parser supports tables, reference-style links, bare
+URLs, balanced link destinations, nested lists, strikethrough, and fenced code.
+Tables scroll horizontally inside the message rather than widening the widget.
+Images appear as labeled links, without automatically fetching remote content.
+
+For downloadable files, call `export_host_file` and use its `chatLink` as the
+Markdown destination in `chat_write`. The app-only `chat_ui_file` action resolves
+that exact export and requests a host-mediated MCP Apps `ui/download-file`.
+Project-relative file links also work, subject to the normal workspace boundary.
+Older `sandbox:/mnt/data/name` links resolve only when the name identifies an
+unambiguous prior export from this workspace. Different files or versions with
+the same name are not guessed. ChatGPT-only sandbox files that Codexify never
+exported remain accessible through their original ChatGPT attachments, not the
+Mac filesystem. Hosts without the optional download capability show an explicit
+message directing the user to the exported attachment. Clicking file links does
+not post a new ChatGPT message, consume instructions, or change agent presence.
+
 Set `uiWidgets` to `false` to keep the three agent chat tools and file-based
 communication but disable the cards and their app-only actions. Refresh the
 connector and start a new conversation after upgrading from the earlier chat
-widget schema (`+markdown-chat` to `+markdown-chat-v2`). Already mounted older
+widget schema (`+markdown-chat` or `+markdown-chat-v2` to `+markdown-chat-v3`). Already mounted older
 cards cannot be removed by the server; new write/wait calls no longer create
 them once the host uses the new tool metadata. The feature remains disabled by
 default; installation alone does not enable it.

@@ -43,6 +43,7 @@ pub fn load_tools_for_config(config: &AppConfig) -> Vec<Box<dyn Tool>> {
     if config.markdown_chat.enabled && config.ui_widgets {
         tools.push(Box::new(tools::markdown_chat_ui::ChatUiTool::Send));
         tools.push(Box::new(tools::markdown_chat_ui::ChatUiTool::State));
+        tools.push(Box::new(tools::markdown_chat_ui::ChatUiTool::File));
         tools.push(Box::new(tools::setup_ui_action::SetupUiAction::Update));
         if config.multi_project {
             tools.push(Box::new(tools::setup_ui_action::SetupUiAction::Projects));

@@ -51,6 +51,7 @@ class ChatBackend {
   pageSize = 50;
   setup = setupPayload();
   chatEnabled = true;
+  downloadsSupported = true;
   add(role, markdown, id = `fixture-${this.messages.length}`) {
     const start = this.end;
     this.end += markdown.length + 150;
@@ -60,6 +61,7 @@ class ChatBackend {
   }
   async call(name, args) {
     this.calls.push({ name, args });
+    if (name === "chat_ui_file") return { _meta:{ [META]:{ file:{ type:"resource_link", uri:"codexify://artifact/" + "a".repeat(43), name:"report one.png", mimeType:"image/png" } } } };
     if (name === "setup_status") return { structuredContent:this.setup, _meta:{ [ENABLED]:this.chatEnabled } };
     if (name === "doctor") return { structuredContent:{ ok:true, checks:[], summary:{ passed:1, failures:0, warnings:0, skipped:0 } } };
     if (name === "setup_ui_list_projects") return { structuredContent:{ projects:[{ selector:"codexify", name:"codexify" }], total:1, warnings:[] } };
@@ -100,7 +102,7 @@ async function mount(browser, backend, { width = 390, theme = "light", count = 1
   const page = await browser.newPage({ viewport:{ width, height:1400 }, colorScheme:theme, deviceScaleFactor:scale });
   page.setDefaultTimeout(8000);
   if (clock !== null) await page.clock.install({ time:clock });
-  const errors = [], hostMessages = [], widgetStates = [];
+  const errors = [], hostMessages = [], widgetStates = [], downloads = [];
   page.on("pageerror", error => errors.push(error.message));
   await page.exposeFunction("mockTool", async (name, args) => {
     const result = await backend.call(name, args);
@@ -108,11 +110,12 @@ async function mount(browser, backend, { width = 390, theme = "light", count = 1
   });
   await page.exposeFunction("saveWidget", state => { widgetStates.push(state); });
   await page.exposeFunction("hostMessage", message => { hostMessages.push(message); });
+  await page.exposeFunction("hostDownload", params => { downloads.push(params); });
   await page.route("https://codexify-widget.test/", route => route.fulfill({
     contentType:"text/html", body:'<!doctype html><html><body style="margin:0"></body></html>'
   }));
   await page.goto("https://codexify-widget.test/");
-  await page.evaluate(({ html, count, bridge, theme, saved, initial }) => {
+  await page.evaluate(({ html, count, bridge, theme, saved, initial, downloadsSupported }) => {
     window.addEventListener("message", async event => {
       const message = event.data;
       if (message?.jsonrpc !== "2.0") return;
@@ -125,8 +128,9 @@ async function mount(browser, backend, { width = 390, theme = "light", count = 1
       window.hostMessage(message.method);
       let result;
       try {
-        if (message.method === "ui/initialize") result = { hostContext:{ theme }, protocolVersion:"2026-01-26", hostCapabilities:{} };
+        if (message.method === "ui/initialize") result = { hostContext:{ theme }, protocolVersion:"2026-01-26", hostCapabilities:downloadsSupported ? { downloadFile:{} } : {} };
         else if (message.method === "tools/call") result = await window.mockTool(message.params.name, message.params.arguments);
+        else if (message.method === "ui/download-file") { await window.hostDownload(message.params); result = {}; }
         else if (message.method === "ui/open-link") result = {};
         else throw new Error(`Unexpected host request ${message.method}`);
         event.source.postMessage({ jsonrpc:"2.0", id:message.id, result }, "*");
@@ -142,10 +146,10 @@ async function mount(browser, backend, { width = 390, theme = "light", count = 1
       frame.srcdoc = html.replace("<head>", "<head>" + bootstrap);
       document.body.append(frame);
     }
-  }, { html:combined ? setupChatHtml : html, count, bridge, theme, saved, initial:combined ? { structuredContent:backend.setup, _meta:{ [ENABLED]:backend.chatEnabled } } : null });
+  }, { html:combined ? setupChatHtml : html, count, bridge, theme, saved, downloadsSupported:backend.downloadsSupported, initial:combined ? { structuredContent:backend.setup, _meta:{ [ENABLED]:backend.chatEnabled } } : null });
   const frames = Array.from({ length:count }, (_, i) => page.frameLocator(`#widget-${i}`));
   await frames[0].getByText("Loading this conversation...", { exact:true }).waitFor({ state:"hidden" });
-  return { page, frames, errors, hostMessages, widgetStates };
+  return { page, frames, errors, hostMessages, widgetStates, downloads };
 }
 
 async function refresh(frame) {
@@ -156,6 +160,52 @@ for (const [engineName, engine] of [["Chromium", chromium], ["WebKit", webkit]])
   test(`${engineName}: Markdown chat composer, synchronization and receipts`, { timeout:180000 }, async t => {
     const browser = await engine.launch();
     try {
+      await t.test("Markdown tables, reference links, balanced URLs and exported files", async () => {
+        const backend = new ChatBackend();
+        backend.add("agent", [
+          "| Case | Result |", "| :--- | ---: |", "| **Prose** | [Docs][docs] |", "| Escaped \\| pipe | ~~old~~ |", "",
+          "[Parentheses](https://example.com/a_(b)) and https://example.com/help", "",
+          "[Screenshot](sandbox:/mnt/data/report%20one.png)", "![Image reference][image]", "",
+          "- Parent", "  - Nested **child**", "",
+          "[docs]: https://example.com/docs \"Documentation\"", "[image]: sandbox:/mnt/data/report%20one.png", "",
+          "[Unsafe](javascript:alert(1)) <script>alert(1)</script>"
+        ].join("\n"));
+        const { page, frames:[frame], errors, downloads, hostMessages } = await mount(browser, backend, { combined:true });
+        await frame.locator(".markdown table").waitFor();
+        assert.equal(await frame.locator(".markdown th").count(), 2);
+        assert.equal(await frame.locator(".markdown td").count(), 4);
+        assert.equal(await frame.locator(".markdown td").nth(2).textContent(), "Escaped | pipe");
+        assert.equal(await frame.locator(".markdown s").textContent(), "old");
+        assert.equal(await frame.locator(".markdown ul ul strong").textContent(), "child");
+        assert.equal(await frame.getByRole("link", { name:"Docs", exact:true }).getAttribute("href"), "https://example.com/docs");
+        assert.equal(await frame.getByRole("link", { name:"Parentheses", exact:true }).getAttribute("href"), "https://example.com/a_(b)");
+        assert.equal(await frame.locator(".markdown script, .markdown a[href^='javascript:']").count(), 0);
+        assert.equal(await frame.getByRole("link", { name:"Image reference", exact:true }).count(), 1);
+        await frame.getByRole("link", { name:"Screenshot", exact:true }).click();
+        await frame.getByText("File download requested.", { exact:true }).waitFor();
+        await refresh(frame);
+        assert.equal(await frame.getByText("File download requested.", { exact:true }).isVisible(), true);
+        assert(backend.calls.some(call => call.name === "chat_ui_file" && call.args.href === "sandbox:/mnt/data/report%20one.png"));
+        assert.equal(downloads.length, 1);
+        assert.equal(downloads[0].contents[0].type, "resource_link");
+        assert.equal(downloads[0].contents[0].name, "report one.png");
+        assert(!hostMessages.includes("ui/message"));
+        assert.equal(backend.delivered, 0); assert.equal(backend.read, 0);
+        assert.equal(await frame.locator("html").evaluate(node => node.scrollWidth > innerWidth), false);
+        mkdirSync(new URL("../target/chat-markdown-previews/", import.meta.url), { recursive:true });
+        await frame.locator("#chat").screenshot({ path:new URL(`../target/chat-markdown-previews/${engineName.toLowerCase()}-markdown.png`, import.meta.url).pathname });
+        assert.deepEqual(errors, []); await page.close();
+      });
+      await t.test("unsupported file downloads explain the limitation without opening a sandbox URL", async () => {
+        const backend = new ChatBackend(); backend.downloadsSupported = false;
+        backend.add("agent", "[Report](sandbox:/mnt/data/report%20one.png)");
+        const { page, frames:[frame], downloads, hostMessages, errors } = await mount(browser, backend, { combined:true });
+        await frame.getByRole("link", { name:"Report", exact:true }).click();
+        await frame.getByText("This host cannot download files from a widget. Open the exported attachment in the ChatGPT conversation.", { exact:true }).waitFor();
+        assert.equal(downloads.length, 0);
+        assert(!hostMessages.includes("ui/open-link")); assert(!hostMessages.includes("ui/message"));
+        assert.deepEqual(errors, []); await page.close();
+      });
       await t.test("Enter, Shift+Enter, button, IME, and grey/blue receipt transitions", async () => {
         const backend = new ChatBackend();
         const { page, frames:[frame], errors, hostMessages, widgetStates } = await mount(browser, backend);

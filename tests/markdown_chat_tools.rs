@@ -71,6 +71,129 @@ fn tools_are_opt_in_and_read_wait_have_no_parameters() {
     );
 }
 
+#[tokio::test]
+async fn chat_file_links_resolve_real_exports_and_reject_ambiguous_or_foreign_files() {
+    let (root, config, session, context) = fixture();
+    std::fs::create_dir(root.path().join("reports")).unwrap();
+    std::fs::write(
+        root.path().join("reports/report one.txt"),
+        "original contents",
+    )
+    .unwrap();
+    let exported = context
+        .artifact_egress
+        .export_project_file(
+            &config.work_dir,
+            "reports/report one.txt",
+            &context.cancellation,
+        )
+        .await
+        .unwrap();
+    let tools = load_tools_for_config(&config);
+    let file_tool = tools
+        .iter()
+        .find(|tool| tool.name() == "chat_ui_file")
+        .expect("app-only file resolver");
+    assert_eq!(
+        file_tool.meta().unwrap().get("openai/visibility"),
+        Some(&json!("private"))
+    );
+    for href in [
+        "sandbox:/mnt/data/report%20one.txt",
+        exported.resource.uri.as_str(),
+        "reports/report%20one.txt",
+    ] {
+        let result = file_tool
+            .call_with_context(json!({"href":href}), &config, &session, &context)
+            .await;
+        assert!(!result.is_error, "{href}: {}", result.joined_text());
+        let file = &result
+            .meta
+            .as_ref()
+            .unwrap()
+            .get(codexify::markdown_chat_ui::CHAT_WIDGET_META)
+            .unwrap()["file"];
+        assert_eq!(file["type"], "resource_link");
+        assert_eq!(file["name"], "report one.txt");
+        let contents = context
+            .artifact_egress
+            .read_resource(file["uri"].as_str().unwrap(), &context.cancellation)
+            .await
+            .unwrap()
+            .unwrap();
+        let contents = serde_json::to_value(contents).unwrap();
+        use base64::Engine;
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(contents["blob"].as_str().unwrap())
+                .unwrap(),
+            b"original contents"
+        );
+    }
+    std::fs::write(root.path().join("reports/part#1.txt"), "encoded filename").unwrap();
+    let encoded = file_tool
+        .call_with_context(
+            json!({"href":"reports/part%231.txt#section"}),
+            &config,
+            &session,
+            &context,
+        )
+        .await;
+    assert!(!encoded.is_error, "{}", encoded.joined_text());
+    for href in [
+        "sandbox:/mnt/data/not-exported.txt",
+        "sandbox:/etc/passwd",
+        "sandbox:/mnt/data/../secret",
+        "../secret",
+        "%2e%2e/secret",
+        "/etc/passwd",
+        "file:///etc/passwd",
+        "https://example.com/data",
+    ] {
+        assert!(
+            file_tool
+                .call_with_context(json!({"href":href}), &config, &session, &context)
+                .await
+                .is_error,
+            "{href}"
+        );
+    }
+    std::fs::write(root.path().join("report one.txt"), "different file").unwrap();
+    context
+        .artifact_egress
+        .export_project_file(&config.work_dir, "report one.txt", &context.cancellation)
+        .await
+        .unwrap();
+    let ambiguous = file_tool
+        .call_with_context(
+            json!({"href":"sandbox:/mnt/data/report%20one.txt"}),
+            &config,
+            &session,
+            &context,
+        )
+        .await;
+    assert!(ambiguous.is_error);
+    assert!(ambiguous.joined_text().contains("ambiguous"));
+    let other = tempfile::tempdir().unwrap();
+    std::fs::write(other.path().join("foreign.txt"), "private").unwrap();
+    let foreign = context
+        .artifact_egress
+        .export_project_file(other.path(), "foreign.txt", &context.cancellation)
+        .await
+        .unwrap();
+    assert!(
+        file_tool
+            .call_with_context(
+                json!({"href":foreign.resource.uri}),
+                &config,
+                &session,
+                &context
+            )
+            .await
+            .is_error
+    );
+}
+
 #[test]
 fn chat_widget_tools_are_app_only_and_chat_calls_never_link_a_widget() {
     let (_root, mut config, _session, _context) = fixture();

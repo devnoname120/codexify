@@ -3,10 +3,26 @@ use serde_json::json;
 use std::sync::LazyLock;
 
 pub const CHAT_UI_URI: &str = "ui://codexify/markdown-chat/v1/mcp-app.html";
-pub const SETUP_CHAT_UI_URI: &str = "ui://codexify/setup-chat/v1/mcp-app.html";
+pub const SETUP_CHAT_UI_URI: &str = "ui://codexify/setup-chat/v2/mcp-app.html";
+pub const PREVIOUS_SETUP_CHAT_UI_URI: &str = "ui://codexify/setup-chat/v1/mcp-app.html";
 pub const CHAT_WIDGET_META: &str = "io.github.devnoname120/codexify/markdown-chat";
 pub const CHAT_ENABLED_META: &str = "io.github.devnoname120/codexify/markdown-chat-enabled";
-pub const CHAT_UI_HTML: &str = include_str!("markdown_chat_ui.html");
+pub static CHAT_UI_HTML: LazyLock<String> = LazyLock::new(|| {
+    include_str!("markdown_chat_ui.html")
+        .replace(
+            "/* CODEXIFY_MARKDOWN_LIBRARY */",
+            concat!(
+                "/*\n",
+                include_str!("vendor/markdown-it.LICENSE"),
+                "*/\n",
+                include_str!("vendor/markdown-it.min.js")
+            ),
+        )
+        .replace(
+            "/* CODEXIFY_MARKDOWN_RENDERER */",
+            include_str!("markdown_chat_render.js"),
+        )
+});
 
 pub fn tool_meta() -> MetaObject {
     let mut meta = crate::setup_ui::tool_meta();
@@ -29,7 +45,7 @@ fn section<'a>(source: &'a str, opening: &str, closing: &str) -> &'a str {
 }
 
 pub static SETUP_CHAT_UI_HTML: LazyLock<String> = LazyLock::new(|| {
-    let style = section(CHAT_UI_HTML, "<style>", "</style>")
+    let style = section(&CHAT_UI_HTML, "<style>", "</style>")
         .replace(
             ":root:not([data-theme=\"light\"])",
             ":host(:not([data-theme=\"light\"]))",
@@ -37,8 +53,8 @@ pub static SETUP_CHAT_UI_HTML: LazyLock<String> = LazyLock::new(|| {
         .replace(":root[data-theme=\"dark\"]", ":host([data-theme=\"dark\"])")
         .replace(":root", ":host")
         .replace("body {", ":host { display:block;");
-    let body = section(CHAT_UI_HTML, "<body>", "<script>");
-    let script = section(CHAT_UI_HTML, "<script>", "</script>");
+    let body = section(&CHAT_UI_HTML, "<body>", "<script>");
+    let script = section(&CHAT_UI_HTML, "<script>", "</script>");
     let component = format!(
         "<template id=\"codexify-chat-template\"><style>{style}</style>{body}</template>\n<script>{script}</script>\n<script>"
     );
@@ -67,8 +83,8 @@ pub fn resource() -> Resource {
 
 pub fn contents_for_uri(uri: &str) -> Option<ResourceContents> {
     let html = match uri {
-        SETUP_CHAT_UI_URI => SETUP_CHAT_UI_HTML.as_str(),
-        CHAT_UI_URI => CHAT_UI_HTML,
+        SETUP_CHAT_UI_URI | PREVIOUS_SETUP_CHAT_UI_URI => SETUP_CHAT_UI_HTML.as_str(),
+        CHAT_UI_URI => CHAT_UI_HTML.as_str(),
         _ => return None,
     };
     Some(
@@ -99,6 +115,7 @@ mod tests {
             Some(&json!(SETUP_CHAT_UI_URI))
         );
         assert!(contents_for_uri(CHAT_UI_URI).is_some());
+        assert!(contents_for_uri(PREVIOUS_SETUP_CHAT_UI_URI).is_some());
         assert!(contents_for_uri("ui://codexify/unrelated").is_none());
         if let Some(path) = std::env::var_os("CODEXIFY_CHAT_PREVIEW_HTML") {
             std::fs::write(path, html).unwrap();

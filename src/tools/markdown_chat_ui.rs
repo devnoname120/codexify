@@ -6,11 +6,18 @@ use serde_json::{Value, json};
 use crate::exec_sessions::SessionState;
 use crate::markdown_chat_ui::CHAT_WIDGET_META;
 use crate::tool::{Tool, ToolBehavior, ToolRequestContext, parse_tool_args, text_output_schema};
-use crate::types::{AppConfig, ToolResult};
+use crate::types::{AppConfig, ToolContent, ToolResult};
 
 pub enum ChatUiTool {
     Send,
     State,
+    File,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileArgs {
+    href: String,
 }
 
 #[derive(Deserialize)]
@@ -43,12 +50,14 @@ impl Tool for ChatUiTool {
         match self {
             Self::Send => "chat_ui_send",
             Self::State => "chat_ui_state",
+            Self::File => "chat_ui_file",
         }
     }
     fn title(&self) -> String {
         match self {
             Self::Send => "Send user chat message",
             Self::State => "Read chat widget state",
+            Self::File => "Download referenced chat file",
         }
         .into()
     }
@@ -56,6 +65,7 @@ impl Tool for ChatUiTool {
         match self {
             Self::Send => "App-only: append the user's Markdown to this conversation's CHAT.md. Reusing request_id with the same text is idempotent. Does not acknowledge or deliver text to the agent.",
             Self::State => "App-only: read a page of this conversation's chat history and delivery receipts without acknowledging messages. No arbitrary path or conversation selector is accepted.",
+            Self::File => "App-only: resolve an exported or project-relative Markdown file link in the active workspace for a user-requested download. Sandbox names must match an unambiguous prior export. Does not read or acknowledge chat messages.",
         }.into()
     }
     fn meta(&self) -> Option<MetaObject> {
@@ -65,11 +75,11 @@ impl Tool for ChatUiTool {
     }
     fn behavior(&self) -> ToolBehavior {
         ToolBehavior::new(
-            matches!(self, Self::State),
+            !matches!(self, Self::Send),
             false,
             true,
             false,
-            "The widget reads only its conversation, or idempotently appends a user message to that transcript; it never publishes externally or advances agent delivery.",
+            "The widget reads its conversation or an active-workspace file, or idempotently appends a user message; it never publishes externally or advances agent delivery.",
         )
     }
     fn input_schema(&self) -> Value {
@@ -82,6 +92,9 @@ impl Tool for ChatUiTool {
                 "before":{"type":"integer", "minimum":0},
                 "revision":{"type":"string", "maxLength":128}
             }, "additionalProperties":false}),
+            Self::File => {
+                json!({"type":"object", "properties":{"href":{"type":"string", "minLength":1, "maxLength":4096}}, "required":["href"], "additionalProperties":false})
+            }
         }
     }
     fn output_schema(&self) -> Option<Value> {
@@ -111,6 +124,26 @@ impl Tool for ChatUiTool {
             Err(error) => return ToolResult::error(error),
         };
         match self {
+            Self::File => {
+                let FileArgs { href } = match parse_tool_args(args) {
+                    Ok(args) => args,
+                    Err(error) => return *error,
+                };
+                match context
+                    .artifact_egress
+                    .chat_file_link(&config.work_dir, &href, &context.cancellation)
+                    .await
+                {
+                    Ok(resource) => {
+                        let mut file = serde_json::to_value(&resource).expect("file resource");
+                        file["type"] = json!("resource_link");
+                        let mut result = private_result(json!({"file":file}));
+                        result.content.push(ToolContent::ResourceLink(resource));
+                        result
+                    }
+                    Err(error) => ToolResult::error(error.to_string()),
+                }
+            }
             Self::Send => {
                 let SendArgs {
                     request_id,

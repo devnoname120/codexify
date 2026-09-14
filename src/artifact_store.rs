@@ -302,6 +302,45 @@ impl ArtifactStore {
         Ok(Some(record))
     }
 
+    pub(crate) fn find_project_export(
+        &self,
+        source_root: &str,
+        name: &str,
+    ) -> Result<Option<ArtifactRecord>, String> {
+        self.ensure_layout()?;
+        let mut found: Option<ArtifactRecord> = None;
+        for entry in std::fs::read_dir(self.records_dir())
+            .map_err(|_| "Could not read the exported-file index")?
+        {
+            let entry = entry.map_err(|_| "Could not read an exported-file entry")?;
+            let filename = entry.file_name();
+            let Some(token) = filename
+                .to_str()
+                .and_then(|name| name.strip_suffix(".json"))
+            else {
+                continue;
+            };
+            let Some(record) = self.load_record(token)? else {
+                continue;
+            };
+            if record.source_root != source_root || record.name != name {
+                continue;
+            }
+            if let Some(previous) = &found {
+                if previous.source_path != record.source_path
+                    || previous.original_sha256 != record.original_sha256
+                {
+                    return Err("This sandbox filename is ambiguous. Use the export's exact chatLink instead.".into());
+                }
+                if previous.created_at_unix_ms >= record.created_at_unix_ms {
+                    continue;
+                }
+            }
+            found = Some(record);
+        }
+        Ok(found)
+    }
+
     pub fn resolve_payload(&self, token: &str) -> Result<Option<StoredPayload>, String> {
         self.ensure_layout()?;
         let _lock = self.acquire_store_lock()?;

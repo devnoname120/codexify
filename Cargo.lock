@@ -418,6 +418,7 @@ dependencies = [
  "jsonschema",
  "libc",
  "notify",
+ "percent-encoding",
  "regex",
  "reqwest",
  "rmcp",

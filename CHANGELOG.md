@@ -30,6 +30,10 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Markdown chat renders tables, nested formatting, reference links, and balanced
+  URLs with an embedded Markdown parser. Exported and project-relative file links
+  use a private workspace-scoped resolver and host-mediated downloads, with an
+  explicit fallback when the host does not support widget downloads.
 - Release installers now validate an existing selected config with the same
   startup rules as the server before installing the background service. Invalid
   configs, including migrated configs missing `workDir`, now defer service setup
