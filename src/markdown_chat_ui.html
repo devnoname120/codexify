@@ -15,10 +15,13 @@ button { cursor:pointer; }
 button:disabled { cursor:default; opacity:.5; }
 button:focus-visible,textarea:focus-visible,a:focus-visible { outline:2px solid var(--accent); outline-offset:3px; }
 [hidden] { display:none!important; }
+:host([hidden]) { display:none!important; }
 #chat { max-width:640px; margin:auto; overflow:hidden; border:1px solid var(--border); border-radius:18px; background:var(--bg); }
 .header { display:flex; align-items:center; gap:12px; padding:13px 16px; border-bottom:1px solid var(--border); }
 .heading { flex:1; min-width:0; }
-h1 { font-size:15px; font-weight:650; margin:0; }
+h1 { display:flex; align-items:center; flex-wrap:wrap; gap:9px; font-size:15px; font-weight:650; margin:0; }
+#presence { display:inline-flex; align-items:center; gap:4px; color:var(--muted); font-size:11px; font-weight:400; }
+.presence-symbol { width:14px; height:14px; flex:none; }
 .subtitle { font-size:12px; color:var(--muted); }
 .icon-button { width:34px; height:34px; padding:6px; border:0; background:transparent; color:var(--muted); border-radius:50%; }
 svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; stroke-width:1.9; stroke-linecap:round; stroke-linejoin:round; }
@@ -42,7 +45,7 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
 .markdown a { color:var(--accent); text-decoration:underline; }
 .receipt { display:flex; align-items:center; justify-content:flex-end; min-height:20px; margin-top:3px; gap:5px; color:var(--muted); font-size:11px; }
 .ticks { width:22px; height:15px; color:var(--tick); }
-.ticks.delivered { color:var(--read); }
+.ticks.read { color:var(--read); }
 .retry { border:0; background:transparent; color:var(--error); padding:0 4px; font-size:12px; }
 .footer { border-top:1px solid var(--border); padding:10px 12px 9px; background:var(--surface); }
 #composer { display:flex; gap:8px; align-items:flex-end; }
@@ -57,7 +60,7 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
 <body>
 <section id="chat" aria-label="Markdown chat for this conversation">
   <header class="header">
-    <div class="heading"><h1>Markdown chat</h1><div class="subtitle">This conversation only</div></div>
+    <div class="heading"><h1>Agent <span id="presence" role="status"></span></h1><div class="subtitle">Markdown chat · This conversation only</div></div>
     <button id="collapse" class="icon-button" aria-label="Collapse chat" aria-expanded="true" title="Collapse chat"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 14 6-6 6 6"/></svg></button>
   </header>
   <div id="panel">
@@ -77,13 +80,16 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
 <script>
 (() => {
   "use strict";
+  function mountChat(scope, bridge = null) {
   const META = "io.github.devnoname120/codexify/markdown-chat";
-  const el = id => document.getElementById(id);
+  const el = id => scope.getElementById(id);
   const list = el("messages"), input = el("draft"), send = el("send"), older = el("older");
   const records = new Map(), nodes = new Map(), pendingSends = new Map(), rpcPending = new Map();
   let rpcId = 1, initialized = false, tornDown = false, pollTimer = null, saveTimer = null;
   let refreshing = false, sending = false, loadingOlder = false, visible = true, collapsed = false;
-  let revision = null, before = null, hasMore = false, delivered = 0, chatFile = null, failures = 0, snapshotEnd = 0;
+  let revision = null, before = null, hasMore = false, delivered = 0, readThrough = 0, chatFile = null, failures = 0, snapshotEnd = 0;
+  let lastAgentCall = null, clockOffset = 0, presenceTimer = null;
+  let available = bridge === null;
   const saved = window.openai?.widgetState?.privateContent || {};
   input.value = typeof saved.draft === "string" ? saved.draft : "";
   collapsed = saved.collapsed === true;
@@ -122,7 +128,9 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
   async function call(name, args) {
     if (tornDown) throw new Error("This widget has closed.");
     let result;
-    if (typeof window.openai?.callTool === "function") {
+    if (bridge) {
+      result = await bridge.callTool(name, args, 8000);
+    } else if (typeof window.openai?.callTool === "function") {
       let timer;
       try {
         result = await Promise.race([
@@ -153,7 +161,7 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
   }
   function save() {
     clearTimeout(saveTimer);
-    const state = { privateContent:{ draft:input.value, collapsed, pending:[...pendingSends.values()] } };
+    const state = { privateContent:{ ...window.openai?.widgetState?.privateContent, draft:input.value, collapsed, pending:[...pendingSends.values()] } };
     try { Promise.resolve(window.openai?.setWidgetState?.(state)).catch(() => {}); } catch {}
   }
   function status(text, error = false) {
@@ -164,14 +172,41 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
   function resizeInput() {
     input.style.height = "auto";
     input.style.height = Math.min(150, input.scrollHeight) + "px";
-    send.disabled = sending || !input.value.trim();
+    input.disabled = !available;
+    send.disabled = !available || sending || !input.value.trim();
     size();
   }
   function size() {
+    if (bridge && !tornDown) { bridge.reportSize(); return; }
     if (initialized && !tornDown) post({ method:"ui/notifications/size-changed", params:{ width:document.documentElement.clientWidth, height:el("chat").offsetHeight } });
   }
   function theme(context) {
-    if (context?.theme === "dark" || context?.theme === "light") document.documentElement.dataset.theme = context.theme;
+    if (context?.theme === "dark" || context?.theme === "light") (scope.host || document.documentElement).dataset.theme = context.theme;
+  }
+  function presenceDetails(lastCall, now) {
+    if (!Number.isFinite(lastCall)) return { state:"offline", label:"offline", delay:null };
+    const age = Math.max(0, now - lastCall);
+    if (age < 240000) return { state:"online", label:"online", delay:240000 - age };
+    if (age < 600000) return { state:"away", label:`last seen ${Math.floor(age / 60000)} mins ago`, delay:60000 - age % 60000 };
+    return { state:"offline", label:"offline", delay:null };
+  }
+  function updatePresence() {
+    clearTimeout(presenceTimer);
+    const { state, label, delay } = presenceDetails(lastAgentCall, Date.now() + clockOffset);
+    const node = el("presence");
+    if (node.dataset.state !== state) {
+      const svg = icon(state === "online" ? ["m6.5 12 3.5 3.5 7.5-8"] : state === "away" ? ["M12 5.5V12l5.6 3.2"] : ["m8 8 8 8", "m8 16 8-8"], "presence-symbol");
+      svg.setAttribute("viewBox", "0 0 24 24");
+      svg.setAttribute("style", `stroke:${state === "offline" ? "#85898d" : "#fff"};stroke-width:3`);
+      const circle = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+      for (const [key, value] of Object.entries({ cx:12, cy:12, r:10.5, fill:state === "online" ? "#159b27" : state === "away" ? "#eba916" : "#fff", stroke:state === "offline" ? "#85898d" : "none" })) circle.setAttribute(key, String(value));
+      svg.prepend(circle);
+      node.replaceChildren(svg, make("span", "presence-label"));
+      node.dataset.state = state;
+    }
+    node.querySelector(".presence-label").textContent = label;
+    node.title = lastAgentCall === null ? "No agent tool call recorded for this conversation." : "Based on this conversation's last agent tool call, not a live connection or proof of ongoing work.";
+    if (!tornDown && !document.hidden && delay !== null) presenceTimer = setTimeout(updatePresence, Math.max(1, delay));
   }
   function inline(parent, text, depth = 0) {
     if (depth > 3) { parent.append(document.createTextNode(text)); return; }
@@ -190,7 +225,7 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
         node.addEventListener("click", event => {
           event.preventDefault();
           const href = node.href;
-          const action = typeof window.openai?.openExternal === "function"
+          const action = bridge ? bridge.openLink(href) : typeof window.openai?.openExternal === "function"
             ? window.openai.openExternal({ href }) : rpc("ui/open-link", { url:href });
           Promise.resolve(action).catch(() => status("The link could not be opened.", true));
         });
@@ -222,7 +257,7 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
     if (code !== null) { const pre = make("pre"); pre.append(make("code", "", code.join("\n"))); container.append(pre); }
   }
   function receipt(node, message) {
-    const state = message.role !== "user" ? "agent" : message.failed ? "failed" : message.pending ? "pending" : message.end <= delivered ? "delivered" : "saved";
+    const state = message.role !== "user" ? "agent" : message.failed ? "failed" : message.pending ? "pending" : message.end <= readThrough ? "read" : message.end <= delivered ? "delivered" : "sent";
     if (node.dataset.state === state) return;
     node.dataset.state = state;
     node.replaceChildren();
@@ -233,11 +268,11 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
       retry.addEventListener("click", () => { if (!sending) void deliver(message); }); node.append(retry); return;
     }
     if (message.pending) { node.append(make("span", "", "Sending...")); return; }
-    const read = message.end <= delivered;
-    const label = read ? "Delivered to agent" : "Saved to CHAT.md";
-    const mark = make("span", "ticks" + (read ? " delivered" : ""));
-    mark.setAttribute("role", "img"); mark.setAttribute("aria-label", label); mark.title = read ? "Included in an agent-facing tool response. This does not prove comprehension." : "Saved. Not yet returned to the agent.";
-    mark.append(icon(read ? ["m1 9 4 4L16 2", "m10 12 2 2L23 3"] : ["m5 9 4 4L20 2"])); node.append(mark);
+    const label = state === "read" ? "Read by agent" : state === "delivered" ? "Delivered to agent" : "Saved to CHAT.md";
+    const mark = make("span", "ticks " + state);
+    mark.setAttribute("role", "img"); mark.setAttribute("aria-label", label);
+    mark.title = state === "read" ? "Acknowledged through chat_read, chat_write, or chat_await. This does not prove comprehension." : state === "delivered" ? "Returned in a tool response, but not yet acknowledged by a chat tool." : "Saved. Not yet returned to the agent.";
+    mark.append(icon(state !== "sent" ? ["m1 9 4 4L16 2", "m10 12 2 2L23 3"] : ["m5 9 4 4L20 2"])); node.append(mark);
   }
   function render() {
     const atBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 50;
@@ -269,6 +304,12 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
     if (chatFile && chatFile !== page.chat_file) throw new Error("This widget's conversation binding changed. Open a new chat widget.");
     chatFile = page.chat_file;
     delivered = Math.max(delivered, page.delivered_through);
+    if (Number.isSafeInteger(page.read_through)) readThrough = Math.max(readThrough, page.read_through);
+    if (!history) {
+      lastAgentCall = Number.isSafeInteger(page.last_agent_call_at_ms) ? page.last_agent_call_at_ms : null;
+      if (Number.isSafeInteger(page.server_time_ms)) clockOffset = page.server_time_ms - Date.now();
+      updatePresence();
+    }
     if (!history) revision = page.revision;
     if (!page.unchanged) {
       const gap = !history && snapshotEnd > 0 && page.has_more && page.messages?.[0]?.start > snapshotEnd;
@@ -286,11 +327,11 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
   }
   function schedule() {
     clearTimeout(pollTimer);
-    if (tornDown || collapsed || !visible || document.hidden) return;
+    if (!available || tornDown || collapsed || !visible || document.hidden) return;
     pollTimer = setTimeout(() => { void refresh(); }, failures ? Math.min(30000, 2000 * 2 ** failures) : 2000);
   }
   async function refresh() {
-    if (refreshing || tornDown || collapsed || !visible || document.hidden) return;
+    if (!available || refreshing || tornDown || collapsed || !visible || document.hidden) return;
     refreshing = true;
     try {
       applyPage(await call("chat_ui_state", revision ? { revision } : {})); failures = 0;
@@ -299,7 +340,7 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
     finally { refreshing = false; schedule(); }
   }
   async function deliver(message) {
-    if (sending || tornDown) return;
+    if (!available || sending || tornDown) return;
     sending = true; message.failed = false; message.pending = true;
     pendingSends.set(message.id, message); render(); resizeInput(); save();
     try {
@@ -316,7 +357,7 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
   }
   el("composer").addEventListener("submit", event => {
     event.preventDefault();
-    if (sending || !input.value.trim()) return;
+    if (!available || sending || !input.value.trim()) return;
     const message = { id:crypto.randomUUID(), role:"user", markdown:input.value, pending:true, failed:false };
     input.value = ""; resizeInput(); void deliver(message); input.focus(); list.scrollTop = list.scrollHeight;
   });
@@ -343,11 +384,12 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
   el("collapse").addEventListener("click", () => { collapsed = !collapsed; setCollapsed(); if (!collapsed) void refresh(); });
   el("refresh").addEventListener("click", () => { revision = null; void refresh(); });
   function teardown() {
-    tornDown = true; clearTimeout(pollTimer); clearTimeout(saveTimer);
+    tornDown = true; clearTimeout(pollTimer); clearTimeout(saveTimer); clearTimeout(presenceTimer);
     for (const waiter of rpcPending.values()) { clearTimeout(waiter.timer); waiter.reject(new Error("Widget closed.")); }
     rpcPending.clear();
   }
   window.addEventListener("message", event => {
+    if (bridge) return;
     if (event.source !== window.parent || event.data?.jsonrpc !== "2.0") return;
     const message = event.data;
     if (rpcPending.has(message.id)) { const waiter = rpcPending.get(message.id); rpcPending.delete(message.id); clearTimeout(waiter.timer); message.error ? waiter.reject(new Error(message.error.message || "Widget request failed")) : waiter.resolve(message.result); return; }
@@ -364,14 +406,34 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
   });
   window.addEventListener("focus", () => { void refresh(); });
   window.addEventListener("pagehide", teardown);
-  document.addEventListener("visibilitychange", () => { schedule(); if (!document.hidden) void refresh(); });
-  if (typeof IntersectionObserver === "function") new IntersectionObserver(entries => { visible = entries[0].isIntersecting; schedule(); if (visible) void refresh(); }).observe(el("chat"));
-  if (typeof ResizeObserver === "function") new ResizeObserver(size).observe(el("chat"));
-  theme(window.openai); setCollapsed(); render(); resizeInput();
-  rpc("ui/initialize", { appInfo:{ name:"Codexify Markdown chat", version:"1" }, protocolVersion:"2026-01-26", appCapabilities:{} }, 5000)
-    .then(result => { initialized = true; theme(result?.hostContext); post({ method:"ui/notifications/initialized", params:{} }); void refresh(); size(); })
+  document.addEventListener("visibilitychange", () => { updatePresence(); schedule(); if (!document.hidden) void refresh(); });
+  const intersection = typeof IntersectionObserver === "function" ? new IntersectionObserver(entries => {
+    const nextVisible = entries[0].isIntersecting;
+    if (nextVisible === visible) return;
+    visible = nextVisible; schedule(); if (visible) void refresh();
+  }) : null;
+  const resize = typeof ResizeObserver === "function" ? new ResizeObserver(size) : null;
+  intersection?.observe(el("chat"));
+  resize?.observe(el("chat"));
+  theme(window.openai); setCollapsed(); render(); resizeInput(); updatePresence();
+  if (!bridge) rpc("ui/initialize", { appInfo:{ name:"Codexify Markdown chat", version:"1" }, protocolVersion:"2026-01-26", appCapabilities:{} }, 5000)
+    .then(result => { initialized = true; theme(result?.hostContext); post({ method:"ui/notifications/initialized", params:{} }); if (!chatFile) void refresh(); size(); })
     .catch(() => { if (!window.openai?.callTool) status("This host has not connected the chat widget.", true); });
-  if (window.openai?.callTool) void refresh();
+  if (!bridge && window.openai?.callTool) void refresh();
+  return {
+    setAvailable(value) {
+      const changed = available !== value;
+      available = value;
+      if (!value) { clearTimeout(pollTimer); el("empty").textContent = "Select a workspace above to start this conversation's chat."; }
+      resizeInput();
+      if (changed && value) { revision = null; void refresh(); }
+    },
+    setTheme:theme,
+    close() { teardown(); intersection?.disconnect(); resize?.disconnect(); }
+  };
+  }
+  window.mountCodexifyChat = mountChat;
+  if (document.getElementById("chat")) mountChat(document);
 })();
 </script>
 </body>

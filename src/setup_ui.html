@@ -329,6 +329,9 @@ button { font: inherit; }
   let statusTimer = null;
   let lastStatusCheckAt = 0;
   let tornDown = false;
+  let markdownChatEnabled = false;
+  let chatController = null;
+  let chatHost = null;
   let projectCatalog = {
     phase: "idle",
     query: "",
@@ -491,6 +494,7 @@ button { font: inherit; }
   }
 
   async function callTool(name, args, timeoutMs = 120_000) {
+    if (markdownChatEnabled) name = ({ list_projects:"setup_ui_list_projects", set_project_root:"setup_ui_select_project", self_update:"setup_ui_update" })[name] || name;
     if (initialized) {
       try {
         return await request("tools/call", { name, arguments: args || {} }, timeoutMs);
@@ -622,6 +626,39 @@ button { font: inherit; }
   function applyHostContext(context) {
     if (!context || typeof context !== "object") return;
     if (context.theme) document.documentElement.dataset.theme = context.theme;
+    chatController?.setTheme(context);
+  }
+
+  function updateChatConfiguration(value) {
+    const feature = objectFrom(value, candidate => {
+      const enabled = candidate["io.github.devnoname120/codexify/markdown-chat-enabled"];
+      return typeof enabled === "boolean" ? { enabled } : null;
+    });
+    if (feature) markdownChatEnabled = feature.enabled;
+    else if (currentData?.connectorSchema?.advertisedVersion) markdownChatEnabled = currentData.connectorSchema.advertisedVersion.includes("+markdown-chat");
+    syncMarkdownChat();
+  }
+
+  function syncMarkdownChat() {
+    const template = document.getElementById("codexify-chat-template");
+    if (!template || !window.mountCodexifyChat || !currentData || tornDown) return;
+    if (!markdownChatEnabled) {
+      if (chatHost) chatHost.hidden = true;
+      chatController?.setAvailable(false);
+      return;
+    }
+    if (!chatController) {
+      chatHost = el("div");
+      chatHost.id = "markdown-chat-host";
+      chatHost.style.cssText = "max-width:500px;margin:10px auto 0";
+      const scope = chatHost.attachShadow({ mode:"open" });
+      scope.append(template.content.cloneNode(true));
+      root.after(chatHost);
+      chatController = window.mountCodexifyChat(scope, { callTool, openLink, reportSize:scheduleSizeReport });
+    }
+    chatHost.hidden = false;
+    chatController.setTheme({ theme:document.documentElement.dataset.theme || window.openai?.theme });
+    chatController.setAvailable(["selected", "without_project", "static"].includes(currentData.project?.status));
   }
 
   function plural(count, singular, pluralForm) {
@@ -1296,6 +1333,7 @@ button { font: inherit; }
     debug.id = "debug";
     card.append(debug);
     root.append(card);
+    syncMarkdownChat();
     renderContinuation();
     refreshDebugFooter();
     if (restoreSearch) {
@@ -1368,6 +1406,7 @@ button { font: inherit; }
       const project = revision === projectRevision ? data.project : currentData.project;
       workspaceChanged = JSON.stringify(project) !== JSON.stringify(currentData.project);
       currentData = { ...currentData, ...data, project };
+      updateChatConfiguration(result);
       updateState = data.update;
       if (actionState.kind === "refresh" && ["current", "conversation_stale"].includes(data.connectorSchema.status)) {
         actionState = { kind: null, message: null, tone: null, pending: false };
@@ -1583,6 +1622,8 @@ button { font: inherit; }
       : payload;
     applyWorktreeDefault();
     currentMetadata = value || currentMetadata;
+    if (!hasLiveStatus) updateChatConfiguration(value);
+    else syncMarkdownChat();
     if (firstPayload || !updateState) updateState = payload.update || null;
     if (firstPayload) {
       debugEntries = [];
@@ -1618,17 +1659,19 @@ button { font: inherit; }
       acceptSetupResult(message.params);
     } else if (message.method === "ui/notifications/host-context-changed") {
       applyHostContext(message.params);
-    } else if (message.method === "ui/resource-teardown" && message.id !== undefined) {
+    } else if (message.method === "ui/resource-teardown") {
       tornDown = true;
+      chatController?.close();
       clearInterval(statusTimer);
       for (const waiter of pending.values()) { clearTimeout(waiter.timer); waiter.reject(new Error("Widget closed.")); }
       pending.clear();
-      post({ jsonrpc: "2.0", id: message.id, result: {} });
+      if (message.id !== undefined) post({ jsonrpc: "2.0", id: message.id, result: {} });
     }
   });
 
   window.addEventListener("focus", () => { if (currentData) void refreshStatus(); });
   window.addEventListener("pageshow", () => { if (currentData) void refreshStatus(); });
+  window.addEventListener("pagehide", () => { chatController?.close(); });
   document.addEventListener("visibilitychange", () => {
     if (document.hidden) { statusFresh = false; renderCurrent(); }
     else if (currentData) void refreshStatus();

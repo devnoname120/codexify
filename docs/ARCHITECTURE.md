@@ -488,7 +488,7 @@ receive an `upstream_result` envelope rather than corrupting the original schema
 Text mirrors preserve visibility in hosts that ignore structured output. Disabled
 installations retain the original advertised schemas and do not expose chat tools.
 
-Schema revisions use an explicit `+markdown-chat` suffix only when enabled, not a
+Schema revisions use an explicit `+markdown-chat-v2` suffix only when enabled, not a
 schema fingerprint. Connector reloads record the version actually advertised by
 the current configuration. A persisted conversation baseline supplies toggle
 warnings when discovery identity is absent; that baseline is not evidence of a
@@ -497,19 +497,37 @@ refreshing live status, so a same-version enable/disable is not mistaken for an
 up-to-date schema. Host cancellation and model-imposed limits remain outside the
 communication subsystem's control.
 
-The optional `markdown_chat_ui` resource is linked by `chat_write` and
-`chat_await`. App-only `chat_ui_send` and `chat_ui_state` share the same resolved
+The optional `setup-chat/v1` resource is linked only by `setup`, combining the
+setup UI with one chat panel in a shadow root. The panel lives outside the setup
+controls' rerendered root; both use the setup bridge without a second handshake.
+The old standalone chat resource remains readable for existing cards, but no
+chat tool advertises it. When there is no configured setup reference, a
+reference-free `setup` variant exposes the same status and panel without changing
+authorization behavior on protected servers.
+
+App-only `chat_ui_send` and `chat_ui_state` share the same resolved
 channel and file lock; the UI never supplies a path or conversation identity.
 User appends carry a request ID for idempotent retries, while history reads parse
 agent/user boundaries and plain editor appends into paged component-only data.
 The normal user-text parser strips framing but preserves complete user Markdown.
 
-A separate `delivered_through` byte boundary in `cursor.json` drives grey/blue
-receipt state. Chat tools record the exact snapshot or append end in private
+A separate `delivered_through` byte boundary in `cursor.json` drives the two-grey
+receipt state; `read_through` exposes the existing consumption offset for two
+blue ticks. Chat tools record the exact snapshot or append end in private
 `ToolResult` bookkeeping, and ordinary tools record their peek end. Dispatch
 persists that boundary only when a nonempty user message is attached to an
 agent-facing response. App-only tools never trigger passive delivery. This tracks
 response construction, not host acknowledgement or model comprehension.
+
+Agent invocation timestamps are recorded at the common dispatch entry, isolated
+by conversation (or transport fallback), and persisted alongside the cursor when
+a workspace is available. A small in-memory record covers calls before selection.
+Widget history responses include the timestamp and server time even for an
+unchanged history revision. Presence changes therefore do not retransmit history.
+Private setup action aliases reuse the existing selection and updater handlers
+but exclude widget actions from passive delivery and activity. The UI uses
+server-relative time to transition at four and ten minutes, without mistaking
+tool completion or widget polling for another agent invocation.
 
 Each rendered card polls the same conversation state, retaining its own unfinished
 composer draft in private widget state. History revisions avoid retransmitting

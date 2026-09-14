@@ -20,6 +20,9 @@ pub struct WidgetPage {
     pub chat_file: String,
     pub revision: String,
     pub delivered_through: u64,
+    pub read_through: u64,
+    pub last_agent_call_at_ms: Option<u64>,
+    pub server_time_ms: u64,
     pub messages: Vec<WidgetMessage>,
     pub has_more: bool,
     pub before: Option<u64>,
@@ -138,6 +141,21 @@ fn spans(file: &mut File) -> Result<Vec<Span>, String> {
 }
 
 impl ChatFile {
+    pub async fn record_agent_call(self: &Arc<Self>, at_ms: u64) -> Result<(), String> {
+        self.run(move |chat| {
+            chat.with_cursor(|cursor, _| {
+                if cursor.last_agent_call_at_ms.is_none_or(|last| at_ms > last) {
+                    let mut next = cursor.clone();
+                    next.last_agent_call_at_ms = Some(at_ms);
+                    chat.save_cursor(&next)?;
+                    *cursor = next;
+                }
+                Ok(())
+            })
+        })
+        .await
+    }
+
     pub async fn widget_page(
         self: &Arc<Self>,
         before: Option<u64>,
@@ -154,12 +172,18 @@ impl ChatFile {
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_nanos();
-                let revision = format!("{length}-{modified}-{}", cursor.delivered_through);
+                let revision = format!(
+                    "{length}-{modified}-{}-{}",
+                    cursor.delivered_through, cursor.offset
+                );
                 let unchanged = before.is_none() && known_revision.as_deref() == Some(&revision);
                 let mut page = WidgetPage {
                     chat_file: chat.path.display().to_string(),
                     revision,
                     delivered_through: cursor.delivered_through,
+                    read_through: cursor.offset,
+                    last_agent_call_at_ms: cursor.last_agent_call_at_ms,
+                    server_time_ms: super::super::now_ms(),
                     messages: Vec::new(),
                     has_more: false,
                     before: None,

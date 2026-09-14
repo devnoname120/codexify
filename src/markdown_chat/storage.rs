@@ -41,6 +41,8 @@ struct Cursor {
     notification: NotificationState,
     #[serde(default)]
     delivered_through: u64,
+    #[serde(default)]
+    last_agent_call_at_ms: Option<u64>,
 }
 
 pub struct ChatSnapshot {

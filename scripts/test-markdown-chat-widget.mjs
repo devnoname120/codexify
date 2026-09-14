@@ -1,17 +1,47 @@
 import assert from "node:assert/strict";
-import { mkdirSync, readFileSync } from "node:fs";
+import { mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import test from "node:test";
+import vm from "node:vm";
+import { chatHtml as html, setupChatHtml } from "./chat-widget-source.mjs";
 
 const { chromium, webkit } = createRequire(import.meta.url)("playwright");
-const html = readFileSync(new URL("../src/markdown_chat_ui.html", import.meta.url), "utf8");
 const META = "io.github.devnoname120/codexify/markdown-chat";
+const ENABLED = "io.github.devnoname120/codexify/markdown-chat-enabled";
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+const presenceDetails = vm.runInNewContext("(" + html.slice(html.indexOf("function presenceDetails("), html.indexOf("  function updatePresence(")) + ")");
+test("presence: exact four/ten-minute boundaries, unknown activity, and clock skew", () => {
+  for (const [age, state, label] of [
+    [0, "online", "online"], [239999, "online", "online"],
+    [240000, "away", "last seen 4 mins ago"], [299999, "away", "last seen 4 mins ago"],
+    [300000, "away", "last seen 5 mins ago"], [599999, "away", "last seen 9 mins ago"],
+    [600000, "offline", "offline"], [3600000, "offline", "offline"], [-5000, "online", "online"]
+  ]) {
+    const actual = presenceDetails(1000000, 1000000 + age);
+    assert.equal(actual.state, state, `age ${age}`);
+    assert.equal(actual.label, label, `age ${age}`);
+    if (actual.delay !== null) assert(actual.delay > 0);
+  }
+  for (const missing of [null, undefined, NaN]) assert.equal(presenceDetails(missing, 1000000).state, "offline");
+});
+
+function setupPayload(selected = true) {
+  return {
+    serverVersion:"1.4.0", worktreeMode:"never",
+    project:selected ? { status:"selected", name:"codexify", activePath:"/worktrees/codexify", sourcePath:"/projects/codexify", managedWorktree:true } : { status:"unselected", selectionAvailable:true },
+    update:{ status:"up_to_date", currentVersion:"1.4.0", latestVersion:"1.4.0" },
+    connectorSchema:{ status:"current", advertisedVersion:"1.4.0+markdown-chat-v2", observedVersion:"1.4.0+markdown-chat-v2", connectorVersion:"1.4.0+markdown-chat-v2", refreshRecommended:false }
+  };
+}
 
 class ChatBackend {
   messages = [];
   calls = [];
   delivered = 0;
+  read = 0;
+  lastAgentCall = null;
+  serverTime = null;
   revision = 0;
   end = 180;
   failSends = 0;
@@ -19,6 +49,8 @@ class ChatBackend {
   failAfterSave = false;
   failState = false;
   pageSize = 50;
+  setup = setupPayload();
+  chatEnabled = true;
   add(role, markdown, id = `fixture-${this.messages.length}`) {
     const start = this.end;
     this.end += markdown.length + 150;
@@ -28,6 +60,14 @@ class ChatBackend {
   }
   async call(name, args) {
     this.calls.push({ name, args });
+    if (name === "setup_status") return { structuredContent:this.setup, _meta:{ [ENABLED]:this.chatEnabled } };
+    if (name === "doctor") return { structuredContent:{ ok:true, checks:[], summary:{ passed:1, failures:0, warnings:0, skipped:0 } } };
+    if (name === "setup_ui_list_projects") return { structuredContent:{ projects:[{ selector:"codexify", name:"codexify" }], total:1, warnings:[] } };
+    if (name === "setup_ui_select_project") {
+      const scratch = args.withoutProject === true;
+      this.setup.project = { status:scratch ? "without_project" : "selected", name:scratch ? "Chat without a project" : "codexify", activePath:scratch ? "/private/scratch" : "/worktrees/codexify", managedWorktree:!scratch };
+      return { structuredContent:{ mode:scratch ? "without_project" : "project", active_root:this.setup.project.activePath, project_name:this.setup.project.name, managed_worktree:!scratch } };
+    }
     if (name === "chat_ui_send") {
       if (this.toolErrorSends-- > 0) return { isError:true, content:[{ type:"text", text:"The message was not saved." }] };
       if (this.failSends-- > 0) throw new Error("Temporary send failure");
@@ -39,7 +79,7 @@ class ChatBackend {
     }
     assert.equal(name, "chat_ui_state", "UI must use only app-only chat tools");
     if (this.failState) throw new Error("Temporary state failure");
-    const revision = `${this.revision}-${this.delivered}`;
+    const revision = `${this.revision}-${this.delivered}-${this.read}`;
     const all = this.messages.filter(message => args.before === undefined || message.start < args.before);
     const unchanged = args.before === undefined && revision === args.revision;
     const messages = unchanged ? [] : all.slice(-this.pageSize);
@@ -47,7 +87,8 @@ class ChatBackend {
       content:[{ type:"text", text:"Widget state updated." }],
       _meta:{ [META]:{
         chat_file:"/private/project/chats/conversation/CHAT.md", revision,
-        delivered_through:this.delivered, messages,
+        delivered_through:this.delivered, read_through:this.read,
+        last_agent_call_at_ms:this.lastAgentCall, server_time_ms:this.serverTime ?? Date.now(), messages,
         has_more:all.length > messages.length && !unchanged,
         before:messages[0]?.start ?? null, unchanged
       } }
@@ -55,9 +96,10 @@ class ChatBackend {
   }
 }
 
-async function mount(browser, backend, { width = 390, theme = "light", count = 1, bridge = "legacy", nested = false, saved = {} } = {}) {
-  const page = await browser.newPage({ viewport:{ width, height:1400 }, colorScheme:theme });
+async function mount(browser, backend, { width = 390, theme = "light", count = 1, bridge = "legacy", nested = false, saved = {}, combined = false, clock = null, scale = 1 } = {}) {
+  const page = await browser.newPage({ viewport:{ width, height:1400 }, colorScheme:theme, deviceScaleFactor:scale });
   page.setDefaultTimeout(8000);
+  if (clock !== null) await page.clock.install({ time:clock });
   const errors = [], hostMessages = [], widgetStates = [];
   page.on("pageerror", error => errors.push(error.message));
   await page.exposeFunction("mockTool", async (name, args) => {
@@ -70,11 +112,15 @@ async function mount(browser, backend, { width = 390, theme = "light", count = 1
     contentType:"text/html", body:'<!doctype html><html><body style="margin:0"></body></html>'
   }));
   await page.goto("https://codexify-widget.test/");
-  await page.evaluate(({ html, count, bridge, theme, saved }) => {
+  await page.evaluate(({ html, count, bridge, theme, saved, initial }) => {
     window.addEventListener("message", async event => {
       const message = event.data;
       if (message?.jsonrpc !== "2.0") return;
       if (message.method === "ui/notifications/size-changed") return;
+      if (message.method === "ui/notifications/initialized" && initial) {
+        event.source.postMessage({ jsonrpc:"2.0", method:"ui/notifications/tool-result", params:initial }, "*");
+        return;
+      }
       if (!message.method || message.id === undefined) return;
       window.hostMessage(message.method);
       let result;
@@ -91,12 +137,12 @@ async function mount(browser, backend, { width = 390, theme = "light", count = 1
       frame.id = `widget-${i}`; frame.title = `Chat widget ${i}`;
       frame.style.cssText = "display:block;border:0;width:100%;height:620px";
       const bootstrap = bridge === "legacy"
-        ? `<script>window.openai={theme:${JSON.stringify(theme)},widgetState:${JSON.stringify(saved)},callTool:(name,args)=>parent.mockTool(name,args),setWidgetState:value=>parent.saveWidget(value),openExternal:()=>Promise.resolve({})};<\/script>`
+        ? `<script>window.openai={theme:${JSON.stringify(theme)},toolOutput:${JSON.stringify(initial)},widgetState:${JSON.stringify(saved)},callTool:(name,args)=>parent.mockTool(name,args),setWidgetState:value=>parent.saveWidget(value),openExternal:()=>Promise.resolve({})};<\/script>`
         : "";
       frame.srcdoc = html.replace("<head>", "<head>" + bootstrap);
       document.body.append(frame);
     }
-  }, { html, count, bridge, theme, saved });
+  }, { html:combined ? setupChatHtml : html, count, bridge, theme, saved, initial:combined ? { structuredContent:backend.setup, _meta:{ [ENABLED]:backend.chatEnabled } } : null });
   const frames = Array.from({ length:count }, (_, i) => page.frameLocator(`#widget-${i}`));
   await frames[0].getByText("Loading this conversation...", { exact:true }).waitFor({ state:"hidden" });
   return { page, frames, errors, hostMessages, widgetStates };
@@ -131,10 +177,19 @@ for (const [engineName, engine] of [["Chromium", chromium], ["WebKit", webkit]])
         await refresh(frame);
         await frame.getByRole("img", { name:"Delivered to agent", exact:true }).waitFor();
         assert.equal(await frame.locator(".ticks.delivered path").count(), 2);
+        const deliveredColor = await frame.locator(".ticks.delivered").evaluate(node => getComputedStyle(node).color);
+        const savedColor = await frame.locator(".ticks.delivered").evaluate(node => getComputedStyle(node).getPropertyValue("--tick").trim());
+        assert.equal(await frame.locator(".ticks.read").count(), 0);
+        backend.read = backend.delivered;
+        await refresh(frame);
+        await frame.getByRole("img", { name:"Read by agent", exact:true }).waitFor();
+        assert.equal(await frame.locator(".ticks.read path").count(), 2);
+        assert.notEqual(await frame.locator(".ticks.read").evaluate(node => getComputedStyle(node).color), deliveredColor);
+        assert(savedColor);
         await input.fill("From the arrow button"); await send.click();
         await frame.getByRole("img", { name:"Saved to CHAT.md", exact:true }).waitFor();
         assert.equal(backend.messages.length, 2);
-        assert.equal(await frame.locator(".ticks:not(.delivered) path").count(), 1);
+        assert.equal(await frame.locator(".ticks.sent path").count(), 1);
         assert(!hostMessages.includes("ui/message"));
         assert(widgetStates.every(state => Object.keys(state).join() === "privateContent"));
         assert.deepEqual(errors, []); await page.close();
@@ -254,11 +309,118 @@ for (const [engineName, engine] of [["Chromium", chromium], ["WebKit", webkit]])
         assert.equal(await mounted.frames[0].getByRole("textbox").inputValue(), "Draft retained");
         await mounted.page.close();
       });
+      await t.test("activity ages locally without new messages or successful polling", async () => {
+        const backend = new ChatBackend();
+        const now = Date.UTC(2026, 8, 14, 12);
+        backend.serverTime = now; backend.lastAgentCall = now;
+        const { page, frames:[frame], errors } = await mount(browser, backend, { clock:now });
+        await frame.locator("#presence[data-state='online']").waitFor();
+        backend.failState = true;
+        await page.clock.fastForward(241000);
+        await frame.getByText("last seen 4 mins ago", { exact:true }).waitFor();
+        assert.equal(await frame.locator(".presence-symbol path").getAttribute("d"), "M12 5.5V12l5.6 3.2");
+        await page.clock.fastForward(60000);
+        await frame.getByText("last seen 5 mins ago", { exact:true }).waitFor();
+        await page.clock.fastForward(300000);
+        await frame.locator("#presence[data-state='offline']").waitFor();
+        assert.equal(await frame.locator(".presence-symbol circle").getAttribute("fill"), "#fff");
+        assert.equal(await frame.locator(".presence-symbol path").count(), 2);
+        assert.equal(backend.lastAgentCall, now, "UI calls must not change activity");
+        assert.deepEqual(errors, []); await page.close();
+      });
+      for (const bridge of ["legacy", "mcp"]) {
+        await t.test(`setup-only panel preserves its draft across status updates (${bridge})`, async () => {
+          const backend = new ChatBackend(); backend.lastAgentCall = Date.now();
+          const { page, frames:[frame], errors, hostMessages } = await mount(browser, backend, { combined:true, bridge });
+          await frame.locator("#chat").waitFor();
+          assert.equal(await frame.locator("#chat").count(), 1);
+          await frame.getByRole("textbox", { name:"Message the agent" }).fill("Keep this draft");
+          await frame.locator("#draft").evaluate(node => { node.dataset.original = "yes"; });
+          await frame.getByRole("button", { name:"Check for updates", exact:true }).click();
+          await frame.getByRole("button", { name:"Check for updates", exact:true }).waitFor();
+          assert.equal(await frame.locator("#draft").inputValue(), "Keep this draft");
+          assert.equal(await frame.locator("#draft").getAttribute("data-original"), "yes");
+          await frame.getByRole("button", { name:"Send message", exact:true }).click();
+          await frame.getByRole("img", { name:"Saved to CHAT.md", exact:true }).waitFor();
+          backend.delivered = backend.messages[0].end;
+          await refresh(frame);
+          await frame.getByRole("img", { name:"Delivered to agent", exact:true }).waitFor();
+          backend.read = backend.delivered;
+          await refresh(frame);
+          await frame.getByRole("img", { name:"Read by agent", exact:true }).waitFor();
+          backend.add("agent", "Answer delivered into the existing panel.");
+          await refresh(frame);
+          await frame.getByText("Answer delivered into the existing panel.", { exact:true }).waitFor();
+          assert.equal(await frame.locator("#chat").count(), 1);
+          assert(!hostMessages.includes("ui/message"));
+          assert.deepEqual(errors, []); await page.close();
+        });
+      }
+      await t.test("setup picker uses private actions and activates the existing panel", async () => {
+        const backend = new ChatBackend(); backend.setup = setupPayload(false);
+        const { page, frames:[frame], errors } = await mount(browser, backend, { combined:true });
+        assert(await frame.locator("#draft").isDisabled());
+        assert.equal(backend.calls.filter(call => call.name === "chat_ui_state").length, 0);
+        await frame.getByRole("button", { name:/Chat without a project Use/ }).click();
+        await frame.locator("#draft:enabled").waitFor();
+        await frame.getByRole("textbox", { name:"Message the agent" }).fill("Scratch chat works");
+        await frame.getByRole("button", { name:"Send message", exact:true }).click();
+        await frame.getByRole("img", { name:"Saved to CHAT.md" }).waitFor();
+        assert(backend.calls.some(call => call.name === "setup_ui_select_project" && call.args.withoutProject));
+        assert(!backend.calls.some(call => ["set_project_root", "list_projects"].includes(call.name)));
+        assert.equal(await frame.locator("#chat").count(), 1);
+        assert.equal(backend.lastAgentCall, null);
+        assert.deepEqual(errors, []); await page.close();
+      });
+      await t.test("historical setup events cannot re-enable a chat disabled by live status", async () => {
+        const backend = new ChatBackend();
+        const { page, frames:[frame], errors } = await mount(browser, backend, { combined:true });
+        await frame.locator("#draft").fill("Preserved when disabled");
+        backend.chatEnabled = false;
+        await frame.getByRole("button", { name:"Check for updates", exact:true }).click();
+        await frame.locator("#markdown-chat-host").waitFor({ state:"hidden" });
+        await page.evaluate(initial => document.querySelector("iframe").contentWindow.postMessage({
+          jsonrpc:"2.0", method:"ui/notifications/tool-result", params:initial
+        }, "*"), { structuredContent:setupPayload(), _meta:{ [ENABLED]:true } });
+        await sleep(100);
+        assert.equal(await frame.locator("#markdown-chat-host").isVisible(), false);
+        backend.chatEnabled = true;
+        await frame.getByRole("button", { name:"Check for updates", exact:true }).click();
+        await frame.locator("#draft:enabled").waitFor();
+        assert.equal(await frame.locator("#draft").inputValue(), "Preserved when disabled");
+        assert.equal(await frame.locator("#chat").count(), 1);
+        assert.deepEqual(errors, []); await page.close();
+      });
       for (const theme of ["light", "dark"]) {
+        await t.test(`${theme} setup renders all three receipts and activity icons`, async () => {
+          for (const [state, minutes] of [["online", 3], ["away", 6], ["offline", 11]]) {
+            const backend = new ChatBackend();
+            backend.lastAgentCall = Date.now() - minutes * 60000;
+            backend.read = backend.add("user", "Use the existing worktree.").end;
+            backend.delivered = backend.add("user", "Also check the mobile layout.").end;
+            backend.add("user", "Do not commit these changes yet.");
+            const { page, frames:[frame], errors } = await mount(browser, backend, { combined:true, width:390, theme, scale:2 });
+            await page.locator("iframe").evaluate(node => { node.style.height = "1100px"; });
+            await frame.locator(`#presence[data-state='${state}']`).waitFor();
+            for (const receipt of ["Saved to CHAT.md", "Delivered to agent", "Read by agent"]) await frame.getByRole("img", { name:receipt, exact:true }).waitFor();
+            const colors = await frame.locator(".ticks").evaluateAll(nodes => nodes.map(node => getComputedStyle(node).color));
+            assert.notEqual(colors[0], colors[1]); assert.equal(colors[1], colors[2]);
+            assert.equal(await frame.locator(".ticks.sent path").count(), 1);
+            assert.equal(await frame.locator(".ticks.delivered path").count(), 2);
+            assert.equal(await frame.locator(".ticks.read path").count(), 2);
+            assert.equal(await frame.locator(".presence-symbol").evaluate(node => node.getBoundingClientRect().width), 14);
+            assert.equal(await frame.locator("html").evaluate(node => node.scrollWidth > innerWidth), false);
+            mkdirSync(new URL("../target/chat-v2-previews/", import.meta.url), { recursive:true });
+            const stem = `../target/chat-v2-previews/${engineName.toLowerCase()}-${theme}-${state}`;
+            await frame.locator("#chat").screenshot({ path:new URL(`${stem}.png`, import.meta.url).pathname });
+            if (state === "online") await frame.locator("body").screenshot({ path:new URL(`${stem}-setup.png`, import.meta.url).pathname });
+            assert.deepEqual(errors, []); await page.close();
+          }
+        });
         await t.test(`${theme} mobile layout and safe Markdown`, async () => {
           const backend = new ChatBackend();
           backend.add("agent", "## Build complete\n\n**All tests passed.** Should I commit?\n\n```rust\n" + "long_identifier_".repeat(18) + "\n```\n\n<img src=x onerror=alert(1)>\n[Unsafe](javascript:alert(1))\n[Docs](https://example.com/docs)");
-          const message = backend.add("user", "Commit the implementation.\nDo not create a release yet."); backend.delivered = message.end;
+          const message = backend.add("user", "Commit the implementation.\nDo not create a release yet."); backend.delivered = message.end; backend.read = message.end;
           backend.add("agent", "I will commit and verify CI, without releasing.");
           backend.add("user", "Thanks.");
           const { page, frames:[frame], errors } = await mount(browser, backend, { width:370, theme });

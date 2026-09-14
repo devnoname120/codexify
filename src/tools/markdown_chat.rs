@@ -75,11 +75,10 @@ impl Tool for ChatTool {
     }
 
     fn meta(&self) -> Option<rmcp::model::MetaObject> {
-        if matches!(self, Self::Write | Self::Await) {
-            Some(crate::markdown_chat_ui::tool_meta())
-        } else {
-            None
-        }
+        Some(
+            serde_json::from_value(json!({"ui":{"visibility":["model"]}}))
+                .expect("chat visibility"),
+        )
     }
 
     fn description(&self) -> String {

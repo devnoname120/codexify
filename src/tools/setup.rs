@@ -336,8 +336,15 @@ fn setup_result(input: SetupResultInput<'_>) -> ToolResult {
         connector_schema,
         debug: debug.then_some(SetupDebugInfo { update_check_ms }),
     };
-    ToolResult::text(text)
-        .with_structured(serde_json::to_value(output).expect("setup output must serialize"))
+    let mut result = ToolResult::text(text)
+        .with_structured(serde_json::to_value(output).expect("setup output must serialize"));
+    result.meta = Some(
+        serde_json::from_value(json!({
+            crate::markdown_chat_ui::CHAT_ENABLED_META: markdown_chat_enabled
+        }))
+        .expect("setup chat metadata"),
+    );
+    result
 }
 
 impl ConversationAuthorization {
@@ -595,6 +602,70 @@ impl Tool for ConversationAuthorization {
 /// Refreshes an existing card using the connector reload record and the card's
 /// original conversation version. Polls never update the reload record.
 pub struct SetupStatus;
+
+pub struct UnrestrictedSetup;
+
+#[async_trait]
+impl Tool for UnrestrictedSetup {
+    fn name(&self) -> &'static str {
+        AUTHORIZATION_TOOL_WIRE_NAME
+    }
+    fn title(&self) -> String {
+        "Open Codexify setup".into()
+    }
+    fn description(&self) -> String {
+        "Call setup once to open workspace selection and this conversation's Markdown chat. No setup reference is required on this server. Continue with get_agent_brief and use the chat tools without reopening setup.".into()
+    }
+    fn describe(&self, config: &AppConfig) -> String {
+        format!(
+            "{} Connector version marker: `{}`; copy it into connectorVersion unchanged.",
+            self.description(),
+            crate::connector_schema::schema_version(config)
+        )
+    }
+    fn behavior(&self) -> ToolBehavior {
+        SetupStatus.behavior()
+    }
+    fn meta(&self) -> Option<rmcp::model::MetaObject> {
+        Some(setup_ui::tool_meta())
+    }
+    fn input_schema(&self) -> Value {
+        let mut schema = ConversationAuthorization.input_schema();
+        schema["properties"].as_object_mut().unwrap().remove("ref");
+        schema["required"] = json!([]);
+        schema
+    }
+    fn output_schema(&self) -> Option<Value> {
+        SetupStatus.output_schema()
+    }
+    fn fills_structured_content(&self) -> bool {
+        false
+    }
+    fn requires_project_root(&self) -> bool {
+        false
+    }
+    async fn call(&self, _: Value, _: &AppConfig, _: &SessionState) -> ToolResult {
+        ToolResult::error("Setup requires request metadata.")
+    }
+    async fn call_with_context(
+        &self,
+        args: Value,
+        config: &AppConfig,
+        session: &SessionState,
+        context: &ToolRequestContext,
+    ) -> ToolResult {
+        if config.conversation_auth_token.is_some() {
+            return ToolResult::error("This server requires its configured setup reference.");
+        }
+        let mut status_args = json!({});
+        if let Some(version) = args.get("connectorVersion") {
+            status_args["conversationVersion"] = version.clone();
+        }
+        SetupStatus
+            .call_with_context(status_args, config, session, context)
+            .await
+    }
+}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]

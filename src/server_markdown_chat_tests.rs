@@ -323,6 +323,7 @@ async fn markdown_chat_never_initializes_or_exposes_a_channel_before_setup() {
     for (name, args) in [
         ("chat_read", json!({})),
         ("chat_ui_state", json!({})),
+        ("setup_ui_update", json!({"confirm":false})),
         (
             "chat_ui_send",
             json!({"request_id":"unauthorized", "message":"Not saved"}),

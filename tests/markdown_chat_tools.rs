@@ -72,7 +72,7 @@ fn tools_are_opt_in_and_read_wait_have_no_parameters() {
 }
 
 #[test]
-fn chat_widget_tools_are_app_only_and_write_wait_link_the_widget() {
+fn chat_widget_tools_are_app_only_and_chat_calls_never_link_a_widget() {
     let (_root, mut config, _session, _context) = fixture();
     let tools = load_tools_for_config(&config);
     for name in ["chat_ui_send", "chat_ui_state"] {
@@ -85,12 +85,11 @@ fn chat_widget_tools_are_app_only_and_write_wait_link_the_widget() {
         assert_eq!(meta.get("openai/visibility"), Some(&json!("private")));
         assert!(tool.input_schema()["properties"].get("path").is_none());
     }
-    for name in ["chat_write", "chat_await"] {
+    for name in ["chat_read", "chat_write", "chat_await"] {
         let tool = tools.iter().find(|tool| tool.name() == name).unwrap();
-        assert_eq!(
-            tool.meta().unwrap().get("ui").unwrap()["resourceUri"],
-            "ui://codexify/markdown-chat/v1/mcp-app.html"
-        );
+        let meta = serde_json::to_value(tool.meta()).unwrap();
+        assert!(meta.get("openai/outputTemplate").is_none());
+        assert!(meta["ui"].get("resourceUri").is_none());
     }
     config.ui_widgets = false;
     assert!(
@@ -218,6 +217,112 @@ async fn delivery_receipt_is_persistent_but_independent_of_acknowledgement() {
         .unwrap();
     assert!(unchanged.unchanged);
     assert!(unchanged.messages.is_empty());
+}
+
+#[tokio::test]
+async fn widget_read_receipt_advances_only_when_a_chat_tool_consumes_the_message() {
+    let (_root, config, session, context) = fixture();
+    let chat = context
+        .markdown_chat
+        .chat(&config, context.conversation.as_ref(), &session)
+        .unwrap();
+    let sent = chat
+        .append_user("read-receipt".into(), "Please read this".into())
+        .await
+        .unwrap();
+    let initial = serde_json::to_value(chat.widget_page(None, None).await.unwrap()).unwrap();
+    assert!(
+        initial["read_through"]
+            .as_u64()
+            .expect("read cursor is exposed")
+            < sent.end
+    );
+    chat.mark_delivered(sent.end).await.unwrap();
+    let delivered = serde_json::to_value(chat.widget_page(None, None).await.unwrap()).unwrap();
+    assert_eq!(delivered["delivered_through"], sent.end);
+    assert_eq!(delivered["read_through"], initial["read_through"]);
+    chat.read(false).await.unwrap();
+    let reader = crate::load_tools_for_config(&config)
+        .into_iter()
+        .find(|tool| tool.name() == "chat_read")
+        .unwrap();
+    let result = reader
+        .call_with_context(json!({}), &config, &session, &context)
+        .await;
+    assert!(!result.is_error);
+    let read = serde_json::to_value(
+        chat.widget_page(None, Some(delivered["revision"].as_str().unwrap().into()))
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(read["read_through"], sent.end);
+    assert_eq!(
+        read["unchanged"], false,
+        "reading must invalidate the receipt revision without an append"
+    );
+    let store = MarkdownChatStore::default();
+    let reopened = store
+        .chat(&config, context.conversation.as_ref(), &session)
+        .unwrap();
+    let persisted = serde_json::to_value(reopened.widget_page(None, None).await.unwrap()).unwrap();
+    assert_eq!(persisted["read_through"], sent.end);
+}
+
+#[tokio::test]
+async fn activity_survives_restart_without_consuming_messages_or_reloading_history() {
+    let (_root, config, session, context) = fixture();
+    let chat = context
+        .markdown_chat
+        .chat(&config, context.conversation.as_ref(), &session)
+        .unwrap();
+    let sent = chat
+        .append_user("activity".into(), "Still unread".into())
+        .await
+        .unwrap();
+    let first = chat.widget_page(None, None).await.unwrap();
+    assert!(first.last_agent_call_at_ms.is_none());
+    chat.record_agent_call(1000).await.unwrap();
+    chat.record_agent_call(500).await.unwrap();
+    let active = chat.widget_page(None, Some(first.revision)).await.unwrap();
+    assert!(
+        active.unchanged,
+        "presence changes do not need a full history retransmission"
+    );
+    assert_eq!(active.last_agent_call_at_ms, Some(1000));
+    assert_eq!(active.delivered_through, 0);
+    assert!(active.read_through < sent.end);
+    assert!(
+        chat.read(false)
+            .await
+            .unwrap()
+            .text
+            .contains("Still unread")
+    );
+    let reopened = MarkdownChatStore::default()
+        .chat(&config, context.conversation.as_ref(), &SessionState::new())
+        .unwrap();
+    assert_eq!(
+        reopened
+            .widget_page(None, None)
+            .await
+            .unwrap()
+            .last_agent_call_at_ms,
+        Some(1000)
+    );
+
+    let path = chat.path().with_file_name("cursor.json");
+    let mut old: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    old.as_object_mut().unwrap().remove("lastAgentCallAtMs");
+    std::fs::write(&path, serde_json::to_vec(&old).unwrap()).unwrap();
+    let legacy = MarkdownChatStore::default()
+        .chat(&config, context.conversation.as_ref(), &session)
+        .unwrap();
+    let legacy_page = legacy.widget_page(None, None).await.unwrap();
+    assert!(legacy_page.last_agent_call_at_ms.is_none());
+    assert_eq!(legacy_page.read_through, active.read_through);
+    assert_eq!(legacy_page.messages[0].markdown, "Still unread");
 }
 
 #[tokio::test]

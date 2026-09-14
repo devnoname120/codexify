@@ -121,6 +121,22 @@ pub struct CodexHandler {
 }
 
 impl CodexHandler {
+    async fn record_chat_activity(&self, conversation: Option<&ConversationIdentity>, at_ms: u64) {
+        self.markdown_chat
+            .record_agent_call(conversation, &self.session, at_ms);
+        if let Some(root) = self.selected_project_root(conversation) {
+            let mut effective = self.config.as_ref().clone();
+            effective.work_dir = root;
+            if let Ok(chat) = self
+                .markdown_chat
+                .chat(&effective, conversation, &self.session)
+                && let Err(error) = chat.record_agent_call(at_ms).await
+            {
+                tracing::warn!(%error, "could not persist Markdown chat agent activity");
+            }
+        }
+    }
+
     fn selected_project_root(
         &self,
         conversation: Option<&ConversationIdentity>,
@@ -254,7 +270,12 @@ fn advertised_tool(tool: &dyn Tool, config: &AppConfig) -> rmcp::model::Tool {
     if let Some(icons) = tool.icons() {
         advertised = advertised.with_icons(icons);
     }
-    let meta = tool.meta().and_then(|meta| {
+    let meta = if config.markdown_chat.enabled && tool.name() == AUTHORIZATION_TOOL_WIRE_NAME {
+        Some(crate::markdown_chat_ui::tool_meta())
+    } else {
+        tool.meta()
+    }
+    .and_then(|meta| {
         if config.ui_widgets {
             Some(meta)
         } else {
@@ -540,6 +561,17 @@ impl ServerHandler for CodexHandler {
         // Keep `tool` as an Option so that even an unknown-tool call flows through
         // the audit begin/finish pairing below rather than short-circuiting.
         let tool = self.tools.iter().find(|t| t.name() == name);
+        let agent_call = self.config.markdown_chat.enabled
+            && tool.is_some_and(|tool| !app_only_tool(tool.as_ref()))
+            && !context.ct.is_cancelled();
+        let called_at_ms = crate::markdown_chat::now_ms();
+        let authorized_before = self
+            .conversation_auth_error("chat_read", conversation.as_ref())
+            .is_none();
+        if agent_call && authorized_before {
+            self.record_chat_activity(conversation.as_ref(), called_at_ms)
+                .await;
+        }
         let call_identity = tool
             .map(|tool| tool.call_identity(&args))
             .unwrap_or_else(|| ToolCallIdentity::native(name.clone()));
@@ -617,7 +649,12 @@ impl ServerHandler for CodexHandler {
 
             match tool {
                 None => ToolResult::error(format!("Unknown tool: {name}")),
-                Some(tool) if name == SetProjectRoot::NAME => {
+                Some(tool)
+                    if matches!(
+                        name.as_str(),
+                        SetProjectRoot::NAME | crate::tools::setup_ui_action::SELECT_NAME
+                    ) =>
+                {
                     if let Some(identity) = conversation.as_ref() {
                         select_and_render(&args, |request| async move {
                             match request {
@@ -734,6 +771,16 @@ impl ServerHandler for CodexHandler {
             }
         };
 
+        if agent_call
+            && (!authorized_before || name == SetProjectRoot::NAME)
+            && !result.is_error
+            && self
+                .conversation_auth_error("chat_read", conversation.as_ref())
+                .is_none()
+        {
+            self.record_chat_activity(conversation.as_ref(), called_at_ms)
+                .await;
+        }
         finalize_model_visible_result(tool.map(|tool| tool.as_ref()), &mut result, &self.config);
         if !result.is_error
             && let Some(tool) = tool
@@ -842,7 +889,10 @@ impl ServerHandler for CodexHandler {
         if let (Some(audit), Some(call), Some(start_scope)) =
             (&self.audit, audit_call.as_ref(), start_scope.as_ref())
         {
-            if name == SetProjectRoot::NAME {
+            if matches!(
+                name.as_str(),
+                SetProjectRoot::NAME | crate::tools::setup_ui_action::SELECT_NAME
+            ) {
                 let finish_scope = self.audit_scope(conversation.as_ref());
                 audit.finish_tool(call, &call_identity, &result, duration_ms, &finish_scope);
             } else {

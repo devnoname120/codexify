@@ -149,12 +149,14 @@ new conversation. `get_agent_brief` reports that conversation's `CHAT.md` path,
 stored with project metadata outside the repository by default. Every
 conversation has its own file, even when several use the same checkout.
 
-With UI widgets enabled, `chat_write` and `chat_await` open a chat card. Send with
-the arrow button or Return; Shift+Return inserts a newline. Every card in the
-conversation shows the same history, so older cards remain usable. One grey tick
-means saved to `CHAT.md`; two blue ticks mean included in an agent-facing tool
-response, not proof that the model understood or acted on it. Widget sends do not
-start a new ChatGPT turn.
+With UI widgets enabled, `setup` opens one persistent chat panel beneath the
+setup controls. Chat tools update it without opening more cards. Send with the
+arrow button or Return; Shift+Return inserts a newline. One grey tick means saved
+to `CHAT.md`, two grey ticks mean returned to the agent, and two blue ticks mean
+acknowledged through `chat_read`, `chat_write`, or `chat_await`. The Agent indicator
+shows online for calls under four minutes old, last seen from four to under ten minutes,
+and offline thereafter. These are tool-activity receipts, not proof of model
+comprehension. Widget sends do not start a new ChatGPT turn.
 
 You can also append your instructions to the file and save. The agent uses `chat_read`,
 `chat_write`, and `chat_await`; other tool results also deliver unread messages

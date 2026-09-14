@@ -29,6 +29,7 @@ pub mod self_update;
 pub mod self_update_status;
 pub mod set_project_root;
 pub mod setup;
+pub mod setup_ui_action;
 pub mod show_diff;
 pub mod skills_list;
 pub mod skills_read;

@@ -129,6 +129,13 @@ impl Tool for ChatUiTool {
                     Ok(args) => args,
                     Err(error) => return *error,
                 };
+                if let Some(at_ms) = context
+                    .markdown_chat
+                    .last_agent_call(context.conversation.as_ref(), session)
+                    && let Err(error) = chat.record_agent_call(at_ms).await
+                {
+                    return ToolResult::error(error);
+                }
                 match chat.widget_page(before, revision).await {
                     Ok(page) => private_result(serde_json::to_value(page).expect("chat page")),
                     Err(error) => ToolResult::error(error),

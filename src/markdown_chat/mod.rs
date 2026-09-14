@@ -26,6 +26,14 @@ pub const DEFAULT_MAX_WAIT_MS: u64 = 270_000;
 pub const MAX_UNREAD_BYTES: usize = 16 * 1024 * 1024;
 pub const USER_MESSAGE_FIELD: &str = "new_chat_message_from_user";
 
+pub(crate) fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u64::MAX as u128) as u64
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields, rename_all = "camelCase")]
 pub struct MarkdownChatConfig {
@@ -92,6 +100,7 @@ impl MarkdownChatConfig {
 
 pub struct MarkdownChatStore {
     channels: Mutex<HashMap<PathBuf, Arc<ChatFile>>>,
+    activity: Mutex<HashMap<String, u64>>,
     transport_namespace: String,
 }
 
@@ -103,12 +112,50 @@ impl Default for MarkdownChatStore {
             .as_nanos();
         Self {
             channels: Mutex::new(HashMap::new()),
+            activity: Mutex::new(HashMap::new()),
             transport_namespace: format!("{}-{timestamp}", std::process::id()),
         }
     }
 }
 
 impl MarkdownChatStore {
+    fn owner(&self, conversation: Option<&ConversationIdentity>, session: &SessionState) -> String {
+        match conversation {
+            Some(identity) => identity.stable_key().to_string(),
+            None => format!(
+                "transport-{}-{}",
+                self.transport_namespace,
+                session.audit_id()
+            ),
+        }
+    }
+
+    pub(crate) fn record_agent_call(
+        &self,
+        conversation: Option<&ConversationIdentity>,
+        session: &SessionState,
+        at_ms: u64,
+    ) {
+        if let Ok(mut activity) = self.activity.lock() {
+            let last = activity
+                .entry(self.owner(conversation, session))
+                .or_default();
+            *last = (*last).max(at_ms);
+        }
+    }
+
+    pub(crate) fn last_agent_call(
+        &self,
+        conversation: Option<&ConversationIdentity>,
+        session: &SessionState,
+    ) -> Option<u64> {
+        self.activity
+            .lock()
+            .ok()?
+            .get(&self.owner(conversation, session))
+            .copied()
+    }
+
     pub fn chat(
         &self,
         config: &AppConfig,
@@ -118,14 +165,7 @@ impl MarkdownChatStore {
         if !config.markdown_chat.enabled {
             return Err("Markdown chat is disabled in the server configuration.".into());
         }
-        let owner = match conversation {
-            Some(identity) => identity.stable_key().to_string(),
-            None => format!(
-                "transport-{}-{}",
-                self.transport_namespace,
-                session.audit_id()
-            ),
-        };
+        let owner = self.owner(conversation, session);
         let path = crate::memory::memory_dir(config)
             .join("chats")
             .join(owner)
@@ -181,4 +221,26 @@ pub(crate) async fn history_call(
     let mut config = config.clone();
     config.work_dir = channel_dir.to_path_buf();
     Ok(Some((args, config)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn activity_is_conversation_scoped_with_transport_fallback() {
+        let store = MarkdownChatStore::default();
+        let first = SessionState::new();
+        let second = SessionState::new();
+        let a = ConversationIdentity::from_openai_session("a").unwrap();
+        let b = ConversationIdentity::from_openai_session("b").unwrap();
+        store.record_agent_call(Some(&a), &first, 1000);
+        store.record_agent_call(Some(&a), &second, 800);
+        assert_eq!(store.last_agent_call(Some(&a), &second), Some(1000));
+        assert_eq!(store.last_agent_call(Some(&b), &first), None);
+        assert_eq!(store.last_agent_call(None, &first), None);
+        store.record_agent_call(None, &first, 1500);
+        assert_eq!(store.last_agent_call(None, &first), Some(1500));
+        assert_eq!(store.last_agent_call(None, &second), None);
+    }
 }

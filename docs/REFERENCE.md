@@ -1464,15 +1464,20 @@ never ends a turn.
 
 ### Chat widget
 
-When both `markdownChat.enabled` and `uiWidgets` are enabled, `chat_write` and
-`chat_await` advertise `ui://codexify/markdown-chat/v1/mcp-app.html`. The card shows
-this conversation's history and a multiline composer. Return or the arrow sends;
-Shift+Return inserts a newline. Input-method composition does not send a message.
-The card can connect before the invoking tool returns if the host mounts it then;
-an existing `chat_write` card also stays usable while `chat_await` is pending.
+When both `markdownChat.enabled` and `uiWidgets` are enabled, `setup` advertises
+`ui://codexify/setup-chat/v1/mcp-app.html`. Call setup once per conversation: its
+card contains the workspace controls and one persistent chat panel. `chat_read`,
+`chat_write`, and `chat_await` do not advertise a widget or create additional
+cards. Their messages appear in the existing panel, which remains usable during
+`chat_await`. Servers without a configured setup reference also expose `setup`
+when Markdown chat is enabled; that variant requires no reference.
 
-All cards in the same conversation use the same server-side transcript, not
-independent threads. They load the latest page and offer **Load earlier messages**
+The chat composer activates after a workspace is selected. Return or the arrow
+sends; Shift+Return inserts a newline. Input-method composition does not send a
+message. Setup status refreshes and workspace-control rerenders preserve the
+panel, its scroll position, and its unfinished draft.
+
+The panel loads the latest page and offers **Load earlier messages**
 for history. Visible cards recheck state every two seconds; collapsed, off-screen,
 hidden, or torn-down cards stop polling. Connection errors back off and retain
 the draft. Each card keeps its own unfinished composer text in private widget
@@ -1483,15 +1488,35 @@ not claim that a stopped agent can be restarted by sending to the file.
 | --- | --- |
 | Sending | The append has not yet been confirmed. |
 | One grey tick | Codexify confirmed the user message was saved to `CHAT.md`. |
-| Two blue ticks | Codexify included the complete message in an agent-facing tool response, including a read, wait, write, ordinary tool, or tool-error response. |
+| Two grey ticks | Codexify included the complete message in an agent-facing tool response, but no chat tool has acknowledged it yet. |
+| Two blue ticks | `chat_read`, `chat_write`, or `chat_await` consumed the message through the conversation's read cursor. |
 | Not confirmed / Retry | The send failed or its response was lost. Retrying the same request ID does not append the message twice. |
 
 Delivery receipts use a persisted byte boundary separate from the consuming read
-cursor. Therefore passive delivery can turn ticks blue while `chat_read` still
-returns the unread text. Viewing the card or polling history never advances either
+cursor. Passive delivery changes one grey tick to two grey ticks; `chat_read`
+still returns the unread text. Only acknowledgment through a chat tool turns
+them blue. Invalid chat-tool arguments can deliver pending text but do not mark
+it read. Viewing the card or polling history never advances either
 boundary. The server cannot prove that ChatGPT received a response after a network
 failure, that the model understood it, or that it acted on the message; blue ticks
 are not such a guarantee.
+
+The header's **Agent** indicator uses the time of the last agent tool invocation
+in this conversation, including failed calls and calls still running:
+
+| Age of last call | Indicator |
+| --- | --- |
+| Less than 4 minutes | Green circle with a white checkmark and **online**. |
+| At least 4, less than 10 minutes | Orange circle with white hands pointing to 12 and 4, and **last seen x mins ago** (whole minutes). |
+| At least 10 minutes, or no recorded call | Grey outlined circle, white center, grey cross, and **offline**. |
+
+Completion does not reset the invocation time. The timestamp survives service
+restarts for stable conversation identities; older records without it show
+offline until an agent call is recorded. UI polling, user sends, and setup's
+private project/update actions do not count. The panel accounts for the server's
+clock and ages the indicator locally even when history is unchanged or a poll
+fails. These labels describe recent tool activity, not a live connection or a
+guarantee that the agent is currently working.
 
 `chat_ui_send` and `chat_ui_state` are app-only tools, hidden from the model using
 MCP Apps visibility and the ChatGPT compatibility fields. They resolve the current
@@ -1504,8 +1529,12 @@ from ordinary tool logs. Rendering uses safe text nodes for Markdown, without ra
 HTML execution or remote resource loading.
 
 Set `uiWidgets` to `false` to keep the three agent chat tools and file-based
-communication but disable the cards and their two app-only tools. The feature
-remains disabled by default; installation alone does not enable it.
+communication but disable the cards and their app-only actions. Refresh the
+connector and start a new conversation after upgrading from the earlier chat
+widget schema (`+markdown-chat` to `+markdown-chat-v2`). Already mounted older
+cards cannot be removed by the server; new write/wait calls no longer create
+them once the host uses the new tool metadata. The feature remains disabled by
+default; installation alone does not enable it.
 
 ### Waiting and notifications
 
