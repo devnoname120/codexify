@@ -14,14 +14,15 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   without another server response. Undated historical user text is not backfilled.
 - Markdown chat can notify multiple services through the local Apprise library,
   using `markdownChat.notifications.urls`, an optional Python interpreter path,
-  and a bounded timeout. Existing ntfy-only configuration remains compatible and
-  needs no Python. CI checks the real ntfy/Pushover/webhook adapters and the
+  and a bounded timeout. All services, including ntfy, use this single backend;
+  the former native ntfy implementation and `markdownChat.ntfy` block are removed.
+  CI checks the real ntfy/Pushover/webhook adapters and the
   subprocess path on Linux, macOS, and Windows without contacting real recipients.
 - Opt-in `markdownChat` communication gives each conversation its own `CHAT.md`
   outside the repository by default. `chat_read`, `chat_write`, and `chat_await`
   support complete unread Markdown, persistent cursors, native directory watches
   with polling fallback, a configurable 270-second default wait, and optional
-  ntfy delivery using a token stored directly in local configuration.
+  Apprise notifications with service credentials stored directly in local configuration.
 - Every advertised tool gains an optional `new_chat_message_from_user` output
   when Markdown chat is enabled. User messages bypass ordinary output truncation,
   remain pending until a chat tool acknowledges them, and do not enter payload

@@ -1393,7 +1393,7 @@ guarantee quota savings, or keep a host-terminated turn alive.
 
 `enabled` defaults to `false`; `maxWaitMs` defaults to **270000 ms (4 min 30 s)**
 and must be between 1000 and 300000. The tools do not accept a timeout override.
-Omit both `notifications` and the legacy `ntfy` section, or set them to `null`,
+Omit `notifications`, or set it to `null`,
 for file-only communication. Configure only one notification backend. Credentials
 can be stored directly in the JSON configuration; keep the config and private
 service URLs out of source control. See the installation steps and URL examples
@@ -1653,15 +1653,20 @@ the helper. URLs and message bodies travel over standard input, not command-line
 arguments, and provider output is not copied into logs. No console is opened on
 Windows. All URLs are parsed by Apprise before any notification is sent.
 
-Existing `markdownChat.ntfy` configurations remain supported without Python:
+All notification services, including ntfy, use Apprise. The separate native
+ntfy implementation and `markdownChat.ntfy` block have been removed; an old
+block is rejected rather than silently ignored. Before upgrading, install
+Apprise and replace that block with `notifications`:
 
 ```json
-{"markdownChat":{"enabled":true,"ntfy":{"url":"https://ntfy.example/codexify","token":"TOKEN"}}}
+{"markdownChat":{"enabled":true,"notifications":{"urls":["ntfys://TOKEN@ntfy.example/codexify?auth=token&image=no"],"pythonPath":"/absolute/path/to/notifications-venv/bin/python"}}}
 ```
 
-That compatibility backend still POSTs the exact source with `Markdown: yes`
-and optional bearer authentication, with bounded timeouts and no redirects.
-It is not silently migrated to Apprise. Setting both backends is an error.
+Keep the same ntfy hostname and topic, use `ntfys` for HTTPS or `ntfy` for HTTP,
+and percent-encode any token used in the URL. Without a token, omit `TOKEN@`
+and `auth=token`. Remove the old `ntfy` key completely, including when it was
+`null`. The local library calls the configured service directly; no Apprise
+account, server, or relay is needed.
 
 The transcript append is independent of notification delivery. A network failure
 returns `notification: failed` while preserving the written message; do not resend

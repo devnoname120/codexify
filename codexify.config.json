@@ -5,7 +5,7 @@
   "markdownChat": {
     "enabled": false,
     "maxWaitMs": 270000,
-    "ntfy": null
+    "notifications": null
   },
   "conversationAuthToken": null,
   "port": 3000,

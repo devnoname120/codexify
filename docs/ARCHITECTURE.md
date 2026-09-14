@@ -482,8 +482,9 @@ The provider-agnostic backend invokes the locally installed Apprise library
 through a small embedded Python helper. Destination URLs and Markdown travel on
 stdin; timeouts/cancellation kill the helper, Windows hides its console, and
 provider stdout/stderr never enter tool logs. Its service adapters, formatting,
-and overflow handling remain upstream responsibilities. The legacy native ntfy
-backend is retained for existing configs without adding a Python requirement.
+and overflow handling remain upstream responsibilities. This is the only
+notification backend, including for ntfy; configuration accepts only the
+`notifications` block and rejects the removed provider-specific `ntfy` block.
 `get_agent_brief` supplies the current channel path and directs communication
 through the chat tools. Historical file reads get a narrowly scoped exception for
 that file, retain ordinary output budgets, and suppress their payload previews.

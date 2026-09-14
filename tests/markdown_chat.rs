@@ -26,7 +26,7 @@ fn markdown_chat_defaults_and_validation() {
     let config: MarkdownChatConfig = serde_json::from_str("{}").unwrap();
     assert!(!config.enabled);
     assert_eq!(config.max_wait_ms, 270_000);
-    assert!(config.ntfy.is_none());
+    assert!(config.notifications.is_none());
     assert!(config.validate().is_ok());
     for wait in [0, 999, 300_001, u64::MAX] {
         let config = MarkdownChatConfig {
@@ -35,18 +35,13 @@ fn markdown_chat_defaults_and_validation() {
         };
         assert!(config.validate().is_err());
     }
-    for url in [
-        "file:///tmp/topic",
-        "https://example.com",
-        "https://user:password@example.com/topic",
-        "https://example.com/topic?token=x",
-    ] {
+    for url in ["", "not a service URL", "ntfys://topic/\n", "https://["] {
         let config: MarkdownChatConfig =
-            serde_json::from_value(serde_json::json!({"ntfy":{"url":url}})).unwrap();
+            serde_json::from_value(serde_json::json!({"notifications":{"urls":[url]}})).unwrap();
         assert!(config.validate().is_err(), "{url}");
     }
     let config: MarkdownChatConfig = serde_json::from_value(
-        serde_json::json!({"ntfy":{"url":"https://ntfy.sh/topic", "token":"private-test-token"}}),
+        serde_json::json!({"notifications":{"urls":["ntfys://private-test-token@ntfy.sh/topic?auth=token&image=no"]}}),
     )
     .unwrap();
     assert!(config.validate().is_ok());
@@ -59,15 +54,15 @@ fn config_loader_reads_markdown_chat_without_exposing_timeout_in_tools() {
     let path = root.path().join("config.json");
     std::fs::write(&path, serde_json::json!({
         "workDir": root.path(), "codexMcp": {"enabled": false},
-        "markdownChat": {"enabled": true, "maxWaitMs": 270000, "ntfy": {"url":"https://ntfy.sh/topic", "token":"test-token"}}
+        "markdownChat": {"enabled": true, "maxWaitMs": 270000, "notifications": {"urls":["ntfys://test-token@ntfy.sh/topic?auth=token&image=no"]}}
     }).to_string()).unwrap();
     let cli = Cli::try_parse_from(["codexify", "--config", path.to_str().unwrap()]).unwrap();
     let config = load_config_quiet(cli).unwrap();
     assert!(config.markdown_chat.enabled);
     assert_eq!(config.markdown_chat.max_wait_ms, 270000);
     assert_eq!(
-        config.markdown_chat.ntfy.unwrap().token.as_deref(),
-        Some("test-token")
+        config.markdown_chat.notifications.unwrap().urls,
+        vec!["ntfys://test-token@ntfy.sh/topic?auth=token&image=no"]
     );
 }
 

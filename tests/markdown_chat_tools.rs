@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use codexify::config::default_config;
 use codexify::exec_sessions::SessionState;
-use codexify::markdown_chat::{MarkdownChatStore, NotificationState, NtfyConfig, WaitOutcome};
+use codexify::markdown_chat::{MarkdownChatStore, NotificationState, WaitOutcome};
 use codexify::project_bindings::ConversationIdentity;
 use codexify::registry::load_tools_for_config;
 use codexify::tool::ToolRequestContext;
@@ -747,7 +747,8 @@ async fn timeout_instructs_another_await_without_claiming_a_read_receipt() {
 }
 
 #[tokio::test]
-async fn ntfy_receives_exact_markdown_and_token_and_failure_does_not_undo_append() {
+#[ignore = "requires CODEXIFY_TEST_APPRISE_PYTHON; exercised explicitly by CI on every platform"]
+async fn apprise_ntfy_token_and_delivery_failure_preserve_transcript() {
     use axum::{
         Router,
         body::Bytes,
@@ -755,48 +756,61 @@ async fn ntfy_receives_exact_markdown_and_token_and_failure_does_not_undo_append
         routing::post,
     };
     let (_root, mut config, session, context) = fixture();
-    let (tx, mut rx) = tokio::sync::mpsc::channel(2);
-    let app = Router::new()
-        .route(
-            "/topic",
-            post(move |headers: HeaderMap, body: Bytes| {
-                let tx = tx.clone();
-                async move {
-                    tx.send((headers, body)).await.unwrap();
-                    StatusCode::OK
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let app = Router::new().route(
+        "/",
+        post(move |headers: HeaderMap, body: Bytes| {
+            let tx = tx.clone();
+            async move {
+                let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                if payload["topic"] == "failure" {
+                    return (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        axum::Json(json!({"error":"unavailable"})),
+                    );
                 }
-            }),
-        )
-        .route(
-            "/failure",
-            post(|| async { StatusCode::SERVICE_UNAVAILABLE }),
-        );
+                tx.send((headers, payload)).unwrap();
+                (
+                    StatusCode::OK,
+                    axum::Json(json!({"id":"test","event":"message"})),
+                )
+            }
+        }),
+    );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    config.markdown_chat.ntfy = Some(NtfyConfig {
-        url: format!("http://{address}/topic"),
-        token: Some("test-ntfy-token".into()),
-    });
+    config.markdown_chat.notifications = Some(serde_json::from_value(json!({
+        "urls":[format!("ntfy://test-ntfy-token@{address}/topic?auth=token&image=no")],
+        "pythonPath":std::env::var("CODEXIFY_TEST_APPRISE_PYTHON").expect("Apprise test interpreter")
+    })).unwrap());
     let tools = load_tools_for_config(&config);
     let writer = tools
         .iter()
         .find(|tool| tool.name() == "chat_write")
         .unwrap();
-    let markdown = format!("## Question\n{}\n", "**full message**\n".repeat(1000));
+    let markdown = format!("## Question\n{}\n", "**full message**\n".repeat(100));
     let result = writer
         .call_with_context(json!({"message":markdown}), &config, &session, &context)
         .await;
     assert!(!result.is_error, "{}", result.joined_text());
     assert_eq!(
         result.structured_content.unwrap()["notification"],
-        "accepted"
+        "accepted",
+        "received {} requests at the local ntfy endpoint",
+        rx.len()
     );
-    let (headers, body) = rx.recv().await.unwrap();
-    assert_eq!(headers["authorization"], "Bearer test-ntfy-token");
-    assert_eq!(headers["markdown"], "yes");
-    assert_eq!(body.as_ref(), markdown.as_bytes());
-    config.markdown_chat.ntfy.as_mut().unwrap().url = format!("http://{address}/failure");
+    let mut chunks = Vec::new();
+    while let Ok((headers, payload)) = rx.try_recv() {
+        assert_eq!(headers["authorization"], "Bearer test-ntfy-token");
+        assert_eq!(headers["x-markdown"], "yes");
+        chunks.push(payload["message"].as_str().unwrap().to_owned());
+    }
+    assert_eq!(chunks.len(), 1);
+    assert_eq!(chunks.join("\n"), markdown.trim());
+    config.markdown_chat.notifications.as_mut().unwrap().urls = vec![format!(
+        "ntfy://test-ntfy-token@{address}/failure?auth=token&image=no"
+    )];
     let result = writer
         .call_with_context(
             json!({"message":"Written despite notification failure"}),
@@ -811,6 +825,11 @@ async fn ntfy_receives_exact_markdown_and_token_and_failure_does_not_undo_append
         .markdown_chat
         .chat(&config, context.conversation.as_ref(), &session)
         .unwrap();
+    assert!(
+        std::fs::read_to_string(chat.path())
+            .unwrap()
+            .contains(&markdown)
+    );
     assert!(
         std::fs::read_to_string(chat.path())
             .unwrap()

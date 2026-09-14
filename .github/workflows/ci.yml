@@ -79,7 +79,7 @@ jobs:
       - name: Test notification subprocesses with a local HTTP receiver
         env:
           CODEXIFY_TEST_APPRISE_PYTHON: ${{ steps.notification-python.outputs.python-path }}
-        run: cargo test --test markdown_chat_notifications -- --include-ignored
+        run: cargo test --test markdown_chat_notifications --test markdown_chat_tools -- --include-ignored
 
       - name: Test setup widget transitions
         run: node --test scripts/test-setup-widget.mjs
@@ -162,4 +162,4 @@ jobs:
       - name: Test notification subprocesses with a local HTTP receiver
         env:
           CODEXIFY_TEST_APPRISE_PYTHON: ${{ steps.notification-python.outputs.python-path }}
-        run: cargo test --test markdown_chat_notifications -- --include-ignored
+        run: cargo test --test markdown_chat_notifications --test markdown_chat_tools -- --include-ignored

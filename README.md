@@ -171,8 +171,9 @@ You can also append your instructions to the file and save. The agent uses `chat
 `chat_write`, and `chat_await`; other tool results also deliver unread messages
 without consuming them. Optional Apprise notifications send the agent's Markdown
 to ntfy, Pushover, and other supported services through one URL-based configuration.
-This opt-in backend needs Python with Apprise installed; existing `ntfy` settings
-continue to work without Python. The feature is disabled by default and does not
+Notifications use only the local Apprise backend and require Python with Apprise
+installed. The former separate `markdownChat.ntfy` block must be replaced with
+an ntfy service URL under `notifications`. The feature is disabled by default and does not
 guarantee unlimited ChatGPT runtime or alter OpenAI's usage limits.
 
 See [Markdown chat configuration and semantics](docs/REFERENCE.md#markdown-chat)

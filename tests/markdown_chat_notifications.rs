@@ -6,6 +6,39 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 #[test]
+fn only_notifications_is_serialized_as_the_provider_configuration() {
+    let config = serde_json::to_value(MarkdownChatConfig::default()).unwrap();
+    assert!(config.get("notifications").is_some());
+    assert!(
+        config.get("ntfy").is_none(),
+        "native ntfy must not remain in the config"
+    );
+}
+
+#[test]
+fn only_notifications_is_accepted_even_for_ntfy_destinations() {
+    for ntfy in [
+        json!(null),
+        json!({"url":"https://ntfy.example/private-topic", "token":"private-token"}),
+    ] {
+        let result = serde_json::from_value::<MarkdownChatConfig>(json!({"ntfy":ntfy}));
+        assert!(
+            result.is_err(),
+            "the removed ntfy block must not be accepted or ignored"
+        );
+        let message = result.unwrap_err().to_string();
+        assert!(message.contains("ntfy"));
+        assert!(!message.contains("private-topic"));
+        assert!(!message.contains("private-token"));
+    }
+    let config: MarkdownChatConfig = serde_json::from_value(json!({
+        "notifications":{"urls":["ntfys://ntfy.example/topic?image=no","pover://user@app"]}
+    }))
+    .unwrap();
+    assert!(config.validate().is_ok());
+}
+
+#[test]
 fn apprise_configuration_is_opt_in_validated_and_redacted() {
     let default: MarkdownChatConfig = serde_json::from_value(json!({})).unwrap();
     assert!(default.validate().is_ok());

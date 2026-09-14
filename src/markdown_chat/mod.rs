@@ -39,7 +39,6 @@ pub(crate) fn now_ms() -> u64 {
 pub struct MarkdownChatConfig {
     pub enabled: bool,
     pub max_wait_ms: u64,
-    pub ntfy: Option<NtfyConfig>,
     pub notifications: Option<NotificationsConfig>,
 }
 
@@ -48,18 +47,9 @@ impl Default for MarkdownChatConfig {
         Self {
             enabled: false,
             max_wait_ms: DEFAULT_MAX_WAIT_MS,
-            ntfy: None,
             notifications: None,
         }
     }
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-pub struct NtfyConfig {
-    pub url: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub token: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -117,48 +107,13 @@ impl NotificationsConfig {
     }
 }
 
-impl fmt::Debug for NtfyConfig {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("NtfyConfig")
-            .field("url", &"<configured endpoint>")
-            .field("token", &self.token.as_ref().map(|_| "<redacted>"))
-            .finish()
-    }
-}
-
 impl MarkdownChatConfig {
     pub fn validate(&self) -> Result<(), String> {
         if !(1_000..=300_000).contains(&self.max_wait_ms) {
             return Err("markdownChat.maxWaitMs must be between 1000 and 300000".into());
         }
         if let Some(notifications) = &self.notifications {
-            if self.ntfy.is_some() {
-                return Err(
-                    "configure markdownChat.notifications or legacy markdownChat.ntfy, not both"
-                        .into(),
-                );
-            }
             notifications.validate()?;
-        }
-        if let Some(ntfy) = &self.ntfy {
-            let url = reqwest::Url::parse(&ntfy.url)
-                .map_err(|_| "markdownChat.ntfy.url must be an HTTP(S) topic URL")?;
-            if !matches!(url.scheme(), "http" | "https")
-                || url.host_str().is_none()
-                || !url.username().is_empty()
-                || url.password().is_some()
-                || url.query().is_some()
-                || url.fragment().is_some()
-                || url.path().trim_matches('/').is_empty()
-            {
-                return Err("markdownChat.ntfy.url must be an HTTP(S) topic URL without credentials, query or fragment".into());
-            }
-            if let Some(token) = &ntfy.token
-                && (token.is_empty()
-                    || reqwest::header::HeaderValue::from_str(&format!("Bearer {token}")).is_err())
-            {
-                return Err("markdownChat.ntfy.token must be a nonempty valid bearer token".into());
-            }
         }
         Ok(())
     }

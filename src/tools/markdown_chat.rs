@@ -164,9 +164,7 @@ impl Tool for ChatTool {
                 Ok(receipt) => receipt,
                 Err(error) => return ToolResult::error(error),
             };
-            let state = if config.markdown_chat.ntfy.is_some()
-                || config.markdown_chat.notifications.is_some()
-            {
+            let state = if config.markdown_chat.notifications.is_some() {
                 let _ = chat
                     .set_notification(receipt.end_offset, NotificationState::Pending)
                     .await;

@@ -1,9 +1,8 @@
 use std::time::Duration;
 
-use base64::Engine;
 use tokio_util::sync::CancellationToken;
 
-use super::{MarkdownChatConfig, NotificationState, NotificationsConfig, NtfyConfig};
+use super::{MarkdownChatConfig, NotificationState, NotificationsConfig};
 
 pub async fn publish_config(
     config: &MarkdownChatConfig,
@@ -16,8 +15,6 @@ pub async fn publish_config(
     }
     if let Some(notifications) = &config.notifications {
         publish_apprise(notifications, workspace, markdown, cancellation).await
-    } else if let Some(ntfy) = &config.ntfy {
-        publish(ntfy, workspace, markdown, cancellation).await
     } else {
         NotificationState::NotConfigured
     }
@@ -74,50 +71,6 @@ async fn publish_apprise(
     outcome
 }
 
-pub async fn publish(
-    config: &NtfyConfig,
-    workspace: &str,
-    markdown: String,
-    cancellation: &CancellationToken,
-) -> NotificationState {
-    if cancellation.is_cancelled() {
-        return NotificationState::Cancelled;
-    }
-    let Ok(client) = crate::tls::client_builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .connect_timeout(Duration::from_secs(3))
-        .timeout(Duration::from_secs(10))
-        .build()
-    else {
-        return NotificationState::Failed;
-    };
-    let title = format!("Codexify - {workspace}");
-    let title = format!(
-        "=?UTF-8?B?{}?=",
-        base64::engine::general_purpose::STANDARD.encode(title)
-    );
-    let mut request = client
-        .post(&config.url)
-        .header("Content-Type", "text/markdown; charset=utf-8")
-        .header("Markdown", "yes")
-        .header("Title", title)
-        .body(markdown);
-    if let Some(token) = &config.token {
-        request = request.bearer_auth(token);
-    }
-    tokio::select! {
-        biased;
-        _ = cancellation.cancelled() => NotificationState::Cancelled,
-        response = request.send() => {
-            if response.is_ok_and(|response| response.status().is_success()) {
-                NotificationState::Accepted
-            } else {
-                NotificationState::Failed
-            }
-        }
-    }
-}
-
 pub fn description(state: NotificationState) -> &'static str {
     match state {
         NotificationState::NotConfigured => {
@@ -130,7 +83,7 @@ pub fn description(state: NotificationState) -> &'static str {
             "The configured notification provider reported success. This does not confirm that the user has seen it."
         }
         NotificationState::Failed => {
-            "The message is saved in CHAT.md, but notification delivery did not fully succeed. Check the provider configuration and, for Apprise, its Python interpreter and installation. Do not resend the chat message merely to retry notifications."
+            "The message is saved in CHAT.md, but notification delivery did not fully succeed. Check the service URLs, Python interpreter, and Apprise installation. Do not resend the chat message merely to retry notifications."
         }
         NotificationState::Cancelled => {
             "The message is saved in CHAT.md, but notification delivery was cancelled."

@@ -57,7 +57,7 @@ fn notification_integration_is_not_silently_skipped_in_ci() {
         assert!(section.contains("python -m unittest scripts.test_apprise_notifications"));
         assert!(section.contains("CODEXIFY_TEST_APPRISE_PYTHON:"));
         assert!(
-            section.contains("cargo test --test markdown_chat_notifications -- --include-ignored")
+            section.contains("cargo test --test markdown_chat_notifications --test markdown_chat_tools -- --include-ignored")
         );
     }
 }
