@@ -764,7 +764,12 @@ window.Prism = { manual: true };
   function mergeTokenSegments(tokens, changed) {
     const segments = [];
     tokens.forEach((text, index) => {
-      const isChanged = Boolean(changed[index]);
+      // Matching spaces should not fragment a highlighted phrase.
+      const joinsChangedText = index > 0 && index + 1 < tokens.length
+        && changed[index - 1] && changed[index + 1]
+        && /^[^\S\r\n\u2028\u2029]+$/.test(text)
+        && /\S$/.test(tokens[index - 1]) && /^\S/.test(tokens[index + 1]);
+      const isChanged = Boolean(changed[index] || joinsChangedText);
       const previous = segments[segments.length - 1];
       if (previous && previous.changed === isChanged) previous.text += text;
       else segments.push({ text, changed: isChanged });

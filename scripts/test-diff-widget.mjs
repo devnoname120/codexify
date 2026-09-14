@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import test from "node:test";
+import vm from "node:vm";
+import { highlightFixtures, diffPayload } from "./diff-highlight-fixtures.mjs";
 
 const { chromium, webkit } = createRequire(import.meta.url)("playwright");
 const source = readFileSync(new URL("../src/diff_ui.rs", import.meta.url), "utf8");
@@ -10,6 +12,45 @@ assert.equal(fragments.length, 2);
 const html = fragments[0]
   + readFileSync(new URL("../src/diff_prism.js", import.meta.url), "utf8")
   + fragments[1];
+const intraline = vm.runInNewContext(
+  source.match(/  const MAX_INTRALINE_\w+ = \d+;/g).join("\n")
+  + source.slice(source.indexOf("  function intralineTokens("), source.indexOf("  function annotateIntraline("))
+  + "\n({ intralineSegments, mergeTokenSegments })"
+);
+
+for (const fixture of highlightFixtures) {
+  test(`intraline: ${fixture.title}`, () => {
+    const result = intraline.intralineSegments(fixture.before, fixture.after);
+    for (const side of ["before", "after"]) {
+      assert.equal(result[side].map(segment => segment.text).join(""), fixture[side]);
+      assert.deepEqual(Array.from(result[side].filter(segment => segment.changed), segment => segment.text), fixture[`${side}Changes`]);
+    }
+  });
+}
+
+test("intraline: never bridge physical line boundaries or extend a single-sided change", () => {
+  for (const gap of ["\n", "\r\n", "\u2028", "\u2029"]) {
+    const result = intraline.mergeTokenSegments(["old", gap, "worker"], [true, false, true]);
+    assert.equal(result[1].changed, false);
+    assert.equal(result[1].text, gap);
+  }
+  for (const flags of [[true, false, false], [false, false, true], [false, false, false]]) {
+    const original = flags.slice();
+    const result = intraline.mergeTokenSegments(["old", " ", "worker"], flags);
+    assert.deepEqual(flags, original, "Presentation must not alter the original change flags");
+    assert.ok(result.filter(segment => segment.changed).every(segment => !segment.text.includes(" ")));
+  }
+  assert.equal(intraline.intralineSegments("unchanged", "unchanged"), null);
+});
+
+test("intraline: the long-line fallback preserves unchanged edges", () => {
+  const prefix = "    " + "prefix ".repeat(1200);
+  const result = intraline.intralineSegments(prefix + "old worker    ", prefix + "new runner    ");
+  assert.equal(result.before[0].text, prefix);
+  assert.equal(result.before[0].changed, false);
+  assert.equal(result.before.at(-1).text, "er    ");
+  assert.equal(result.before.at(-1).changed, false);
+});
 const lines = [
   [" ", '            subprocess.run([str(hook_test), paf_text, offsets["PAF_EVICT_OFFSET"],'],
   [" ", '                            offsets["PAF_SCAN_OFFSET"], shell_text,'],
@@ -21,7 +62,7 @@ const lines = [
   [" ", "    return value   "]
 ];
 
-async function mount(browser, width, theme, extension = "py") {
+async function mount(browser, width, theme, extension = "py", fixture = null) {
   const page = await browser.newPage({
     viewport: { width, height: 900 },
     deviceScaleFactor: 2,
@@ -36,7 +77,7 @@ async function mount(browser, width, theme, extension = "py") {
     `diff --git a/${path} b/${path}`, `--- a/${path}`, `+++ b/${path}`,
     "@@ -70,7 +70,7 @@", ...lines.map(([kind, text]) => kind + text), ""
   ].join("\n");
-  const payload = {
+  const payload = fixture ? diffPayload(fixture) : {
     summary: { files: 1, additions: 1, deletions: 1 },
     files: [{ path, status: "modified", additions: 1, deletions: 1 }],
     patch, patchIncluded: true
@@ -46,6 +87,7 @@ async function mount(browser, width, theme, extension = "py") {
   });
   await page.setContent(html.replace("<script>", `<script>window.openai = ${globals};</script><script>`));
   await page.locator(".file-summary").click();
+  await page.locator(".diff-table").waitFor({ state: "visible" });
   return { page, errors };
 }
 
@@ -115,6 +157,31 @@ for (const engine of [chromium, webkit]) {
         t.after(() => page.close());
         await page.addStyleTag({ content: ":root { --diff-font-size: 13px; }" });
         await assertRows(page);
+        assert.deepEqual(errors, []);
+      });
+    }
+    for (const fixture of highlightFixtures) {
+      await t.test(`continuous highlights: ${fixture.title}`, async t => {
+        const { page, errors } = await mount(browser, 390, "light", fixture.extension, fixture);
+        t.after(() => page.close());
+        const rows = await page.locator(".diff-row:is(.deleted,.added) .code").evaluateAll(cells => cells.map(cell => {
+          const walker = document.createTreeWalker(cell, NodeFilter.SHOW_TEXT);
+          const runs = [];
+          let text;
+          while ((text = walker.nextNode())) {
+            const changed = Boolean(text.parentElement.closest(".word-change"));
+            const last = runs.at(-1);
+            if (last && last.changed === changed) last.text += text.textContent;
+            else runs.push({ text: text.textContent, changed });
+          }
+          return { text: cell.textContent, highlighted: runs.filter(run => run.changed).map(run => run.text) };
+        }));
+        assert.deepEqual(rows, [
+          { text: fixture.before, highlighted: fixture.beforeChanges },
+          { text: fixture.after, highlighted: fixture.afterChanges }
+        ]);
+        assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+        if (fixture.extension === "js") assert.ok(await page.locator(".syntax-string").count() > 0);
         assert.deepEqual(errors, []);
       });
     }
