@@ -69,6 +69,7 @@ fn release_builds_run_parallel_to_validation_and_publish_only_after_both() {
     let deploy = job_section(&release, "deploy-installers", "release");
 
     assert!(!build.contains("needs: check"));
+    assert!(build.contains("codexify.config.example.json"));
     assert!(deploy.contains("needs: [check, build]"));
 }
 

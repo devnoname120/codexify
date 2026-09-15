@@ -1865,6 +1865,202 @@ mod tests {
     }
 
     #[test]
+    fn shipped_config_examples_track_the_complete_supported_surface() {
+        fn assert_keys(value: &serde_json::Value, label: &str, expected: &[&str]) {
+            let mut actual = value
+                .as_object()
+                .unwrap_or_else(|| panic!("{label} must be an object"))
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>();
+            actual.sort_unstable();
+            let mut expected = expected.to_vec();
+            expected.sort_unstable();
+            assert_eq!(actual, expected, "{label} fields drifted");
+        }
+
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let default_raw = std::fs::read_to_string(root.join("codexify.config.json")).unwrap();
+        let example_raw =
+            std::fs::read_to_string(root.join("codexify.config.example.json")).unwrap();
+        assert!(!example_raw.contains("sk-"));
+        let default: serde_json::Value = serde_json::from_str(&default_raw).unwrap();
+        let example: serde_json::Value = serde_json::from_str(&example_raw).unwrap();
+
+        let top_level = [
+            "allowedHosts",
+            "apiKey",
+            "artifactEgress",
+            "artifactIngress",
+            "audit",
+            "codexMcp",
+            "command",
+            "conversationAuthToken",
+            "debug",
+            "diff",
+            "exec",
+            "forceReadOnlyToolAnnotations",
+            "ignore",
+            "markdownChat",
+            "mcpServers",
+            "memory",
+            "multiProject",
+            "openaiTunnel",
+            "output",
+            "port",
+            "projectCatalog",
+            "projectCloneDir",
+            "projectDoc",
+            "skills",
+            "toolLogging",
+            "tree",
+            "uiWidgets",
+            "workDir",
+            "worktrees",
+        ];
+        assert_keys(&default, "codexify.config.json", &top_level);
+        assert_keys(&example, "codexify.config.example.json", &top_level);
+
+        for (path, keys) in [
+            (
+                "worktrees",
+                &[
+                    "allowSetupScript",
+                    "autoCleanupEnabled",
+                    "keepCount",
+                    "mode",
+                    "root",
+                    "upstreamRefreshMode",
+                ][..],
+            ),
+            ("tree", &["defaultDepth", "ignore"]),
+            (
+                "ignore",
+                &["customPatterns", "useDefaultPatterns", "useGitignore"],
+            ),
+            ("command", &["defaultTimeout", "maxTimeout"]),
+            ("exec", &["defaultShell", "idleTimeoutMs", "maxSessions"]),
+            (
+                "projectDoc",
+                &["fallbackFilenames", "maxBytes", "rootMarkers"],
+            ),
+            (
+                "output",
+                &[
+                    "maxEntries",
+                    "maxFileBytes",
+                    "maxFileLines",
+                    "maxToolOutputTokens",
+                    "maxTreeNodes",
+                ],
+            ),
+            ("diff", &["maxPatchBytes"]),
+            (
+                "toolLogging",
+                &[
+                    "level",
+                    "maxRequestBytes",
+                    "maxResponseBytes",
+                    "mode",
+                    "redactEnv",
+                ],
+            ),
+            (
+                "audit",
+                &[
+                    "commandPreviewMaxBytes",
+                    "includeCommandPreview",
+                    "logFile",
+                    "redactEnv",
+                ],
+            ),
+            (
+                "artifactIngress",
+                &[
+                    "allowedHosts",
+                    "enabled",
+                    "idleTimeoutMs",
+                    "maxConcurrentDownloads",
+                    "maxFileBytes",
+                    "maxRedirects",
+                    "requestTimeoutMs",
+                ],
+            ),
+            (
+                "artifactEgress",
+                &[
+                    "enabled",
+                    "fallbackToSource",
+                    "maxFileBytes",
+                    "maxReferences",
+                    "maxSnapshotBytes",
+                    "referenceTtlMs",
+                    "snapshotMaxFileBytes",
+                ],
+            ),
+            ("memory", &["dir", "enabled", "maxBytes"]),
+            ("markdownChat", &["enabled", "maxWaitMs", "notifications"]),
+            ("skills", &["dirs", "enabled", "includePlugins"]),
+            ("codexMcp", &["cliPath", "enabled", "useCli"]),
+            ("projectCatalog", &["codexConfig", "entries"]),
+        ] {
+            assert_keys(&example[path], path, keys);
+        }
+        assert_keys(
+            &example["markdownChat"]["notifications"],
+            "markdownChat.notifications",
+            &["pythonPath", "timeoutMs", "urls"],
+        );
+        assert_keys(
+            &example["projectCatalog"]["codexConfig"],
+            "projectCatalog.codexConfig",
+            &["enabled", "trustedOnly"],
+        );
+        assert_keys(
+            &example["projectCatalog"]["entries"][0],
+            "projectCatalog.entries[]",
+            &["aliases", "description", "name", "path"],
+        );
+        assert_keys(
+            &example["openaiTunnel"],
+            "openaiTunnel",
+            &["apiKeyRef", "clientPath", "organizationId", "tunnelId"],
+        );
+        let mcp_server_fields = [
+            "args",
+            "bearerTokenEnvVar",
+            "command",
+            "cwd",
+            "disabled",
+            "disabledTools",
+            "env",
+            "envHttpHeaders",
+            "httpHeaders",
+            "mode",
+            "startupTimeoutSec",
+            "toolTimeoutSec",
+            "tools",
+            "type",
+            "url",
+        ];
+        assert_keys(
+            &example["mcpServers"]["local-example"],
+            "mcpServers.local-example",
+            &mcp_server_fields,
+        );
+        assert_keys(
+            &example["mcpServers"]["remote-example"],
+            "mcpServers.remote-example",
+            &mcp_server_fields,
+        );
+        assert_eq!(example["mcpServers"]["local-example"]["disabled"], true);
+        assert_eq!(example["mcpServers"]["remote-example"]["disabled"], true);
+
+        serde_json::from_value::<FileConfig>(default).unwrap();
+        serde_json::from_value::<FileConfig>(example).unwrap();
+    }
+
+    #[test]
     fn forced_read_only_tool_annotations_default_off_and_can_be_enabled() {
         let root = tempfile::tempdir().unwrap();
         assert!(!default_config(root.path().to_path_buf()).force_read_only_tool_annotations);

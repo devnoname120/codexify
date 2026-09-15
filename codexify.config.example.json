@@ -1,17 +1,12 @@
 {
-  "workDir": null,
+  "workDir": "/absolute/path/to/projects",
   "debug": false,
   "uiWidgets": true,
   "forceReadOnlyToolAnnotations": false,
-  "markdownChat": {
-    "enabled": false,
-    "maxWaitMs": 270000,
-    "notifications": null
-  },
   "apiKey": null,
   "conversationAuthToken": null,
   "port": 3000,
-  "multiProject": false,
+  "multiProject": true,
   "projectCloneDir": ".",
   "worktrees": {
     "mode": "auto",
@@ -43,13 +38,6 @@
     "maxBytes": 32768,
     "fallbackFilenames": [],
     "rootMarkers": [".git"]
-  },
-  "projectCatalog": {
-    "codexConfig": {
-      "enabled": true,
-      "trustedOnly": true
-    },
-    "entries": []
   },
   "output": {
     "maxToolOutputTokens": 10000,
@@ -97,6 +85,15 @@
     "dir": null,
     "maxBytes": 16384
   },
+  "markdownChat": {
+    "enabled": false,
+    "maxWaitMs": 270000,
+    "notifications": {
+      "urls": ["ntfys://ntfy.example/codexify?image=no"],
+      "pythonPath": "python3",
+      "timeoutMs": 15000
+    }
+  },
   "skills": {
     "enabled": true,
     "dirs": null,
@@ -107,7 +104,67 @@
     "useCli": true,
     "cliPath": null
   },
+  "projectCatalog": {
+    "codexConfig": {
+      "enabled": true,
+      "trustedOnly": true
+    },
+    "entries": [
+      {
+        "path": "example-project",
+        "name": "Example project",
+        "aliases": ["example"],
+        "description": "Optional searchable metadata for this project"
+      }
+    ]
+  },
   "allowedHosts": [],
-  "openaiTunnel": null,
-  "mcpServers": {}
+  "openaiTunnel": {
+    "tunnelId": "tunnel_0123456789abcdef0123456789abcdef",
+    "apiKeyRef": "env:CONTROL_PLANE_API_KEY",
+    "clientPath": null,
+    "organizationId": null
+  },
+  "mcpServers": {
+    "local-example": {
+      "command": "npx",
+      "args": ["-y", "example-mcp-server"],
+      "env": {
+        "EXAMPLE_MODE": "1"
+      },
+      "cwd": null,
+      "disabled": true,
+      "type": "stdio",
+      "url": null,
+      "bearerTokenEnvVar": null,
+      "httpHeaders": {},
+      "envHttpHeaders": {},
+      "startupTimeoutSec": 20,
+      "toolTimeoutSec": 60,
+      "tools": ["example_tool"],
+      "disabledTools": [],
+      "mode": "direct"
+    },
+    "remote-example": {
+      "command": null,
+      "args": [],
+      "env": {},
+      "cwd": null,
+      "disabled": true,
+      "type": "streamable-http",
+      "url": "https://mcp.example.com/mcp",
+      "bearerTokenEnvVar": "EXAMPLE_REMOTE_MCP_TOKEN",
+      "httpHeaders": {
+        "X-Client": "codexify-example"
+      },
+      "envHttpHeaders": {
+        "X-Tenant": "EXAMPLE_REMOTE_MCP_TENANT"
+      },
+      "startupTimeoutSec": 20,
+      "toolTimeoutSec": 60,
+      "tools": null,
+      "disabledTools": [],
+      "mode": "catalog"
+    }
+  }
 }

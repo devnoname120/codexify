@@ -786,7 +786,7 @@ Multi-project mode adds two project-control tools:
 
 These tools expose runtime context, project instructions, and the four durable memory/task-state operations through MCP. See [Context and memory](#context-and-memory), [Acting as a Codex agent](#acting-as-a-codex-agent), [Shells and the host](#shells-and-the-host), [AGENTS.md](#agentsmd) and [Skills](#skills).
 
-That is 33 advertised native tools in the default single-project mode and 35 in multi-project mode. Of those, 30 and 32 respectively are model-visible; `check_for_updates`, `doctor`, and `self_update_status` are app-only. Enabling conversation authorization adds the ChatGPT-facing `setup` tool, producing 34 or 36 advertised tools and 31 or 33 model-visible tools. Setting `artifactIngress.enabled` to `false` removes `import_host_file`; setting `artifactEgress.enabled` to `false` independently removes `export_host_file`. Each disabled direction reduces the applicable count by one. One or more [catalog-mode MCP upstreams](#catalog-mode-default-for-automatic-imports) add one shared four-tool discovery/call surface regardless of how many transitive tools they contain. Direct mode adds one downstream tool per selected upstream tool; gateway mode adds one downstream dispatcher per upstream server.
+That is 34 advertised native tools in the default single-project mode and 36 in multi-project mode. Of those, 30 and 32 respectively are model-visible; `check_for_updates`, `setup_status`, `doctor`, and `self_update_status` are app-only. Enabling conversation authorization adds the ChatGPT-facing `setup` tool, producing 35 or 37 advertised tools and 31 or 33 model-visible tools. Setting `artifactIngress.enabled` to `false` removes `import_host_file`; setting `artifactEgress.enabled` to `false` independently removes `export_host_file`. Each disabled direction reduces the applicable count by one. One or more [catalog-mode MCP upstreams](#catalog-mode-default-for-automatic-imports) add one shared four-tool discovery/call surface regardless of how many transitive tools they contain. Direct mode adds one downstream tool per selected upstream tool; gateway mode adds one downstream dispatcher per upstream server.
 
 MCP-specific tool behavior:
 
@@ -822,15 +822,27 @@ are used. The startup banner prints the selected path and its source. `quickstar
 uses the user-level path when neither explicit source is set. Every config field is
 optional and uses camelCase names.
 
+The maintained [fully populated example](../codexify.config.example.json) includes
+every supported top-level and nested key, including both stdio and HTTP MCP server
+shapes. Replace its placeholder paths and identifiers before use; its example MCP
+servers are disabled and credentials are represented only by environment-variable
+names.
+
 ```json
 {
   "workDir": "/absolute/path/to/project",
   "debug": false,
   "uiWidgets": true,
   "forceReadOnlyToolAnnotations": false,
+  "apiKey": null,
+  "conversationAuthToken": null,
+  "markdownChat": {
+    "enabled": false,
+    "maxWaitMs": 270000,
+    "notifications": null
+  },
   "multiProject": false,
   "projectCloneDir": ".",
-  "conversationAuthToken": null,
   "worktrees": {
     "mode": "auto",
     "root": "/path/to/worktrees",
@@ -855,6 +867,7 @@ optional and uses camelCase names.
   },
   "exec": {
     "maxSessions": 8,
+    "defaultShell": null,
     "idleTimeoutMs": 300000
   },
   "projectDoc": {
@@ -905,15 +918,18 @@ optional and uses camelCase names.
   },
   "memory": {
     "enabled": true,
+    "dir": null,
     "maxBytes": 16384
   },
   "skills": {
     "enabled": true,
+    "dirs": null,
     "includePlugins": true
   },
   "codexMcp": {
     "enabled": true,
-    "useCli": true
+    "useCli": true,
+    "cliPath": null
   },
   "projectCatalog": {
     "codexConfig": {
@@ -924,7 +940,9 @@ optional and uses camelCase names.
   },
   "openaiTunnel": {
     "tunnelId": "tunnel_0123456789abcdef0123456789abcdef",
-    "apiKeyRef": "env:CONTROL_PLANE_API_KEY"
+    "apiKeyRef": "env:CONTROL_PLANE_API_KEY",
+    "clientPath": null,
+    "organizationId": null
   },
   "allowedHosts": [],
   "mcpServers": {}

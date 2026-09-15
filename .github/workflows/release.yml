@@ -181,7 +181,7 @@ jobs:
           STAGE="codexify-${VERSION}-${{ matrix.name }}"
           mkdir "${STAGE}"
           cp "target/${{ matrix.target }}/release/codexify${{ matrix.ext }}" "${STAGE}/"
-          cp codexify.config.json CHANGELOG.md LICENSE README.md "${STAGE}/"
+          cp codexify.config.json codexify.config.example.json CHANGELOG.md LICENSE README.md "${STAGE}/"
           mkdir "${STAGE}/docs"
           cp docs/REFERENCE.md docs/ARCHITECTURE.md "${STAGE}/docs/"
           test -s "${STAGE}/CHANGELOG.md"

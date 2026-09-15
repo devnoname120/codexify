@@ -110,6 +110,8 @@ standard installation.
 
 This setup uses an outbound OpenAI tunnel: you do not need a public server URL or
 an inbound port. For other deployments, see [connection options](docs/REFERENCE.md#connecting-to-chatgpt).
+The fully populated [configuration example](codexify.config.example.json) shows
+every supported JSON field with non-secret placeholders.
 
 ### 3. Start a task
 

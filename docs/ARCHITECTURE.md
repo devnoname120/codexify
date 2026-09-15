@@ -1232,6 +1232,10 @@ default. All fields are optional, but server startup requires either CLI
 `--work-dir` or an absolute config `workDir`; native service launches use the
 latter.
 
+The maintained [fully populated example](../codexify.config.example.json) is the
+machine-readable inventory of every supported key; the abbreviated JSONC below
+focuses on relationships and defaults.
+
 ```jsonc
 {
   "workDir": "/absolute/path/to/project", // required when --work-dir is omitted
@@ -1318,7 +1322,7 @@ The banner is designed so failures are never silent:
 
 ```
 Config: C:\Users\alice\.codexify\codexify.config.json (user config)
-Tools loaded (37): 33 native + 4 upstream-facing MCP tools
+Tools loaded (39): 35 native + 4 upstream-facing MCP tools
 Upstream MCP servers:
   idalib      -> catalog (66 private tool(s))
   remote-exec -> catalog (84 private tool(s))
@@ -1339,7 +1343,7 @@ Audit command previews: disabled
   internal bearer are never printed.
 - Multi-project startup also prints `Project access root:`, `Project mode:
   persistent ChatGPT conversation binding`, and the conversation-binding state
-  directory; its native count is 34 without conversation authorization and 35
+  directory; its native count is 36 without conversation authorization and 37
   with it because the two selectors and optional `setup` tool are present.
 - Conversation authorization adds one native tool and prints only whether the
   gate is enabled; neither the token nor its derived namespace is printed.
