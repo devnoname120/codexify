@@ -1,8 +1,8 @@
 //! Shared configuration and result types.
 //!
 //! Core data structures shared by configuration, tools, and MCP transport code.
-//! Config field names use camelCase on the wire (`extraAllowedCommands`,
-//! `maxSessions`, …) through serde renames.
+//! Config field names use camelCase on the wire (`maxSessions`,
+//! `idleTimeoutMs`, …) through serde renames.
 
 use std::fmt;
 use std::ops::Deref;
@@ -206,20 +206,12 @@ impl Drop for ConversationAuthToken {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ExecMode {
-    Allowlist,
-    Unrestricted,
-}
-
-/// Policy applied to `exec_command`. Every field has a default so a partial
-/// config JSON still parses.
+/// Runtime controls for `exec_command`. Command execution itself is always
+/// unrestricted; these fields bound resident process resources and choose the
+/// default shell.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExecConfig {
-    pub mode: ExecMode,
-    pub extra_allowed_commands: Vec<String>,
     pub max_sessions: usize,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub default_shell: Option<String>,

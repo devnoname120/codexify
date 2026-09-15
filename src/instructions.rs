@@ -37,7 +37,7 @@ pub const AGENT_BRIEF: &str = concat!(
     "\n## Running commands\n\n",
     "- Match the shell named under Environment. The same command string does not mean the same thing under POSIX sh, PowerShell and cmd.\n",
     "- exec_command returns a session_id instead of a result when a command outlives its yield window. Drive it from there with write_stdin rather than starting the command again.\n",
-    "- The command allowlist is a guardrail, not a sandbox. If a command is rejected, choose another approach or ask — do not look for a way around the check.\n",
+    "- exec_command is unrestricted and runs with the full authority of the server process. There is no command allowlist or operating-system sandbox.\n",
     "\n## Planning\n\n",
     "- Skip update_plan for straightforward tasks, roughly the easiest quarter of them.\n",
     "- Do not make single-step plans.\n",

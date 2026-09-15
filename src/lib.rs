@@ -23,7 +23,6 @@ pub mod diff;
 pub mod diff_ui;
 pub mod doctor;
 pub mod environment;
-pub mod exec_policy;
 pub mod exec_sessions;
 pub mod ignore_rules;
 pub mod instructions;

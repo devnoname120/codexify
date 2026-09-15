@@ -132,6 +132,17 @@ fn migrate_config(
     // carry a customized legacy value into Codexify now that the field has no
     // runtime meaning.
     migrated.remove("allowedCommands");
+    let remove_empty_exec = migrated
+        .get_mut("exec")
+        .and_then(Value::as_object_mut)
+        .is_some_and(|exec| {
+            exec.remove("mode");
+            exec.remove("extraAllowedCommands");
+            exec.is_empty()
+        });
+    if remove_empty_exec {
+        migrated.remove("exec");
+    }
 
     if let Some(review) = migrated.remove("review") {
         match migrated.entry("diff".to_string()) {
@@ -740,6 +751,7 @@ mod tests {
                 },
                 "exec": {
                     "mode": "allowlist",
+                    "extraAllowedCommands": ["custom-runner"],
                     "maxSessions": 12,
                     "idleTimeoutMs": 300000
                 },

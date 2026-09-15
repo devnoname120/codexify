@@ -1563,7 +1563,6 @@ mod tests {
     use crate::tool::Tool;
     use crate::tools::exec_command::ExecCommand;
     use crate::tools::write_stdin::WriteStdin;
-    use crate::types::ExecMode;
     use serde_json::json;
 
     #[test]
@@ -1773,8 +1772,7 @@ mod tests {
     #[tokio::test]
     async fn conversation_owned_exec_session_survives_replacement_transport() {
         let dir = std::env::temp_dir();
-        let mut config = crate::config::default_config(dir.clone());
-        config.exec.mode = ExecMode::Unrestricted;
+        let config = crate::config::default_config(dir.clone());
         let store = ConversationExecSessionStore::new();
         let identity =
             ConversationIdentity::from_openai_session("conversation-resident-process").unwrap();

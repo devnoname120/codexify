@@ -22,11 +22,10 @@ use crate::openai_tunnel::validate_tunnel_id;
 use crate::project_catalog::{ProjectCatalog, discover_project_catalog_at};
 use crate::types::{
     AppConfig, ArtifactEgressConfig, ArtifactIngressConfig, AuditConfig, CodexProjectCatalogConfig,
-    CommandConfig, ConversationAuthToken, DiffConfig, ExecConfig, ExecMode, IgnoreConfig,
-    McpServerSpec, McpToolExposure, MemoryConfig, OpenAiTunnelConfig, OutputConfig,
-    ProjectCatalogConfig, ProjectCatalogEntryConfig, ProjectDocConfig, SkillsConfig, ToolLogLevel,
-    ToolLogMode, ToolLoggingConfig, TreeConfig, WorktreeConfig, WorktreeMode,
-    WorktreeUpstreamRefreshMode,
+    CommandConfig, ConversationAuthToken, DiffConfig, ExecConfig, IgnoreConfig, McpServerSpec,
+    McpToolExposure, MemoryConfig, OpenAiTunnelConfig, OutputConfig, ProjectCatalogConfig,
+    ProjectCatalogEntryConfig, ProjectDocConfig, SkillsConfig, ToolLogLevel, ToolLogMode,
+    ToolLoggingConfig, TreeConfig, WorktreeConfig, WorktreeMode, WorktreeUpstreamRefreshMode,
 };
 use crate::util::home_dir;
 
@@ -341,8 +340,6 @@ fn default_command() -> CommandConfig {
 
 fn default_exec() -> ExecConfig {
     ExecConfig {
-        mode: ExecMode::Unrestricted,
-        extra_allowed_commands: Vec::new(),
         max_sessions: 8,
         default_shell: None,
         idle_timeout_ms: 300_000,
@@ -368,8 +365,6 @@ struct PartialCommand {
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PartialExec {
-    mode: Option<ExecMode>,
-    extra_allowed_commands: Option<Vec<String>>,
     max_sessions: Option<usize>,
     default_shell: Option<String>,
     idle_timeout_ms: Option<u64>,
@@ -1502,12 +1497,6 @@ fn load_config_with_announcements(cli: &Cli, announce: bool) -> Result<AppConfig
 
     let mut exec = default_exec();
     if let Some(e) = file.exec.take() {
-        if let Some(m) = e.mode {
-            exec.mode = m;
-        }
-        if let Some(x) = e.extra_allowed_commands {
-            exec.extra_allowed_commands = x;
-        }
         if let Some(s) = e.max_sessions {
             exec.max_sessions = s;
         }
@@ -1800,6 +1789,79 @@ mod tests {
         let mut args = cli(root.path(), &config_path);
         args.work_dir = None;
         assert!(!load_config(args).unwrap().ui_widgets);
+    }
+
+    #[test]
+    fn exec_config_serializes_only_runtime_resource_settings() {
+        let root = tempfile::tempdir().unwrap();
+        let exec = serde_json::to_value(default_config(root.path().to_path_buf()).exec).unwrap();
+
+        assert_eq!(
+            exec,
+            json!({
+                "maxSessions": 8,
+                "idleTimeoutMs": 300000
+            })
+        );
+
+        let config_path = root.path().join("legacy-exec-policy.json");
+        std::fs::write(
+            &config_path,
+            serde_json::to_vec(&json!({
+                "codexMcp": { "enabled": false },
+                "exec": {
+                    "mode": "allowlist",
+                    "extraAllowedCommands": [],
+                    "maxSessions": 3
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let loaded = load_config(cli(root.path(), &config_path)).unwrap();
+        assert_eq!(loaded.exec.max_sessions, 3);
+        assert_eq!(
+            serde_json::to_value(loaded.exec).unwrap(),
+            json!({
+                "maxSessions": 3,
+                "idleTimeoutMs": 300000
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn removed_legacy_command_policy_cannot_restrict_exec_command() {
+        use crate::tool::Tool as _;
+
+        let root = tempfile::tempdir().unwrap();
+        let config_path = root.path().join("legacy-exec-policy.json");
+        std::fs::write(
+            &config_path,
+            serde_json::to_vec(&json!({
+                "workDir": root.path(),
+                "codexMcp": { "enabled": false },
+                "exec": {
+                    "mode": "allowlist",
+                    "extraAllowedCommands": []
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let mut args = cli(root.path(), &config_path);
+        args.work_dir = None;
+        let config = load_config(args).unwrap();
+
+        let result = crate::tools::exec_command::ExecCommand
+            .call(
+                json!({ "cmd": "echo unrestricted", "yield_time_ms": 1000 }),
+                &config,
+                &crate::exec_sessions::SessionState::new(),
+            )
+            .await;
+
+        assert!(!result.is_error, "{}", result.joined_text());
+        assert!(result.joined_text().contains("unrestricted"));
     }
 
     #[test]
@@ -2361,6 +2423,7 @@ mod tests {
                         "startupTimeoutSec": 12.5,
                         "toolTimeoutSec": 30,
                         "mode": "gateway",
+                        "tools": ["read"],
                         "disabledTools": ["write"]
                     }
                 }

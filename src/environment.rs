@@ -7,7 +7,6 @@
 
 use serde::Serialize;
 
-use crate::exec_policy::effective_allowlist;
 use crate::exec_sessions::{resolve_shell, shell_type_of};
 use crate::types::AppConfig;
 
@@ -50,9 +49,7 @@ pub struct ShellInfo {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ExecInfo {
-    pub mode: String,
     pub max_sessions: usize,
-    pub allowed_commands: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -72,11 +69,6 @@ pub fn describe_environment(config: &AppConfig) -> EnvironmentInfo {
     let args = parts[1..].to_vec();
     let platform = node_platform().to_string();
 
-    let mode = match config.exec.mode {
-        crate::types::ExecMode::Allowlist => "allowlist",
-        crate::types::ExecMode::Unrestricted => "unrestricted",
-    };
-
     EnvironmentInfo {
         os: os_name(&platform),
         platform,
@@ -89,9 +81,7 @@ pub fn describe_environment(config: &AppConfig) -> EnvironmentInfo {
             argv_prefix: args,
         },
         exec: ExecInfo {
-            mode: mode.to_string(),
             max_sessions: config.exec.max_sessions,
-            allowed_commands: effective_allowlist(config),
         },
     }
 }
@@ -109,12 +99,6 @@ pub fn render_environment(info: &EnvironmentInfo) -> String {
         _ => "Write POSIX sh syntax. Standard utilities (ls, grep, sed, awk) behave as usual.",
     };
 
-    let exec_policy = if info.exec.mode == "allowlist" {
-        format!(", allowing: {}", info.exec.allowed_commands.join(", "))
-    } else {
-        " (any command runs)".to_string()
-    };
-
     let path_sep_json = serde_json::to_string(&info.path_separator).unwrap_or_default();
 
     [
@@ -128,7 +112,7 @@ pub fn render_environment(info: &EnvironmentInfo) -> String {
         String::new(),
         shell_advice.to_string(),
         String::new(),
-        format!("exec_command policy: {}{}", info.exec.mode, exec_policy),
+        "exec_command: unrestricted; commands run as written".to_string(),
         format!("Concurrent exec sessions: up to {}", info.exec.max_sessions),
     ]
     .join("\n")

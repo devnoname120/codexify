@@ -804,6 +804,17 @@ fn merge_tunnel_config(
     );
     config.insert("multiProject".to_string(), Value::Bool(multi_project));
     config.remove("allowedCommands");
+    let remove_empty_exec = config
+        .get_mut("exec")
+        .and_then(Value::as_object_mut)
+        .is_some_and(|exec| {
+            exec.remove("mode");
+            exec.remove("extraAllowedCommands");
+            exec.is_empty()
+        });
+    if remove_empty_exec {
+        config.remove("exec");
+    }
     match conversation_auth_token {
         Some(token) => {
             config.insert(
@@ -1334,6 +1345,11 @@ mod tests {
                 "multiProject": true,
                 "conversationAuthToken": CONVERSATION_TOKEN,
                 "allowedCommands": ["git"],
+                "exec": {
+                    "mode": "allowlist",
+                    "extraAllowedCommands": ["git"],
+                    "maxSessions": 12
+                },
                 "openaiTunnel": {
                     "tunnelId": TUNNEL_ID,
                     "apiKeyRef": "env:OLD_KEY",
@@ -1372,6 +1388,7 @@ mod tests {
         assert!(!output.contains("Require each new ChatGPT conversation"));
         assert!(!output.contains("Generate a new conversation token"));
         assert!(config.get("allowedCommands").is_none());
+        assert_eq!(config["exec"], json!({ "maxSessions": 12 }));
         assert_eq!(
             config["openaiTunnel"]["organizationId"],
             json!("org_example")

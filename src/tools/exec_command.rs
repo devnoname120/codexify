@@ -2,7 +2,6 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::exec_policy::{assert_exec_allowed, effective_allowlist};
 use crate::exec_sessions::{
     DEFAULT_MAX_OUTPUT_TOKENS, EXEC_DEFAULT_YIELD_MS, EXEC_MAX_YIELD_MS, EXEC_MIN_YIELD_MS,
     SessionState, ShellType, UnifiedExecOutput, clamp, generate_chunk_id, resolve_shell,
@@ -11,7 +10,7 @@ use crate::exec_sessions::{
 use crate::output_budget::resolve_requested_output_tokens;
 use crate::safe_path::resolve_safe_path;
 use crate::tool::{Tool, ToolBehavior, parse_tool_args};
-use crate::types::{AppConfig, ExecMode, ToolAuditMetadata, ToolResult};
+use crate::types::{AppConfig, ToolAuditMetadata, ToolResult};
 
 /// The output schema shared by `exec_command` and `write_stdin`.
 pub fn unified_exec_output_schema() -> Value {
@@ -195,24 +194,10 @@ impl Tool for ExecCommand {
             Err(e) => return ToolResult::error(e),
         };
 
-        if let Err(e) = assert_exec_allowed(&cmd, config) {
-            return ToolResult::error(e.to_string());
-        }
-
         let started = std::time::Instant::now();
         let exec_session = match start_exec_session(session, config, &cmd, &cwd, shell.as_deref()) {
             Ok(s) => s,
-            Err(e) => {
-                let hint = if config.exec.mode == ExecMode::Allowlist {
-                    format!(
-                        "\nAllowed commands: {}",
-                        effective_allowlist(config).join(", ")
-                    )
-                } else {
-                    String::new()
-                };
-                return ToolResult::error(format!("{e}{hint}"));
-            }
+            Err(e) => return ToolResult::error(e),
         };
 
         let (output, exited, buffer_truncated) =
@@ -299,7 +284,6 @@ mod tests {
     async fn requested_output_budget_cannot_exceed_server_policy() {
         let root = tempfile::tempdir().unwrap();
         let mut config = default_config(root.path().to_path_buf());
-        config.exec.mode = ExecMode::Unrestricted;
         config.output.max_tool_output_tokens = Some(20);
         let session = SessionState::new();
 

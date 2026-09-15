@@ -39,7 +39,7 @@ use codexify::tools::get_environment::GetEnvironment;
 use codexify::tools::get_project_doc::GetProjectDoc;
 use codexify::tools::skills_list::SkillsList;
 use codexify::tools::skills_read::SkillsRead;
-use codexify::types::{AppConfig, ExecMode};
+use codexify::types::AppConfig;
 
 // --- helpers -----------------------------------------------------------
 
@@ -1404,12 +1404,8 @@ async fn agent_brief_works_without_agents_md() {
 
 // --- get_environment ----------------------------------------------------
 
-/// The get-environment suite pins workDir to "/tmp/project" and uses an explicit
-/// allowlist so rendering of the opt-in policy remains covered.
 fn env_config(default_shell: Option<&str>) -> AppConfig {
     let mut c = default_config(PathBuf::from("/tmp/project"));
-    c.exec.mode = ExecMode::Allowlist;
-    c.exec.extra_allowed_commands = vec!["node".to_string(), "git".to_string(), "ls".to_string()];
     c.exec.default_shell = default_shell.map(|s| s.to_string());
     c
 }
@@ -1438,13 +1434,10 @@ fn describe_reports_shell_it_would_launch() {
 }
 
 #[test]
-fn describe_reports_workdir_and_effective_allowlist() {
+fn describe_reports_workdir_and_exec_session_limit() {
     let info = describe_environment(&env_config(None));
     assert_eq!(info.cwd, "/tmp/project");
-    assert_eq!(
-        info.exec.allowed_commands,
-        vec!["git".to_string(), "ls".to_string(), "node".to_string()]
-    );
+    assert_eq!(info.exec.max_sessions, 8);
 }
 
 #[test]
@@ -1476,18 +1469,10 @@ fn render_gives_posix_advice() {
 }
 
 #[test]
-fn render_spells_out_allowlist() {
+fn render_says_command_execution_is_unrestricted() {
     let text = render_environment(&describe_environment(&env_config(None)));
-    assert!(text.contains("allowing: git, ls, node"));
-}
-
-#[test]
-fn render_says_unrestricted_instead_of_listing() {
-    let mut config = env_config(None);
-    config.exec.mode = ExecMode::Unrestricted;
-    let text = render_environment(&describe_environment(&config));
-    assert!(text.contains("any command runs"));
-    assert!(!text.contains("allowing:"));
+    assert!(text.contains("exec_command: unrestricted"));
+    assert!(!text.contains("allow"));
 }
 
 #[tokio::test]

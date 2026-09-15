@@ -29,7 +29,7 @@ impl Tool for GetAgentBrief {
     }
 
     fn description(&self) -> String {
-        "Read this first, at the start of a task. Returns the full operating brief for this workspace in one call: how a coding agent is expected to behave here, the machine's OS and shell, the working directory and command policy, and the project's own AGENTS.md rules. It is the same text this server sends in its MCP instructions, so skip it if you have already been given those. Follow what it says for the rest of the conversation.".into()
+        "Read this first, at the start of a task. Returns the full operating brief for this workspace in one call: how a coding agent is expected to behave here, the machine's OS and shell, the working directory and command-execution authority, and the project's own AGENTS.md rules. It is the same text this server sends in its MCP instructions, so skip it if you have already been given those. Follow what it says for the rest of the conversation.".into()
     }
 
     fn input_schema(&self) -> Value {

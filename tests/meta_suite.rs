@@ -20,15 +20,15 @@ use codexify::exec_sessions::SessionState;
 use codexify::registry::{load_tools, load_tools_for_config, load_tools_for_mode};
 use codexify::safe_path::resolve_safe_path;
 use codexify::tool::{Tool, ToolBehavior, validate_and_wrap_tools};
-use codexify::types::{AppConfig, ExecMode, ToolContent, ToolResult};
+use codexify::types::{AppConfig, ToolContent, ToolResult};
 
 // ─── registry.test.ts ──────────────────────────────────────────────────
 
 #[test]
-fn default_exec_policy_is_unrestricted_without_an_allowlist() {
+fn exec_configuration_contains_only_runtime_controls() {
     let config = default_config(PathBuf::from("/tmp"));
-    assert_eq!(config.exec.mode, ExecMode::Unrestricted);
-    assert!(config.exec.extra_allowed_commands.is_empty());
+    assert_eq!(config.exec.max_sessions, 8);
+    assert_eq!(config.exec.idle_timeout_ms, 300_000);
 }
 
 #[test]

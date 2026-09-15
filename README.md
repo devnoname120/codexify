@@ -182,8 +182,9 @@ for notifications, timeouts, schema refreshes, and append-only editing rules.
 ## Use it safely
 
 **Codexify runs real commands with your user account's permissions.** Shell
-execution is unrestricted by default. Project boundaries and Git worktrees are
-not an operating-system sandbox, and commands can reach beyond the project.
+execution is unrestricted and has no command allowlist. Project boundaries and
+Git worktrees are not an operating-system sandbox, and commands can reach beyond
+the project.
 
 Start with a trusted repository, review requested actions, and keep credentials
 out of chats and version control. A private tunnel keeps the MCP endpoint off the

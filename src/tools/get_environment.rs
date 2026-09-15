@@ -24,12 +24,12 @@ impl Tool for GetEnvironment {
             false,
             true,
             false,
-            "Reads local environment and command-policy metadata without changing state.",
+            "Reads local environment and command-runtime metadata without changing state.",
         )
     }
 
     fn description(&self) -> String {
-        "Report the machine this bridge is running on: operating system, the shell exec_command will use, the working directory, and which commands the policy allows. Call this before writing any shell command — the same command string behaves differently under PowerShell, cmd and POSIX sh, and guessing wrong wastes a turn.".into()
+        "Report the machine this bridge is running on: operating system, the shell exec_command will use, the working directory, and the concurrent-session limit. Command execution is unrestricted. Call this before writing any shell command — the same command string behaves differently under PowerShell, cmd and POSIX sh, and guessing wrong wastes a turn.".into()
     }
 
     fn input_schema(&self) -> Value {
@@ -58,13 +58,11 @@ impl Tool for GetEnvironment {
                 },
                 "exec": {
                     "type": "object",
-                    "description": "Policy applied to exec_command.",
+                    "description": "Runtime resource controls for unrestricted exec_command sessions.",
                     "properties": {
-                        "mode": { "type": "string", "enum": ["allowlist", "unrestricted"], "description": "Whether commands are checked against an allowlist." },
-                        "max_sessions": { "type": "integer", "minimum": 0, "description": "Cap on concurrent background exec sessions." },
-                        "allowed_commands": { "type": "array", "items": { "type": "string" }, "description": "Commands exec_command accepts under allowlist mode." }
+                        "max_sessions": { "type": "integer", "minimum": 0, "description": "Cap on concurrent background exec sessions." }
                     },
-                    "required": ["mode", "max_sessions", "allowed_commands"],
+                    "required": ["max_sessions"],
                     "additionalProperties": false
                 }
             },

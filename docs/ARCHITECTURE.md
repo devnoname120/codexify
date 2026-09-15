@@ -378,8 +378,8 @@ worktree's leading directories. Per-worktree Codex environment setup is a securi
 boundary of its own: the environment file is neither copied into the worktree nor
 its setup script executed unless `worktrees.allowSetupScript` is explicitly `true`
 (default `false`), because both the file and its script path are selectable through
-the source repository's local Git config and the script runs outside the
-`exec` policy.
+the source repository's local Git config and the script runs without going
+through `exec_command`.
 
 ### `ConversationExecSessionStore` and `SessionState` (`exec_sessions.rs`)
 `SessionState` is the per-MCP-transport view: it owns the optional fallback
@@ -831,7 +831,6 @@ the original order and rejects duplicate names.
 | `audit.rs` | Private append-only JSONL tool lifecycle records, resolved raw MCP identities, stable hashed conversation/project identities, redacted argument summaries, output accounting, and opt-in bounded command previews using the shared redactor. |
 | `conversation_auth.rs` | Authentication-token generation and validation, constant-time comparison, copyable ChatGPT instruction rendering with the innocuous wire vocabulary, durable per-conversation authorization markers, and transport-session fallback. |
 | `ignore_rules.rs` | One `.gitignore`-accurate matcher (the `ignore` crate) shared by glob/grep/tree/list_directory. |
-| `exec_policy.rs` | Shell-string allowlist guard for `exec_command` (a guardrail, not a sandbox). |
 | `project_bindings.rs` | Canonical project-root validation plus durable ChatGPT project/scratch bindings keyed by a hash of `openai/session`, namespaced by access root, locked per record, and atomically written; scratch roots are private, exact-path validated, and outside the access root. |
 | `project_clone.rs` | Strict provider-agnostic HTTPS/SSH Git repository URL parsing plus GitHub branch/PR/commit target parsing, conservative normalized remote matching, existing-checkout discovery, exact GitHub target-ref or object-ID fetching, bounded non-interactive cloning below `projectCloneDir`, cross-process repository locks, collision refusal, and post-clone verification. |
 | `worktrees.rs` | Per-conversation managed Git worktree lifecycle: create a detached checkout under `worktrees.root` via `git worktree add`, optionally at an exact fetched commit, dual source/worktree root tracking, startup sweep bounded by `keepCount`, Windows `\\?\`-prefix handling, and the opt-in `allowSetupScript` gate for per-worktree environment setup. |
@@ -1253,8 +1252,7 @@ latter.
   },
   "tree":   { "defaultDepth": 3, "ignore": ["node_modules", ".git", …] },
   "command":{ "defaultTimeout": 30000, "maxTimeout": 120000 },   // ms
-  "exec":   { "mode": "unrestricted",     // or "allowlist"
-              "extraAllowedCommands": [], "maxSessions": 8,
+  "exec":   { "maxSessions": 8,
               "defaultShell": "…" },
   "ignore": { "useGitignore": true, "useDefaultPatterns": true, "customPatterns": [] },
   "output": { "maxToolOutputTokens": 10000, "maxFileLines": 1000, "maxFileBytes": 131072, "maxEntries": 500, "maxTreeNodes": 1000 },
