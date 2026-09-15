@@ -695,6 +695,10 @@ pub struct SessionState {
     /// Stable per-transport identifier stamped into audit-log events. Shared by
     /// any conversation-scoped view derived from this transport session.
     audit_id: u64,
+    /// Durable parent for scratch workspaces created by generic MCP transports.
+    /// The binding remains transport-local, but dropping the transport never
+    /// removes workspace contents.
+    transport_scratch_dir: PathBuf,
 }
 
 #[derive(Debug, Clone)]
@@ -710,77 +714,138 @@ struct TransportProjectBinding {
 #[derive(Debug, Clone)]
 enum TransportProjectBindingState {
     Project(TransportProjectBinding),
-    WithoutProject {
-        scratch: Arc<tempfile::TempDir>,
-        scratch_root: PathBuf,
-    },
+    WithoutProject { scratch_root: PathBuf },
 }
 
-fn create_transport_scratch(
-    access_root: &Path,
-) -> Result<(Arc<tempfile::TempDir>, PathBuf), String> {
-    let mut bases = vec![std::env::temp_dir()];
-    if let Some(home) = crate::util::home_dir() {
-        bases.push(home.join(".codexify").join("scratch").join("transports"));
-    }
-
-    for base in bases {
-        if std::fs::create_dir_all(&base).is_err() {
-            continue;
-        }
-        let scratch = match tempfile::Builder::new()
-            .prefix("codexify-chat-")
-            .tempdir_in(&base)
-        {
-            Ok(scratch) => scratch,
-            Err(_) => continue,
-        };
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            if std::fs::set_permissions(scratch.path(), std::fs::Permissions::from_mode(0o700))
-                .is_err()
-            {
-                continue;
-            }
-        }
-        let scratch_root = match std::fs::canonicalize(scratch.path()) {
-            Ok(path) => path,
-            Err(_) => continue,
-        };
-        if scratch_root == access_root || scratch_root.starts_with(access_root) {
-            continue;
-        }
-        return Ok((Arc::new(scratch), scratch_root));
-    }
-
-    Err(format!(
-        "Could not create a private scratch workspace outside the configured project access root {}",
-        access_root.display()
-    ))
+fn default_transport_scratch_dir() -> PathBuf {
+    crate::util::home_dir()
+        .map(|home| home.join(".codexify").join("scratch").join("transports"))
+        .unwrap_or_else(|| {
+            std::env::temp_dir()
+                .join("codexify-scratch")
+                .join("transports")
+        })
 }
 
-fn validated_transport_scratch(
-    scratch: &tempfile::TempDir,
-    expected: &Path,
-    access_root: &Path,
-) -> Result<PathBuf, String> {
-    let metadata = std::fs::symlink_metadata(scratch.path()).map_err(|error| {
+fn create_transport_scratch(access_root: &Path, base: &Path) -> Result<PathBuf, String> {
+    if base == access_root || base.starts_with(access_root) {
+        return Err(format!(
+            "The Codexify transport scratch root must be outside the configured project access root: {}",
+            base.display()
+        ));
+    }
+    let base_created = match std::fs::symlink_metadata(base) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            return Err(format!(
+                "The Codexify transport scratch root is not a private directory: {}",
+                base.display()
+            ));
+        }
+        Ok(_) => false,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::create_dir_all(base).map_err(|error| {
+                format!(
+                    "Could not create Codexify transport scratch root {}: {error}",
+                    base.display()
+                )
+            })?;
+            true
+        }
+        Err(error) => {
+            return Err(format!(
+                "Could not inspect Codexify transport scratch root {}: {error}",
+                base.display()
+            ));
+        }
+    };
+    let base = std::fs::canonicalize(base).map_err(|error| {
+        format!(
+            "Could not resolve Codexify transport scratch root {}: {error}",
+            base.display()
+        )
+    })?;
+    if base == access_root || base.starts_with(access_root) {
+        if base_created {
+            let _ = std::fs::remove_dir(&base);
+        }
+        return Err(format!(
+            "The Codexify transport scratch root must resolve outside the configured project access root: {}",
+            base.display()
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700)).map_err(
+            |error| {
+                format!(
+                    "Could not protect Codexify transport scratch root {}: {error}",
+                    base.display()
+                )
+            },
+        )?;
+    }
+
+    let scratch = tempfile::Builder::new()
+        .prefix("codexify-chat-")
+        .tempdir_in(&base)
+        .map_err(|error| {
+            format!(
+                "Could not create a private scratch workspace in {}: {error}",
+                base.display()
+            )
+        })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(scratch.path(), std::fs::Permissions::from_mode(0o700)).map_err(
+            |error| {
+                format!(
+                    "Could not protect scratch workspace {}: {error}",
+                    scratch.path().display()
+                )
+            },
+        )?;
+    }
+    let scratch_root = std::fs::canonicalize(scratch.path()).map_err(|error| {
+        format!(
+            "Could not resolve scratch workspace {}: {error}",
+            scratch.path().display()
+        )
+    })?;
+    if !scratch_root.starts_with(&base) {
+        return Err(format!(
+            "The scratch workspace resolves outside its private root: {}",
+            scratch_root.display()
+        ));
+    }
+    if scratch_root == access_root || scratch_root.starts_with(access_root) {
+        return Err(format!(
+            "The scratch workspace resolves inside the configured project access root: {}",
+            scratch_root.display()
+        ));
+    }
+    let _persisted_path = scratch.keep();
+    Ok(scratch_root)
+}
+
+fn validated_transport_scratch(expected: &Path, access_root: &Path) -> Result<PathBuf, String> {
+    let metadata = std::fs::symlink_metadata(expected).map_err(|error| {
         format!(
             "The scratch workspace for this MCP transport session no longer exists or cannot be inspected: {}: {error}. Open a new session.",
-            scratch.path().display()
+            expected.display()
         )
     })?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
         return Err(format!(
             "The scratch workspace for this MCP transport session is no longer a directory: {}. Open a new session.",
-            scratch.path().display()
+            expected.display()
         ));
     }
-    let canonical = std::fs::canonicalize(scratch.path()).map_err(|error| {
+    let canonical = std::fs::canonicalize(expected).map_err(|error| {
         format!(
             "The scratch workspace for this MCP transport session cannot be resolved: {}: {error}. Open a new session.",
-            scratch.path().display()
+            expected.display()
         )
     })?;
     if canonical != expected {
@@ -962,6 +1027,7 @@ impl Default for SessionState {
             project_selection_lock: Arc::new(TokioMutex::new(())),
             diff: TransportDiffState::new(),
             audit_id: TRANSPORT_SESSION_COUNTER.fetch_add(1, Ordering::Relaxed),
+            transport_scratch_dir: default_transport_scratch_dir(),
         }
     }
 }
@@ -969,6 +1035,14 @@ impl Default for SessionState {
 impl SessionState {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    #[doc(hidden)]
+    pub fn new_with_transport_scratch_dir(transport_scratch_dir: PathBuf) -> Self {
+        Self {
+            transport_scratch_dir,
+            ..Self::default()
+        }
     }
 
     fn with_exec_state(&self, exec: Arc<ExecSessionState>) -> Self {
@@ -980,6 +1054,7 @@ impl SessionState {
             project_selection_lock: self.project_selection_lock.clone(),
             diff: self.diff.clone(),
             audit_id: self.audit_id,
+            transport_scratch_dir: self.transport_scratch_dir.clone(),
         }
     }
 
@@ -1061,12 +1136,8 @@ impl SessionState {
                 access_root,
                 scope: ProjectBindingScope::McpTransportSession,
             }),
-            Some(TransportProjectBindingState::WithoutProject {
-                scratch,
-                scratch_root,
-            }) => {
-                let scratch_root =
-                    validated_transport_scratch(&scratch, &scratch_root, &access_root)?;
+            Some(TransportProjectBindingState::WithoutProject { scratch_root }) => {
+                let scratch_root = validated_transport_scratch(&scratch_root, &access_root)?;
                 Ok(ProjectBindingState::WithoutProject {
                     access_root,
                     scratch_root,
@@ -1236,12 +1307,8 @@ impl SessionState {
             )
         })?;
         match self.project_binding.lock().unwrap().clone() {
-            Some(TransportProjectBindingState::WithoutProject {
-                scratch,
-                scratch_root,
-            }) => {
-                let scratch_root =
-                    validated_transport_scratch(&scratch, &scratch_root, &access_root)?;
+            Some(TransportProjectBindingState::WithoutProject { scratch_root }) => {
+                let scratch_root = validated_transport_scratch(&scratch_root, &access_root)?;
                 return Ok(WithoutProjectSelection {
                     access_root,
                     scratch_root,
@@ -1257,10 +1324,9 @@ impl SessionState {
             }
             None => {}
         }
-        let (scratch, scratch_root) = create_transport_scratch(&access_root)?;
+        let scratch_root = create_transport_scratch(&access_root, &self.transport_scratch_dir)?;
         *self.project_binding.lock().unwrap() =
             Some(TransportProjectBindingState::WithoutProject {
-                scratch,
                 scratch_root: scratch_root.clone(),
             });
         Ok(WithoutProjectSelection {

@@ -804,6 +804,10 @@ pub struct AppConfig {
     pub debug: bool,
     /// Advertise and serve Codexify's built-in MCP App widgets.
     pub ui_widgets: bool,
+    /// Override three host-facing MCP safety hints on every advertised tool.
+    /// This affects declaration only; dispatch and authorization still use the
+    /// tool's real behavior.
+    pub force_read_only_tool_annotations: bool,
     pub multi_project: bool,
     pub project_clone_dir: std::path::PathBuf,
     pub project_catalog: ProjectCatalogConfig,

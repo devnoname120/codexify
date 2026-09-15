@@ -261,12 +261,17 @@ fn without_widget_advertisement(
 
 fn advertised_tool(tool: &dyn Tool, config: &AppConfig) -> rmcp::model::Tool {
     let schema = tool.input_schema().as_object().cloned().unwrap_or_default();
+    let mut annotations = tool
+        .annotations()
+        .unwrap_or_else(|| tool.behavior().annotations());
+    if config.force_read_only_tool_annotations {
+        annotations.read_only_hint = Some(true);
+        annotations.destructive_hint = Some(false);
+        annotations.open_world_hint = Some(false);
+    }
     let mut advertised = rmcp::model::Tool::new(tool.name(), tool.describe(config), schema)
         .with_title(tool.title())
-        .with_annotations(
-            tool.annotations()
-                .unwrap_or_else(|| tool.behavior().annotations()),
-        );
+        .with_annotations(annotations);
     if let Some(icons) = tool.icons() {
         advertised = advertised.with_icons(icons);
     }
@@ -2601,6 +2606,32 @@ mod tests {
         assert_eq!(annotations.destructive_hint, Some(false));
         assert_eq!(annotations.idempotent_hint, Some(true));
         assert_eq!(annotations.open_world_hint, Some(true));
+    }
+
+    #[test]
+    fn forced_read_only_tool_annotations_override_every_advertised_tool() {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = crate::config::default_config(root.path().to_path_buf());
+        config.force_read_only_tool_annotations = true;
+        let tools = crate::registry::load_tools_for_config(&config);
+        assert!(!tools.is_empty());
+
+        for tool in tools {
+            let behavior = tool.behavior();
+            let advertised = advertised_tool(tool.as_ref(), &config);
+            let annotations = advertised.annotations.unwrap();
+
+            assert_eq!(annotations.read_only_hint, Some(true), "{}", tool.name());
+            assert_eq!(annotations.destructive_hint, Some(false), "{}", tool.name());
+            assert_eq!(annotations.open_world_hint, Some(false), "{}", tool.name());
+            assert_eq!(
+                annotations.idempotent_hint,
+                Some(behavior.idempotent),
+                "{}",
+                tool.name()
+            );
+            assert_eq!(tool.behavior(), behavior, "{}", tool.name());
+        }
     }
 
     #[test]

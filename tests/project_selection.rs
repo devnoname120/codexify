@@ -486,12 +486,15 @@ async fn set_project_root_without_project_returns_a_scratch_workspace_receipt() 
     let access = root.path().join("projects");
     fs::create_dir_all(&access).unwrap();
     let config = multi_project_config(&access);
-    let session = SessionState::new();
+    let session =
+        SessionState::new_with_transport_scratch_dir(root.path().join("transport-scratch"));
 
     let result = SetProjectRoot
         .call(json!({ "withoutProject": true }), &config, &session)
         .await;
     assert!(!result.is_error, "{}", result.joined_text());
+    assert!(result.joined_text().contains("remain on disk"));
+    assert!(!result.joined_text().contains("workspace is removed"));
     let structured = result.structured_content.as_ref().unwrap();
     assert_eq!(structured["mode"], "without_project");
     assert_eq!(structured["project_name"], "Chat without a project");
@@ -525,7 +528,8 @@ async fn scratch_workspace_supports_filesystem_and_command_tools() {
     let access = root.path().join("projects");
     fs::create_dir_all(&access).unwrap();
     let config = multi_project_config(&access);
-    let session = SessionState::new();
+    let session =
+        SessionState::new_with_transport_scratch_dir(root.path().join("transport-scratch"));
 
     let selected = SetProjectRoot
         .call(json!({ "withoutProject": true }), &config, &session)
@@ -570,17 +574,30 @@ async fn scratch_workspace_supports_filesystem_and_command_tools() {
 }
 
 #[tokio::test]
-async fn transport_without_project_binding_uses_a_private_ephemeral_scratch_root() {
+async fn transport_without_project_binding_uses_a_private_persistent_scratch_root() {
     let root = TempDir::new().unwrap();
     let access = root.path().join("projects");
     fs::create_dir_all(access.join("alpha")).unwrap();
     let config = multi_project_config(&access);
-    let session = SessionState::new();
+    let session =
+        SessionState::new_with_transport_scratch_dir(root.path().join("transport-scratch"));
 
     let first = session.select_without_project(&config).await.unwrap();
     assert!(first.newly_selected);
     assert_eq!(first.scope, ProjectBindingScope::McpTransportSession);
     assert!(first.scratch_root.is_dir());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(&first.scratch_root)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+    }
     assert!(
         !first
             .scratch_root
@@ -616,7 +633,26 @@ async fn transport_without_project_binding_uses_a_private_ephemeral_scratch_root
 
     let scratch_root = effective.work_dir;
     drop(session);
-    assert!(!scratch_root.exists());
+    assert!(scratch_root.is_dir());
+    assert_eq!(
+        fs::read_to_string(scratch_root.join("scratch.txt")).unwrap(),
+        "transport scratch\n"
+    );
+}
+
+#[tokio::test]
+async fn transport_scratch_root_inside_the_access_root_is_rejected_without_creation() {
+    let root = TempDir::new().unwrap();
+    let access = root.path().join("projects");
+    fs::create_dir_all(&access).unwrap();
+    let config = multi_project_config(&access);
+    let invalid_scratch_root = access.join("transport-scratch");
+    let session = SessionState::new_with_transport_scratch_dir(invalid_scratch_root.clone());
+
+    let error = session.select_without_project(&config).await.unwrap_err();
+
+    assert!(error.contains("outside"), "{error}");
+    assert!(!invalid_scratch_root.exists());
 }
 
 #[tokio::test]

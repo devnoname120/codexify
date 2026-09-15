@@ -287,7 +287,7 @@ To reuse one server across several independent projects, point it at their commo
 cargo run --release -- --work-dir /path/to/projects --multi-project
 ```
 
-Here `--work-dir` is an **access root**, not the active project. In ChatGPT, call `set_project_root` directly when the exact relative/absolute path, an HTTPS/SSH Git repository URL ending in `.git`, or a supported GitHub repository, branch, pull-request, or commit URL is known. Repository URLs reuse an unambiguous matching checkout already below the access root, or run `git clone` in the configured project clone directory before binding. GitHub branch, PR, and commit URLs select their exact targets without switching an unrelated source checkout. When per-conversation setup is enabled and the intended project is ambiguous, the setup card loads `list_projects` into a searchable chooser and keeps **Chat without a project** above the search and results; that choice creates a private scratch workspace outside the access root. Codexify keys the resulting project or scratch binding from ChatGPT's `_meta["openai/session"]` conversation identifier and persists it outside the repository, so later turns in the same chat recover the active workspace after an MCP reconnect or Codexify restart. A new chat gets a new binding and an existing chat cannot switch choices. Clients that do not provide `openai/session` fall back to a one-time MCP transport-session binding; their scratch directory is removed when that session ends.
+Here `--work-dir` is an **access root**, not the active project. In ChatGPT, call `set_project_root` directly when the exact relative/absolute path, an HTTPS/SSH Git repository URL ending in `.git`, or a supported GitHub repository, branch, pull-request, or commit URL is known. Repository URLs reuse an unambiguous matching checkout already below the access root, or run `git clone` in the configured project clone directory before binding. GitHub branch, PR, and commit URLs select their exact targets without switching an unrelated source checkout. When per-conversation setup is enabled and the intended project is ambiguous, the setup card loads `list_projects` into a searchable chooser and keeps **Chat without a project** above the search and results; that choice creates a private scratch workspace outside the access root. Codexify keys the resulting project or scratch binding from ChatGPT's `_meta["openai/session"]` conversation identifier and persists it outside the repository, so later turns in the same chat recover the active workspace after an MCP reconnect or Codexify restart. A new chat gets a new binding and an existing chat cannot switch choices. Clients that do not provide `openai/session` fall back to a one-time MCP transport-session binding. The binding is forgotten when the transport ends, but its scratch directory and files remain on disk.
 
 ### Optional per-conversation authorization
 
@@ -782,7 +782,7 @@ Multi-project mode adds two project-control tools:
 | Tool | Description |
 |------|-------------|
 | `list_projects` | Search the read-only project catalogue before binding. Returns relative selectors for existing canonical directories authorized beneath the access root, plus names, aliases, descriptions, trust metadata, sources, and sanitized warnings. It never selects a project and is callable by both the model and setup app |
-| `set_project_root` | Bind the current ChatGPT conversation either to an existing directory/repository target or, with `withoutProject: true`, to a private scratch workspace. Project URL selection reuses a matching checkout or clones into `projectCloneDir`; targeted GitHub URLs fetch and select the exact target without moving an unrelated source checkout. The result always reports `active_root` and distinguishes direct project, managed-worktree, and scratch paths. Repeating the same choice is idempotent, but switching is rejected. Without ChatGPT conversation metadata, the binding lasts for the MCP transport session and a scratch directory is deleted when that session ends |
+| `set_project_root` | Bind the current ChatGPT conversation either to an existing directory/repository target or, with `withoutProject: true`, to a private scratch workspace. Project URL selection reuses a matching checkout or clones into `projectCloneDir`; targeted GitHub URLs fetch and select the exact target without moving an unrelated source checkout. The result always reports `active_root` and distinguishes direct project, managed-worktree, and scratch paths. Repeating the same choice is idempotent, but switching is rejected. Without ChatGPT conversation metadata, the binding lasts for the MCP transport session; the binding is forgotten afterward, but its scratch directory and files remain on disk |
 
 These tools expose runtime context, project instructions, and the four durable memory/task-state operations through MCP. See [Context and memory](#context-and-memory), [Acting as a Codex agent](#acting-as-a-codex-agent), [Shells and the host](#shells-and-the-host), [AGENTS.md](#agentsmd) and [Skills](#skills).
 
@@ -827,6 +827,7 @@ optional and uses camelCase names.
   "workDir": "/absolute/path/to/project",
   "debug": false,
   "uiWidgets": true,
+  "forceReadOnlyToolAnnotations": false,
   "multiProject": false,
   "projectCloneDir": ".",
   "conversationAuthToken": null,
@@ -962,6 +963,13 @@ then omits the MCP Apps extension, built-in UI resources, widget template/access
 metadata, component-only diff/updater payloads, and widget timing metadata. The
 underlying tools remain available, app-only helper tools remain private, and MCP
 resource support stays enabled for exported files and bridged resources.
+
+`forceReadOnlyToolAnnotations` defaults to `false`. When enabled, every tool
+descriptor returned by `tools/list` declares `readOnlyHint: true`,
+`destructiveHint: false`, and `openWorldHint: false`. This is a testing-only
+schema override: it does not change tool implementations, dispatch,
+authorization, or side effects, and it preserves each tool's existing
+`idempotentHint` and other descriptor metadata.
 
 ## Diagnostics, tool payloads, and audit logging
 
@@ -1297,7 +1305,7 @@ Each conversation makes exactly one workspace choice through [`set_project_root`
 - With the default worktree mode and no explicit selection override, the first conversation selecting a Git project uses the source checkout directly. Once that logical project is already assigned, another conversation receives a detached managed worktree under the configured Codex worktree location, preventing concurrent chats from editing the same checkout. A branch, PR, or commit URL also receives a detached worktree when the existing source checkout is on another commit. `always` isolates every selection; `never` uses the source directly and therefore rejects a targeted URL unless that source is already at the requested commit.
 - Pass `createWorktree: false` to `set_project_root` to use the source checkout regardless of the configured mode, or `true` to create a managed worktree. Models must pass the user's explicit preference even when the project is obvious and selected automatically. Omitting it retains the configured policy. This override affects only the selection, never the saved configuration; an existing immutable binding cannot change placement.
 - Worktree identity uses the repository's Git common directory plus the selected path relative to its Git root. Linked worktrees are therefore recognised as the same repository, while separate subprojects in a monorepo remain distinct.
-- **Chat without a project** creates a private active root beneath `~/.codexify/scratch/conversations/`, outside the configured access root. Structured filesystem tools and project-scoped context/memory operate there, shell commands start there, and Git tools behave as they would in any non-repository directory unless the user initializes one. Generic transport clients receive an ephemeral scratch directory instead.
+- **Chat without a project** creates a private active root beneath `~/.codexify/scratch/conversations/`, outside the configured access root. Structured filesystem tools and project-scoped context/memory operate there, shell commands start there, and Git tools behave as they would in any non-repository directory unless the user initializes one. Generic transport clients receive a private persistent directory beneath `~/.codexify/scratch/transports/`; Codexify forgets the binding when that transport ends but does not delete the directory or its contents.
 - A conversation cannot switch choices once bound — start another chat for a different project or scratch workspace. Re-selecting the same canonical path, exact normalized repository selection, or scratch choice is idempotent. A different choice is rejected before any clone, fetch, or replacement scratch creation begins.
 - Until a choice is made, project-scoped tools are unavailable and say why. `list_projects` and `set_project_root` remain project-independent so the model—or the setup card when enabled—can complete the selection.
 

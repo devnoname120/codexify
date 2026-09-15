@@ -72,7 +72,7 @@ ChatGPT / MCP client
 │    • no raw arguments or returned output      │
 │                                               │
 │  per-transport SessionState                   │
-│    • project or ephemeral scratch fallback    │
+│    • project or persistent scratch fallback   │
 │    • auth + exec + plan + diff fallback       │
 └──────────────────────────────────────────────┘
         │ reads/writes           │ stdio / Streamable HTTP
@@ -386,9 +386,11 @@ the source repository's local Git config and the script runs outside the
 project/scratch root and authorization flag for generic clients, the current plan, a
 transport-owned exec state, and the generic-client diff fallback. The exec state is
 reference-counted and kills running process trees when its last owner disappears.
-Transport scratch mode retains an `Arc<TempDir>` plus its canonical path; it is
-validated outside the configured access root on every resolution and removed when
-the final session owner is dropped.
+Transport scratch mode retains the canonical path of a private persistent
+directory beneath `~/.codexify/scratch/transports/`; it is validated outside the
+configured access root on every resolution. The transport-local binding is
+forgotten when its final session owner is dropped, but Codexify does not delete
+the scratch directory or its contents.
 
 `ConversationExecSessionStore` is shared by all handlers in the server process.
 For the two unified-exec tools, dispatch uses the hashed `openai/session` identity
@@ -428,7 +430,11 @@ explicit `mcpServers` entries as field overlays. Optional sub-configs (`projectD
 deserialization alias for `diff`, but resolved runtime configuration uses only the
 diff-named field. Top-level `uiWidgets` defaults to `true`; disabling it removes
 Codexify's MCP Apps capability/resource advertisement and widget-only metadata
-without disabling general MCP resources or the underlying tools. In multi-project mode, dispatch clones this
+without disabling general MCP resources or the underlying tools. The testing-only
+`forceReadOnlyToolAnnotations` flag defaults to `false`; when enabled, the
+`tools/list` projection forces the read-only, non-destructive, and closed-world
+hints without changing the underlying `ToolBehavior` used by dispatch. In
+multi-project mode, dispatch clones this
 config per call and substitutes the conversation's selected root—or the transport
 fallback—for `work_dir`; the static server policy, catalogue overlay, and bridge
 configuration remain shared. Native Codex project entries are intentionally re-read
@@ -830,7 +836,7 @@ the original order and rejects duplicate names.
 | `project_clone.rs` | Strict provider-agnostic HTTPS/SSH Git repository URL parsing plus GitHub branch/PR/commit target parsing, conservative normalized remote matching, existing-checkout discovery, exact GitHub target-ref or object-ID fetching, bounded non-interactive cloning below `projectCloneDir`, cross-process repository locks, collision refusal, and post-clone verification. |
 | `worktrees.rs` | Per-conversation managed Git worktree lifecycle: create a detached checkout under `worktrees.root` via `git worktree add`, optionally at an exact fetched commit, dual source/worktree root tracking, startup sweep bounded by `keepCount`, Windows `\\?\`-prefix handling, and the opt-in `allowSetupScript` gate for per-worktree environment setup. |
 | `project_catalog.rs` | Live, read-only project discovery from native Codex plus explicit metadata; canonical access-root filtering, deduplication, deterministic query ranking, sanitized MCP warnings, and local diagnostics. |
-| `exec_sessions.rs` | Generic-client project/scratch fallback plus conversation-owned unified-exec sessions and transport-local diff state: private ephemeral scratch lifetime, trusted configured-shell resolution, Codex-compatible model shell-type selection by basename, PowerShell exit-code wrapping, background stdout/stderr drain tasks, process-group kill, idle cleanup, and output truncation (UTF-16 units to match the TS). |
+| `exec_sessions.rs` | Generic-client project/scratch fallback plus conversation-owned unified-exec sessions and transport-local diff state: private persistent scratch storage with transport-local bindings, trusted configured-shell resolution, Codex-compatible model shell-type selection by basename, PowerShell exit-code wrapping, background stdout/stderr drain tasks, process-group kill, idle cleanup, and output truncation (UTF-16 units to match the TS). |
 | `diff.rs` | Project-scoped Git snapshots, persistent conversation refs, transport-local fallbacks, incremental comparisons whose emitted snapshot can advance the private diff cursor through compare-and-swap, legacy review-ref migration, diff parsing and component-payload budgets. |
 | `diff_ui.rs` | Embedded MCP Apps resource, component-only diff-result metadata, legacy review-card compatibility, and persisted private interaction state for the interactive `show_diff` card. |
 | `setup_ui.rs` / `setup_ui.html` | Compact setup/status MCP App with a searchable project/scratch chooser, selected direct/worktree/scratch path rendering, cached-bypass update checks, background structured doctor diagnostics, direct connector-settings Refresh routing, conversational Autofix, and debug timing display. |
@@ -1232,6 +1238,7 @@ latter.
   "workDir": "/absolute/path/to/project", // required when --work-dir is omitted
   "debug": false,                         // component-only tool timing footers
   "uiWidgets": true,                     // built-in setup/diff/updater MCP Apps
+  "forceReadOnlyToolAnnotations": false, // testing-only tools/list hint override
   "port": 3000,
   "apiKey": "…",                      // or --api-key; bearer token
   "conversationAuthToken": "0123456789abcdef…", // exactly 64 lowercase hex characters
