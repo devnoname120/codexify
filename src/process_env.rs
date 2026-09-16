@@ -29,8 +29,10 @@ const TUNNEL_ENV_PASSTHROUGH: &[&str] = &[
 ];
 
 pub fn scrub_untrusted_child_env(command: &mut Command, config: &AppConfig) {
-    if let Some(name) = referenced_tunnel_key_env(config) {
-        command.env_remove(name);
+    for tunnel in config.configured_openai_tunnels() {
+        if let Some(name) = tunnel.api_key_ref.strip_prefix("env:") {
+            command.env_remove(OsStr::new(name));
+        }
     }
     command
         .env_remove(CHILD_CONTROL_PLANE_API_KEY_ENV)
@@ -46,15 +48,6 @@ pub fn isolate_tunnel_child_env(command: &mut Command) {
 
     command.env_clear();
     command.envs(preserved);
-}
-
-fn referenced_tunnel_key_env(config: &AppConfig) -> Option<&OsStr> {
-    config
-        .openai_tunnel
-        .as_ref()?
-        .api_key_ref
-        .strip_prefix("env:")
-        .map(OsStr::new)
 }
 
 #[cfg(test)]
@@ -74,6 +67,12 @@ mod tests {
             organization_id: None,
             client_path: None,
         });
+        config.additional_openai_tunnels.push(OpenAiTunnelConfig {
+            tunnel_id: "tunnel_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            api_key_ref: "env:SECOND_PRIVATE_TUNNEL_KEY".into(),
+            organization_id: None,
+            client_path: None,
+        });
         let mut command = Command::new("ignored");
 
         scrub_untrusted_child_env(&mut command, &config);
@@ -84,6 +83,7 @@ mod tests {
             .filter_map(|(name, value)| value.is_none().then_some(name))
             .collect::<Vec<_>>();
         assert!(removed.contains(&OsStr::new("PRIVATE_TUNNEL_KEY")));
+        assert!(removed.contains(&OsStr::new("SECOND_PRIVATE_TUNNEL_KEY")));
         assert!(removed.contains(&OsStr::new(CHILD_CONTROL_PLANE_API_KEY_ENV)));
         assert!(removed.contains(&OsStr::new(CHILD_MCP_AUTHORIZATION_ENV)));
         assert!(removed.contains(&OsStr::new(SERVICE_SUPERVISED_ENV)));

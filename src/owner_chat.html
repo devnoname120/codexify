@@ -53,12 +53,13 @@ main { min-width:0; min-height:0; display:flex; justify-content:center; padding:
 (() => {
   "use strict";
   const token = location.hash.slice(1) || sessionStorage.getItem("owner-chat-token");
-  if (location.hash) history.replaceState(null, "", location.pathname);
+  if (location.hash) history.replaceState(null, "", location.pathname + location.search);
   if (token) sessionStorage.setItem("owner-chat-token", token);
   const list = document.getElementById("conversations");
   const host = document.getElementById("chat-host");
   const errorNode = document.getElementById("error");
   let selected = null, controller = null, chats = [];
+  const chatIdPattern = /^[0-9a-f]{64}$/;
   let seen = {};
   try { seen = JSON.parse(localStorage.getItem("owner-chat-seen-v1") || "{}"); } catch {}
 
@@ -113,8 +114,24 @@ main { min-width:0; min-height:0; display:flex; justify-content:center; padding:
       list.append(button);
     }
   }
-  function select(id) {
+  function chatIdFromUrl() {
+    const id = new URLSearchParams(location.search).get("chat");
+    return id && chatIdPattern.test(id) ? id : null;
+  }
+  function clearSelection(message = "Select a conversation to view its chat.") {
+    controller?.close(); controller = null; selected = null;
+    const placeholder = textNode("div", "", message);
+    placeholder.id = "placeholder";
+    host.replaceChildren(placeholder);
+    renderList();
+  }
+  function select(id, updateUrl = true) {
     if (id === selected) return;
+    if (updateUrl) {
+      const url = new URL(location.href);
+      url.searchParams.set("chat", id);
+      history.pushState(null, "", url.pathname + url.search);
+    }
     controller?.close(); controller = null; selected = id;
     host.replaceChildren();
     const shell = document.createElement("div");
@@ -167,19 +184,27 @@ main { min-width:0; min-height:0; display:flex; justify-content:center; padding:
     controller.setAvailable(true);
     renderList();
   }
+  function selectFromUrl() {
+    const id = chatIdFromUrl();
+    if (!id) {
+      if (selected !== null) clearSelection();
+    } else if (chats.some(chat => chat.id === id)) {
+      select(id, false);
+    } else if (selected !== null || chats.length) {
+      clearSelection("Conversation is no longer available.");
+    }
+  }
   async function refresh() {
     if (document.hidden) return;
     try {
       const payload = await (await api("/api/chats")).json();
       chats = payload.chats || [];
       showError("");
+      selectFromUrl();
       renderList();
-      if (selected && !chats.some(chat => chat.id === selected)) {
-        controller?.close(); controller = null; selected = null;
-        host.replaceChildren(textNode("div", "", "Conversation is no longer available."));
-      }
     } catch (error) { showError(error.message || "Chat list unavailable"); }
   }
+  window.addEventListener("popstate", selectFromUrl);
   window.addEventListener("storage", event => {
     if (event.key === "owner-chat-seen-v1") {
       try { seen = JSON.parse(event.newValue || "{}"); } catch {}

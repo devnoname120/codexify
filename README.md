@@ -65,6 +65,9 @@ workspace with [custom MCP apps enabled](https://developers.openai.com/api/docs/
 and access to [OpenAI Secure MCP Tunnels](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels)
 in an OpenAI Platform organization. ChatGPT access and tunnel permissions are
 separate; a workspace administrator may need to grant them.
+One Codexify service can connect to several ChatGPT accounts by configuring
+separate tunnel ID/key-reference pairs in `openaiTunnels`; all accounts share
+the same local tools and project access. See [native tunnel setup](docs/REFERENCE.md#manual-native-openai-tunnel-setup).
 
 ### 1. Install
 

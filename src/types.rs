@@ -828,10 +828,21 @@ pub struct AppConfig {
     /// OpenAI's outbound tunnel, when enabled. The HTTP listener is restricted
     /// to loopback and its permissive browser CORS layer is disabled in this mode.
     pub openai_tunnel: Option<OpenAiTunnelConfig>,
+    /// Additional native tunnel clients sharing this MCP listener. The first
+    /// entry remains in `openai_tunnel` for the single-tunnel compatibility path.
+    pub additional_openai_tunnels: Vec<OpenAiTunnelConfig>,
     /// Upstream MCP servers, keyed by their raw configured names. Their tools are
     /// discovered at startup and exposed according to each server's effective mode.
     pub mcp_servers: std::collections::HashMap<String, McpServerSpec>,
     /// Directory where gateway-mode servers write their auto-generated SKILL.md,
     /// added to skill discovery. Set at startup, not from the config file.
     pub generated_skills_dir: Option<std::path::PathBuf>,
+}
+
+impl AppConfig {
+    pub fn configured_openai_tunnels(&self) -> impl Iterator<Item = &OpenAiTunnelConfig> {
+        self.openai_tunnel
+            .iter()
+            .chain(self.additional_openai_tunnels.iter())
+    }
 }

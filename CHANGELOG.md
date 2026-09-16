@@ -6,6 +6,21 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.5.3] - 2026-09-16
+
+### Added
+
+- `openaiTunnels` accepts 1–8 tunnel ID/API-key-reference pairs so one Codexify
+  service can connect to several ChatGPT accounts. Each tunnel client is
+  supervised independently; a failing account does not take healthy tunnels
+  offline. Existing single `openaiTunnel` configurations remain valid.
+
+### Fixed
+
+- The standalone owner chat now puts the selected conversation in the URL so
+  reload restores it and browser Back/Forward navigates between chats. The
+  private access token remains in session storage after the initial link loads.
+
 ## [1.5.2] - 2026-09-16
 
 ### Added
@@ -428,7 +443,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   drained through bounded head/tail buffers, while component-only `_meta` remains
   outside the model-visible limit.
 
-[Unreleased]: https://github.com/devnoname120/codexify/compare/v1.5.2...HEAD
+[Unreleased]: https://github.com/devnoname120/codexify/compare/v1.5.3...HEAD
+[1.5.3]: https://github.com/devnoname120/codexify/compare/v1.5.2...v1.5.3
 [1.5.2]: https://github.com/devnoname120/codexify/compare/v1.5.1...v1.5.2
 [1.5.1]: https://github.com/devnoname120/codexify/compare/v1.5.0...v1.5.1
 [1.5.0]: https://github.com/devnoname120/codexify/compare/v1.4.0...v1.5.0

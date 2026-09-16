@@ -76,13 +76,24 @@ impl ConnectorSchemaStore {
         Ok(())
     }
     pub(crate) fn for_current_user(config: &AppConfig) -> Self {
-        let scope = match &config.openai_tunnel {
-            Some(tunnel) => private_key(&["tunnel", &tunnel.tunnel_id]),
-            None => private_key(&[
+        let tunnels = config.configured_openai_tunnels().collect::<Vec<_>>();
+        let scope = match tunnels.as_slice() {
+            [tunnel] => private_key(&["tunnel", &tunnel.tunnel_id]),
+            [] => private_key(&[
                 "http",
                 &config.work_dir.to_string_lossy(),
                 &config.port.to_string(),
             ]),
+            _ => {
+                let mut ids = tunnels
+                    .iter()
+                    .map(|tunnel| tunnel.tunnel_id.as_str())
+                    .collect::<Vec<_>>();
+                ids.sort_unstable();
+                let mut parts = vec!["tunnels"];
+                parts.extend(ids);
+                private_key(&parts)
+            }
         };
         Self {
             directory: crate::util::home_dir()
@@ -137,6 +148,32 @@ mod tests {
             version_for_markdown_chat(true)
         );
         assert_eq!(version_for_markdown_chat(false), env!("CARGO_PKG_VERSION"));
+    }
+
+    #[test]
+    fn multi_tunnel_schema_scope_is_independent_of_list_order() {
+        let mut config = crate::config::default_config(std::path::PathBuf::from("/tmp/project"));
+        let first = crate::types::OpenAiTunnelConfig {
+            tunnel_id: "tunnel_0123456789abcdef0123456789abcdef".into(),
+            api_key_ref: "env:FIRST_KEY".into(),
+            organization_id: None,
+            client_path: None,
+        };
+        let second = crate::types::OpenAiTunnelConfig {
+            tunnel_id: "tunnel_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            api_key_ref: "env:SECOND_KEY".into(),
+            organization_id: None,
+            client_path: None,
+        };
+        config.openai_tunnel = Some(first.clone());
+        config.additional_openai_tunnels.push(second.clone());
+        let scope = ConnectorSchemaStore::for_current_user(&config).directory;
+        config.openai_tunnel = Some(second);
+        config.additional_openai_tunnels = vec![first];
+        assert_eq!(
+            scope,
+            ConnectorSchemaStore::for_current_user(&config).directory
+        );
     }
 
     #[test]

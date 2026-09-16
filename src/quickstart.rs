@@ -194,12 +194,28 @@ where
     let (mut file_config, pending_migration) = read_config(&config_path)?;
     if file_config
         .get("openaiTunnel")
-        .is_some_and(|value| !value.is_object())
+        .is_some_and(|value| !value.is_null() && !value.is_object())
     {
         bail!(
             "openaiTunnel in the existing config must be a JSON object: {}",
             config_path.display()
         );
+    }
+    if let Some(value) = file_config.get("openaiTunnels") {
+        let entries = value
+            .as_array()
+            .context("openaiTunnels in the existing config must be an array")?;
+        if file_config
+            .get("openaiTunnel")
+            .is_some_and(|value| !value.is_null())
+            || entries.is_empty()
+            || entries.len() > 8
+            || entries.iter().any(|entry| !entry.is_object())
+        {
+            bail!(
+                "openaiTunnels must contain 1 to 8 objects and cannot be combined with openaiTunnel"
+            );
+        }
     }
 
     let title = wizard.decorate(HEADING, "Codexify quickstart");
@@ -256,6 +272,14 @@ where
     let existing_tunnel_id = configured_tunnel_id(&file_config);
     print_tunnel_creation_step(&mut wizard, &connector_name)?;
     let tunnel_id = prompt_tunnel_id(&mut wizard, existing_tunnel_id.as_deref())?;
+    if let Some(entries) = file_config.get("openaiTunnels").and_then(Value::as_array)
+        && entries.len() >= 8
+        && !entries
+            .iter()
+            .any(|entry| entry.get("tunnelId").and_then(Value::as_str) == Some(tunnel_id.as_str()))
+    {
+        bail!("openaiTunnels already contains 8 tunnels; remove one before adding another");
+    }
 
     let key_path = credential_path(&environment.home_dir, &tunnel_id);
     print_api_key_step(&mut wizard, &key_path)?;
@@ -343,7 +367,7 @@ where
         if start_server {
             let message = wizard.decorate(
                 SUCCESS,
-                "Starting Codexify. Wait for `OpenAI Secure MCP Tunnel: ready`, then complete the ChatGPT steps above.",
+                "Starting Codexify. Wait for a tunnel-ready line, then complete the ChatGPT steps above.",
             );
             writeln!(wizard.output, "\n{message}")?;
         } else {
@@ -711,7 +735,7 @@ where
     write_setup_field(wizard, "Authentication", "No Authentication")?;
     let scan = wizard.decorate(
         MUTED,
-        "   Wait until this terminal reports `OpenAI Secure MCP Tunnel: ready`, then scan the tools and create the connector. Enable the read/write actions you intend to use; full Codex-style operation needs both.",
+        "   Wait until this terminal reports a ready tunnel, then scan the tools and create the connector. Enable the read/write actions you intend to use; full Codex-style operation needs both.",
     );
     writeln!(wizard.output, "{scan}")?;
     let selection = wizard.decorate(
@@ -750,11 +774,19 @@ fn connector_name_default() -> String {
 }
 
 fn configured_tunnel_id(config: &Map<String, Value>) -> Option<String> {
-    config
+    let single = config
         .get("openaiTunnel")
         .and_then(Value::as_object)
         .and_then(|tunnel| tunnel.get("tunnelId"))
-        .and_then(Value::as_str)
+        .and_then(Value::as_str);
+    let first_multiple = config
+        .get("openaiTunnels")
+        .and_then(Value::as_array)
+        .and_then(|entries| entries.first())
+        .and_then(|entry| entry.get("tunnelId"))
+        .and_then(Value::as_str);
+    single
+        .or(first_multiple)
         .filter(|value| validate_tunnel_id(value).is_ok())
         .map(str::to_string)
 }
@@ -795,12 +827,36 @@ fn merge_tunnel_config(
         "schemaVersion".to_string(),
         Value::Number(crate::config_migration::CONFIG_SCHEMA_VERSION.into()),
     );
-    let tunnel = config
-        .entry("openaiTunnel".to_string())
-        .or_insert_with(|| Value::Object(Map::new()));
-    let tunnel = tunnel
-        .as_object_mut()
-        .context("openaiTunnel in the existing config must be a JSON object")?;
+    if config.get("openaiTunnel").is_some_and(Value::is_null) {
+        config.remove("openaiTunnel");
+    }
+    let tunnel = if let Some(entries) = config.get_mut("openaiTunnels") {
+        let entries = entries
+            .as_array_mut()
+            .context("openaiTunnels must be an array")?;
+        let index = match entries
+            .iter()
+            .position(|entry| entry.get("tunnelId").and_then(Value::as_str) == Some(tunnel_id))
+        {
+            Some(index) => index,
+            None if entries.len() < 8 => {
+                entries.push(Value::Object(Map::new()));
+                entries.len() - 1
+            }
+            None => {
+                bail!("openaiTunnels already contains 8 tunnels; remove one before adding another")
+            }
+        };
+        entries[index]
+            .as_object_mut()
+            .context("openaiTunnels entries must be JSON objects")?
+    } else {
+        config
+            .entry("openaiTunnel".to_string())
+            .or_insert_with(|| Value::Object(Map::new()))
+            .as_object_mut()
+            .context("openaiTunnel in the existing config must be a JSON object")?
+    };
     tunnel.insert("tunnelId".to_string(), Value::String(tunnel_id.to_string()));
     tunnel.insert(
         "apiKeyRef".to_string(),
@@ -1285,6 +1341,42 @@ mod tests {
                 0o700
             );
         }
+    }
+
+    #[test]
+    fn quickstart_appends_or_updates_one_tunnel_without_replacing_others() {
+        let root = TempDir::new().unwrap();
+        let work_dir = root.path();
+        let first_id = "tunnel_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let mut config = json!({
+            "openaiTunnel": null,
+            "openaiTunnels": [
+                {"tunnelId": first_id, "apiKeyRef": "env:FIRST_KEY", "organizationId":"org_first"}
+            ]
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let second_key = root.path().join("second.key");
+        merge_tunnel_config(&mut config, TUNNEL_ID, &second_key, work_dir, false, None).unwrap();
+        assert!(!config.contains_key("openaiTunnel"));
+        let tunnels = config["openaiTunnels"].as_array().unwrap();
+        assert_eq!(tunnels.len(), 2);
+        assert_eq!(tunnels[0]["apiKeyRef"], "env:FIRST_KEY");
+        assert_eq!(tunnels[0]["organizationId"], "org_first");
+        assert_eq!(tunnels[1]["tunnelId"], TUNNEL_ID);
+        assert_eq!(
+            tunnels[1]["apiKeyRef"],
+            format!("file:{}", second_key.display())
+        );
+        let replacement = root.path().join("replacement.key");
+        merge_tunnel_config(&mut config, TUNNEL_ID, &replacement, work_dir, false, None).unwrap();
+        let tunnels = config["openaiTunnels"].as_array().unwrap();
+        assert_eq!(tunnels.len(), 2);
+        assert_eq!(
+            tunnels[1]["apiKeyRef"],
+            format!("file:{}", replacement.display())
+        );
     }
 
     #[test]

@@ -120,12 +120,20 @@
     ]
   },
   "allowedHosts": [],
-  "openaiTunnel": {
-    "tunnelId": "tunnel_0123456789abcdef0123456789abcdef",
-    "apiKeyRef": "env:CONTROL_PLANE_API_KEY",
-    "clientPath": null,
-    "organizationId": null
-  },
+  "openaiTunnels": [
+    {
+      "tunnelId": "tunnel_0123456789abcdef0123456789abcdef",
+      "apiKeyRef": "env:FIRST_TUNNEL_API_KEY",
+      "clientPath": null,
+      "organizationId": null
+    },
+    {
+      "tunnelId": "tunnel_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "apiKeyRef": "env:SECOND_TUNNEL_API_KEY",
+      "clientPath": null,
+      "organizationId": null
+    }
+  ],
   "mcpServers": {
     "local-example": {
       "command": "npx",

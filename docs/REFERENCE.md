@@ -269,9 +269,49 @@ the runtime API key at the hidden-input prompt.
    cargo run --release -- --work-dir /path/to/your/project
    ```
 
+To connect the same service to multiple ChatGPT accounts, use `openaiTunnels`
+instead of `openaiTunnel`, with a separate tunnel and matching restricted runtime
+key for each account:
+
+```json
+{
+  "openaiTunnels": [
+    {
+      "tunnelId": "tunnel_0123456789abcdef0123456789abcdef",
+      "apiKeyRef": "env:FIRST_TUNNEL_API_KEY"
+    },
+    {
+      "tunnelId": "tunnel_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "apiKeyRef": "env:SECOND_TUNNEL_API_KEY"
+    }
+  ]
+}
+```
+
+Set both referenced keys in the service environment (or use separate private
+`file:/absolute/path` references), then configure a ChatGPT connector in each
+account using its own tunnel. The list must contain 1–8 distinct tunnel IDs;
+each entry requires `tunnelId` and `apiKeyRef` and can also have its own
+`clientPath` and `organizationId`. `openaiTunnel` and `openaiTunnels` are
+mutually exclusive, and `--openai-tunnel-*` overrides apply only to the legacy
+single-tunnel form. Existing single-tunnel configs need no migration or rewrite.
+All connected accounts share this server's tools, project access, and chat
+storage; the tunnels are not an account-isolation boundary. One unhealthy tunnel
+is retried independently while healthy tunnels keep working. `/health` is ready
+when at least one configured tunnel is ready; it becomes unhealthy if none are.
+In list mode, `/health` also reports `tunnelsReady` and `tunnelsConfigured`
+so partial availability is visible without inspecting logs. Service logs label
+individual tunnel clients `#1`, `#2`, and so on in configuration order without
+printing their IDs or credentials. Each client has its own bounded restart
+breaker; if one exhausts it, restart the service after fixing that entry while
+other healthy clients remain available in the meantime.
+
 On first use, Codexify downloads the pinned runtime-only build of OpenAI's official [`tunnel-client`](https://github.com/openai/tunnel-client), verifies the archive against the per-platform SHA-256 embedded in this Codexify build, and installs it under `~/.codexify/openai-tunnel/`. Codexify reports ready only after the runtime's `/readyz` check succeeds and its metrics show a successful control-plane poll. The runtime-only binary exposes loopback `/healthz`, `/readyz`, and `/metrics` endpoints; it intentionally does not include the full client's admin UI.
 
-To use a preinstalled official client, set `openaiTunnel.clientPath` or pass `--openai-tunnel-client /path/to/tunnel-client-runtime`. Codexify checks the binary's version surface and required flags before starting it.
+To use a preinstalled official client, set `openaiTunnel.clientPath`, set
+`openaiTunnels[].clientPath` for each relevant entry, or pass
+`--openai-tunnel-client /path/to/tunnel-client-runtime` in single-tunnel mode.
+Codexify checks the binary's version surface and required flags before starting it.
 
 ### Local endpoint or externally managed tunnel
 
@@ -279,7 +319,7 @@ To use a preinstalled official client, set `openaiTunnel.clientPath` or pass `--
 cargo run --release -- --work-dir /path/to/your/project
 ```
 
-Without `openaiTunnel`, the server listens on `0.0.0.0:3000`, serves MCP at `/mcp`, and serves `/health`. This mode is intended for local clients or an explicitly configured reverse proxy/tunnel. Do not publish it without authentication and network-level access controls.
+Without `openaiTunnel` or `openaiTunnels`, the server listens on `0.0.0.0:3000`, serves MCP at `/mcp`, and serves `/health`. This mode is intended for local clients or an explicitly configured reverse proxy/tunnel. Do not publish it without authentication and network-level access controls.
 
 To reuse one server across several independent projects, point it at their common parent and enable multi-project mode:
 
@@ -962,18 +1002,28 @@ names.
     },
     "entries": []
   },
-  "openaiTunnel": {
-    "tunnelId": "tunnel_0123456789abcdef0123456789abcdef",
-    "apiKeyRef": "env:CONTROL_PLANE_API_KEY",
-    "clientPath": null,
-    "organizationId": null
-  },
+  "openaiTunnels": [
+    {
+      "tunnelId": "tunnel_0123456789abcdef0123456789abcdef",
+      "apiKeyRef": "env:FIRST_TUNNEL_API_KEY",
+      "clientPath": null,
+      "organizationId": null
+    },
+    {
+      "tunnelId": "tunnel_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "apiKeyRef": "env:SECOND_TUNNEL_API_KEY",
+      "clientPath": null,
+      "organizationId": null
+    }
+  ],
   "allowedHosts": [],
   "mcpServers": {}
 }
 ```
 
-CLI flags override values from the config file.
+CLI flags override applicable values from the config file. The
+`--openai-tunnel-*` flags apply only to the single `openaiTunnel` form and are
+rejected with `openaiTunnels` to avoid changing one list entry ambiguously.
 
 `workDir` supplies the project directory or multi-project access root when
 `--work-dir` is omitted. It must be absolute. Background-service launches rely
@@ -1102,12 +1152,13 @@ Startup fails if an enabled audit file cannot be opened safely. On Unix, newly c
 
 This is an operational activity log, not a tamper-evident security boundary. Model-launched commands run as the same OS user and can modify any audit file they can locate and access. Keep the file outside the project access root, restrict its directory permissions, and forward it to a separately protected collector when independent evidence is required.
 
-The `openaiTunnel` block enables OpenAI's native outbound tunnel:
+The `openaiTunnel` block enables one native outbound tunnel; `openaiTunnels`
+uses the same fields for each entry in a list of independent tunnel clients:
 
 | Key | Default | Description |
 |-----|---------|-------------|
 | `tunnelId` | required | Existing `tunnel_…` identifier from OpenAI Platform |
-| `apiKeyRef` | `"env:CONTROL_PLANE_API_KEY"` | Runtime API-key reference. Only `env:NAME` and `file:/path` are accepted; literal keys are rejected |
+| `apiKeyRef` | `"env:CONTROL_PLANE_API_KEY"` for the single object; required in each list entry | Runtime API-key reference. Only `env:NAME` and `file:/path` are accepted; literal keys are rejected |
 | `clientPath` | verified managed runtime | Explicit official `tunnel-client` or `tunnel-client-runtime` binary. Relative paths resolve from the launch directory |
 | `organizationId` | - | Optional organization ID passed as `OpenAI-Organization` by the official client |
 
@@ -1116,6 +1167,8 @@ The `quickstart` command writes its runtime key to
 that absolute `file:` path. It never writes the key itself into
 `codexify.config.json`; on Unix, the credential directory is mode `0700` and the key
 file is mode `0600`.
+When `openaiTunnels` already exists, quickstart updates the matching tunnel
+entry or appends a new one without replacing the other entries.
 
 Native mode deliberately cannot be combined with a caller-supplied `apiKey` / `--api-key`: Codexify generates a high-entropy bearer token for the loopback MCP hop and injects it into the tunnel runtime through static MCP and discovery headers. Host validation is forced to loopback authorities and permissive browser CORS is disabled.
 
@@ -1282,7 +1335,7 @@ Metadata overlays are merged by canonical path. Explicit entries are operator-au
 
 Git URL selection is separate from catalogue listing. Before cloning, Codexify checks the normal destination, catalogue candidates, and immediate child directories of `projectCloneDir`, then compares normalized remotes at each Git top level. Exactly one match is reused; multiple matches are rejected as ambiguous so the caller can pass an explicit path. Provider-agnostic repository selection accepts HTTPS URLs such as `https://gitlab.com/group/repository.git`, SSH URLs such as `ssh://git@gitlab.com/group/repository.git`, and SCP-style SSH URLs such as `git@gitlab.com:group/repository.git`. Non-GitHub selections must end in `.git`, which avoids treating arbitrary provider web pages as repositories; an already-cloned matching remote may omit that suffix. GitHub additionally accepts repository-root URLs without `.git` plus HTTPS branch (`/tree/<branch>`), pull-request (`/pull/<number>`), and commit (`/commit/<sha>`) URLs. For branch URLs, everything after `/tree/` is interpreted as the branch ref, including `/` characters. Commit URLs require the full 40-character hexadecimal object ID and normalize it to lowercase. Credential-bearing HTTPS URLs, query strings, fragments, `file://`, HTTP, `git://`, and other transports are rejected.
 
-The `openaiTunnel` block, `allowedHosts` array, and `mcpServers` map are covered under [Native OpenAI tunnel](#manual-native-openai-tunnel-setup), [Host allowlist](#host-allowlist), and [Bridging other MCP servers](#bridging-other-mcp-servers).
+The `openaiTunnel`/`openaiTunnels` choice, `allowedHosts` array, and `mcpServers` map are covered under [Native OpenAI tunnel](#manual-native-openai-tunnel-setup), [Host allowlist](#host-allowlist), and [Bridging other MCP servers](#bridging-other-mcp-servers).
 
 ## Native host-file ingress
 
@@ -1562,6 +1615,13 @@ conversation loads the same chat component, including pagination, sending,
 Markdown, receipts, tool counters, and exported-file downloads. Sending from
 either view appends to the same conversation channel. This does not restart a
 stopped ChatGPT turn.
+
+Selecting a conversation updates the owner page's `?chat=<opaque-id>` URL.
+Reloading restores that conversation, and browser Back/Forward switches chats
+without a full navigation. The access token remains in session storage after
+the initial URL fragment is removed; a copied URL without that fragment does
+not authorize a fresh browser session. Run `codexify chat` again to get a
+private entry link for a new session.
 
 ChatGPT's conversation display title is not part of the connector metadata.
 The list therefore derives a local title from the first user chat entry, or
@@ -2170,9 +2230,9 @@ If your server doesn't show up, **check the banner first** — the most common c
 ### With the native OpenAI tunnel
 
 1. In ChatGPT, enable **Developer mode**.
-2. Configure `openaiTunnel`, export the referenced runtime key, and start Codexify. Keep the process running for connector discovery and every tool call.
+2. Configure `openaiTunnel` or `openaiTunnels`, provide every referenced runtime key, and start Codexify. Keep the process running for connector discovery and every tool call.
 3. In ChatGPT's connector/plugin settings, create a developer-mode connector with **Connection type: Tunnel**.
-4. Select the same tunnel ID that Codexify reports as ready. Set **Authentication** to **None**.
+4. Select the corresponding tunnel ID from your configuration. Set **Authentication** to **None**.
 5. Set the connector's permissions to **Allow all actions** if you do not want per-call confirmations.
 6. Enable the connector in a new chat. Without conversation authorization, open with `Call get_agent_brief and follow it for the rest of this chat.` With `conversationAuthToken`, first supply the one-line `setup` instruction from [Optional per-conversation authorization](#optional-per-conversation-authorization). In multi-project mode, an exact target can still be passed directly to `set_project_root`; otherwise the setup card lets the user search the project catalogue or choose a scratch workspace. Later follow-ups recover both authorization and the selected project/scratch binding from ChatGPT's conversation metadata.
 
@@ -2180,7 +2240,7 @@ There is no server URL to enter in this mode. OpenAI routes the selected tunnel 
 
 ### With an externally managed tunnel
 
-1. Start Codexify without `openaiTunnel` (add `--work-dir /path/to/projects --multi-project` for one connector shared across projects).
+1. Start Codexify without `openaiTunnel` or `openaiTunnels` (add `--work-dir /path/to/projects --multi-project` for one connector shared across projects).
 2. Put an authenticated reverse proxy or tunnel in front of port `3000`.
 3. Create a URL-based developer connector/plugin whose server URL is the resulting HTTPS URL with `/mcp` appended.
 4. Configure the connector authentication supported by the client, and enforce access controls at the proxy/tunnel layer.
@@ -2189,7 +2249,7 @@ For example, `ngrok http 3000` is sufficient for a disposable connectivity test,
 
 ## Host allowlist
 
-Without `openaiTunnel`, `allowedHosts` is empty by default, which accepts any `Host` header so an externally managed proxy can present an arbitrary hostname. Set it to a list of hostnames to enable **DNS-rebinding protection**: only requests whose `Host` header matches are served.
+Without `openaiTunnel` or `openaiTunnels`, `allowedHosts` is empty by default, which accepts any `Host` header so an externally managed proxy can present an arbitrary hostname. Set it to a list of hostnames to enable **DNS-rebinding protection**: only requests whose `Host` header matches are served.
 
 Native tunnel mode ignores `allowedHosts` and forces the accepted authorities to `127.0.0.1`, `localhost`, and `::1`. It also binds only `127.0.0.1` and removes the permissive CORS layer. These restrictions are part of the mode rather than optional hardening.
 
@@ -2213,7 +2273,7 @@ Native tunnel mode ignores `allowedHosts` and forces the accepted authorities to
 - **The loopback MCP hop is authenticated**: native mode generates a random per-process bearer token and configures the tunnel runtime to send it on MCP requests and discovery probes. The token is never printed, written to the config file, or inherited by model-launched commands and bridged MCP children.
 - **Optional conversation-level authorization**: `conversationAuthToken` blocks all tools except the deliberately innocuous `setup` wire tool until the stable ChatGPT conversation presents the configured authentication token as `ref`. Successful grants persist by hashed conversation identity and are invalidated by token rotation; clients without `openai/session` get transport-only grants. Initialization withholds the project-aware brief until authorization succeeds. The `setup(ref)` naming and SHA-256-shaped token avoid ChatGPT's false-positive connector secret-leak refusal; they do not make the token public or replace real authentication. This gate controls model conversations, not network callers: keep the native tunnel, reverse proxy, ChatGPT workspace, and local account secured independently. The token remains plaintext in `codexify.config.json` because the server must compare chat-supplied values, so keep that file private and out of version control.
 - **Verified tunnel-client installation**: the managed client is pinned to a specific official release and per-platform archive SHA-256 embedded in Codexify, extracted by exact filename under size limits, installed atomically with private permissions, and hash-checked against its installation manifest on subsequent starts. Set `clientPath` to opt out of managed installation while retaining compatibility checks.
-- **Tunnel secrets are references, not config values**: `openaiTunnel.apiKeyRef` accepts only `env:NAME` or `file:/path`; literal API keys are rejected. Codexify resolves the value and exposes it only to the tunnel child under a synthetic environment name, while the child receives a clean, allowlisted environment. Use a restricted runtime key with Tunnels **Read** + **Use**, not an admin key. Private key-file permissions are enforced on Unix. Same-user process inspection and same-user file access remain outside this boundary.
+- **Tunnel secrets are references, not config values**: `openaiTunnel.apiKeyRef` and every `openaiTunnels[].apiKeyRef` accept only `env:NAME` or `file:/path`; literal API keys are rejected. Codexify resolves each value and exposes it only to its tunnel child under a synthetic environment name, while the child receives a clean, allowlisted environment. Use restricted runtime keys with Tunnels **Read** + **Use**, not admin keys. Private key-file permissions are enforced on Unix. Same-user process inspection and same-user file access remain outside this boundary.
 - **Optional bearer token auth in non-native mode**: set `--api-key` to require an `Authorization: Bearer <key>` header on all requests except `/health`. Native mode instead owns its private per-process bearer token. ChatGPT Plugins do not support simple bearer token auth for URL-based connectors.
 - **Host allowlist**: set `allowedHosts` to pin the accepted `Host` header for DNS-rebinding protection. See [Host allowlist](#host-allowlist).
 - **Tool payload logging is explicitly sensitive**: `toolLogging` / `--log-tool-payloads` can retain source code, paths, commands, model output, and data returned by delegated MCP servers. Redaction removes configured and heuristically recognized credentials before byte-bounded truncation; MCP image content-block base64 and resource-link capability URIs are always omitted. Arbitrary sensitive literals still cannot be identified perfectly. Leave the mode `off` unless the operational visibility is worth that exposure, and protect the process logs accordingly.

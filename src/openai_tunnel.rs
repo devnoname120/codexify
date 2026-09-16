@@ -34,6 +34,7 @@ const CHILD_STOP_TIMEOUT: Duration = Duration::from_secs(5);
 const LOG_TAIL_BYTES: u64 = 32 * 1024;
 const DETAIL_MAX_CHARS: usize = 2_000;
 const POLL_SUCCESS_METRIC: &str = "commands_poll_last_successful_timestamp_seconds";
+static MANAGED_CLIENT_INSTALL_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 pub(crate) fn validate_tunnel_id(value: &str) -> anyhow::Result<()> {
     if value.strip_prefix("tunnel_").is_some_and(|suffix| {
@@ -138,6 +139,13 @@ pub async fn start(config: &AppConfig) -> anyhow::Result<RunningOpenAiTunnel> {
         .openai_tunnel
         .as_ref()
         .context("OpenAI tunnel configuration is missing")?;
+    start_for(config, settings).await
+}
+
+pub async fn start_for(
+    config: &AppConfig,
+    settings: &OpenAiTunnelConfig,
+) -> anyhow::Result<RunningOpenAiTunnel> {
     let control_plane_api_key = resolve_key_reference(&settings.api_key_ref)?;
     let internal_mcp_bearer = config
         .api_key
@@ -398,6 +406,10 @@ async fn resolve_client(settings: &OpenAiTunnelConfig) -> anyhow::Result<PathBuf
         validate_client(path, None).await?;
         return Ok(path.clone());
     }
+
+    // Several tunnel clients can start concurrently, but their pinned runtime
+    // is one shared installation under the user's private state directory.
+    let _install_guard = MANAGED_CLIENT_INSTALL_LOCK.lock().await;
 
     let asset = release_asset()?;
     let binary_path = managed_binary_path(&asset.binary_name)?;

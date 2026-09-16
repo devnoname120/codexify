@@ -312,7 +312,7 @@ fn collect_secret_values(
             push_secret(&mut values, value, true);
         }
     }
-    if let Some(tunnel) = config.openai_tunnel.as_ref() {
+    for tunnel in config.configured_openai_tunnels() {
         if let Some(name) = tunnel.api_key_ref.strip_prefix("env:") {
             if let Ok(value) = std::env::var(name) {
                 push_secret(&mut values, &value, false);
@@ -587,6 +587,34 @@ mod tests {
         assert!(!preview.contains("private conversation text"));
         assert!(!preview.contains("private-topic"));
         assert!(!preview.contains("private-notification-token"));
+    }
+
+    #[test]
+    fn every_configured_tunnel_key_is_redacted() {
+        let root = tempfile::tempdir().unwrap();
+        let first = root.path().join("first.key");
+        let second = root.path().join("second.key");
+        std::fs::write(&first, "first-private-test-credential").unwrap();
+        std::fs::write(&second, "second-private-test-credential").unwrap();
+        let mut config = default_config(root.path().to_path_buf());
+        config.openai_tunnel = Some(crate::types::OpenAiTunnelConfig {
+            tunnel_id: "tunnel_0123456789abcdef0123456789abcdef".into(),
+            api_key_ref: format!("file:{}", first.display()),
+            organization_id: None,
+            client_path: None,
+        });
+        config
+            .additional_openai_tunnels
+            .push(crate::types::OpenAiTunnelConfig {
+                tunnel_id: "tunnel_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+                api_key_ref: format!("file:{}", second.display()),
+                organization_id: None,
+                client_path: None,
+            });
+        let text = SecretRedactor::for_tool_logging(&config)
+            .redact_text("first-private-test-credential and second-private-test-credential");
+        assert!(!text.contains("first-private-test-credential"));
+        assert!(!text.contains("second-private-test-credential"));
     }
 
     #[test]

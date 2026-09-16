@@ -620,6 +620,7 @@ struct FileConfig {
     project_catalog: Option<PartialProjectCatalog>,
     allowed_hosts: Option<Vec<String>>,
     openai_tunnel: Option<PartialOpenAiTunnel>,
+    openai_tunnels: Option<Vec<PartialOpenAiTunnel>>,
     mcp_servers: Option<HashMap<String, PartialMcpServerSpec>>,
 }
 
@@ -852,6 +853,7 @@ pub fn default_config(work_dir: std::path::PathBuf) -> AppConfig {
         audit: AuditConfig::default(),
         allowed_hosts: Vec::new(),
         openai_tunnel: None,
+        additional_openai_tunnels: Vec::new(),
         mcp_servers: HashMap::new(),
         generated_skills_dir: None,
     }
@@ -1322,23 +1324,22 @@ fn valid_env_name(value: &str) -> bool {
         && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
 
-fn resolve_api_key_ref(raw: &str) -> Result<String, String> {
+fn resolve_api_key_ref(raw: &str, field: &str) -> Result<String, String> {
     if let Some(name) = raw.strip_prefix("env:") {
         if valid_env_name(name) {
             return Ok(raw.to_string());
         }
-        return Err("openaiTunnel.apiKeyRef has an invalid environment-variable name".into());
+        return Err(format!("{field} has an invalid environment-variable name"));
     }
     if let Some(path) = raw.strip_prefix("file:") {
         if path.trim().is_empty() {
-            return Err("openaiTunnel.apiKeyRef file path is empty".into());
+            return Err(format!("{field} file path is empty"));
         }
         return Ok(format!("file:{}", resolve_path(path).display()));
     }
-    Err(
-        "openaiTunnel.apiKeyRef must be env:NAME or file:/path; literal API keys are rejected"
-            .into(),
-    )
+    Err(format!(
+        "{field} must be env:NAME or file:/path; literal API keys are rejected"
+    ))
 }
 
 fn resolve_openai_tunnel(
@@ -1367,6 +1368,7 @@ fn resolve_openai_tunnel(
             .as_deref()
             .or(file.api_key_ref.as_deref())
             .unwrap_or("env:CONTROL_PLANE_API_KEY"),
+        "openaiTunnel.apiKeyRef",
     )?;
     let client_path = cli
         .openai_tunnel_client
@@ -1392,6 +1394,71 @@ fn resolve_openai_tunnel(
         organization_id,
         client_path,
     }))
+}
+
+fn resolve_openai_tunnels(
+    single: Option<PartialOpenAiTunnel>,
+    multiple: Option<Vec<PartialOpenAiTunnel>>,
+    cli: &Cli,
+) -> Result<(Option<OpenAiTunnelConfig>, Vec<OpenAiTunnelConfig>), String> {
+    let Some(entries) = multiple else {
+        return Ok((resolve_openai_tunnel(single, cli)?, Vec::new()));
+    };
+    if single.is_some()
+        || cli.openai_tunnel_id.is_some()
+        || cli.openai_tunnel_api_key_ref.is_some()
+        || cli.openai_tunnel_client.is_some()
+        || cli.openai_tunnel_organization_id.is_some()
+    {
+        return Err(
+            "openaiTunnels cannot be combined with openaiTunnel or --openai-tunnel-* overrides"
+                .into(),
+        );
+    }
+    if entries.is_empty() || entries.len() > 8 {
+        return Err("openaiTunnels must contain 1 to 8 tunnel configurations".into());
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut resolved = Vec::with_capacity(entries.len());
+    for (index, entry) in entries.into_iter().enumerate() {
+        let field = format!("openaiTunnels[{index}]");
+        let tunnel_id = entry
+            .tunnel_id
+            .ok_or_else(|| format!("{field}.tunnelId is required"))?;
+        validate_tunnel_id(&tunnel_id).map_err(|error| format!("{field}.tunnelId: {error}"))?;
+        if !seen.insert(tunnel_id.clone()) {
+            return Err(format!(
+                "{field}.tunnelId duplicates another configured tunnel"
+            ));
+        }
+        let api_key_ref = resolve_api_key_ref(
+            entry
+                .api_key_ref
+                .as_deref()
+                .ok_or_else(|| format!("{field}.apiKeyRef is required"))?,
+            &format!("{field}.apiKeyRef"),
+        )?;
+        let organization_id = entry
+            .organization_id
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        if organization_id
+            .as_deref()
+            .is_some_and(|value| value.chars().any(char::is_control))
+        {
+            return Err(format!(
+                "{field}.organizationId must not contain control characters"
+            ));
+        }
+        resolved.push(OpenAiTunnelConfig {
+            tunnel_id,
+            api_key_ref,
+            organization_id,
+            client_path: entry.client_path.as_deref().map(resolve_path),
+        });
+    }
+    let mut resolved = resolved.into_iter();
+    Ok((resolved.next(), resolved.collect()))
 }
 
 fn resolve_tool_logging(
@@ -1544,14 +1611,15 @@ fn load_config_with_announcements(
 
     let project_catalog = resolve_project_catalog(&mut file);
     let mcp_servers = resolve_mcp_servers(&mut file, cli, announce)?;
-    let openai_tunnel = resolve_openai_tunnel(file.openai_tunnel, cli)?;
+    let (openai_tunnel, additional_openai_tunnels) =
+        resolve_openai_tunnels(file.openai_tunnel, file.openai_tunnels, cli)?;
     let tool_logging = resolve_tool_logging(file.tool_logging, cli)?;
     let audit = resolve_audit(file.audit, cli)?;
     let worktrees = resolve_worktree_config(file.worktrees.take(), cli, announce);
     let api_key = cli.api_key.clone().or(file.api_key);
     if api_key.is_some() && openai_tunnel.is_some() {
         return Err(
-            "apiKey/--api-key cannot be combined with openaiTunnel: native tunnel mode generates a private per-process bearer for the loopback MCP hop"
+            "apiKey/--api-key cannot be combined with openaiTunnel or openaiTunnels: native tunnel mode generates a private per-process bearer for the loopback MCP hop"
                 .into(),
         );
     }
@@ -1599,6 +1667,7 @@ fn load_config_with_announcements(
         audit,
         allowed_hosts: file.allowed_hosts.unwrap_or_default(),
         openai_tunnel,
+        additional_openai_tunnels,
         mcp_servers,
         generated_skills_dir: None,
     };
@@ -2011,7 +2080,7 @@ mod tests {
         let default: serde_json::Value = serde_json::from_str(&default_raw).unwrap();
         let example: serde_json::Value = serde_json::from_str(&example_raw).unwrap();
 
-        let top_level = [
+        let common_top_level = [
             "allowedHosts",
             "apiKey",
             "artifactEgress",
@@ -2029,7 +2098,6 @@ mod tests {
             "mcpServers",
             "memory",
             "multiProject",
-            "openaiTunnel",
             "output",
             "port",
             "projectCatalog",
@@ -2043,8 +2111,12 @@ mod tests {
             "workDir",
             "worktrees",
         ];
-        assert_keys(&default, "codexify.config.json", &top_level);
-        assert_keys(&example, "codexify.config.example.json", &top_level);
+        let mut default_top_level = common_top_level.to_vec();
+        default_top_level.push("openaiTunnel");
+        assert_keys(&default, "codexify.config.json", &default_top_level);
+        let mut example_top_level = common_top_level.to_vec();
+        example_top_level.push("openaiTunnels");
+        assert_keys(&example, "codexify.config.example.json", &example_top_level);
 
         for (path, keys) in [
             (
@@ -2146,11 +2218,19 @@ mod tests {
             "projectCatalog.entries[]",
             &["aliases", "description", "name", "path"],
         );
-        assert_keys(
-            &example["openaiTunnel"],
-            "openaiTunnel",
-            &["apiKeyRef", "clientPath", "organizationId", "tunnelId"],
-        );
+        assert_eq!(example["openaiTunnels"].as_array().unwrap().len(), 2);
+        for (index, tunnel) in example["openaiTunnels"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .enumerate()
+        {
+            assert_keys(
+                tunnel,
+                &format!("openaiTunnels[{index}]"),
+                &["apiKeyRef", "clientPath", "organizationId", "tunnelId"],
+            );
+        }
         let mcp_server_fields = [
             "args",
             "bearerTokenEnvVar",
@@ -3351,10 +3431,94 @@ mod tests {
         .unwrap();
 
         let config = load_config(cli(root.path(), &config_path)).unwrap();
+        assert!(config.additional_openai_tunnels.is_empty());
         let tunnel = config.openai_tunnel.unwrap();
         assert_eq!(tunnel.tunnel_id, "tunnel_0123456789abcdef0123456789abcdef");
         assert_eq!(tunnel.api_key_ref, "env:CONTROL_PLANE_API_KEY");
         assert!(tunnel.client_path.is_none());
+    }
+
+    #[test]
+    fn loads_distinct_native_tunnel_pairs_without_rewriting_the_config() {
+        let root = tempfile::tempdir().unwrap();
+        let config_path = root.path().join("config.json");
+        let source = serde_json::to_vec_pretty(&json!({
+            "schemaVersion": 1,
+            "codexMcp": {"useCli": false},
+            "openaiTunnel": null,
+            "openaiTunnels": [
+                {"tunnelId":"tunnel_0123456789abcdef0123456789abcdef", "apiKeyRef":"env:FIRST_KEY"},
+                {"tunnelId":"tunnel_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "apiKeyRef":"file:second.key", "organizationId":"org_second", "clientPath":"bin/tunnel-client"}
+            ]
+        })).unwrap();
+        std::fs::write(&config_path, &source).unwrap();
+
+        let config = load_config(cli(root.path(), &config_path)).unwrap();
+        let tunnels = config.configured_openai_tunnels().collect::<Vec<_>>();
+        assert_eq!(tunnels.len(), 2);
+        assert_eq!(tunnels[0].api_key_ref, "env:FIRST_KEY");
+        assert_eq!(
+            tunnels[1].tunnel_id,
+            "tunnel_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
+        assert_eq!(tunnels[1].organization_id.as_deref(), Some("org_second"));
+        assert_eq!(
+            tunnels[1].api_key_ref,
+            format!(
+                "file:{}",
+                std::env::current_dir()
+                    .unwrap()
+                    .join("second.key")
+                    .display()
+            )
+        );
+        assert_eq!(std::fs::read(&config_path).unwrap(), source);
+    }
+
+    #[test]
+    fn rejects_ambiguous_or_incomplete_native_tunnel_lists() {
+        let root = tempfile::tempdir().unwrap();
+        let config_path = root.path().join("config.json");
+        let first = json!({"tunnelId":"tunnel_0123456789abcdef0123456789abcdef", "apiKeyRef":"env:FIRST_KEY"});
+        for (entries, expected) in [
+            (json!([]), "1 to 8"),
+            (json!(vec![first.clone(); 9]), "1 to 8"),
+            (json!([first.clone(), first.clone()]), "duplicates"),
+            (
+                json!([{"tunnelId":"tunnel_0123456789abcdef0123456789abcdef"}]),
+                "apiKeyRef is required",
+            ),
+            (
+                json!([{"tunnelId":"tunnel_0123456789abcdef0123456789abcdef","apiKeyRef":"sk-literal-test-key"}]),
+                "literal API keys are rejected",
+            ),
+        ] {
+            std::fs::write(
+                &config_path,
+                serde_json::to_vec(
+                    &json!({"schemaVersion":1,"codexMcp":{"useCli":false},"openaiTunnels":entries}),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            let error = load_config(cli(root.path(), &config_path)).unwrap_err();
+            assert!(error.contains(expected), "{error}");
+            assert!(!error.contains("sk-literal-test-key"));
+        }
+        std::fs::write(&config_path, serde_json::to_vec(&json!({"schemaVersion":1,"codexMcp":{"useCli":false},"openaiTunnel":first,"openaiTunnels":[{"tunnelId":"tunnel_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","apiKeyRef":"env:SECOND_KEY"}]})).unwrap()).unwrap();
+        let error = load_config(cli(root.path(), &config_path)).unwrap_err();
+        assert!(error.contains("cannot be combined"), "{error}");
+        std::fs::write(&config_path, serde_json::to_vec(&json!({"schemaVersion":1,"codexMcp":{"useCli":false},"openaiTunnels":[{"tunnelId":"tunnel_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","apiKeyRef":"env:SECOND_KEY"}]})).unwrap()).unwrap();
+        let mut args = cli(root.path(), &config_path);
+        args.openai_tunnel_id = Some("tunnel_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into());
+        let error = load_config(args).unwrap_err();
+        assert!(error.contains("cannot be combined"), "{error}");
+        std::fs::write(&config_path, serde_json::to_vec(&json!({"schemaVersion":1,"codexMcp":{"useCli":false},"apiKey":"local-token","openaiTunnels":[{"tunnelId":"tunnel_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","apiKeyRef":"env:SECOND_KEY"}]})).unwrap()).unwrap();
+        let error = load_config(cli(root.path(), &config_path)).unwrap_err();
+        assert!(
+            error.contains("cannot be combined with openaiTunnel"),
+            "{error}"
+        );
     }
 
     #[test]

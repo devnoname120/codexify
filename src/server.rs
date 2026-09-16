@@ -9,8 +9,8 @@
 //! UI resources remain presentation-only.
 
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use axum::{Router, extract::State, http::StatusCode, response::Json, routing::get};
@@ -957,25 +957,44 @@ impl ServerHandler for CodexHandler {
 struct HealthState {
     tool_count: usize,
     ready: Arc<AtomicBool>,
+    multi_tunnel: Option<(Arc<TunnelAvailability>, usize)>,
 }
 
 async fn health(State(state): State<HealthState>) -> (StatusCode, Json<Value>) {
-    if state.ready.load(Ordering::Acquire) {
-        (
-            StatusCode::OK,
-            Json(json!({ "status": "ok", "tools": state.tool_count })),
-        )
+    let tunnel_counts = state
+        .multi_tunnel
+        .as_ref()
+        .map(|(availability, configured)| {
+            (
+                *availability
+                    .active
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()),
+                *configured,
+            )
+        });
+    let is_ready = tunnel_counts.as_ref().map_or_else(
+        || state.ready.load(Ordering::Acquire),
+        |(active, _)| *active > 0,
+    );
+    let mut payload = json!({
+        "status": if is_ready { "ok" } else { "starting" },
+        "tools": state.tool_count,
+    });
+    if let Some((active, configured)) = tunnel_counts {
+        payload["tunnelsReady"] = json!(active);
+        payload["tunnelsConfigured"] = json!(configured);
+    }
+    if is_ready {
+        (StatusCode::OK, Json(payload))
     } else {
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({ "status": "starting", "tools": state.tool_count })),
-        )
+        (StatusCode::SERVICE_UNAVAILABLE, Json(payload))
     }
 }
 
 /// Build the axum app and serve it. Ports `startHttpServer`.
 pub async fn start_http_server(mut config: AppConfig) -> anyhow::Result<()> {
-    let native_tunnel = config.openai_tunnel.is_some();
+    let native_tunnel = config.configured_openai_tunnels().next().is_some();
     if native_tunnel {
         if config.api_key.is_some() {
             anyhow::bail!("native tunnel mode cannot use a caller-supplied local MCP API key");
@@ -1058,6 +1077,12 @@ pub async fn start_http_server(mut config: AppConfig) -> anyhow::Result<()> {
     let tools = Arc::new(all_tools);
     let tool_count = tools.len();
     let ready = Arc::new(AtomicBool::new(!native_tunnel));
+    let multi_availability = (!config.additional_openai_tunnels.is_empty()).then(|| {
+        Arc::new(TunnelAvailability {
+            active: Mutex::new(0),
+            ready: ready.clone(),
+        })
+    });
 
     // Streamable HTTP transport config. `json_response` mirrors the TS
     // `enableJsonResponse: true` so simple request/response tools return
@@ -1121,6 +1146,12 @@ pub async fn start_http_server(mut config: AppConfig) -> anyhow::Result<()> {
         .with_state(HealthState {
             tool_count,
             ready: ready.clone(),
+            multi_tunnel: multi_availability.as_ref().map(|availability| {
+                (
+                    availability.clone(),
+                    config.configured_openai_tunnels().count(),
+                )
+            }),
         })
         .nest_service("/mcp", service)
         .layer(axum::middleware::from_fn_with_state(
@@ -1224,8 +1255,23 @@ pub async fn start_http_server(mut config: AppConfig) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    println!("Exposure: loopback only; starting OpenAI Secure MCP Tunnel");
-    run_with_openai_tunnel(listener, app, config, mcp_cancellation, ready).await
+    if config.additional_openai_tunnels.is_empty() {
+        println!("Exposure: loopback only; starting OpenAI Secure MCP Tunnel");
+        run_with_openai_tunnel(listener, app, config, mcp_cancellation, ready).await
+    } else {
+        println!(
+            "Exposure: loopback only; starting {} OpenAI Secure MCP Tunnels",
+            config.configured_openai_tunnels().count()
+        );
+        run_with_openai_tunnels(
+            listener,
+            app,
+            config,
+            mcp_cancellation,
+            multi_availability.expect("multi-tunnel availability initialized"),
+        )
+        .await
+    }
 }
 
 /// What ended a supervision cycle for a running tunnel. Terminal events (server
@@ -1458,6 +1504,235 @@ async fn run_with_openai_tunnel(
                     ).await?;
                     return Ok(());
                 }
+            }
+        }
+    }
+}
+
+struct TunnelAvailability {
+    active: Mutex<usize>,
+    ready: Arc<AtomicBool>,
+}
+
+struct TunnelReadyPermit {
+    availability: Arc<TunnelAvailability>,
+    active: bool,
+}
+
+impl TunnelReadyPermit {
+    fn new(availability: Arc<TunnelAvailability>) -> Self {
+        Self {
+            availability,
+            active: false,
+        }
+    }
+
+    fn mark_ready(&mut self) {
+        if self.active {
+            return;
+        }
+        let mut active = self
+            .availability
+            .active
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *active += 1;
+        self.active = true;
+        self.availability.ready.store(true, Ordering::Release);
+    }
+
+    fn mark_down(&mut self) {
+        if !self.active {
+            return;
+        }
+        let mut active = self
+            .availability
+            .active
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *active -= 1;
+        self.active = false;
+        self.availability
+            .ready
+            .store(*active > 0, Ordering::Release);
+    }
+}
+
+impl Drop for TunnelReadyPermit {
+    fn drop(&mut self) {
+        self.mark_down();
+    }
+}
+
+async fn wait_for_tunnel_retry(
+    label: &str,
+    reason: &str,
+    window: &mut Vec<Instant>,
+    cancellation: &CancellationToken,
+) -> anyhow::Result<bool> {
+    let attempt = record_restart(window, Instant::now());
+    if attempt >= TUNNEL_BREAKER_MAX_RESTARTS {
+        anyhow::bail!(
+            "tunnel {label} restarted {} times within {}s; giving up ({reason})",
+            attempt - 1,
+            TUNNEL_BREAKER_WINDOW.as_secs()
+        );
+    }
+    let backoff = restart_backoff(attempt);
+    tracing::warn!(
+        "tunnel {label} down; restart attempt {attempt} in {}s: {reason}",
+        backoff.as_secs()
+    );
+    tokio::select! {
+        _ = tokio::time::sleep(backoff) => Ok(true),
+        _ = cancellation.cancelled() => Ok(false),
+    }
+}
+
+async fn supervise_one_tunnel(
+    config: Arc<AppConfig>,
+    settings: crate::types::OpenAiTunnelConfig,
+    label: String,
+    availability: Arc<TunnelAvailability>,
+    cancellation: CancellationToken,
+) -> anyhow::Result<()> {
+    let health_client = crate::openai_tunnel::build_health_client()?;
+    let mut permit = TunnelReadyPermit::new(availability);
+    let mut restart_window = Vec::new();
+
+    loop {
+        let start = crate::openai_tunnel::start_for(&config, &settings);
+        tokio::pin!(start);
+        let mut tunnel = match tokio::select! {
+            _ = cancellation.cancelled() => return Ok(()),
+            started = &mut start => started,
+        } {
+            Ok(tunnel) => tunnel,
+            Err(error) => {
+                let reason = format!("startup failed: {error:#}");
+                if !wait_for_tunnel_retry(&label, &reason, &mut restart_window, &cancellation)
+                    .await?
+                {
+                    return Ok(());
+                }
+                continue;
+            }
+        };
+        permit.mark_ready();
+        println!(
+            "OpenAI Secure MCP Tunnel {label}: ready; {}/readyz",
+            tunnel.health_url()
+        );
+        let mut health_interval = tokio::time::interval(TUNNEL_HEALTH_INTERVAL);
+        health_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        health_interval.tick().await;
+        let mut consecutive_failures = 0_u32;
+
+        let reason = loop {
+            let event = tokio::select! {
+                _ = cancellation.cancelled() => {
+                    permit.mark_down();
+                    return tunnel.shutdown().await;
+                }
+                error = tunnel.wait_for_exit() => SuperviseEvent::Died(format!("{error:#}")),
+                _ = health_interval.tick() => SuperviseEvent::HealthTick,
+            };
+            match event {
+                SuperviseEvent::Died(reason) => break reason,
+                SuperviseEvent::HealthTick => match tunnel.check_health(&health_client).await {
+                    TunnelHealth::Healthy => consecutive_failures = 0,
+                    TunnelHealth::Unhealthy(detail) | TunnelHealth::Unreachable(detail) => {
+                        consecutive_failures += 1;
+                        tracing::warn!(
+                            "tunnel {label} health probe failed ({consecutive_failures}/{TUNNEL_HEALTH_FAIL_THRESHOLD}): {detail}"
+                        );
+                        if consecutive_failures >= TUNNEL_HEALTH_FAIL_THRESHOLD {
+                            break format!(
+                                "health probe failed {consecutive_failures} consecutive times: {detail}"
+                            );
+                        }
+                    }
+                },
+            }
+        };
+        permit.mark_down();
+        let _ = tunnel.shutdown().await;
+        if !wait_for_tunnel_retry(&label, &reason, &mut restart_window, &cancellation).await? {
+            return Ok(());
+        }
+    }
+}
+
+async fn stop_tunnel_supervisors(
+    tasks: &mut tokio::task::JoinSet<anyhow::Result<()>>,
+    cancellation: &CancellationToken,
+) {
+    cancellation.cancel();
+    if tokio::time::timeout(HTTP_SERVER_STOP_TIMEOUT, async {
+        while tasks.join_next().await.is_some() {}
+    })
+    .await
+    .is_err()
+    {
+        tasks.abort_all();
+        while tasks.join_next().await.is_some() {}
+    }
+}
+
+async fn run_with_openai_tunnels(
+    listener: tokio::net::TcpListener,
+    app: Router,
+    config: Arc<AppConfig>,
+    mcp_cancellation: CancellationToken,
+    availability: Arc<TunnelAvailability>,
+) -> anyhow::Result<()> {
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let mut shutdown_tx = Some(shutdown_tx);
+    let mut server_task = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async move {
+                let _ = shutdown_rx.await;
+            })
+            .await
+    });
+    tokio::task::yield_now().await;
+    let cancellation = CancellationToken::new();
+    let mut tasks = tokio::task::JoinSet::new();
+    for (index, settings) in config.configured_openai_tunnels().cloned().enumerate() {
+        let config = config.clone();
+        let availability = availability.clone();
+        let cancellation = cancellation.clone();
+        let label = format!("#{}", index + 1);
+        tasks.spawn(async move {
+            supervise_one_tunnel(config, settings, label, availability, cancellation).await
+        });
+    }
+    println!(
+        "For each ChatGPT account, select its configured tunnel in a developer-mode connector with Authentication: None."
+    );
+
+    loop {
+        tokio::select! {
+            server_result = &mut server_task => {
+                stop_tunnel_supervisors(&mut tasks, &cancellation).await;
+                return flatten_server_result(server_result);
+            }
+            supervisor_result = tasks.join_next() => {
+                match supervisor_result {
+                    Some(Ok(Err(error))) => tracing::error!("OpenAI tunnel supervisor stopped: {error:#}"),
+                    Some(Err(error)) => tracing::error!("OpenAI tunnel supervisor failed: {error}"),
+                    Some(Ok(Ok(()))) => tracing::warn!("OpenAI tunnel supervisor stopped unexpectedly"),
+                    None => {}
+                }
+                if tasks.is_empty() {
+                    stop_http_server(&mut shutdown_tx, &mcp_cancellation, server_task, HTTP_SERVER_STOP_TIMEOUT).await?;
+                    anyhow::bail!("all configured OpenAI tunnel supervisors stopped");
+                }
+            }
+            _ = shutdown_signal() => {
+                stop_tunnel_supervisors(&mut tasks, &cancellation).await;
+                stop_http_server(&mut shutdown_tx, &mcp_cancellation, server_task, HTTP_SERVER_STOP_TIMEOUT).await?;
+                return Ok(());
             }
         }
     }
@@ -2831,12 +3106,125 @@ mod tests {
         assert_eq!(restart_backoff(100), TUNNEL_RESTART_BACKOFF_MAX);
     }
 
+    #[test]
+    fn multiple_tunnels_keep_health_ready_until_the_last_one_goes_down() {
+        let ready = Arc::new(AtomicBool::new(false));
+        let availability = Arc::new(TunnelAvailability {
+            active: Mutex::new(0),
+            ready: ready.clone(),
+        });
+        let mut first = TunnelReadyPermit::new(availability.clone());
+        let mut second = TunnelReadyPermit::new(availability);
+        first.mark_ready();
+        second.mark_ready();
+        assert!(ready.load(Ordering::Acquire));
+        first.mark_down();
+        assert!(ready.load(Ordering::Acquire));
+        drop(second);
+        assert!(!ready.load(Ordering::Acquire));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn failed_tunnel_supervisor_does_not_stop_a_healthy_peer() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let health_url = format!(
+            "http://127.0.0.1:{}/",
+            listener.local_addr().unwrap().port()
+        );
+        let health = Router::new()
+            .route("/readyz", get(|| async { "ready" }))
+            .route(
+                "/metrics",
+                get(|| async { "commands_poll_last_successful_timestamp_seconds 1\n" }),
+            );
+        let health_task = tokio::spawn(async move {
+            axum::serve(listener, health).await.unwrap();
+        });
+        let key = root.path().join("key");
+        std::fs::write(&key, "TEST_RUNTIME_KEY").unwrap();
+        std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let make_client = |name: &str, fail: bool| {
+            let path = root.path().join(name);
+            let run = if fail {
+                "exit 1".to_string()
+            } else {
+                format!(
+                    "while [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = \"--health.url-file\" ]; then shift; printf '%s' '{}' > \"$1\"; break; fi\n  shift\ndone\nexec sleep 60",
+                    health_url
+                )
+            };
+            std::fs::write(&path, format!("#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 0.0.12; exit 0; fi\nif [ \"$1\" = \"run\" ] && [ \"$2\" = \"--help\" ]; then echo '--control-plane.tunnel-id --mcp.server-url --mcp.extra-headers --mcp.discovery-extra-headers --health.url-file'; exit 0; fi\n{run}\n")).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+            path
+        };
+        let good_client = make_client("good-client", false);
+        let bad_client = make_client("bad-client", true);
+        let mut config = crate::config::default_config(root.path().to_path_buf());
+        config.api_key = Some("TEST_INTERNAL_BEARER".into());
+        let config = Arc::new(config);
+        let availability = Arc::new(TunnelAvailability {
+            active: Mutex::new(0),
+            ready: Arc::new(AtomicBool::new(false)),
+        });
+        let cancellation = CancellationToken::new();
+        let settings = |tunnel_id: &str, client_path| crate::types::OpenAiTunnelConfig {
+            tunnel_id: tunnel_id.into(),
+            api_key_ref: format!("file:{}", key.display()),
+            organization_id: None,
+            client_path: Some(client_path),
+        };
+        let good = tokio::spawn(supervise_one_tunnel(
+            config.clone(),
+            settings("tunnel_0123456789abcdef0123456789abcdef", good_client),
+            "#1".into(),
+            availability.clone(),
+            cancellation.clone(),
+        ));
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !availability.ready.load(Ordering::Acquire) {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let bad = tokio::spawn(supervise_one_tunnel(
+            config,
+            settings("tunnel_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", bad_client),
+            "#2".into(),
+            availability.clone(),
+            cancellation.clone(),
+        ));
+        let failure = tokio::time::timeout(Duration::from_secs(30), bad)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(failure.is_err());
+        assert!(availability.ready.load(Ordering::Acquire));
+        cancellation.cancel();
+        assert!(
+            tokio::time::timeout(Duration::from_secs(10), good)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_ok()
+        );
+        assert!(!availability.ready.load(Ordering::Acquire));
+        health_task.abort();
+    }
+
     #[tokio::test]
     async fn health_reports_tunnel_readiness() {
         let ready = Arc::new(AtomicBool::new(false));
         let state = HealthState {
             tool_count: 38,
             ready: ready.clone(),
+            multi_tunnel: None,
         };
 
         let (status, Json(payload)) = health(State(state.clone())).await;
@@ -2847,5 +3235,29 @@ mod tests {
         let (status, Json(payload)) = health(State(state)).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(payload, json!({ "status": "ok", "tools": 38 }));
+    }
+
+    #[tokio::test]
+    async fn health_exposes_partial_multi_tunnel_availability() {
+        let ready = Arc::new(AtomicBool::new(false));
+        let availability = Arc::new(TunnelAvailability {
+            active: Mutex::new(0),
+            ready: ready.clone(),
+        });
+        let state = HealthState {
+            tool_count: 38,
+            ready,
+            multi_tunnel: Some((availability.clone(), 2)),
+        };
+        let (code, Json(payload)) = health(State(state.clone())).await;
+        assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(payload["tunnelsReady"], 0);
+        assert_eq!(payload["tunnelsConfigured"], 2);
+        let mut first = TunnelReadyPermit::new(availability);
+        first.mark_ready();
+        let (code, Json(payload)) = health(State(state)).await;
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(payload["tunnelsReady"], 1);
+        assert_eq!(payload["tunnelsConfigured"], 2);
     }
 }

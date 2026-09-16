@@ -806,52 +806,85 @@ async fn health_check(
 }
 
 fn tunnel_credential_check(config: &AppConfig) -> DoctorCheck {
-    let Some(settings) = config.openai_tunnel.as_ref() else {
+    let tunnels = config.configured_openai_tunnels().collect::<Vec<_>>();
+    if tunnels.is_empty() {
         return DoctorCheck::skipped(
             "openai_tunnel_credential",
             "OpenAI tunnel mode is not configured",
         );
-    };
-    match openai_tunnel::validate_key_reference(&settings.api_key_ref) {
-        Ok(()) => DoctorCheck::pass(
+    }
+    let failures = tunnels
+        .iter()
+        .filter_map(|settings| {
+            openai_tunnel::validate_key_reference(&settings.api_key_ref)
+                .err()
+                .map(|error| format!("{}: {error:#}", settings.tunnel_id))
+        })
+        .collect::<Vec<_>>();
+    if failures.is_empty() {
+        DoctorCheck::pass(
             "openai_tunnel_credential",
-            "OpenAI tunnel credential reference is usable",
+            "OpenAI tunnel credential references are usable",
         )
-        .with_detail(settings.api_key_ref.clone()),
-        Err(error) => DoctorCheck::failure(
+        .with_detail(if tunnels.len() == 1 {
+            tunnels[0].api_key_ref.clone()
+        } else {
+            format!("{} tunnel credential references checked", tunnels.len())
+        })
+    } else {
+        DoctorCheck::failure(
             "openai_tunnel_credential",
             "OpenAI tunnel credential reference is unusable",
         )
-        .with_detail(format!("{error:#}"))
-        .with_remediation("Correct openaiTunnel.apiKeyRef or provide its referenced secret"),
+        .with_detail(failures.join("; "))
+        .with_remediation(
+            "Correct each openaiTunnel/openaiTunnels apiKeyRef or provide its referenced secret",
+        )
     }
 }
 
 async fn tunnel_runtime_check(config: &AppConfig) -> DoctorCheck {
-    let Some(settings) = config.openai_tunnel.as_ref() else {
+    let tunnels = config.configured_openai_tunnels().collect::<Vec<_>>();
+    if tunnels.is_empty() {
         return DoctorCheck::skipped(
             "openai_tunnel_runtime",
             "OpenAI tunnel mode is not configured",
         );
-    };
-    match openai_tunnel::inspect_runtime(settings).await {
-        Ok(TunnelRuntimeInspection::Ready(path)) => DoctorCheck::pass(
+    }
+    let mut ready_paths = Vec::new();
+    let mut missing = Vec::new();
+    let mut failures = Vec::new();
+    for settings in tunnels {
+        match openai_tunnel::inspect_runtime(settings).await {
+            Ok(TunnelRuntimeInspection::Ready(path)) => ready_paths.push(path),
+            Ok(TunnelRuntimeInspection::MissingManaged(path)) => missing.push(path),
+            Err(error) => failures.push(format!("{}: {error:#}", settings.tunnel_id)),
+        }
+    }
+    if !failures.is_empty() {
+        DoctorCheck::failure(
             "openai_tunnel_runtime",
-            "OpenAI tunnel runtime is compatible",
+            "OpenAI tunnel runtime is incomplete or incompatible",
         )
-        .with_detail(path.display().to_string()),
-        Ok(TunnelRuntimeInspection::MissingManaged(path)) => DoctorCheck::warning(
+        .with_detail(failures.join("; "))
+        .with_remediation("Repair or remove the configured tunnel runtime, then restart Codexify")
+    } else if let Some(path) = missing.first() {
+        DoctorCheck::warning(
             "openai_tunnel_runtime",
             "Managed OpenAI tunnel runtime is not installed yet",
         )
         .with_detail(path.display().to_string())
-        .with_remediation("Start Codexify normally to install the pinned verified tunnel runtime"),
-        Err(error) => DoctorCheck::failure(
+        .with_remediation("Start Codexify normally to install the pinned verified tunnel runtime")
+    } else {
+        DoctorCheck::pass(
             "openai_tunnel_runtime",
-            "OpenAI tunnel runtime is incomplete or incompatible",
+            "OpenAI tunnel runtime is compatible",
         )
-        .with_detail(format!("{error:#}"))
-        .with_remediation("Repair or remove the configured tunnel runtime, then restart Codexify"),
+        .with_detail(if ready_paths.len() == 1 {
+            ready_paths[0].display().to_string()
+        } else {
+            format!("{} compatible tunnel runtimes checked", ready_paths.len())
+        })
     }
 }
 
@@ -970,9 +1003,49 @@ pub async fn run_for_config(config: &AppConfig) -> DoctorReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::default_config;
     use crate::self_update::{LatestVersionInspection, LatestVersionSource, LatestVersionStatus};
+    use crate::types::OpenAiTunnelConfig;
     use semver::Version;
     use std::path::Path;
+
+    #[test]
+    fn doctor_checks_every_tunnel_credential_reference() {
+        let root = tempfile::tempdir().unwrap();
+        let first = root.path().join("first.key");
+        let second = root.path().join("second.key");
+        std::fs::write(&first, "FIRST_TEST_KEY").unwrap();
+        std::fs::write(&second, "SECOND_TEST_KEY").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&first, std::fs::Permissions::from_mode(0o600)).unwrap();
+            std::fs::set_permissions(&second, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let mut config = default_config(root.path().to_path_buf());
+        config.openai_tunnel = Some(OpenAiTunnelConfig {
+            tunnel_id: "tunnel_0123456789abcdef0123456789abcdef".into(),
+            api_key_ref: format!("file:{}", first.display()),
+            organization_id: None,
+            client_path: None,
+        });
+        config.additional_openai_tunnels.push(OpenAiTunnelConfig {
+            tunnel_id: "tunnel_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            api_key_ref: format!("file:{}", second.display()),
+            organization_id: None,
+            client_path: None,
+        });
+        assert_eq!(tunnel_credential_check(&config).status, DoctorStatus::Pass);
+        std::fs::remove_file(second).unwrap();
+        let check = tunnel_credential_check(&config);
+        assert_eq!(check.status, DoctorStatus::Failure);
+        assert!(
+            check
+                .detail
+                .unwrap()
+                .contains("tunnel_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        );
+    }
 
     #[test]
     fn report_counts_statuses_and_renders_each_check() {

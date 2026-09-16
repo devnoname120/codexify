@@ -787,6 +787,10 @@ The native tunnel is a supervised sidecar, not a second MCP implementation.
 Codexify continues to serve its existing Streamable HTTP endpoint, while the
 official OpenAI `tunnel-client-runtime` forwards tunnel commands to
 `http://127.0.0.1:<port>/mcp`.
+The legacy `openaiTunnel` object runs one sidecar. An `openaiTunnels` list runs
+up to eight sidecars against that same authenticated listener, each with its
+own tunnel ID and runtime-key reference. Runtime installation is serialized so
+concurrent clients cannot race on the shared verified binary.
 
 Startup is ordered and fail-closed:
 
@@ -807,13 +811,17 @@ Startup is ordered and fail-closed:
    success and the labeled
    `commands_poll_last_successful_timestamp_seconds` metric must be non-zero.
 
-The Codexify `/health` endpoint returns success only after this startup sequence
-has completed. It returns `503 Service Unavailable` while the native tunnel is
-starting or is known to be unhealthy, and returns to success after supervision
-restores the tunnel. Non-tunnel mode is ready as soon as the HTTP listener starts.
+The Codexify `/health` endpoint returns success once a native tunnel is ready.
+With several configured tunnels, independent supervisors keep healthy accounts
+online while retrying failed ones; health returns `503 Service Unavailable`
+only when none are ready and includes ready/configured tunnel counts to expose
+partial availability. Single-tunnel behavior retains its existing failure
+semantics. Non-tunnel mode is ready as soon as the HTTP listener starts.
 
-Codexify watches the HTTP server, tunnel child, `SIGINT`, and `SIGTERM`
-concurrently. Failure of either process shuts down the other. Normal shutdown
+Codexify watches the HTTP server, tunnel children, `SIGINT`, and `SIGTERM`
+concurrently. A single-tunnel failure shuts down the service after its restart
+breaker trips; in multi-tunnel mode each child has its own breaker and the
+server shuts down only if all supervisors stop. Normal shutdown
 sends `SIGTERM` on Unix, waits under a deadline, then force-kills if necessary;
 Windows uses the child-process kill path. The MCP cancellation token and Axum
 graceful-shutdown signal are triggered together; lingering HTTP connections are

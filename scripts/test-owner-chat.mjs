@@ -4,7 +4,7 @@ import { createRequire } from "node:module";
 import test from "node:test";
 import { chatHtml } from "./chat-widget-source.mjs";
 
-const { chromium } = createRequire(import.meta.url)("playwright");
+const { chromium, webkit } = createRequire(import.meta.url)("playwright");
 const META = "io.github.devnoname120/codexify/markdown-chat";
 const section = (text, opening, closing) => text.split(opening)[1].split(closing)[0];
 const style = section(chatHtml, "<style>", "</style>")
@@ -18,8 +18,9 @@ const ownerHtml = readFileSync(new URL("../src/owner_chat.html", import.meta.url
   .replace("<!-- CHAT_TEMPLATE -->", `<template id="chat-template"><style>${style}\n#chat { max-width:none; height:100%; border:0; border-radius:0; display:flex; flex-direction:column; } #panel { display:flex; flex:1; min-height:0; flex-direction:column; } #panel[hidden] { display:none; } #messages { flex:1; max-height:none; min-height:0; }\n</style>${widgetBody}</template>`)
   .replace("/* CHAT_SCRIPT */", widgetScript);
 
-test("standalone owner view lists and switches live conversations using the shared widget", { timeout:30000 }, async () => {
-  const browser = await chromium.launch();
+for (const [engineName, engine] of [["Chromium", chromium], ["WebKit", webkit]]) {
+test(`${engineName}: standalone owner view restores its URL selection`, { timeout:30000 }, async () => {
+  const browser = await engine.launch();
   try {
     const page = await browser.newPage();
     const errors = [];
@@ -60,19 +61,40 @@ test("standalone owner view lists and switches live conversations using the shar
     });
     await page.goto("http://127.0.0.1:43210/#test-token");
     await page.getByRole("button", { name:/Fix tests/ }).waitFor();
+    assert.equal(new URL(page.url()).hash, "", "the access token must leave the address bar");
     assert.deepEqual(await page.locator(".conversation-title").allTextContents(), ["Fix tests", "Review files", "Old task"]);
     assert.deepEqual(await page.locator(".presence").evaluateAll(nodes => nodes.map(node => [...node.classList].at(-1))), ["online", "away", "offline"]);
     assert.equal(await page.locator(".unread:not([hidden])").count(), 3);
     await page.getByRole("button", { name:/Fix tests/ }).click();
+    assert.equal(new URL(page.url()).searchParams.get("chat"), chats[0].id);
     const chat = page.locator("#chat-host").locator("div").first().locator("#draft");
     await chat.fill("Please run the test suite");
     await chat.press("Enter");
     await page.locator("#chat-host").getByText("Please run the test suite").waitFor();
     await page.getByRole("button", { name:/Review files/ }).click();
+    assert.equal(new URL(page.url()).searchParams.get("chat"), chats[1].id);
     await page.locator("#chat-host").getByText("Please run the test suite").waitFor({ state:"hidden" });
-    await page.getByRole("button", { name:/Fix tests/ }).click();
+    await page.goBack();
     await page.locator("#chat-host").getByText("Please run the test suite").waitFor();
+    assert.equal(new URL(page.url()).searchParams.get("chat"), chats[0].id);
+    await page.goBack();
+    await page.locator("#placeholder").waitFor();
+    assert.equal(new URL(page.url()).searchParams.get("chat"), null);
+    await page.goForward();
+    await page.locator("#chat-host").getByText("Please run the test suite").waitFor();
+    await page.goForward();
+    await page.locator("#chat-host").getByText("Please run the test suite").waitFor({ state:"hidden" });
+    await page.reload();
+    await page.locator('.conversation[aria-current="true"] .conversation-title').getByText("Review files").waitFor();
+    await page.locator("#chat-host #draft").waitFor();
+    assert.equal(new URL(page.url()).searchParams.get("chat"), chats[1].id);
+    await page.evaluate(() => sessionStorage.clear());
+    await page.goto(`http://127.0.0.1:43210/?chat=${chats[0].id}#test-token`);
+    await page.locator("#chat-host").getByText("Please run the test suite").waitFor();
+    assert.equal(new URL(page.url()).searchParams.get("chat"), chats[0].id);
+    assert.equal(new URL(page.url()).hash, "");
     assert(seenRequests.length > 0 && seenRequests.every(value => value === "Bearer test-token"));
     assert.deepEqual(errors, []);
   } finally { await browser.close(); }
 });
+}
