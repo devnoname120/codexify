@@ -1507,9 +1507,7 @@ large tool results. Historical `read_file` and `grep` results keep their normal
 pagination and output limits.
 
 The agent brief directs questions, progress, and completion reports to
-`chat_write`, and directs blocked or idle agents to `chat_await` rather than
-voluntarily ending their turn. Timeouts request another wait until a reply
-arrives. Explicit user stop/disable instructions, cancellation, and higher-priority
+`chat_write`, and directs blocked or idle agents to `chat_await` rather than ending their turn. Timeouts request another wait until a reply arrives. Explicit user stop/disable instructions, cancellation, and higher-priority
 requirements still apply. No server-side instruction can guarantee that ChatGPT
 never ends a turn.
 
