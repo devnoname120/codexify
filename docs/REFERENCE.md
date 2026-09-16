@@ -1557,9 +1557,9 @@ commands still have the user's filesystem permissions.
 
 | Tool | Arguments | Behavior |
 | --- | --- | --- |
-| `chat_read` | None | Returns all unread user Markdown and advances the cursor. With no new text, directs the agent to continue useful work or write and await when blocked. |
-| `chat_write` | `message`: Markdown string | Reads pending user text, appends the agent message, optionally notifies, and returns that pending text explicitly labelled as sent before the agent wrote. |
-| `chat_await` | None | Immediately returns pending text, otherwise waits for a user append, the configured deadline, or cancellation. A normal timeout directs another wait; cancellation does not. |
+| `chat_read` | None | Returns all unread user Markdown and advances the cursor. It is explicitly non-terminal: after handling input, continue useful work or call `chat_await`. |
+| `chat_write` | `message`: Markdown string | Reads pending user text, appends the agent message, optionally notifies, and returns that pending text explicitly labelled as sent before the agent wrote. A successful write is explicitly non-terminal. |
+| `chat_await` | None | Immediately returns pending text, otherwise waits for a user append, the configured deadline, or cancellation. It is the only valid idle state while Markdown chat is active; timeout or cancellation without a message directs another wait. |
 
 When enabled, **every top-level tool** advertises the optional string field
 `new_chat_message_from_user`, including bridged, gateway, catalog, and widget
@@ -1587,10 +1587,18 @@ transport or context limits; Codexify cannot guarantee acceptance of arbitrarily
 large tool results. Historical `read_file` and `grep` results keep their normal
 pagination and output limits.
 
-The agent brief directs questions, progress, and completion reports to
-`chat_write`, and directs blocked or idle agents to `chat_await` rather than ending their turn. Timeouts request another wait until a reply arrives. Explicit user stop/disable instructions, cancellation, and higher-priority
-requirements still apply. No server-side instruction can guarantee that ChatGPT
-never ends a turn.
+Each chat-tool structured result includes `required_next_action` and
+`assistant_turn_may_end`. The next action is one of `continue_or_chat_await`,
+`chat_write`, or `chat_await`; `assistant_turn_may_end` is `false` while the
+Markdown-chat protocol is active. If a chat tool returns unread user text, the
+next action is `chat_write` regardless of the tool's ordinary idle transition.
+
+The Markdown-chat state machine is placed at the start of the agent brief. It
+directs all user-facing output through `chat_write`, makes every successful
+`chat_write` non-terminal, and uses `chat_await` as the only idle state. A normal
+final response is forbidden unless the user explicitly authorizes ending the turn
+or a higher-priority instruction requires it. No server-side instruction can
+guarantee that ChatGPT never ends a turn.
 
 ### Chat widget
 

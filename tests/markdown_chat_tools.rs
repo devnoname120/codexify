@@ -71,6 +71,131 @@ fn tools_are_opt_in_and_read_wait_have_no_parameters() {
     );
 }
 
+#[test]
+fn chat_tool_descriptions_define_a_non_terminal_state_machine() {
+    let (_root, config, _session, _context) = fixture();
+    let tools = load_tools_for_config(&config);
+    let reader = tools
+        .iter()
+        .find(|tool| tool.name() == "chat_read")
+        .unwrap();
+    let writer = tools
+        .iter()
+        .find(|tool| tool.name() == "chat_write")
+        .unwrap();
+    let waiter = tools
+        .iter()
+        .find(|tool| tool.name() == "chat_await")
+        .unwrap();
+
+    let read_description = reader.description();
+    assert!(read_description.contains("NON-TERMINAL TOOL"));
+    assert!(read_description.contains("MUST call chat_await"));
+
+    let write_description = writer.description();
+    assert!(write_description.contains("NON-TERMINAL TOOL"));
+    assert!(write_description.contains("MUST NOT end the assistant turn"));
+    assert!(write_description.contains("new_chat_message_from_user"));
+    assert!(write_description.contains("chat_await"));
+
+    let await_description = waiter.description();
+    assert!(await_description.contains("only valid idle state"));
+    assert!(await_description.contains("Never substitute a normal assistant final response"));
+}
+
+#[tokio::test]
+async fn chat_tool_results_expose_the_required_next_action() {
+    let (_root, mut config, session, context) = fixture();
+    config.markdown_chat.max_wait_ms = 1;
+    let chat = context
+        .markdown_chat
+        .chat(&config, context.conversation.as_ref(), &session)
+        .unwrap();
+    chat.ensure().await.unwrap();
+    let tools = load_tools_for_config(&config);
+    let writer = tools
+        .iter()
+        .find(|tool| tool.name() == "chat_write")
+        .unwrap();
+    let reader = tools
+        .iter()
+        .find(|tool| tool.name() == "chat_read")
+        .unwrap();
+    let waiter = tools
+        .iter()
+        .find(|tool| tool.name() == "chat_await")
+        .unwrap();
+
+    let written = writer
+        .call_with_context(
+            json!({"message":"Progress update"}),
+            &config,
+            &session,
+            &context,
+        )
+        .await;
+    assert_eq!(
+        written.structured_content.as_ref().unwrap()["required_next_action"],
+        "continue_or_chat_await"
+    );
+    assert_eq!(
+        written.structured_content.as_ref().unwrap()["assistant_turn_may_end"],
+        false
+    );
+
+    append(chat.path(), "Interrupting user message\n");
+    let interrupted = writer
+        .call_with_context(
+            json!({"message":"Another update"}),
+            &config,
+            &session,
+            &context,
+        )
+        .await;
+    assert!(interrupted.new_chat_message_from_user.is_some());
+    assert_eq!(
+        interrupted.structured_content.as_ref().unwrap()["required_next_action"],
+        "chat_write"
+    );
+    assert_eq!(
+        interrupted.structured_content.as_ref().unwrap()["assistant_turn_may_end"],
+        false
+    );
+
+    let empty = reader
+        .call_with_context(json!({}), &config, &session, &context)
+        .await;
+    assert_eq!(
+        empty.structured_content.as_ref().unwrap()["required_next_action"],
+        "continue_or_chat_await"
+    );
+
+    append(chat.path(), "Read me\n");
+    let message = reader
+        .call_with_context(json!({}), &config, &session, &context)
+        .await;
+    assert_eq!(
+        message.structured_content.as_ref().unwrap()["required_next_action"],
+        "chat_write"
+    );
+
+    let timeout = waiter
+        .call_with_context(json!({}), &config, &session, &context)
+        .await;
+    assert_eq!(
+        timeout.structured_content.as_ref().unwrap()["status"],
+        "timeout"
+    );
+    assert_eq!(
+        timeout.structured_content.as_ref().unwrap()["required_next_action"],
+        "chat_await"
+    );
+    assert_eq!(
+        timeout.structured_content.as_ref().unwrap()["assistant_turn_may_end"],
+        false
+    );
+}
+
 #[tokio::test]
 async fn chat_file_links_resolve_real_exports_and_reject_ambiguous_or_foreign_files() {
     let (root, config, session, context) = fixture();
@@ -621,6 +746,9 @@ async fn brief_has_the_conversation_path_and_read_only_history_guidance() {
         .chat(&config, context.conversation.as_ref(), &session)
         .unwrap();
     let brief = result.joined_text();
+    assert!(brief.starts_with("## Markdown-driven communication"));
+    assert!(brief.contains("### Mandatory state machine"));
+    assert!(brief.contains("Do not send a normal ChatGPT final response"));
     assert!(brief.contains(&chat.path().display().to_string()));
     assert!(brief.contains("read-only"));
     assert!(brief.contains("chat_read"));

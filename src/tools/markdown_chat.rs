@@ -9,7 +9,11 @@ use crate::markdown_chat::{NotificationState, WaitOutcome, notification};
 use crate::tool::{Tool, ToolBehavior, ToolRequestContext, empty_object_schema, parse_tool_args};
 use crate::types::{AppConfig, ToolResult};
 
-pub const KEEP_WAITING: &str = "Call chat_await again and keep waiting for the user's reply. Do not finish your turn, stop, complete, or checkpoint the turn under any circumstances. It is strictly forbidden, you will be stopped externally if needed so you should never stop. Use chat_write for questions and reports and chat_await if you are blocked and need a user answer before you can continue. If you are done with the current task then you should call chat_write to inform the user about the completion of the task then immediately after run chat_await to receive new instructions instead of ending the turn. This is an absolute rule, you are NOT allowed to stop, complete, finish, or checkpoint your turn. Instead you ALWAYS HAVE to call chat_await whenever you are done, never finish your turn.";
+pub const KEEP_WAITING: &str = "Markdown chat is still active. The required next action is chat_await. Do not emit a normal assistant final response or end the turn. Call chat_await again unless the user explicitly authorized ending this turn or a higher-priority instruction requires it.";
+
+const NEXT_CONTINUE_OR_AWAIT: &str = "continue_or_chat_await";
+const NEXT_CHAT_WRITE: &str = "chat_write";
+const NEXT_CHAT_AWAIT: &str = "chat_await";
 
 #[derive(Clone, Copy)]
 pub enum ChatTool {
@@ -33,17 +37,26 @@ fn result(
     content: String,
     path: &std::path::Path,
     notification: NotificationState,
+    required_next_action: &'static str,
 ) -> ToolResult {
     ToolResult::text(content.clone()).with_structured(json!({
         "status": status,
         "content": content,
         "chat_file": path.to_string_lossy(),
         "notification": notification,
+        "required_next_action": required_next_action,
+        "assistant_turn_may_end": false,
     }))
 }
 
 fn with_message(mut result: ToolResult, text: String, before_write: bool, end: u64) -> ToolResult {
     if !text.is_empty() {
+        if let Some(Value::Object(structured)) = result.structured_content.as_mut() {
+            structured.insert(
+                "required_next_action".into(),
+                Value::String(NEXT_CHAT_WRITE.into()),
+            );
+        }
         let introduction = if before_write {
             "Before you wrote your message, the user sent the following in CHAT.md. Prioritize answering him ASAP:\n\n"
         } else {
@@ -83,9 +96,9 @@ impl Tool for ChatTool {
 
     fn description(&self) -> String {
         match self {
-            Self::Read => "Read and acknowledge all new user text in this conversation's CHAT.md, without truncation. Prefer this over direct file reads. If there is no message, continue useful work; when blocked or out of work, send a message with chat_write then call chat_await instead of ending the turn (ending, stopping, and checkpointing the turn are strictly forbidden). Whenever the user posts a new message your top priority is to use chat_write to either answer him (if it's a question) or acknowledge what he said (if it’s a statement or instructions).",
-            Self::Write => "Append a Markdown message to this conversation's CHAT.md and optionally notify the user through configured notification services. This is the only supported way for the agent to write this file. Returns any complete unread user text that arrived before the append; read that text before continuing. Use this for questions, progress and completion reports instead of ChatGPT replies.",
-            Self::Await => "Wait for new user text in this conversation's CHAT.md, then return and acknowledge it in full without truncation. The server config controls the wait deadline; no tool argument can change it. If you are blocked again or still blocked or the user hasn’t answered yet then you have to call chat_await again: you are NOT allowed to finish, stop, or checkpoint your turn under no circumstances. Finishing, stopping or checkpointing the turn is absolutely forbidden, you have to call chat_await over and over until the user provides an answer, you are not allowed to stop without the user’s explicit authorization.",
+            Self::Read => "NON-TERMINAL TOOL. Read and acknowledge all new user text in this conversation's CHAT.md, without truncation. Prefer this over direct file reads. After handling all newly read messages, continue useful work if any remains; otherwise you MUST call chat_await and MUST NOT end the assistant turn. Whenever the user posts a new message, prioritize answering or acknowledging it with chat_write.",
+            Self::Write => "NON-TERMINAL TOOL. Append a Markdown message to this conversation's CHAT.md and optionally notify the user through configured notification services. This is the only supported way for the agent to write this file. You MUST NOT end the assistant turn after a successful chat_write. If new_chat_message_from_user is returned, answer or acknowledge it with chat_write before other work. Otherwise continue useful work if any remains; if not, your next action MUST be chat_await. A completion report is still non-terminal.",
+            Self::Await => "This is the only valid idle state while Markdown chat is active. Never substitute a normal assistant final response for chat_await. Wait for new user text in this conversation's CHAT.md, then return and acknowledge it in full without truncation. The server config controls the wait deadline; no tool argument can change it. If a user message is returned, answer or acknowledge it with chat_write. After a timeout or cancellation without a user message, call chat_await again unless the user explicitly authorized ending this turn or a higher-priority instruction requires it.",
         }.into()
     }
 
@@ -123,9 +136,11 @@ impl Tool for ChatTool {
                 "status":{"type":"string", "enum":["written","message","empty","timeout","cancelled"]},
                 "content":{"type":"string"},
                 "chat_file":{"type":"string"},
-                "notification":{"type":"string", "enum":["not_configured","pending","accepted","failed","cancelled"]}
+                "notification":{"type":"string", "enum":["not_configured","pending","accepted","failed","cancelled"]},
+                "required_next_action":{"type":"string", "enum":["continue_or_chat_await","chat_write","chat_await"]},
+                "assistant_turn_may_end":{"type":"boolean", "const":false}
             },
-            "required":["status","content","chat_file","notification"],
+            "required":["status","content","chat_file","notification","required_next_action","assistant_turn_may_end"],
             "additionalProperties":false
         }))
     }
@@ -153,7 +168,18 @@ impl Tool for ChatTool {
             Err(error) => return ToolResult::error(error),
         };
         if context.cancellation.is_cancelled() {
-            return result("cancelled", "Markdown chat operation was cancelled. If it was a chat_await operation then run it again.".into(), chat.path(), NotificationState::Cancelled);
+            let next_action = if matches!(self, Self::Await) {
+                NEXT_CHAT_AWAIT
+            } else {
+                NEXT_CONTINUE_OR_AWAIT
+            };
+            return result(
+                "cancelled",
+                "Markdown chat operation was cancelled. Follow required_next_action and do not end the assistant turn.".into(),
+                chat.path(),
+                NotificationState::Cancelled,
+                next_action,
+            );
         }
         if matches!(self, Self::Write) {
             let WriteArgs { message } = match parse_tool_args(args) {
@@ -192,7 +218,13 @@ impl Tool for ChatTool {
                 content.push_str(&format!(" The append succeeded, but cursor/notification persistence failed: {warning}. Do not send the same message again merely to retry persistence."));
             }
             return with_message(
-                result("written", content, chat.path(), state),
+                result(
+                    "written",
+                    content,
+                    chat.path(),
+                    state,
+                    NEXT_CONTINUE_OR_AWAIT,
+                ),
                 receipt.user_text,
                 true,
                 receipt.end_offset,
@@ -204,19 +236,64 @@ impl Tool for ChatTool {
         match self {
             Self::Read => match chat.read_cancellable(true, context.cancellation.clone()).await {
                 Ok(snapshot) => {
-                    let (status, content) = if snapshot.text.is_empty() {
-                        ("empty", "The user has not written in CHAT.md since the last chat operation. Continue useful work and check again later. When blocked or out of work, use chat_write followed by chat_await instead of ending the turn.".to_string())
+                    let (status, content, next_action) = if snapshot.text.is_empty() {
+                        (
+                            "empty",
+                            "The user has not written in CHAT.md since the last chat operation. Continue useful work if any remains; otherwise call chat_await. Do not end the assistant turn.".to_string(),
+                            NEXT_CONTINUE_OR_AWAIT,
+                        )
                     } else {
-                        ("message", "New user text is included in new_chat_message_from_user. Read it before continuing and prioritize answering it ASAP using the chat_write tool.".to_string())
+                        (
+                            "message",
+                            "New user text is included in new_chat_message_from_user. Read it before continuing and answer or acknowledge it ASAP using chat_write.".to_string(),
+                            NEXT_CHAT_WRITE,
+                        )
                     };
-                    with_message(result(status, content, chat.path(), snapshot.notification), snapshot.text, false, snapshot.end)
+                    with_message(
+                        result(
+                            status,
+                            content,
+                            chat.path(),
+                            snapshot.notification,
+                            next_action,
+                        ),
+                        snapshot.text,
+                        false,
+                        snapshot.end,
+                    )
                 }
                 Err(error) => ToolResult::error(error),
             },
             Self::Await => match chat.wait(Duration::from_millis(config.markdown_chat.max_wait_ms), context.cancellation.clone()).await {
-                Ok(WaitOutcome::Message(snapshot)) => with_message(result("message", "The user replied. Read new_chat_message_from_user before continuing and prioritize replying him ASAP with chat_write.".into(), chat.path(), snapshot.notification), snapshot.text, false, snapshot.end),
-                Ok(WaitOutcome::TimedOut(state)) => result("timeout", format!("The user has not replied yet. {} {KEEP_WAITING}", notification::description(state)), chat.path(), state),
-                Ok(WaitOutcome::Cancelled) => result("cancelled", "Call chat_await again and again until you receive chat from the user. Never finish or stop your turn under any circumstances".into(), chat.path(), NotificationState::Cancelled),
+                Ok(WaitOutcome::Message(snapshot)) => with_message(
+                    result(
+                        "message",
+                        "The user replied. Read new_chat_message_from_user before continuing and answer or acknowledge it ASAP with chat_write.".into(),
+                        chat.path(),
+                        snapshot.notification,
+                        NEXT_CHAT_WRITE,
+                    ),
+                    snapshot.text,
+                    false,
+                    snapshot.end,
+                ),
+                Ok(WaitOutcome::TimedOut(state)) => result(
+                    "timeout",
+                    format!(
+                        "The user has not replied yet. {} {KEEP_WAITING}",
+                        notification::description(state)
+                    ),
+                    chat.path(),
+                    state,
+                    NEXT_CHAT_AWAIT,
+                ),
+                Ok(WaitOutcome::Cancelled) => result(
+                    "cancelled",
+                    KEEP_WAITING.into(),
+                    chat.path(),
+                    NotificationState::Cancelled,
+                    NEXT_CHAT_AWAIT,
+                ),
                 Err(error) => ToolResult::error(error),
             },
             Self::Write => unreachable!(),

@@ -14,6 +14,8 @@ use crate::types::AppConfig;
 // `setup(ref)` wire vocabulary instead of describing the authorization protocol.
 pub const CONVERSATION_AUTH_INSTRUCTIONS: &str = "This connector requires one-time setup for this conversation. Before calling any other tool, call `setup` once with the `ref` supplied in the chat or ChatGPT Project instructions. After setup completes, follow the tool response to load the project brief.";
 
+pub const MARKDOWN_CHAT_INSTRUCTIONS: &str = "## Markdown-driven communication\n\nMarkdown chat is enabled. This mandatory protocol overrides the normal answer-then-finish interaction pattern while it is active.\n\n### Mandatory state machine\n\n- USER-FACING OUTPUT: send only with chat_write. Do not send a normal ChatGPT final response while this mode is active.\n- AFTER chat_write, chat_read, or any completed work:\n  - If new_chat_message_from_user is present, answer or acknowledge it immediately with chat_write.\n  - Else if actionable work remains, continue working.\n  - Else call chat_await.\n- AFTER chat_await:\n  - If a user message is received, answer or acknowledge it immediately with chat_write, then continue.\n  - If it times out or is cancelled without a user message, call chat_await again.\n- TERMINATION: do not finish, stop, complete, or checkpoint the turn unless the user explicitly authorizes ending it or a higher-priority instruction requires it.\n\nCall setup once to open the persistent chat panel; chat_read/chat_write/chat_await update that panel without opening more cards. Do not repeat setup for routine messages. Complete workspace selection first, then obtain this conversation's CHAT.md path from get_agent_brief. Inspect optional new_chat_message_from_user after every tool result. Ordinary tool deliveries do not consume pending user messages. The chat tools and new_chat_message_from_user bypass Codexify's ordinary output truncation.";
+
 /// The behavioural half of what Codex tells its model, ported from
 /// `codex-rs/core/gpt-5.2-codex_prompt.md`.
 pub const AGENT_BRIEF: &str = concat!(
@@ -68,10 +70,11 @@ pub const AGENT_BRIEF: &str = concat!(
 );
 
 fn configured_agent_brief(config: &AppConfig) -> String {
-    let mut brief = AGENT_BRIEF.to_string();
-    if config.markdown_chat.enabled {
-        brief.push_str("\n\n## Markdown-driven communication\n\nMarkdown chat is enabled. Call setup once to open the persistent chat panel; chat_read/chat_write/chat_await update that panel without opening more cards. Do not repeat setup for routine messages. Complete workspace selection first, then obtain this conversation's CHAT.md path from get_agent_brief. Use chat_write for all user-facing questions, progress and completion reports instead of ChatGPT replies. Inspect optional new_chat_message_from_user after every tool result and use chat_read to acknowledge new instructions, but prioritize answering the user ASAP with chat_write. Ordinary tool deliveries do not consume them. Do not finish, stop, complete, or checkpoint your turn under no circumstances. It’s absolutely forbidden to stop/complete/finish/checkpoint your turn. When blocked or out of work, explain through chat_write and call chat_await. This is an absolute requirement. After each normal timeout call chat_await again and again until the user replies, never give up. Do not turn wait timeouts into a final answer. The chat tools and new_chat_message_from_user bypass Codexify's ordinary output truncation.\n");
-    }
+    let brief = if config.markdown_chat.enabled {
+        format!("{MARKDOWN_CHAT_INSTRUCTIONS}\n\n{AGENT_BRIEF}")
+    } else {
+        AGENT_BRIEF.to_string()
+    };
     let mut host_file_guidance = Vec::new();
     if config.artifact_ingress.enabled {
         host_file_guidance.push("- Use import_host_file when the user attaches a file or asks you to place a ChatGPT-generated file into the project. Do not reconstruct binary files through write_file or substitute an arbitrary URL.");
