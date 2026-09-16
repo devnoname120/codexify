@@ -14,6 +14,7 @@ pub struct WidgetMessage {
     pub start: u64,
     pub end: u64,
     pub created_at_ms: Option<u64>,
+    pub tool_call_count: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -23,6 +24,7 @@ pub struct WidgetPage {
     pub delivered_through: u64,
     pub read_through: u64,
     pub last_agent_call_at_ms: Option<u64>,
+    pub total_tool_calls: u64,
     pub server_time_ms: u64,
     pub messages: Vec<WidgetMessage>,
     pub has_more: bool,
@@ -45,6 +47,7 @@ struct Span {
     body_end: u64,
     end: u64,
     created_at_ms: Option<u64>,
+    tool_call_count: Option<u64>,
 }
 
 fn valid_id(id: &str) -> bool {
@@ -55,7 +58,11 @@ fn valid_id(id: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
 }
 
-fn marker_fields<'a>(role: &str, fields: &'a str) -> Option<(&'a str, Option<u64>)> {
+fn marker_fields<'a>(role: &str, fields: &'a str) -> Option<(&'a str, Option<u64>, Option<u64>)> {
+    let (fields, tool_call_count) = match fields.rsplit_once("\" tool_call_count=\"") {
+        Some((fields, count)) => (fields, Some(count.parse::<u64>().ok()?)),
+        None => (fields, None),
+    };
     let (id, time) = match fields.split_once("\" created_at_ms=\"") {
         Some((id, timestamp)) => {
             let timestamp = timestamp.parse::<u64>().ok()?;
@@ -82,17 +89,17 @@ fn marker_fields<'a>(role: &str, fields: &'a str) -> Option<(&'a str, Option<u64
         let timestamp = micros.parse::<u64>().ok()? / 1000;
         (timestamp <= 8_640_000_000_000_000).then_some(timestamp)
     };
-    Some((id, time.or_else(legacy_time)))
+    Some((id, time.or_else(legacy_time), tool_call_count))
 }
 
-fn start_marker(line: &str) -> Option<(&'static str, String, Option<u64>)> {
+fn start_marker(line: &str) -> Option<(&'static str, String, Option<u64>, Option<u64>)> {
     for role in ["agent", "user"] {
-        if let Some((id, time)) = line
+        if let Some((id, time, tool_call_count)) = line
             .strip_prefix(&format!("<!-- codexify-{role}-message:v1:start id=\""))
             .and_then(|line| line.strip_suffix("\" -->\n"))
             .and_then(|fields| marker_fields(role, fields))
         {
-            return Some((role, id.to_string(), time));
+            return Some((role, id.to_string(), time, tool_call_count));
         }
     }
     None
@@ -107,6 +114,7 @@ fn raw_span(start: u64, end: u64) -> Span {
         body_end: end,
         end,
         created_at_ms: None,
+        tool_call_count: None,
     }
 }
 
@@ -145,7 +153,7 @@ fn spans(file: &mut File) -> Result<Vec<Span>, String> {
             }
             continue;
         }
-        if let Some((role, id, created_at_ms)) = start_marker(&line) {
+        if let Some((role, id, created_at_ms, tool_call_count)) = start_marker(&line) {
             let block_start = start.saturating_sub(2).max(raw_start);
             if raw_start < block_start {
                 result.push(raw_span(raw_start, block_start));
@@ -160,6 +168,7 @@ fn spans(file: &mut File) -> Result<Vec<Span>, String> {
                     body_end: offset,
                     end: offset,
                     created_at_ms,
+                    tool_call_count,
                 },
                 ending,
                 3,
@@ -176,17 +185,32 @@ fn spans(file: &mut File) -> Result<Vec<Span>, String> {
 }
 
 impl ChatFile {
+    #[doc(hidden)]
     pub async fn record_agent_call(self: &Arc<Self>, at_ms: u64) -> Result<(), String> {
         self.run(move |chat| {
             chat.with_cursor(|cursor, _| {
-                if cursor.last_agent_call_at_ms.is_none_or(|last| at_ms > last) {
-                    let mut next = cursor.clone();
-                    next.last_agent_call_at_ms = Some(at_ms);
-                    chat.save_cursor(&next)?;
-                    *cursor = next;
-                }
-                Ok(())
+                let sequence = if cursor.tool_call_epoch.as_deref() == Some("direct") {
+                    cursor.tool_call_sequence.saturating_add(1)
+                } else {
+                    1
+                };
+                let activity = super::super::AgentActivity {
+                    at_ms,
+                    epoch: "direct".into(),
+                    sequence,
+                };
+                persist_agent_activity(chat, cursor, activity)
             })
+        })
+        .await
+    }
+
+    pub(crate) async fn sync_agent_activity(
+        self: &Arc<Self>,
+        activity: super::super::AgentActivity,
+    ) -> Result<(), String> {
+        self.run(move |chat| {
+            chat.with_cursor(|cursor, _| persist_agent_activity(chat, cursor, activity))
         })
         .await
     }
@@ -218,6 +242,7 @@ impl ChatFile {
                     delivered_through: cursor.delivered_through,
                     read_through: cursor.offset,
                     last_agent_call_at_ms: cursor.last_agent_call_at_ms,
+                    total_tool_calls: cursor.total_tool_calls,
                     server_time_ms: super::super::now_ms(),
                     messages: Vec::new(),
                     has_more: false,
@@ -258,6 +283,7 @@ impl ChatFile {
                         start: span.start,
                         end: span.end,
                         created_at_ms: span.created_at_ms,
+                        tool_call_count: span.tool_call_count,
                     });
                 }
                 page.messages.reverse();
@@ -326,6 +352,40 @@ impl ChatFile {
     }
 }
 
+fn persist_agent_activity(
+    chat: &ChatFile,
+    cursor: &mut Cursor,
+    activity: super::super::AgentActivity,
+) -> Result<(), String> {
+    let mut next = cursor.clone();
+    next.last_agent_call_at_ms = Some(
+        next.last_agent_call_at_ms
+            .unwrap_or_default()
+            .max(activity.at_ms),
+    );
+    let sequence_delta = if next.tool_call_epoch.as_deref() == Some(activity.epoch.as_str()) {
+        activity.sequence.saturating_sub(next.tool_call_sequence)
+    } else {
+        activity.sequence
+    };
+    next.total_tool_calls = next.total_tool_calls.saturating_add(sequence_delta);
+    if next.tool_call_epoch.as_deref() != Some(activity.epoch.as_str())
+        || activity.sequence > next.tool_call_sequence
+    {
+        next.tool_call_epoch = Some(activity.epoch);
+        next.tool_call_sequence = activity.sequence;
+    }
+    if next.last_agent_call_at_ms != cursor.last_agent_call_at_ms
+        || next.total_tool_calls != cursor.total_tool_calls
+        || next.tool_call_epoch != cursor.tool_call_epoch
+        || next.tool_call_sequence != cursor.tool_call_sequence
+    {
+        chat.save_cursor(&next)?;
+        *cursor = next;
+    }
+    Ok(())
+}
+
 pub(super) fn user_text(text: &str) -> Result<String, String> {
     let mut output = String::new();
     let mut remaining = text;
@@ -344,7 +404,7 @@ pub(super) fn user_text(text: &str) -> Result<String, String> {
         let Some((fields, body)) = marker.split_once(&opening) else {
             return Err("CHAT.md has an incomplete message; finish saving before retrying.".into());
         };
-        let Some((id, _)) = marker_fields(role, fields) else {
+        let Some((id, _, _)) = marker_fields(role, fields) else {
             return Err("CHAT.md has a malformed message marker.".into());
         };
         let ending = format!("\n\n<!-- codexify-{role}-message:v1:end id=\"{id}\" -->\n");
@@ -359,4 +419,44 @@ pub(super) fn user_text(text: &str) -> Result<String, String> {
     }
     output.push_str(remaining);
     Ok(output)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn activity(epoch: &str, sequence: u64, at_ms: u64) -> super::super::super::AgentActivity {
+        super::super::super::AgentActivity {
+            at_ms,
+            epoch: epoch.into(),
+            sequence,
+        }
+    }
+
+    #[tokio::test]
+    async fn activity_sequences_are_idempotent_out_of_order_and_continue_after_restart() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("chat/CHAT.md");
+        let chat = Arc::new(ChatFile::new(path.clone(), true));
+
+        chat.sync_agent_activity(activity("first", 2, 2000))
+            .await
+            .unwrap();
+        chat.sync_agent_activity(activity("first", 1, 1000))
+            .await
+            .unwrap();
+        chat.sync_agent_activity(activity("first", 4, 3000))
+            .await
+            .unwrap();
+        chat.sync_agent_activity(activity("second", 1, 4000))
+            .await
+            .unwrap();
+        chat.append("Counted response".into()).await.unwrap();
+
+        let reopened = Arc::new(ChatFile::new(path, true));
+        let page = reopened.widget_page(None, None).await.unwrap();
+        assert_eq!(page.total_tool_calls, 5);
+        assert_eq!(page.last_agent_call_at_ms, Some(4000));
+        assert_eq!(page.messages[0].tool_call_count, Some(5));
+    }
 }

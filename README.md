@@ -113,6 +113,11 @@ an inbound port. For other deployments, see [connection options](docs/REFERENCE.
 The fully populated [configuration example](codexify.config.example.json) shows
 every supported JSON field with non-secret placeholders.
 
+Configuration schema changes are migrated automatically on the next successful
+startup. Codexify validates the migrated document before replacing the config,
+keeps a byte-for-byte `*.before-schema-vN.bak` copy beside it, preserves file
+permissions, and refuses configs written for a newer schema version.
+
 ### 3. Start a task
 
 Start a regular **Chat** conversation in ChatGPT, not a Work or Codex task, and
@@ -139,7 +144,7 @@ sending another ChatGPT message. Enable the feature in your Codexify config:
 
 ```json
 {
-  "markdownChat": {
+  "agentChat": {
     "enabled": true,
     "maxWaitMs": 270000
   }
@@ -158,7 +163,11 @@ to `CHAT.md`, two grey ticks mean returned to the agent, and two blue ticks mean
 acknowledged through `chat_read`, `chat_write`, or `chat_await`. The Agent indicator
 shows online for calls under four minutes old, last seen from four to under ten minutes,
 and offline thereafter. These are tool-activity receipts, not proof of model
-comprehension. Widget sends do not start a new ChatGPT turn.
+comprehension. A small header total counts model-visible Codexify tool calls in
+the conversation. Between agent messages, a compact counter shows the calls since
+the previous agent message and increments live while the agent works. Widget
+polling and other app-only helpers do not inflate either count. Widget sends do
+not start a new ChatGPT turn.
 
 Messages show a small local `HH:mm` timestamp at the bottom right, before the
 ticks on user messages. Earlier local calendar days also show `YYYY-MM-DD`
@@ -174,9 +183,10 @@ You can also append your instructions to the file and save. The agent uses `chat
 without consuming them. Optional Apprise notifications send the agent's Markdown
 to ntfy, Pushover, and other supported services through one URL-based configuration.
 Notifications use only the local Apprise backend and require Python with Apprise
-installed. The former separate `markdownChat.ntfy` block must be replaced with
-an ntfy service URL under `notifications`. The feature is disabled by default and does not
-guarantee unlimited ChatGPT runtime or alter OpenAI's usage limits.
+installed. Schema migration renames an existing `markdownChat` block to
+`agentChat` and converts the former native `ntfy` child to an Apprise ntfy
+service URL. The feature is disabled by default and does not guarantee unlimited
+ChatGPT runtime or alter OpenAI's usage limits.
 
 See [Markdown chat configuration and semantics](docs/REFERENCE.md#markdown-chat)
 for notifications, timeouts, schema refreshes, and append-only editing rules.

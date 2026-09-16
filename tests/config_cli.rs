@@ -127,6 +127,7 @@ fn config_set_get_and_unset_preserve_unrelated_values() {
     );
 
     let value: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(value["schemaVersion"], 1);
     assert_eq!(value["unknownFutureSetting"], json!({"keep": true}));
     assert_eq!(value["mcpServers"]["server.with.dot"]["enabled"], true);
     assert_eq!(value["port"], 4100);
@@ -285,7 +286,10 @@ printf '%s\n' '{"port":4567,"future":{"kept":true}}' > "$1"
         .unwrap();
     assert_success(&output);
     let edited: Value = serde_json::from_slice(&fs::read(config_path(&root)).unwrap()).unwrap();
-    assert_eq!(edited, json!({"port": 4567, "future": {"kept": true}}));
+    assert_eq!(
+        edited,
+        json!({"schemaVersion": 1, "port": 4567, "future": {"kept": true}})
+    );
     assert_eq!(fs::read_to_string(args_file).unwrap().lines().count(), 1);
     assert!(
         String::from_utf8(output.stdout)

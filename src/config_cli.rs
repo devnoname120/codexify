@@ -52,25 +52,30 @@ fn get(path: &Path, args: ConfigGetArgs) -> anyhow::Result<()> {
 fn set(path: &Path, args: ConfigSetArgs) -> anyhow::Result<()> {
     let segments = parse_key(&args.key)?;
     let value = serde_json::from_str(&args.value).unwrap_or(Value::String(args.value));
-    let mut document = Value::Object(read_document(path)?);
+    let (document, migration) = read_document_for_write(path)?;
+    let mut document = Value::Object(document);
     set_value(&mut document, &segments, value)?;
+    backup_migration(migration.as_ref())?;
     write_document(path, document.as_object().expect("root remains an object"))?;
     print_mutation("Set", &args.key, path)
 }
 
 fn unset(path: &Path, args: ConfigUnsetArgs) -> anyhow::Result<()> {
     let segments = parse_key(&args.key)?;
-    let mut document = Value::Object(read_document(path)?);
+    let (document, migration) = read_document_for_write(path)?;
+    let mut document = Value::Object(document);
     if !remove_value(&mut document, &segments)? {
         bail!("setting not found: {}", args.key);
     }
+    backup_migration(migration.as_ref())?;
     write_document(path, document.as_object().expect("root remains an object"))?;
     print_mutation("Removed", &args.key, path)
 }
 
 fn edit(path: &Path) -> anyhow::Result<()> {
     refuse_unsafe_target(path)?;
-    let document = Value::Object(read_document(path)?);
+    let (document, migration) = read_document_for_write(path)?;
+    let document = Value::Object(document);
     let parent = config_parent(path);
     fs::create_dir_all(parent)
         .with_context(|| format!("create config directory {}", parent.display()))?;
@@ -106,6 +111,7 @@ fn edit(path: &Path) -> anyhow::Result<()> {
     let edited = edited
         .as_object()
         .context("edited configuration must contain a JSON object")?;
+    backup_migration(migration.as_ref())?;
     write_document(path, edited)?;
 
     let output = format!(
@@ -168,6 +174,43 @@ fn read_document(path: &Path) -> anyhow::Result<Map<String, Value>> {
         .context("configuration must contain a JSON object")
 }
 
+fn read_document_for_write(
+    path: &Path,
+) -> anyhow::Result<(
+    Map<String, Value>,
+    Option<crate::config_migration::PendingConfigMigration>,
+)> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() {
+                bail!("refusing to read symlinked config file {}", path.display());
+            }
+            if !metadata.is_file() {
+                bail!("config path is not a regular file: {}", path.display());
+            }
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok((Map::new(), None));
+        }
+        Err(error) => {
+            return Err(error).with_context(|| format!("inspect config file {}", path.display()));
+        }
+    }
+
+    let source = fs::read(path).with_context(|| format!("read config file {}", path.display()))?;
+    let prepared = crate::config_migration::prepare(path, &source)?;
+    Ok((prepared.document, prepared.migration))
+}
+
+fn backup_migration(
+    migration: Option<&crate::config_migration::PendingConfigMigration>,
+) -> anyhow::Result<()> {
+    if let Some(migration) = migration {
+        migration.backup_original()?;
+    }
+    Ok(())
+}
+
 fn write_document(path: &Path, document: &Map<String, Value>) -> anyhow::Result<()> {
     refuse_unsafe_target(path)?;
     let parent = config_parent(path);
@@ -175,7 +218,12 @@ fn write_document(path: &Path, document: &Map<String, Value>) -> anyhow::Result<
         .with_context(|| format!("create config directory {}", parent.display()))?;
     let mut temp = NamedTempFile::new_in(parent)
         .with_context(|| format!("create temporary config beside {}", path.display()))?;
-    let mut bytes = serde_json::to_vec_pretty(&Value::Object(document.clone()))?;
+    let mut document = document.clone();
+    document.insert(
+        "schemaVersion".to_string(),
+        Value::Number(crate::config_migration::CONFIG_SCHEMA_VERSION.into()),
+    );
+    let mut bytes = serde_json::to_vec_pretty(&Value::Object(document))?;
     bytes.push(b'\n');
     temp.write_all(&bytes)?;
     temp.as_file().sync_all()?;

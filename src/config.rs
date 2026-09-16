@@ -585,6 +585,8 @@ impl PartialMcpServerSpec {
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct FileConfig {
+    #[serde(rename = "schemaVersion")]
+    _schema_version: Option<u64>,
     work_dir: Option<String>,
     debug: Option<bool>,
     ui_widgets: Option<bool>,
@@ -605,7 +607,9 @@ struct FileConfig {
     artifact_ingress: Option<ArtifactIngressConfig>,
     artifact_egress: Option<ArtifactEgressConfig>,
     memory: Option<MemoryConfig>,
-    markdown_chat: Option<crate::markdown_chat::MarkdownChatConfig>,
+    agent_chat: Option<crate::markdown_chat::MarkdownChatConfig>,
+    #[serde(rename = "markdownChat")]
+    removed_markdown_chat: Option<serde_json::Value>,
     skills: Option<SkillsConfig>,
     ignore: Option<IgnoreConfig>,
     tool_logging: Option<PartialToolLogging>,
@@ -1249,33 +1253,56 @@ fn announce_missing_config(selection: &ConfigPathSelection) {
     }
 }
 
-fn load_file_config(cli: &Cli, announce: bool) -> Result<FileConfig, String> {
+struct LoadedFileConfig {
+    file: FileConfig,
+    migration: Option<crate::config_migration::PendingConfigMigration>,
+}
+
+fn load_file_config_prepared(cli: &Cli, announce: bool) -> Result<LoadedFileConfig, String> {
     let selection = select_config_path(cli)?;
     let Some(config_path) = selection.path.as_deref() else {
         if announce {
             announce_missing_config(&selection);
         }
-        return Ok(FileConfig::default());
+        return Ok(LoadedFileConfig {
+            file: FileConfig::default(),
+            migration: None,
+        });
     };
-    match std::fs::read_to_string(config_path) {
-        Ok(text) => {
+    match std::fs::read(config_path) {
+        Ok(source) => {
             if announce {
                 announce_loaded_config(&selection, config_path);
             }
-            serde_json::from_str(&text)
-                .map_err(|error| format!("invalid config file {}: {error}", config_path.display()))
+            let prepared = crate::config_migration::prepare(config_path, &source)
+                .map_err(|error| error.to_string())?;
+            let file = serde_json::from_value(serde_json::Value::Object(prepared.document))
+                .map_err(|error| {
+                    format!("invalid config file {}: {error}", config_path.display())
+                })?;
+            Ok(LoadedFileConfig {
+                file,
+                migration: prepared.migration,
+            })
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             if announce {
                 announce_missing_config(&selection);
             }
-            Ok(FileConfig::default())
+            Ok(LoadedFileConfig {
+                file: FileConfig::default(),
+                migration: None,
+            })
         }
         Err(error) => Err(format!(
             "could not read config file {}: {error}",
             config_path.display()
         )),
     }
+}
+
+fn load_file_config(cli: &Cli, announce: bool) -> Result<FileConfig, String> {
+    load_file_config_prepared(cli, announce).map(|loaded| loaded.file)
 }
 
 fn resolve_path(raw: &str) -> PathBuf {
@@ -1461,8 +1488,13 @@ fn resolve_audit(file: Option<PartialAudit>, cli: &Cli) -> Result<AuditConfig, S
 
 /// Load and merge config. Errors are returned as strings for the caller to
 /// print and exit on, mirroring the TS which validates and `process.exit`s.
-fn load_config_with_announcements(cli: &Cli, announce: bool) -> Result<AppConfig, String> {
-    let mut file = load_file_config(cli, announce)?;
+fn load_config_with_announcements(
+    cli: &Cli,
+    announce: bool,
+    persist_migration: bool,
+) -> Result<AppConfig, String> {
+    let loaded = load_file_config_prepared(cli, announce)?;
+    let mut file = loaded.file;
     let work_dir = resolve_configured_work_dir(cli, file.work_dir.as_deref())?;
     let project_clone_dir = resolve_project_clone_dir(
         &work_dir,
@@ -1528,10 +1560,16 @@ fn load_config_with_announcements(cli: &Cli, announce: bool) -> Result<AppConfig
     artifact_egress.validate()?;
     let output = file.output.unwrap_or_default();
     output.validate()?;
-    let markdown_chat = file.markdown_chat.unwrap_or_default();
+    if file.removed_markdown_chat.is_some() {
+        return Err(
+            "markdownChat was renamed to agentChat; update the configuration key before starting Codexify"
+                .to_string(),
+        );
+    }
+    let markdown_chat = file.agent_chat.unwrap_or_default();
     markdown_chat.validate()?;
 
-    Ok(AppConfig {
+    let config = AppConfig {
         work_dir,
         debug: file.debug.unwrap_or(false),
         ui_widgets: file.ui_widgets.unwrap_or(true),
@@ -1561,19 +1599,39 @@ fn load_config_with_announcements(cli: &Cli, announce: bool) -> Result<AppConfig
         openai_tunnel,
         mcp_servers,
         generated_skills_dir: None,
-    })
+    };
+    if persist_migration && let Some(migration) = loaded.migration {
+        let outcome = migration.commit().map_err(|error| {
+            format!(
+                "configuration is valid, but its schema migration could not be saved: {error:#}"
+            )
+        })?;
+        if announce {
+            println!(
+                "Config schema: migrated v{} to v{} (backup: {})",
+                outcome.from_version,
+                outcome.to_version,
+                outcome.backup_path.display()
+            );
+        }
+    }
+    Ok(config)
 }
 
 pub fn load_config(cli: Cli) -> Result<AppConfig, String> {
-    load_config_with_announcements(&cli, true)
+    load_config_with_announcements(&cli, true, true)
 }
 
 pub fn load_config_quiet(cli: Cli) -> Result<AppConfig, String> {
-    load_config_with_announcements(&cli, false)
+    load_config_with_announcements(&cli, false, true)
+}
+
+pub(crate) fn load_config_quiet_read_only(cli: Cli) -> Result<AppConfig, String> {
+    load_config_with_announcements(&cli, false, false)
 }
 
 pub fn validate_config_quiet(cli: &Cli) -> Result<(), String> {
-    load_config_with_announcements(cli, false).map(|_| ())
+    load_config_with_announcements(cli, false, false).map(|_| ())
 }
 
 pub fn load_project_catalog_for_cli(cli: &Cli) -> Result<ProjectCatalog, String> {
@@ -1829,6 +1887,70 @@ mod tests {
         );
     }
 
+    #[test]
+    fn exact_v1_3_0_config_migrates_and_passes_the_current_startup_loader() {
+        let root = tempfile::tempdir().unwrap();
+        let config_path = root.path().join("codexify.config.json");
+        let original = include_bytes!("../tests/fixtures/codexify.config.v1.3.0.json");
+        std::fs::write(&config_path, original).unwrap();
+
+        let loaded = load_config_quiet(cli(root.path(), &config_path)).unwrap();
+
+        assert_eq!(loaded.work_dir, root.path());
+        assert_eq!(loaded.port, 3000);
+        assert_eq!(loaded.exec.max_sessions, 8);
+        assert_eq!(loaded.artifact_egress.max_snapshot_bytes, 5_368_709_120);
+        let migrated: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&config_path).unwrap()).unwrap();
+        assert_eq!(migrated["schemaVersion"], 1);
+        assert!(migrated["exec"].get("mode").is_none());
+        assert!(migrated["exec"].get("extraAllowedCommands").is_none());
+        assert_eq!(
+            std::fs::read(config_path.with_file_name("codexify.config.json.before-schema-v1.bak"))
+                .unwrap(),
+            original
+        );
+    }
+
+    #[test]
+    fn v1_3_0_configured_work_dir_loads_without_a_cli_override() {
+        let root = tempfile::tempdir().unwrap();
+        let config_path = root.path().join("codexify.config.json");
+        let mut source: serde_json::Value = serde_json::from_slice(include_bytes!(
+            "../tests/fixtures/codexify.config.v1.3.0.json"
+        ))
+        .unwrap();
+        source["workDir"] = json!(root.path());
+        std::fs::write(&config_path, serde_json::to_vec_pretty(&source).unwrap()).unwrap();
+        let mut args = cli(root.path(), &config_path);
+        args.work_dir = None;
+
+        let loaded = load_config_quiet(args).unwrap();
+
+        assert_eq!(loaded.work_dir, root.path());
+        let persisted: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&config_path).unwrap()).unwrap();
+        assert_eq!(persisted["schemaVersion"], 1);
+    }
+
+    #[test]
+    fn invalid_migrated_config_is_not_persisted_or_backed_up() {
+        let root = tempfile::tempdir().unwrap();
+        let config_path = root.path().join("config.json");
+        let original = br#"{"output":{"maxToolOutputTokens":0}}"#;
+        std::fs::write(&config_path, original).unwrap();
+
+        let error = load_config_quiet(cli(root.path(), &config_path)).unwrap_err();
+
+        assert!(error.contains("maxToolOutputTokens"), "{error}");
+        assert_eq!(std::fs::read(&config_path).unwrap(), original);
+        assert!(
+            !config_path
+                .with_file_name("config.json.before-schema-v1.bak")
+                .exists()
+        );
+    }
+
     #[tokio::test]
     async fn removed_legacy_command_policy_cannot_restrict_exec_command() {
         use crate::tool::Tool as _;
@@ -1901,7 +2023,7 @@ mod tests {
             "exec",
             "forceReadOnlyToolAnnotations",
             "ignore",
-            "markdownChat",
+            "agentChat",
             "mcpServers",
             "memory",
             "multiProject",
@@ -1911,6 +2033,7 @@ mod tests {
             "projectCatalog",
             "projectCloneDir",
             "projectDoc",
+            "schemaVersion",
             "skills",
             "toolLogging",
             "tree",
@@ -1999,7 +2122,7 @@ mod tests {
                 ],
             ),
             ("memory", &["dir", "enabled", "maxBytes"]),
-            ("markdownChat", &["enabled", "maxWaitMs", "notifications"]),
+            ("agentChat", &["enabled", "maxWaitMs", "notifications"]),
             ("skills", &["dirs", "enabled", "includePlugins"]),
             ("codexMcp", &["cliPath", "enabled", "useCli"]),
             ("projectCatalog", &["codexConfig", "entries"]),
@@ -2007,8 +2130,8 @@ mod tests {
             assert_keys(&example[path], path, keys);
         }
         assert_keys(
-            &example["markdownChat"]["notifications"],
-            "markdownChat.notifications",
+            &example["agentChat"]["notifications"],
+            "agentChat.notifications",
             &["pythonPath", "timeoutMs", "urls"],
         );
         assert_keys(

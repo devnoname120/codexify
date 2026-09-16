@@ -45,7 +45,9 @@ fn validate_migrated(home: &Path) -> Value {
             .output()
             .unwrap(),
     );
-    serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
+    let config: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+    assert_eq!(config["schemaVersion"], 1);
+    config
 }
 
 #[test]

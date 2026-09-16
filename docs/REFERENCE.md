@@ -481,6 +481,12 @@ Each release ships a compiled binary per platform — `windows-x64`, `linux-x64`
 | `service status [--json]` | Report native service installation, running/enabled state, and definition details without changing the service |
 | `service logs [-f]` | Print formatted service logs with adaptive colors and expanded JSON payloads; `-f` follows new output |
 
+Config mutations preserve unknown fields and existing permissions, refuse
+symlink/non-file targets, and atomically replace the document. They apply any
+pending schema migration first and retain the byte-for-byte pre-migration backup.
+`config`, `config get`, `config path`, hidden `config validate`, and `doctor` are
+read-only; normal server startup persists a validated pending migration.
+
 `quickstart` writes `~/.codexify/codexify.config.json` by default. It accepts
 `--config <PATH>` (or `CODEXIFY_CONFIG`) to select another file and
 `--work-dir <DIR>` as the initial project-directory prompt value.
@@ -822,6 +828,23 @@ are used. The startup banner prints the selected path and its source. `quickstar
 uses the user-level path when neither explicit source is set. Every config field is
 optional and uses camelCase names.
 
+`schemaVersion` identifies the persisted configuration shape. Unversioned files
+are treated as schema 0. After the complete migrated configuration passes normal
+startup validation, Codexify writes a byte-for-byte backup beside the source as
+`<filename>.before-schema-vN.bak`, preserves the source permissions, and
+atomically replaces the source with schema `N`. A repeated load is a no-op. If a
+backup name already contains different data, a numeric suffix is used rather
+than overwriting it. Invalid, ambiguous, concurrently edited, symlinked, and
+newer-than-supported configs are not replaced.
+
+The schema-0 migration covers every released historical shape: `review` becomes
+`diff`; removed `allowedCommands`, `exec.mode`,
+`exec.extraAllowedCommands`, and `artifactEgress.maxCachedBytes` fields are
+deleted; `markdownChat` becomes `agentChat`; and the former native
+`markdownChat.ntfy` object becomes an Apprise notification URL. Fields added
+after an older release remain absent and therefore receive their documented
+current defaults. The exact v1.3.0 default config is kept as a regression fixture.
+
 The maintained [fully populated example](../codexify.config.example.json) includes
 every supported top-level and nested key, including both stdio and HTTP MCP server
 shapes. Replace its placeholder paths and identifiers before use; its example MCP
@@ -830,13 +853,14 @@ names.
 
 ```json
 {
+  "schemaVersion": 1,
   "workDir": "/absolute/path/to/project",
   "debug": false,
   "uiWidgets": true,
   "forceReadOnlyToolAnnotations": false,
   "apiKey": null,
   "conversationAuthToken": null,
-  "markdownChat": {
+  "agentChat": {
     "enabled": false,
     "maxWaitMs": 270000,
     "notifications": null
@@ -1125,7 +1149,9 @@ The `exec` block governs resident-process resources and the default shell for
 
 `exec_command` does not tokenize, filter, or allow-list commands. Its `cmd` value
 is passed to the selected shell as written after ordinary input and working-directory
-validation. Legacy `exec.mode` and `exec.extraAllowedCommands` values are ignored.
+validation. Schema migration deletes legacy `exec.mode`,
+`exec.extraAllowedCommands`, and top-level `allowedCommands` values because they
+no longer have runtime meaning.
 
 The `ignore` block decides what the file-walking tools — `glob`, `grep`, `tree` and `list_directory` — never surface, so a search returns your code rather than the contents of `node_modules`. One policy covers all four, backed by the Rust [`ignore`](https://crates.io/crates/ignore) crate for `.gitignore`-accurate matching:
 
@@ -1185,7 +1211,9 @@ The `artifactEgress` block governs [native host-file egress](#native-host-file-e
 | `maxReferences` | `64` | Maximum live opaque references for **bridged upstream** resources, between `1` and `1024`; native exported-file records are durable and are not subject to this count |
 | `referenceTtlMs` | `300000` | Lifetime of **bridged upstream** resource capabilities after the producing tool call (5 minutes). Native exported-file capabilities do not use this TTL |
 
-The former `maxCachedBytes` key is accepted and ignored for configuration-file compatibility. Replace it with `maxSnapshotBytes`; it no longer limits an in-memory native payload cache because that cache no longer exists.
+Schema migration deletes the former `maxCachedBytes` key. Use
+`maxSnapshotBytes`; the old key no longer limits an in-memory native payload
+cache because that cache no longer exists.
 
 The `memory` block governs `remember`, `recall` and the plan `update_plan` saves:
 
@@ -1397,14 +1425,14 @@ Historical `read_file` and `grep` calls still use normal limits.
 
 ## Markdown chat
 
-`markdownChat` is disabled by default. When enabled, it provides a local
+`agentChat` is disabled by default. When enabled, it provides a local
 communication channel for an active conversation without requiring a new
 ChatGPT message for every user instruction. It does not bypass model limits,
 guarantee quota savings, or keep a host-terminated turn alive.
 
 ```json
 {
-  "markdownChat": {
+  "agentChat": {
     "enabled": true,
     "maxWaitMs": 270000,
     "notifications": {
@@ -1424,7 +1452,7 @@ can be stored directly in the JSON configuration; keep the config and private
 service URLs out of source control. See the installation steps and URL examples
 in [Waiting and notifications](#waiting-and-notifications).
 
-For example, `codexify config set markdownChat.enabled true` enables the setting.
+For example, `codexify config set agentChat.enabled true` enables the setting.
 Configuration is loaded when the service starts: restart the service after a
 change. Enabling or disabling this feature changes the advertised tools and
 output schemas, so also refresh the connector in ChatGPT Settings and start a
@@ -1513,8 +1541,8 @@ never ends a turn.
 
 ### Chat widget
 
-When both `markdownChat.enabled` and `uiWidgets` are enabled, `setup` advertises
-`ui://codexify/setup-chat/v2/mcp-app.html`. Call setup once per conversation: its
+When both `agentChat.enabled` and `uiWidgets` are enabled, `setup` advertises
+`ui://codexify/setup-chat/v3/mcp-app.html`. Call setup once per conversation: its
 card contains the workspace controls and one persistent chat panel. `chat_read`,
 `chat_write`, and `chat_await` do not advertise a widget or create additional
 cards. Their messages appear in the existing panel, which remains usable during
@@ -1532,6 +1560,17 @@ hidden, or torn-down cards stop polling. Connection errors back off and retain
 the draft. Each card keeps its own unfinished composer text in private widget
 state. No background follow-up message is posted to ChatGPT, and the widget does
 not claim that a stopped agent can be restarted by sending to the file.
+
+The header shows the total number of model-visible Codexify tool calls recorded
+for the conversation. A compact standalone label before each later agent bubble
+shows the calls since the previous agent bubble. While work continues after the
+latest agent bubble, the same label appears after the visible history and updates
+through live state polling; the next agent bubble fixes that count into history.
+The `chat_write` that creates the later bubble is included. Counts are stored in
+private cursor state, and each new agent transcript marker snapshots the total so
+intervals survive reloads and server restarts. Existing pre-counter bubbles have
+no invented historical count. App-only widget state, send, file, setup, and
+project-selection helpers are excluded.
 
 | Indicator | Meaning |
 | --- | --- |
@@ -1612,7 +1651,8 @@ not post a new ChatGPT message, consume instructions, or change agent presence.
 Set `uiWidgets` to `false` to keep the three agent chat tools and file-based
 communication but disable the cards and their app-only actions. Refresh the
 connector and start a new conversation after upgrading from the earlier chat
-widget schema (`+markdown-chat` or `+markdown-chat-v2` to `+markdown-chat-v3`). Already mounted older
+widget schema (`+markdown-chat`, `+markdown-chat-v2`, or `+markdown-chat-v3` to
+`+markdown-chat-v4`). Already mounted older
 cards cannot be removed by the server; new write/wait calls no longer create
 them once the host uses the new tool metadata. The feature remains disabled by
 default; installation alone does not enable it.
@@ -1647,7 +1687,7 @@ python -m venv "$env:USERPROFILE\.codexify\notifications-venv"
 & "$env:USERPROFILE\.codexify\notifications-venv\Scripts\python.exe" -m pip install 'apprise>=1.13.1,<2'
 ```
 
-Set `markdownChat.notifications.pythonPath` to that interpreter's absolute path.
+Set `agentChat.notifications.pythonPath` to that interpreter's absolute path.
 The default is `python3` on macOS/Linux and `python` on Windows. The interpreter
 runs in isolated mode, so user-site-only Python packages are not used. Codexify
 does not download packages or alter the Python installation at runtime.
@@ -1677,12 +1717,13 @@ arguments, and provider output is not copied into logs. No console is opened on
 Windows. All URLs are parsed by Apprise before any notification is sent.
 
 All notification services, including ntfy, use Apprise. The separate native
-ntfy implementation and `markdownChat.ntfy` block have been removed; an old
-block is rejected rather than silently ignored. Before upgrading, install
-Apprise and replace that block with `notifications`:
+ntfy implementation and the `markdownChat` configuration key have been removed.
+Automatic schema migration renames that block to `agentChat` and converts its
+old `ntfy` child to `notifications`; install Apprise before relying on migrated
+notifications. The resulting shape is:
 
 ```json
-{"markdownChat":{"enabled":true,"notifications":{"urls":["ntfys://TOKEN@ntfy.example/codexify?auth=token&image=no"],"pythonPath":"/absolute/path/to/notifications-venv/bin/python"}}}
+{"agentChat":{"enabled":true,"notifications":{"urls":["ntfys://TOKEN@ntfy.example/codexify?auth=token&image=no"],"pythonPath":"/absolute/path/to/notifications-venv/bin/python"}}}
 ```
 
 Keep the same ntfy hostname and topic, use `ntfys` for HTTPS or `ntfy` for HTTP,

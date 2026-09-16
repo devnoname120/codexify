@@ -143,6 +143,12 @@ fn migrate_config(
     if remove_empty_exec {
         migrated.remove("exec");
     }
+    if let Some(artifact_egress) = migrated
+        .get_mut("artifactEgress")
+        .and_then(Value::as_object_mut)
+    {
+        artifact_egress.remove("maxCachedBytes");
+    }
 
     if let Some(review) = migrated.remove("review") {
         match migrated.entry("diff".to_string()) {
@@ -178,11 +184,19 @@ fn migrate_config(
             });
         }
     };
-    let mut current = if current_permissions.is_some() {
-        read_json_object(&current_path, "existing Codexify config")?
+    let (mut current, current_schema_migration) = if current_permissions.is_some() {
+        let source = fs::read(&current_path)
+            .with_context(|| format!("read existing Codexify config {}", current_path.display()))?;
+        let prepared = crate::config_migration::prepare(&current_path, &source)
+            .context("migrate existing Codexify config schema in memory")?;
+        (prepared.document, prepared.migration)
     } else {
-        Map::new()
+        (Map::new(), None)
     };
+    current.insert(
+        "schemaVersion".into(),
+        Value::Number(crate::config_migration::CONFIG_SCHEMA_VERSION.into()),
+    );
 
     let before = current.clone();
     merge_missing(&mut current, migrated, &mut outcome.config_conflicts);
@@ -200,11 +214,18 @@ fn migrate_config(
     }
     outcome.config_fields_added = count_added_leaves(&before, &current);
 
+    let replace = current != before || !current_path.exists() || current_schema_migration.is_some();
+    if replace && let Some(migration) = current_schema_migration.as_ref() {
+        migration
+            .backup_original()
+            .context("back up existing Codexify config before schema migration")?;
+    }
+
     write_json_object(
         &current_path,
         &current,
         current_permissions.or(Some(legacy_permissions)),
-        current != before || !current_path.exists(),
+        replace,
     )?;
 
     fs::remove_file(&legacy_path)
@@ -907,7 +928,11 @@ mod tests {
         let config = read_json(&current.join(CURRENT_CONFIG_FILE));
         assert_eq!(
             config,
-            json!({ "port": 4567, "workDir": fs::canonicalize(home.path()).unwrap() })
+            json!({
+                "schemaVersion": 1,
+                "port": 4567,
+                "workDir": fs::canonicalize(home.path()).unwrap()
+            })
         );
     }
 

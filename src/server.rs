@@ -121,16 +121,31 @@ pub struct CodexHandler {
 }
 
 impl CodexHandler {
-    async fn record_chat_activity(&self, conversation: Option<&ConversationIdentity>, at_ms: u64) {
-        self.markdown_chat
-            .record_agent_call(conversation, &self.session, at_ms);
+    async fn record_chat_activity(
+        &self,
+        conversation: Option<&ConversationIdentity>,
+        at_ms: u64,
+    ) -> Option<crate::markdown_chat::AgentActivity> {
+        let activity = self
+            .markdown_chat
+            .record_agent_call(conversation, &self.session, at_ms)?;
+        self.persist_chat_activity(conversation, activity.clone())
+            .await;
+        Some(activity)
+    }
+
+    async fn persist_chat_activity(
+        &self,
+        conversation: Option<&ConversationIdentity>,
+        activity: crate::markdown_chat::AgentActivity,
+    ) {
         if let Some(root) = self.selected_project_root(conversation) {
             let mut effective = self.config.as_ref().clone();
             effective.work_dir = root;
             if let Ok(chat) = self
                 .markdown_chat
                 .chat(&effective, conversation, &self.session)
-                && let Err(error) = chat.record_agent_call(at_ms).await
+                && let Err(error) = chat.sync_agent_activity(activity).await
             {
                 tracing::warn!(%error, "could not persist Markdown chat agent activity");
             }
@@ -573,10 +588,12 @@ impl ServerHandler for CodexHandler {
         let authorized_before = self
             .conversation_auth_error("chat_read", conversation.as_ref())
             .is_none();
-        if agent_call && authorized_before {
+        let activity = if agent_call && authorized_before {
             self.record_chat_activity(conversation.as_ref(), called_at_ms)
-                .await;
-        }
+                .await
+        } else {
+            None
+        };
         let call_identity = tool
             .map(|tool| tool.call_identity(&args))
             .unwrap_or_else(|| ToolCallIdentity::native(name.clone()));
@@ -777,14 +794,20 @@ impl ServerHandler for CodexHandler {
         };
 
         if agent_call
-            && (!authorized_before || name == SetProjectRoot::NAME)
             && !result.is_error
             && self
                 .conversation_auth_error("chat_read", conversation.as_ref())
                 .is_none()
         {
-            self.record_chat_activity(conversation.as_ref(), called_at_ms)
-                .await;
+            if !authorized_before {
+                self.record_chat_activity(conversation.as_ref(), called_at_ms)
+                    .await;
+            } else if name == SetProjectRoot::NAME
+                && let Some(activity) = activity
+            {
+                self.persist_chat_activity(conversation.as_ref(), activity)
+                    .await;
+            }
         }
         finalize_model_visible_result(tool.map(|tool| tool.as_ref()), &mut result, &self.config);
         if !result.is_error

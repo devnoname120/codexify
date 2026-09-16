@@ -1,27 +1,9 @@
 {
-  "schemaVersion": 1,
   "workDir": null,
   "debug": false,
   "uiWidgets": true,
-  "forceReadOnlyToolAnnotations": false,
-  "agentChat": {
-    "enabled": false,
-    "maxWaitMs": 270000,
-    "notifications": null
-  },
-  "apiKey": null,
   "conversationAuthToken": null,
   "port": 3000,
-  "multiProject": false,
-  "projectCloneDir": ".",
-  "worktrees": {
-    "mode": "auto",
-    "root": null,
-    "upstreamRefreshMode": "never",
-    "autoCleanupEnabled": true,
-    "keepCount": 15,
-    "allowSetupScript": false
-  },
   "tree": {
     "defaultDepth": 3,
     "ignore": ["node_modules", ".git", "dist", ".next", "__pycache__"]
@@ -36,15 +18,12 @@
     "maxTimeout": 120000
   },
   "exec": {
+    "mode": "unrestricted",
+    "extraAllowedCommands": [],
     "maxSessions": 8,
-    "defaultShell": null,
     "idleTimeoutMs": 300000
   },
-  "projectDoc": {
-    "maxBytes": 32768,
-    "fallbackFilenames": [],
-    "rootMarkers": [".git"]
-  },
+  "projectCloneDir": ".",
   "projectCatalog": {
     "codexConfig": {
       "enabled": true,
@@ -92,23 +71,5 @@
     "fallbackToSource": true,
     "maxReferences": 64,
     "referenceTtlMs": 300000
-  },
-  "memory": {
-    "enabled": true,
-    "dir": null,
-    "maxBytes": 16384
-  },
-  "skills": {
-    "enabled": true,
-    "dirs": null,
-    "includePlugins": true
-  },
-  "codexMcp": {
-    "enabled": true,
-    "useCli": true,
-    "cliPath": null
-  },
-  "allowedHosts": [],
-  "openaiTunnel": null,
-  "mcpServers": {}
+  }
 }

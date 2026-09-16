@@ -2,9 +2,11 @@ use rmcp::model::{MetaObject, Resource, ResourceContents};
 use serde_json::json;
 use std::sync::LazyLock;
 
-pub const CHAT_UI_URI: &str = "ui://codexify/markdown-chat/v1/mcp-app.html";
-pub const SETUP_CHAT_UI_URI: &str = "ui://codexify/setup-chat/v2/mcp-app.html";
-pub const PREVIOUS_SETUP_CHAT_UI_URI: &str = "ui://codexify/setup-chat/v1/mcp-app.html";
+pub const CHAT_UI_URI: &str = "ui://codexify/markdown-chat/v2/mcp-app.html";
+pub const PREVIOUS_CHAT_UI_URI: &str = "ui://codexify/markdown-chat/v1/mcp-app.html";
+pub const SETUP_CHAT_UI_URI: &str = "ui://codexify/setup-chat/v3/mcp-app.html";
+pub const PREVIOUS_SETUP_CHAT_UI_URI: &str = "ui://codexify/setup-chat/v2/mcp-app.html";
+pub const LEGACY_SETUP_CHAT_UI_URI: &str = "ui://codexify/setup-chat/v1/mcp-app.html";
 pub const CHAT_WIDGET_META: &str = "io.github.devnoname120/codexify/markdown-chat";
 pub const CHAT_ENABLED_META: &str = "io.github.devnoname120/codexify/markdown-chat-enabled";
 pub static CHAT_UI_HTML: LazyLock<String> = LazyLock::new(|| {
@@ -66,7 +68,7 @@ fn resource_meta() -> MetaObject {
         "ui":{"prefersBorder":false,"csp":{"connectDomains":[],"resourceDomains":[]}},
         "openai/widgetPrefersBorder":false,
         "openai/widgetCSP":{"connect_domains":[],"resource_domains":[]},
-        "openai/widgetDescription":"Codexify setup with one conversation-specific chat panel. One grey tick means sent, two grey ticks mean returned to the agent, and two blue ticks mean acknowledged by a chat tool. Agent presence reflects the last agent tool call, not a live connection."
+        "openai/widgetDescription":"Codexify setup with one conversation-specific chat panel. One grey tick means sent, two grey ticks mean returned to the agent, and two blue ticks mean acknowledged by a chat tool. Compact counters show model-visible Codexify tool calls for the conversation and between agent messages. Agent presence reflects the last agent tool call, not a live connection."
     })).expect("chat resource metadata")
 }
 
@@ -83,8 +85,10 @@ pub fn resource() -> Resource {
 
 pub fn contents_for_uri(uri: &str) -> Option<ResourceContents> {
     let html = match uri {
-        SETUP_CHAT_UI_URI | PREVIOUS_SETUP_CHAT_UI_URI => SETUP_CHAT_UI_HTML.as_str(),
-        CHAT_UI_URI => CHAT_UI_HTML.as_str(),
+        SETUP_CHAT_UI_URI | PREVIOUS_SETUP_CHAT_UI_URI | LEGACY_SETUP_CHAT_UI_URI => {
+            SETUP_CHAT_UI_HTML.as_str()
+        }
+        CHAT_UI_URI | PREVIOUS_CHAT_UI_URI => CHAT_UI_HTML.as_str(),
         _ => return None,
     };
     Some(
@@ -109,13 +113,17 @@ mod tests {
         assert!(html.contains("root.after(chatHost)"));
         assert!(html.contains("setup_ui_select_project"));
         assert!(html.contains("Read by agent"));
+        assert!(html.contains("id=\"tool-total\""));
+        assert!(html.contains("tool-call-marker"));
         assert_eq!(resource().uri, SETUP_CHAT_UI_URI);
         assert_eq!(
             tool_meta().get("openai/outputTemplate"),
             Some(&json!(SETUP_CHAT_UI_URI))
         );
         assert!(contents_for_uri(CHAT_UI_URI).is_some());
+        assert!(contents_for_uri(PREVIOUS_CHAT_UI_URI).is_some());
         assert!(contents_for_uri(PREVIOUS_SETUP_CHAT_UI_URI).is_some());
+        assert!(contents_for_uri(LEGACY_SETUP_CHAT_UI_URI).is_some());
         assert!(contents_for_uri("ui://codexify/unrelated").is_none());
         if let Some(path) = std::env::var_os("CODEXIFY_CHAT_PREVIEW_HTML") {
             std::fs::write(path, html).unwrap();

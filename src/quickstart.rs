@@ -191,7 +191,7 @@ where
     };
     let config_path = absolute_path(&environment.current_dir, &args.config);
     refuse_symlinked_config(&config_path)?;
-    let mut file_config = read_config(&config_path)?;
+    let (mut file_config, pending_migration) = read_config(&config_path)?;
     if file_config
         .get("openaiTunnel")
         .is_some_and(|value| !value.is_object())
@@ -269,6 +269,10 @@ where
         multi_project,
         conversation_auth_token.as_deref(),
     )?;
+    let migration_backup = pending_migration
+        .as_ref()
+        .map(crate::config_migration::PendingConfigMigration::backup_original)
+        .transpose()?;
     write_config(
         &config_path,
         &file_config,
@@ -277,6 +281,11 @@ where
 
     let complete = wizard.decorate(SUCCESS, "Local configuration complete.");
     writeln!(wizard.output, "\n{complete}")?;
+    if let Some(backup) = migration_backup {
+        let label = wizard.decorate(SUCCESS, "Migrated config backup:");
+        let path = wizard.decorate(ACCENT, backup.display());
+        writeln!(wizard.output, "{label} {path}")?;
+    }
     write_summary_value(&mut wizard, "Config", config_path.display())?;
     write_summary_value(&mut wizard, "Runtime key", key_path.display())?;
     write_summary_value(
@@ -782,6 +791,10 @@ fn merge_tunnel_config(
     multi_project: bool,
     conversation_auth_token: Option<&str>,
 ) -> anyhow::Result<()> {
+    config.insert(
+        "schemaVersion".to_string(),
+        Value::Number(crate::config_migration::CONFIG_SCHEMA_VERSION.into()),
+    );
     let tunnel = config
         .entry("openaiTunnel".to_string())
         .or_insert_with(|| Value::Object(Map::new()));
@@ -829,14 +842,18 @@ fn merge_tunnel_config(
     Ok(())
 }
 
-fn read_config(path: &Path) -> anyhow::Result<Map<String, Value>> {
-    match fs::read_to_string(path) {
-        Ok(text) => serde_json::from_str::<Value>(&text)
-            .with_context(|| format!("parse existing config {}", path.display()))?
-            .as_object()
-            .cloned()
-            .context("existing config must contain a JSON object"),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Map::new()),
+fn read_config(
+    path: &Path,
+) -> anyhow::Result<(
+    Map<String, Value>,
+    Option<crate::config_migration::PendingConfigMigration>,
+)> {
+    match fs::read(path) {
+        Ok(source) => {
+            let prepared = crate::config_migration::prepare(path, &source)?;
+            Ok((prepared.document, prepared.migration))
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok((Map::new(), None)),
         Err(error) => Err(error).with_context(|| format!("read config {}", path.display())),
     }
 }
@@ -1214,6 +1231,7 @@ mod tests {
         assert_eq!(fs::read_to_string(&key_path).unwrap().trim(), RUNTIME_KEY);
         let config: Value =
             serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+        assert_eq!(config["schemaVersion"], json!(1));
         assert_eq!(
             config["workDir"],
             json!(fs::canonicalize(&project).unwrap())
@@ -1476,6 +1494,36 @@ mod tests {
         );
         assert!(output.contains("Start Codexify now"), "{output}");
         assert!(output.contains("Starting Codexify."), "{output}");
+    }
+
+    #[test]
+    fn legacy_markdown_chat_key_migrates_during_successful_quickstart() {
+        let root = TempDir::new().unwrap();
+        let project = root.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+        let config_path = project.join("codexify.config.json");
+        let original = r#"{"markdownChat":{"enabled":true}}"#;
+        fs::write(&config_path, original).unwrap();
+        let environment = environment(&root, &project);
+        let input = format!("\n\n\n{TUNNEL_ID}\n\n");
+
+        let (result, output) = run_test_wizard(
+            args(config_path.clone(), &project),
+            environment,
+            &input,
+            &[RUNTIME_KEY],
+        );
+        result.unwrap();
+        let config: Value = serde_json::from_slice(&fs::read(&config_path).unwrap()).unwrap();
+        assert_eq!(config["schemaVersion"], 1);
+        assert_eq!(config["agentChat"]["enabled"], true);
+        assert!(config.get("markdownChat").is_none());
+        assert_eq!(
+            fs::read(config_path.with_file_name("codexify.config.json.before-schema-v1.bak"))
+                .unwrap(),
+            original.as_bytes()
+        );
+        assert!(output.contains("Migrated config backup:"));
     }
 
     #[test]

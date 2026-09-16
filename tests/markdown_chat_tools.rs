@@ -439,6 +439,7 @@ async fn activity_survives_restart_without_consuming_messages_or_reloading_histo
         .unwrap();
     let first = chat.widget_page(None, None).await.unwrap();
     assert!(first.last_agent_call_at_ms.is_none());
+    assert_eq!(first.total_tool_calls, 0);
     chat.record_agent_call(1000).await.unwrap();
     chat.record_agent_call(500).await.unwrap();
     let active = chat.widget_page(None, Some(first.revision)).await.unwrap();
@@ -447,6 +448,7 @@ async fn activity_survives_restart_without_consuming_messages_or_reloading_histo
         "presence changes do not need a full history retransmission"
     );
     assert_eq!(active.last_agent_call_at_ms, Some(1000));
+    assert_eq!(active.total_tool_calls, 2);
     assert_eq!(active.delivered_through, 0);
     assert!(active.read_through < sent.end);
     assert!(
@@ -459,27 +461,51 @@ async fn activity_survives_restart_without_consuming_messages_or_reloading_histo
     let reopened = MarkdownChatStore::default()
         .chat(&config, context.conversation.as_ref(), &SessionState::new())
         .unwrap();
-    assert_eq!(
-        reopened
-            .widget_page(None, None)
-            .await
-            .unwrap()
-            .last_agent_call_at_ms,
-        Some(1000)
-    );
+    let reopened_page = reopened.widget_page(None, None).await.unwrap();
+    assert_eq!(reopened_page.last_agent_call_at_ms, Some(1000));
+    assert_eq!(reopened_page.total_tool_calls, 2);
 
     let path = chat.path().with_file_name("cursor.json");
     let mut old: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-    old.as_object_mut().unwrap().remove("lastAgentCallAtMs");
+    for field in [
+        "lastAgentCallAtMs",
+        "totalToolCalls",
+        "toolCallEpoch",
+        "toolCallSequence",
+    ] {
+        old.as_object_mut().unwrap().remove(field);
+    }
     std::fs::write(&path, serde_json::to_vec(&old).unwrap()).unwrap();
     let legacy = MarkdownChatStore::default()
         .chat(&config, context.conversation.as_ref(), &session)
         .unwrap();
     let legacy_page = legacy.widget_page(None, None).await.unwrap();
     assert!(legacy_page.last_agent_call_at_ms.is_none());
+    assert_eq!(legacy_page.total_tool_calls, 0);
     assert_eq!(legacy_page.read_through, active.read_through);
     assert_eq!(legacy_page.messages[0].markdown, "Still unread");
+}
+
+#[tokio::test]
+async fn agent_messages_snapshot_the_tool_count_for_interval_rendering() {
+    let (_root, config, session, context) = fixture();
+    let chat = context
+        .markdown_chat
+        .chat(&config, context.conversation.as_ref(), &session)
+        .unwrap();
+
+    chat.record_agent_call(1000).await.unwrap();
+    chat.append("First agent message".into()).await.unwrap();
+    chat.record_agent_call(1100).await.unwrap();
+    chat.record_agent_call(1200).await.unwrap();
+    chat.append("Second agent message".into()).await.unwrap();
+
+    let page = chat.widget_page(None, None).await.unwrap();
+    assert_eq!(page.total_tool_calls, 3);
+    assert_eq!(page.messages.len(), 2);
+    assert_eq!(page.messages[0].tool_call_count, Some(1));
+    assert_eq!(page.messages[1].tool_call_count, Some(3));
 }
 
 #[tokio::test]

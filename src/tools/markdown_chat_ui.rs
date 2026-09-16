@@ -162,10 +162,10 @@ impl Tool for ChatUiTool {
                     Ok(args) => args,
                     Err(error) => return *error,
                 };
-                if let Some(at_ms) = context
+                if let Some(activity) = context
                     .markdown_chat
-                    .last_agent_call(context.conversation.as_ref(), session)
-                    && let Err(error) = chat.record_agent_call(at_ms).await
+                    .agent_activity(context.conversation.as_ref(), session)
+                    && let Err(error) = chat.sync_agent_activity(activity).await
                 {
                     return ToolResult::error(error);
                 }

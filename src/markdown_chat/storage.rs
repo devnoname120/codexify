@@ -43,6 +43,12 @@ struct Cursor {
     delivered_through: u64,
     #[serde(default)]
     last_agent_call_at_ms: Option<u64>,
+    #[serde(default)]
+    total_tool_calls: u64,
+    #[serde(default)]
+    tool_call_epoch: Option<String>,
+    #[serde(default)]
+    tool_call_sequence: u64,
 }
 
 pub struct ChatSnapshot {
@@ -266,7 +272,8 @@ impl ChatFile {
             let before = snapshot(file, cursor)?;
             let id = format!("{}-{}", chrono::Utc::now().timestamp_micros(), MESSAGE_COUNTER.fetch_add(1, Ordering::Relaxed));
             let created_at_ms = super::now_ms();
-            let block = format!("{AGENT_START}{id}\" created_at_ms=\"{created_at_ms}\" -->\n\n## Agent\n\n{message}\n\n<!-- codexify-agent-message:v1:end id=\"{id}\" -->\n");
+            let tool_call_count = cursor.total_tool_calls;
+            let block = format!("{AGENT_START}{id}\" created_at_ms=\"{created_at_ms}\" tool_call_count=\"{tool_call_count}\" -->\n\n## Agent\n\n{message}\n\n<!-- codexify-agent-message:v1:end id=\"{id}\" -->\n");
             before_append();
             file.write_all(block.as_bytes()).map_err(io_error)?;
             let end = file.stream_position().map_err(io_error)?;

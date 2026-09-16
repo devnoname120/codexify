@@ -330,7 +330,7 @@ button { font: inherit; }
   let statusTimer = null;
   let lastStatusCheckAt = 0;
   let tornDown = false;
-  let markdownChatEnabled = false;
+  let agentChatEnabled = false;
   let chatController = null;
   let chatHost = null;
   let projectCatalog = {
@@ -495,7 +495,7 @@ button { font: inherit; }
   }
 
   async function callTool(name, args, timeoutMs = 120_000) {
-    if (markdownChatEnabled) name = ({ list_projects:"setup_ui_list_projects", set_project_root:"setup_ui_select_project", self_update:"setup_ui_update" })[name] || name;
+    if (agentChatEnabled) name = ({ list_projects:"setup_ui_list_projects", set_project_root:"setup_ui_select_project", self_update:"setup_ui_update" })[name] || name;
     if (initialized) {
       try {
         return await request("tools/call", { name, arguments: args || {} }, timeoutMs);
@@ -635,15 +635,15 @@ button { font: inherit; }
       const enabled = candidate["io.github.devnoname120/codexify/markdown-chat-enabled"];
       return typeof enabled === "boolean" ? { enabled } : null;
     });
-    if (feature) markdownChatEnabled = feature.enabled;
-    else if (currentData?.connectorSchema?.advertisedVersion) markdownChatEnabled = currentData.connectorSchema.advertisedVersion.includes("+markdown-chat");
+    if (feature) agentChatEnabled = feature.enabled;
+    else if (currentData?.connectorSchema?.advertisedVersion) agentChatEnabled = currentData.connectorSchema.advertisedVersion.includes("+markdown-chat");
     syncMarkdownChat();
   }
 
   function syncMarkdownChat() {
     const template = document.getElementById("codexify-chat-template");
     if (!template || !window.mountCodexifyChat || !currentData || tornDown) return;
-    if (!markdownChatEnabled) {
+    if (!agentChatEnabled) {
       if (chatHost) chatHost.hidden = true;
       chatController?.setAvailable(false);
       return;

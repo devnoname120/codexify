@@ -420,14 +420,19 @@ The fully-resolved config handed to every tool. `config.rs` selects one JSON fil
 from explicit `--config`, `CODEXIFY_CONFIG`, the user-level
 `~/.codexify/codexify.config.json`, or built-in defaults, in that order. It parses
 camelCase fields and resolves the active project from CLI `--work-dir` or the
-config's absolute `workDir`. It imports user-level Codex MCP definitions through
+config's absolute `workDir`. Before deserialization, `config_migration.rs` treats
+an unversioned document as schema 0 and applies ordered JSON-to-JSON migrations in
+memory. Only after the complete current configuration validates does startup save
+a byte-for-byte, permission-preserving backup and atomically replace the source;
+newer schemas and ambiguous or concurrently edited inputs fail closed. It imports
+user-level Codex MCP definitions through
 `codex_mcp.rs`, opportunistically adds
 plugin-provided entries from the Codex CLI's effective catalogue, then applies
 explicit `mcpServers` entries as field overlays. Optional sub-configs (`projectDoc`,
 `projectCatalog`, `output`, `diff`, `artifactIngress`, `artifactEgress`, `worktrees`,
 `memory`, `skills`, `ignore`, `audit`) fall back to per-module defaults, as does `codexMcp`
-(Codex MCP import and CLI enrichment). The former top-level `review` key remains a
-deserialization alias for `diff`, but resolved runtime configuration uses only the
+(Codex MCP import and CLI enrichment). Schema-0 migration rewrites the former
+top-level `review` key to `diff`; resolved runtime configuration uses only the
 diff-named field. Top-level `uiWidgets` defaults to `true`; disabling it removes
 Codexify's MCP Apps capability/resource advertisement and widget-only metadata
 without disabling general MCP resources or the underlying tools. The testing-only
@@ -466,7 +471,7 @@ to redirected or `NO_COLOR` output.
 
 ### Optional Markdown chat (`markdown_chat`, `tools/markdown_chat.rs`)
 
-`markdownChat` is default-disabled and owns conversation-scoped `CHAT.md` files
+`agentChat` is default-disabled and owns conversation-scoped `CHAT.md` files
 under the existing workspace metadata base. A shared `MarkdownChatStore` resolves
 one channel per active root and conversation identity, with unique ephemeral
 transport identities for clients lacking stable metadata. Channels are initialized
@@ -503,7 +508,7 @@ receive an `upstream_result` envelope rather than corrupting the original schema
 Text mirrors preserve visibility in hosts that ignore structured output. Disabled
 installations retain the original advertised schemas and do not expose chat tools.
 
-Schema revisions use an explicit `+markdown-chat-v3` suffix only when enabled, not a
+Schema revisions use an explicit `+markdown-chat-v4` suffix only when enabled, not a
 schema fingerprint. Connector reloads record the version actually advertised by
 the current configuration. A persisted conversation baseline supplies toggle
 warnings when discovery identity is absent; that baseline is not evidence of a
@@ -512,7 +517,7 @@ refreshing live status, so a same-version enable/disable is not mistaken for an
 up-to-date schema. Host cancellation and model-imposed limits remain outside the
 communication subsystem's control.
 
-The optional `setup-chat/v2` resource is linked only by `setup`, combining the
+The optional `setup-chat/v3` resource is linked only by `setup`, combining the
 setup UI with one chat panel in a shadow root. The panel lives outside the setup
 controls' rerendered root; both use the setup bridge without a second handshake.
 The old standalone chat resource remains readable for existing cards, but no
@@ -522,6 +527,13 @@ authorization behavior on protected servers.
 
 App-only `chat_ui_send` and `chat_ui_state` share the same resolved
 channel and file lock; the UI never supplies a path or conversation identity.
+The common model-visible dispatch boundary assigns conversation-scoped activity
+sequence numbers before execution. Cursor persistence merges those sequences by
+per-process epoch, making retries and out-of-order persistence idempotent while
+continuing the cumulative count after restart. Each agent transcript marker
+captures the current total; the widget subtracts adjacent snapshots for fixed
+interval labels and subtracts the latest snapshot from cursor state for the live
+in-progress label. App-only calls never enter this counter.
 User appends carry a request ID for idempotent retries, while history reads parse
 agent/user boundaries and plain editor appends into paged component-only data.
 The normal user-text parser strips framing but preserves complete user Markdown.
@@ -604,7 +616,7 @@ the runtime API key. Presentation is routed through the shared adaptive terminal
 styles in production while the injected test writer stays plain and deterministic.
 The mode prompt precedes path resolution, defaults new setups to multi-project,
 and selects either access-root or project-directory wording. Tunnel and connector
-suggestions default to `Codexify`; existing values are never migrated. Tunnel ID
+suggestions default to `Codexify`; existing tunnel values are never guessed. Tunnel ID
 and API-key input follow their instructions directly without a separate pause.
 Without an explicit CLI or environment override, it writes
 `~/.codexify/codexify.config.json` and its generated launch command relies on normal
@@ -620,14 +632,19 @@ through `load_config` before entering the foreground server lifecycle.
 The wizard does not expose the advanced `conversationAuthToken` policy as an
 onboarding choice. If an existing config already contains a valid token, it
 preserves the token, protects the config as a private file on Unix, and prints the
-one-line instruction needed by an individual chat or ChatGPT Project.
+one-line instruction needed by an individual chat or ChatGPT Project. Existing
+schema-0 configs are migrated in memory and backed up immediately before the
+wizard publishes its merged schema-1 document.
 
 ### `config` CLI (`config_cli.rs`)
 
 Configuration management operates on the selected raw JSON document rather than
 round-tripping through `AppConfig`, so unknown future fields survive edits. The
 command shares the normal path-precedence resolver, supports escaped dotted object
-paths, and treats values as JSON when they parse or as strings otherwise.
+paths, and treats values as JSON when they parse or as strings otherwise. A
+mutating command first applies the same ordered schema migration and preserves a
+byte-for-byte backup; read-only display and validation commands do not rewrite the
+source.
 
 Mutations reject symlinks and non-file targets, serialize beside the destination,
 preserve existing permissions, and publish with atomic replacement. New Unix files
@@ -820,6 +837,7 @@ the original order and rejects duplicate names.
 
 | Module | Responsibility |
 |--------|----------------|
+| `config_migration.rs` | Ordered JSON config-schema migrations, newer-schema and ambiguity rejection, byte-for-byte no-clobber backups, concurrent-edit detection, permission preservation, and atomic source replacement after current startup validation. |
 | `safe_path.rs` | Lexical path-traversal guard (no `canonicalize`; component-wise containment) used by the ordinary filesystem tools. Native file ingress and egress use their own capability-confined boundaries below. |
 | `artifact_ingress/` | OpenAI native-file validation and streaming plus capability-confined, atomic no-overwrite workspace publication. It never accepts a local source path, and constrains the download URL and every redirect hop to the configurable `artifactIngress.allowedHosts` allowlist (default `"*"`, which still rejects loopback, private, link-local, unique-local, CGNAT, `localhost`, and metadata addresses). |
 | `artifact_egress.rs` | Capability-confined regular-file snapshotting plus a process-wide bounded store of immutable bytes. It returns random opaque `codexify://artifact/...` resource capabilities, enforces per-file/total-byte/reference/TTL limits, and serves blobs only through `resources/read`; absolute paths, traversal, symlink escapes, and delayed path rereads are excluded. |

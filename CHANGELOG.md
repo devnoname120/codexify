@@ -6,19 +6,24 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-09-16
+
 ### Added
 
+- Agent chat shows a live total of model-visible Codexify tool calls in its
+  header and a compact interval count between agent messages. Counts persist
+  across reloads and server restarts; app-only widget polling is excluded.
 - User and agent chat bubbles show small local times at the bottom right, with
   user times before the ticks and `YYYY-MM-DD` prefixes for earlier local days.
   Timestamps persist across reloads and retries; midnight changes update locally
   without another server response. Undated historical user text is not backfilled.
 - Markdown chat can notify multiple services through the local Apprise library,
-  using `markdownChat.notifications.urls`, an optional Python interpreter path,
+  using `agentChat.notifications.urls`, an optional Python interpreter path,
   and a bounded timeout. All services, including ntfy, use this single backend;
   the former native ntfy implementation and `markdownChat.ntfy` block are removed.
   CI checks the real ntfy/Pushover/webhook adapters and the
   subprocess path on Linux, macOS, and Windows without contacting real recipients.
-- Opt-in `markdownChat` communication gives each conversation its own `CHAT.md`
+- Opt-in `agentChat` communication gives each conversation its own `CHAT.md`
   outside the repository by default. `chat_read`, `chat_write`, and `chat_await`
   support complete unread Markdown, persistent cursors, native directory watches
   with polling fallback, a configurable 270-second default wait, and optional
@@ -37,6 +42,17 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Widget interactions do not count as agent activity. Cards preserve drafts,
   offer earlier history, and retry sends without
   duplicating messages. Inactive cards stop polling.
+
+### Changed
+
+- Renamed the public configuration block from `markdownChat` to `agentChat`.
+  Versioned config migration rewrites the old key instead of retaining a runtime
+  alias, including conversion of the former native ntfy shape.
+- Configuration files now carry `schemaVersion`. On successful startup,
+  unversioned historical configs are validated, backed up byte-for-byte beside
+  the original, and atomically rewritten to the current schema. The migration
+  covers the v1.0 `review` name and artifact-cache field, removed command-policy
+  fields, and post-v1.3 chat configuration shapes; newer schemas are rejected.
 
 ### Fixed
 
@@ -383,7 +399,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   drained through bounded head/tail buffers, while component-only `_meta` remains
   outside the model-visible limit.
 
-[Unreleased]: https://github.com/devnoname120/codexify/compare/v1.4.0...HEAD
+[Unreleased]: https://github.com/devnoname120/codexify/compare/v1.5.0...HEAD
+[1.5.0]: https://github.com/devnoname120/codexify/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/devnoname120/codexify/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/devnoname120/codexify/compare/v1.2.4...v1.3.0
 [1.2.4]: https://github.com/devnoname120/codexify/compare/v1.2.3...v1.2.4

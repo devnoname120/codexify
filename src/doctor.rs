@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use crate::config::{
     Cli, CodexCliDiagnosticConfig, ConfigPathSelection, ConfigPathSource,
-    codex_cli_diagnostic_config, config_path_selection, load_config_quiet,
+    codex_cli_diagnostic_config, config_path_selection, load_config_quiet_read_only,
 };
 use crate::exec_sessions::resolve_shell;
 use crate::openai_tunnel::{self, TunnelRuntimeInspection};
@@ -933,7 +933,7 @@ pub async fn run(cli: Cli) -> DoctorReport {
         }
     }
 
-    let config = match load_config_quiet(cli) {
+    let config = match load_config_quiet_read_only(cli) {
         Ok(config) => {
             checks.push(effective_configuration_check(&config));
             Some(config)

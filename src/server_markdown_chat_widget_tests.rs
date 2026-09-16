@@ -67,6 +67,7 @@ async fn markdown_chat_widget_send_poll_and_agent_delivery_are_separate() {
             .unwrap();
         assert_eq!(payload(&state)["delivered_through"], 0);
         assert!(payload(&state)["last_agent_call_at_ms"].is_null());
+        assert_eq!(payload(&state)["total_tool_calls"], 0);
         assert!(payload(&state)["read_through"].as_u64().unwrap() < end);
         assert!(
             state
@@ -94,6 +95,7 @@ async fn markdown_chat_widget_send_poll_and_agent_delivery_are_separate() {
         .unwrap();
     assert_eq!(payload(&other)["messages"], json!([]));
     assert!(payload(&other)["last_agent_call_at_ms"].is_null());
+    assert_eq!(payload(&other)["total_tool_calls"], 0);
     let returned = client
         .call_tool(request("clock_curr_time", json!({}), "widget-owner"))
         .await
@@ -118,6 +120,7 @@ async fn markdown_chat_widget_send_poll_and_agent_delivery_are_separate() {
     let last_call = payload(&state)["last_agent_call_at_ms"]
         .as_u64()
         .expect("agent activity timestamp");
+    assert_eq!(payload(&state)["total_tool_calls"], 1);
     assert!(last_call > 0);
     tokio::time::sleep(Duration::from_millis(20)).await;
     let polled = client
@@ -129,6 +132,7 @@ async fn markdown_chat_widget_send_poll_and_agent_delivery_are_separate() {
         last_call,
         "widget polling must not record agent activity"
     );
+    assert_eq!(payload(&polled)["total_tool_calls"], 1);
     assert!(
         chat.read(false)
             .await
@@ -149,6 +153,7 @@ async fn markdown_chat_widget_send_poll_and_agent_delivery_are_separate() {
     let previous_call = payload(&read_state)["last_agent_call_at_ms"]
         .as_u64()
         .unwrap();
+    assert_eq!(payload(&read_state)["total_tool_calls"], 2);
     tokio::time::sleep(Duration::from_millis(20)).await;
     let (wait, send) = tokio::join!(
         client.call_tool(request("chat_await", json!({}), "widget-owner")),
@@ -159,6 +164,7 @@ async fn markdown_chat_widget_send_poll_and_agent_delivery_are_separate() {
                 .await
                 .unwrap();
             let started = payload(&during)["last_agent_call_at_ms"].as_u64().unwrap();
+            assert_eq!(payload(&during)["total_tool_calls"], 3);
             assert!(
                 started > previous_call,
                 "a pending wait counts at invocation, not completion"
@@ -197,6 +203,7 @@ async fn markdown_chat_widget_send_poll_and_agent_delivery_are_separate() {
         wait_started,
         "completion must not reset the activity clock"
     );
+    assert_eq!(payload(&state)["total_tool_calls"], 3);
     assert!(chat.read(false).await.unwrap().text.is_empty());
     for (number, (name, args)) in [
         ("chat_read", json!({})),
@@ -226,6 +233,18 @@ async fn markdown_chat_widget_send_poll_and_agent_delivery_are_separate() {
             .call_tool(request("chat_ui_state", json!({}), "widget-owner"))
             .await
             .unwrap();
+        assert_eq!(payload(&state)["total_tool_calls"], 4 + number);
+        if name == "chat_write" {
+            let state_payload = payload(&state);
+            let agent = state_payload["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .rev()
+                .find(|message| message["role"] == "agent")
+                .unwrap();
+            assert_eq!(agent["tool_call_count"], 5);
+        }
         assert!(payload(&state)["delivered_through"].as_u64().unwrap() >= end);
         if number == 2 {
             assert!(
@@ -377,6 +396,7 @@ async fn markdown_chat_private_selection_does_not_deliver_or_fake_activity() {
         .get(crate::markdown_chat_ui::CHAT_WIDGET_META)
         .unwrap();
     assert!(page["last_agent_call_at_ms"].is_null());
+    assert_eq!(page["total_tool_calls"], 0);
     assert_eq!(page["delivered_through"], 0);
     assert!(page["read_through"].as_u64().unwrap() < page["messages"][0]["end"].as_u64().unwrap());
     client.cancel().await.unwrap();

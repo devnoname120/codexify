@@ -49,12 +49,12 @@ fn markdown_chat_defaults_and_validation() {
 }
 
 #[test]
-fn config_loader_reads_markdown_chat_without_exposing_timeout_in_tools() {
+fn config_loader_reads_agent_chat_without_exposing_timeout_in_tools() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("config.json");
     std::fs::write(&path, serde_json::json!({
         "workDir": root.path(), "codexMcp": {"enabled": false},
-        "markdownChat": {"enabled": true, "maxWaitMs": 270000, "notifications": {"urls":["ntfys://test-token@ntfy.sh/topic?auth=token&image=no"]}}
+        "agentChat": {"enabled": true, "maxWaitMs": 270000, "notifications": {"urls":["ntfys://test-token@ntfy.sh/topic?auth=token&image=no"]}}
     }).to_string()).unwrap();
     let cli = Cli::try_parse_from(["codexify", "--config", path.to_str().unwrap()]).unwrap();
     let config = load_config_quiet(cli).unwrap();
@@ -63,6 +63,33 @@ fn config_loader_reads_markdown_chat_without_exposing_timeout_in_tools() {
     assert_eq!(
         config.markdown_chat.notifications.unwrap().urls,
         vec!["ntfys://test-token@ntfy.sh/topic?auth=token&image=no"]
+    );
+}
+
+#[test]
+fn legacy_markdown_chat_key_migrates_without_a_runtime_alias() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("config.json");
+    let original = serde_json::json!({
+        "workDir": root.path(),
+        "codexMcp": {"enabled": false},
+        "markdownChat": {"enabled": true}
+    })
+    .to_string();
+    std::fs::write(&path, &original).unwrap();
+    let cli = Cli::try_parse_from(["codexify", "--config", path.to_str().unwrap()]).unwrap();
+
+    let config = load_config_quiet(cli).unwrap();
+
+    assert!(config.markdown_chat.enabled);
+    let migrated: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(migrated["schemaVersion"], 1);
+    assert_eq!(migrated["agentChat"]["enabled"], true);
+    assert!(migrated.get("markdownChat").is_none());
+    assert_eq!(
+        std::fs::read(path.with_file_name("config.json.before-schema-v1.bak")).unwrap(),
+        original.as_bytes()
     );
 }
 

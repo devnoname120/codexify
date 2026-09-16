@@ -1,4 +1,5 @@
 {
+  "schemaVersion": 1,
   "workDir": "/absolute/path/to/projects",
   "debug": false,
   "uiWidgets": true,
@@ -85,7 +86,7 @@
     "dir": null,
     "maxBytes": 16384
   },
-  "markdownChat": {
+  "agentChat": {
     "enabled": false,
     "maxWaitMs": 270000,
     "notifications": {

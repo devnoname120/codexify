@@ -84,7 +84,7 @@ impl NotificationsConfig {
     fn validate(&self) -> Result<(), String> {
         if self.urls.is_empty() || self.urls.len() > 32 {
             return Err(
-                "markdownChat.notifications.urls must contain 1 to 32 Apprise service URLs".into(),
+                "agentChat.notifications.urls must contain 1 to 32 Apprise service URLs".into(),
             );
         }
         if self.urls.iter().any(|url| {
@@ -93,15 +93,13 @@ impl NotificationsConfig {
                 || url.chars().any(char::is_control)
                 || reqwest::Url::parse(url).is_err()
         }) {
-            return Err("markdownChat.notifications.urls contains an invalid service URL".into());
+            return Err("agentChat.notifications.urls contains an invalid service URL".into());
         }
         if self.python_path.trim().is_empty() || self.python_path.contains('\0') {
-            return Err("markdownChat.notifications.pythonPath must name a Python interpreter with Apprise installed".into());
+            return Err("agentChat.notifications.pythonPath must name a Python interpreter with Apprise installed".into());
         }
         if !(1_000..=60_000).contains(&self.timeout_ms) {
-            return Err(
-                "markdownChat.notifications.timeoutMs must be between 1000 and 60000".into(),
-            );
+            return Err("agentChat.notifications.timeoutMs must be between 1000 and 60000".into());
         }
         Ok(())
     }
@@ -110,7 +108,7 @@ impl NotificationsConfig {
 impl MarkdownChatConfig {
     pub fn validate(&self) -> Result<(), String> {
         if !(1_000..=300_000).contains(&self.max_wait_ms) {
-            return Err("markdownChat.maxWaitMs must be between 1000 and 300000".into());
+            return Err("agentChat.maxWaitMs must be between 1000 and 300000".into());
         }
         if let Some(notifications) = &self.notifications {
             notifications.validate()?;
@@ -121,8 +119,21 @@ impl MarkdownChatConfig {
 
 pub struct MarkdownChatStore {
     channels: Mutex<HashMap<PathBuf, Arc<ChatFile>>>,
-    activity: Mutex<HashMap<String, u64>>,
+    activity: Mutex<HashMap<String, AgentActivityState>>,
     transport_namespace: String,
+}
+
+#[derive(Clone)]
+pub(crate) struct AgentActivity {
+    pub at_ms: u64,
+    pub epoch: String,
+    pub sequence: u64,
+}
+
+#[derive(Default)]
+struct AgentActivityState {
+    last_call_at_ms: u64,
+    sequence: u64,
 }
 
 impl Default for MarkdownChatStore {
@@ -156,25 +167,32 @@ impl MarkdownChatStore {
         conversation: Option<&ConversationIdentity>,
         session: &SessionState,
         at_ms: u64,
-    ) {
-        if let Ok(mut activity) = self.activity.lock() {
-            let last = activity
-                .entry(self.owner(conversation, session))
-                .or_default();
-            *last = (*last).max(at_ms);
-        }
+    ) -> Option<AgentActivity> {
+        let mut activity = self.activity.lock().ok()?;
+        let state = activity
+            .entry(self.owner(conversation, session))
+            .or_default();
+        state.last_call_at_ms = state.last_call_at_ms.max(at_ms);
+        state.sequence = state.sequence.saturating_add(1);
+        Some(AgentActivity {
+            at_ms: state.last_call_at_ms,
+            epoch: self.transport_namespace.clone(),
+            sequence: state.sequence,
+        })
     }
 
-    pub(crate) fn last_agent_call(
+    pub(crate) fn agent_activity(
         &self,
         conversation: Option<&ConversationIdentity>,
         session: &SessionState,
-    ) -> Option<u64> {
-        self.activity
-            .lock()
-            .ok()?
-            .get(&self.owner(conversation, session))
-            .copied()
+    ) -> Option<AgentActivity> {
+        let activity = self.activity.lock().ok()?;
+        let state = activity.get(&self.owner(conversation, session))?;
+        Some(AgentActivity {
+            at_ms: state.last_call_at_ms,
+            epoch: self.transport_namespace.clone(),
+            sequence: state.sequence,
+        })
     }
 
     pub fn chat(
@@ -255,13 +273,18 @@ mod tests {
         let second = SessionState::new();
         let a = ConversationIdentity::from_openai_session("a").unwrap();
         let b = ConversationIdentity::from_openai_session("b").unwrap();
-        store.record_agent_call(Some(&a), &first, 1000);
-        store.record_agent_call(Some(&a), &second, 800);
-        assert_eq!(store.last_agent_call(Some(&a), &second), Some(1000));
-        assert_eq!(store.last_agent_call(Some(&b), &first), None);
-        assert_eq!(store.last_agent_call(None, &first), None);
-        store.record_agent_call(None, &first, 1500);
-        assert_eq!(store.last_agent_call(None, &first), Some(1500));
-        assert_eq!(store.last_agent_call(None, &second), None);
+        let first_call = store.record_agent_call(Some(&a), &first, 1000).unwrap();
+        let second_call = store.record_agent_call(Some(&a), &second, 800).unwrap();
+        assert_eq!(first_call.sequence, 1);
+        assert_eq!(second_call.sequence, 2);
+        let shared = store.agent_activity(Some(&a), &second).unwrap();
+        assert_eq!(shared.at_ms, 1000);
+        assert_eq!(shared.sequence, 2);
+        assert!(store.agent_activity(Some(&b), &first).is_none());
+        assert!(store.agent_activity(None, &first).is_none());
+        let transport = store.record_agent_call(None, &first, 1500).unwrap();
+        assert_eq!(transport.at_ms, 1500);
+        assert_eq!(transport.sequence, 1);
+        assert!(store.agent_activity(None, &second).is_none());
     }
 }

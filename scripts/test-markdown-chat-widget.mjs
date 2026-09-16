@@ -10,7 +10,7 @@ const META = "io.github.devnoname120/codexify/markdown-chat";
 const ENABLED = "io.github.devnoname120/codexify/markdown-chat-enabled";
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
-const presenceDetails = vm.runInNewContext("(" + html.slice(html.indexOf("function presenceDetails("), html.indexOf("  function updatePresence(")) + ")");
+const presenceDetails = vm.runInNewContext("(" + html.slice(html.indexOf("function presenceDetails("), html.indexOf("  function toolCallLabel(")) + ")");
 test("presence: exact four/ten-minute boundaries, unknown activity, and clock skew", () => {
   for (const [age, state, label] of [
     [0, "online", "online"], [239999, "online", "online"],
@@ -41,6 +41,7 @@ class ChatBackend {
   delivered = 0;
   read = 0;
   lastAgentCall = null;
+  totalToolCalls = 0;
   serverTime = null;
   revision = 0;
   end = 180;
@@ -55,7 +56,7 @@ class ChatBackend {
   add(role, markdown, id = `fixture-${this.messages.length}`) {
     const start = this.end;
     this.end += markdown.length + 150;
-    const message = { id, role, markdown, start, end:this.end, created_at_ms:Date.now() };
+    const message = { id, role, markdown, start, end:this.end, created_at_ms:Date.now(), tool_call_count:role === "agent" ? this.totalToolCalls : null };
     this.messages.push(message); this.revision++;
     return message;
   }
@@ -90,7 +91,7 @@ class ChatBackend {
       _meta:{ [META]:{
         chat_file:"/private/project/chats/conversation/CHAT.md", revision,
         delivered_through:this.delivered, read_through:this.read,
-        last_agent_call_at_ms:this.lastAgentCall, server_time_ms:this.serverTime ?? Date.now(), messages,
+        last_agent_call_at_ms:this.lastAgentCall, total_tool_calls:this.totalToolCalls, server_time_ms:this.serverTime ?? Date.now(), messages,
         has_more:all.length > messages.length && !unchanged,
         before:messages[0]?.start ?? null, unchanged
       } }
@@ -282,6 +283,41 @@ for (const [engineName, engine] of [["Chromium", chromium], ["WebKit", webkit]])
         await second.getByText("The release build passed.", { exact:true }).waitFor();
         assert.equal(await first.locator(".message").count(), 3);
         assert.equal(await secondInput.inputValue(), "Keep my unfinished draft");
+        assert.deepEqual(errors, []); await page.close();
+      });
+      await t.test("tool-call total and between-agent marker update without a history revision", async () => {
+        const backend = new ChatBackend();
+        backend.totalToolCalls = 1;
+        backend.add("agent", "First progress report.");
+        const { page, frames:[frame], errors } = await mount(browser, backend, { combined:true });
+        const total = frame.locator("#tool-total");
+        const markers = frame.locator(".tool-call-marker");
+        assert.equal(await total.textContent(), "1 tool call");
+        assert.equal(await markers.count(), 0);
+
+        backend.totalToolCalls = 2;
+        await refresh(frame);
+        await frame.getByText("2 tool calls", { exact:true }).waitFor();
+        assert.deepEqual(await markers.allTextContents(), ["1 tool call"]);
+        backend.totalToolCalls = 4;
+        await refresh(frame);
+        assert.equal(await total.textContent(), "4 tool calls");
+        assert.deepEqual(await markers.allTextContents(), ["3 tool calls"]);
+
+        backend.add("user", "Keep going.");
+        backend.add("agent", "Second progress report.");
+        await refresh(frame);
+        await frame.getByText("Second progress report.", { exact:true }).waitFor();
+        assert.deepEqual(await markers.allTextContents(), ["3 tool calls"]);
+        const order = await frame.locator("#messages > .message, #messages > .tool-call-marker")
+          .evaluateAll(nodes => nodes.map(node => node.classList.contains("tool-call-marker") ? node.textContent : node.querySelector(".markdown")?.textContent));
+        assert.deepEqual(order, ["First progress report.", "Keep going.", "3 tool calls", "Second progress report."]);
+
+        backend.totalToolCalls = 5;
+        await refresh(frame);
+        assert.equal(await total.textContent(), "5 tool calls");
+        assert.deepEqual(await markers.allTextContents(), ["3 tool calls", "1 tool call"]);
+        assert(!backend.calls.some(call => call.name === "chat_ui_send"));
         assert.deepEqual(errors, []); await page.close();
       });
       await t.test("failed send retries the same ID, including an ambiguous saved response", async () => {

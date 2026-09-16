@@ -17,6 +17,7 @@ pub mod codex_mcp;
 mod codex_plugin_skills;
 pub mod config;
 pub mod config_cli;
+pub(crate) mod config_migration;
 mod connector_schema;
 pub mod conversation_auth;
 pub mod diff;
