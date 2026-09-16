@@ -1621,6 +1621,16 @@ clock and ages the indicator locally even when history is unchanged or a poll
 fails. These labels describe recent tool activity, not a live connection or a
 guarantee that the agent is currently working.
 
+When `agentChat.notifications` is configured, a server-side timer uses the same
+10-minute threshold to attempt one offline alert for each period without an
+agent tool call. No alert is sent before the first call. A later agent call
+re-arms the alert; widget polling and user sends do not. The chat card can be
+closed, but the Codexify server must be running to detect the transition. The
+server records the alert claim before calling the notification provider, so a
+lost response or restart cannot duplicate an accepted submission. A failed
+attempt is not retried automatically, and provider acceptance does not prove
+that the user saw the alert.
+
 `chat_ui_send` and `chat_ui_state` are app-only tools, hidden from the model using
 MCP Apps visibility and the ChatGPT compatibility fields. They resolve the current
 authorized conversation and workspace on the server; they accept no file path
@@ -1664,6 +1674,8 @@ are detected. A 500 ms polling fallback handles unavailable watchers, with a
 2-second safety recheck even when native watching is available. The file is
 checked after watcher registration and once more at the deadline to avoid a
 missed wake-up. No background polling continues after the tool returns.
+The offline-alert timer is separate from `chat_await` and runs in the server
+when notifications are configured.
 
 The 270-second default is a configurable choice, **not a documented ChatGPT
 maximum**. A [first-hand report](https://community.openai.com/t/agentsdk-and-chatgpt-ui-fails-running-time-consuming-mcp-tool-with-typeerror-fetch-failed/1366562)

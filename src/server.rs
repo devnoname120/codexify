@@ -145,9 +145,19 @@ impl CodexHandler {
             if let Ok(chat) = self
                 .markdown_chat
                 .chat(&effective, conversation, &self.session)
-                && let Err(error) = chat.sync_agent_activity(activity).await
             {
-                tracing::warn!(%error, "could not persist Markdown chat agent activity");
+                if let Err(error) = chat.sync_agent_activity(activity).await {
+                    tracing::warn!(%error, "could not persist Markdown chat agent activity");
+                } else {
+                    let workspace = effective
+                        .work_dir
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .into_owned();
+                    self.markdown_chat
+                        .monitor_offline(chat, &effective.markdown_chat, workspace);
+                }
             }
         }
     }

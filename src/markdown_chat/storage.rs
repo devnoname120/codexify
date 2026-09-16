@@ -44,6 +44,8 @@ struct Cursor {
     #[serde(default)]
     last_agent_call_at_ms: Option<u64>,
     #[serde(default)]
+    offline_notified_for_tool_call_count: Option<u64>,
+    #[serde(default)]
     total_tool_calls: u64,
     #[serde(default)]
     tool_call_epoch: Option<String>,
@@ -61,6 +63,13 @@ pub struct AppendReceipt {
     pub user_text: String,
     pub end_offset: u64,
     pub cursor_warning: Option<String>,
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct OfflineActivity {
+    pub last_call_at_ms: Option<u64>,
+    pub tool_call_count: u64,
+    pub notified_for_tool_call_count: Option<u64>,
 }
 
 pub struct ChatFile {
@@ -151,6 +160,44 @@ impl ChatFile {
                     *cursor = next;
                 }
                 Ok(())
+            })
+        })
+        .await
+    }
+
+    pub(super) async fn offline_activity(self: &Arc<Self>) -> Result<OfflineActivity, String> {
+        self.run(|chat| {
+            chat.with_cursor(|cursor, _| {
+                Ok(OfflineActivity {
+                    last_call_at_ms: cursor.last_agent_call_at_ms,
+                    tool_call_count: cursor.total_tool_calls,
+                    notified_for_tool_call_count: cursor.offline_notified_for_tool_call_count,
+                })
+            })
+        })
+        .await
+    }
+
+    pub(super) async fn claim_offline_notification(
+        self: &Arc<Self>,
+        now_ms: u64,
+        offline_after_ms: u64,
+    ) -> Result<bool, String> {
+        self.run(move |chat| {
+            chat.with_cursor(|cursor, _| {
+                let Some(last_call_at_ms) = cursor.last_agent_call_at_ms else {
+                    return Ok(false);
+                };
+                if now_ms.saturating_sub(last_call_at_ms) < offline_after_ms
+                    || cursor.offline_notified_for_tool_call_count == Some(cursor.total_tool_calls)
+                {
+                    return Ok(false);
+                }
+                let mut next = cursor.clone();
+                next.offline_notified_for_tool_call_count = Some(cursor.total_tool_calls);
+                chat.save_cursor(&next)?;
+                *cursor = next;
+                Ok(true)
             })
         })
         .await

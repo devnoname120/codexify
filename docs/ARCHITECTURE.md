@@ -534,6 +534,11 @@ continuing the cumulative count after restart. Each agent transcript marker
 captures the current total; the widget subtracts adjacent snapshots for fixed
 interval labels and subtracts the latest snapshot from cursor state for the live
 in-progress label. App-only calls never enter this counter.
+The same model-visible activity starts a server-owned offline monitor only when
+Apprise notifications are configured. It compares the persisted last-call time
+against the widget's 10-minute offline threshold, claims the current activity
+period in the private cursor before provider delivery, and waits for a new call
+before it can alert again. App-only calls never re-arm or trigger the monitor.
 User appends carry a request ID for idempotent retries, while history reads parse
 agent/user boundaries and plain editor appends into paged component-only data.
 The normal user-text parser strips framing but preserves complete user Markdown.

@@ -1,6 +1,7 @@
 //! Optional conversation-scoped Markdown communication, separate from repository files.
 
 pub mod notification;
+mod offline;
 pub(crate) mod output;
 mod storage;
 mod wait;
@@ -25,6 +26,7 @@ pub use wait::WaitOutcome;
 pub const DEFAULT_MAX_WAIT_MS: u64 = 270_000;
 pub const MAX_UNREAD_BYTES: usize = 16 * 1024 * 1024;
 pub const USER_MESSAGE_FIELD: &str = "new_chat_message_from_user";
+pub const OFFLINE_AFTER_MS: u64 = 600_000;
 
 pub(crate) fn now_ms() -> u64 {
     SystemTime::now()
@@ -120,6 +122,7 @@ impl MarkdownChatConfig {
 pub struct MarkdownChatStore {
     channels: Mutex<HashMap<PathBuf, Arc<ChatFile>>>,
     activity: Mutex<HashMap<String, AgentActivityState>>,
+    offline_monitors: Mutex<HashMap<PathBuf, Arc<tokio::sync::Notify>>>,
     transport_namespace: String,
 }
 
@@ -145,6 +148,7 @@ impl Default for MarkdownChatStore {
         Self {
             channels: Mutex::new(HashMap::new()),
             activity: Mutex::new(HashMap::new()),
+            offline_monitors: Mutex::new(HashMap::new()),
             transport_namespace: format!("{}-{timestamp}", std::process::id()),
         }
     }
@@ -225,6 +229,51 @@ impl MarkdownChatStore {
             .or_insert_with(|| Arc::new(ChatFile::new(path, conversation.is_some())))
             .clone())
     }
+
+    pub(crate) fn monitor_offline(
+        &self,
+        chat: Arc<ChatFile>,
+        config: &MarkdownChatConfig,
+        workspace: String,
+    ) {
+        if config.notifications.is_none() {
+            return;
+        }
+        let Ok(mut monitors) = self.offline_monitors.lock() else {
+            tracing::warn!("could not start agent chat offline notification monitor");
+            return;
+        };
+        let wake = monitors
+            .entry(chat.path().to_path_buf())
+            .or_insert_with(|| {
+                let wake = Arc::new(tokio::sync::Notify::new());
+                let config = config.clone();
+                let monitor_wake = wake.clone();
+                tokio::spawn(async move {
+                    offline::monitor(chat, monitor_wake, OFFLINE_AFTER_MS, move || {
+                        let config = config.clone();
+                        let workspace = workspace.clone();
+                        async move {
+                            notification::publish_config(
+                                &config,
+                                &workspace,
+                                offline::MESSAGE.to_string(),
+                                &tokio_util::sync::CancellationToken::new(),
+                            )
+                            .await
+                        }
+                    })
+                    .await;
+                });
+                wake
+            });
+        wake.notify_one();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn offline_monitor_count(&self) -> usize {
+        self.offline_monitors.lock().unwrap().len()
+    }
 }
 
 pub(crate) async fn history_call(
@@ -286,5 +335,19 @@ mod tests {
         assert_eq!(transport.at_ms, 1500);
         assert_eq!(transport.sequence, 1);
         assert!(store.agent_activity(None, &second).is_none());
+    }
+
+    #[tokio::test]
+    async fn no_offline_monitor_is_started_without_notifications() {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = crate::config::default_config(root.path().to_path_buf());
+        config.markdown_chat.enabled = true;
+        let store = MarkdownChatStore::default();
+        let session = SessionState::new();
+        let chat = store.chat(&config, None, &session).unwrap();
+
+        store.monitor_offline(chat, &config.markdown_chat, "test".into());
+
+        assert_eq!(store.offline_monitor_count(), 0);
     }
 }

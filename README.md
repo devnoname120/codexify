@@ -169,6 +169,12 @@ the previous agent message and increments live while the agent works. Widget
 polling and other app-only helpers do not inflate either count. Widget sends do
 not start a new ChatGPT turn.
 
+If `agentChat.notifications` is configured, the server also attempts one
+notification when this indicator turns offline after 10 minutes without an agent
+tool call. The next agent call re-arms the alert. This works without an open
+chat card, but the Codexify service must be running; no alert is sent before the
+first recorded agent call.
+
 Messages show a small local `HH:mm` timestamp at the bottom right, before the
 ticks on user messages. Earlier local calendar days also show `YYYY-MM-DD`
 before the time. Dates follow the viewer's timezone and update at midnight.

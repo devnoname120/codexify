@@ -321,6 +321,68 @@ fn markdown_chat_only_setup_advertises_a_chat_template() {
 }
 
 #[tokio::test]
+async fn only_model_visible_calls_start_offline_notification_monitors() {
+    let root = tempfile::tempdir().unwrap();
+    let mut config = crate::config::default_config(root.path().into());
+    config.markdown_chat.enabled = true;
+    config.markdown_chat.notifications = Some(crate::markdown_chat::NotificationsConfig {
+        urls: vec!["ntfys://ntfy.example/topic?image=no".into()],
+        python_path: root.path().join("missing-python").display().to_string(),
+        timeout_ms: 1000,
+    });
+    config.memory.dir = Some(root.path().join("metadata").display().to_string());
+    let mut handler = handler_with_tools(
+        root.path(),
+        crate::registry::load_tools_for_config(&config),
+        crate::types::ToolLogLevel::Info,
+    );
+    handler.config = Arc::new(config);
+    let chat_store = handler.markdown_chat.clone();
+    let (server_transport, client_transport) = tokio::io::duplex(32 * 1024);
+    let task = tokio::spawn(async move {
+        handler
+            .serve(server_transport)
+            .await
+            .unwrap()
+            .waiting()
+            .await
+            .unwrap()
+    });
+    let client = ().serve(client_transport).await.unwrap();
+    let request = |name: &str, conversation: &str| {
+        let mut request = CallToolRequestParams::new(name.to_string())
+            .with_arguments(json!({}).as_object().unwrap().clone());
+        request.meta =
+            Some(serde_json::from_value(json!({"openai/session":conversation})).unwrap());
+        request
+    };
+
+    client
+        .call_tool(request("chat_ui_state", "first"))
+        .await
+        .unwrap();
+    assert_eq!(chat_store.offline_monitor_count(), 0);
+    client
+        .call_tool(request("clock_curr_time", "first"))
+        .await
+        .unwrap();
+    assert_eq!(chat_store.offline_monitor_count(), 1);
+    client
+        .call_tool(request("chat_ui_state", "first"))
+        .await
+        .unwrap();
+    assert_eq!(chat_store.offline_monitor_count(), 1);
+    client
+        .call_tool(request("clock_curr_time", "second"))
+        .await
+        .unwrap();
+    assert_eq!(chat_store.offline_monitor_count(), 2);
+
+    client.cancel().await.unwrap();
+    task.await.unwrap();
+}
+
+#[tokio::test]
 async fn markdown_chat_private_selection_does_not_deliver_or_fake_activity() {
     let root = tempfile::tempdir().unwrap();
     let project = root.path().join("project");

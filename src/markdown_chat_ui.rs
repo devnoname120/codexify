@@ -113,6 +113,10 @@ mod tests {
         assert!(html.contains("root.after(chatHost)"));
         assert!(html.contains("setup_ui_select_project"));
         assert!(html.contains("Read by agent"));
+        assert!(html.contains(&format!(
+            "if (age < {}) return {{ state:\"away\"",
+            crate::markdown_chat::OFFLINE_AFTER_MS
+        )));
         assert!(html.contains("id=\"tool-total\""));
         assert!(html.contains("tool-call-marker"));
         assert_eq!(resource().uri, SETUP_CHAT_UI_URI);

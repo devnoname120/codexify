@@ -6,6 +6,17 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.5.1] - 2026-09-16
+
+### Added
+
+- When `agentChat.notifications` is configured, the server attempts one offline
+  notification after a conversation has gone 10 minutes without an agent tool
+  call, matching the chat indicator's offline threshold. The claim is persisted
+  before provider delivery to prevent duplicate alerts; the next agent call
+  re-arms it. The chat card does not need to be open, and a failed delivery is
+  not retried automatically.
+
 ## [1.5.0] - 2026-09-16
 
 ### Added
@@ -399,7 +410,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   drained through bounded head/tail buffers, while component-only `_meta` remains
   outside the model-visible limit.
 
-[Unreleased]: https://github.com/devnoname120/codexify/compare/v1.5.0...HEAD
+[Unreleased]: https://github.com/devnoname120/codexify/compare/v1.5.1...HEAD
+[1.5.1]: https://github.com/devnoname120/codexify/compare/v1.5.0...v1.5.1
 [1.5.0]: https://github.com/devnoname120/codexify/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/devnoname120/codexify/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/devnoname120/codexify/compare/v1.2.4...v1.3.0
