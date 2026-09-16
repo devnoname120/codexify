@@ -861,13 +861,11 @@ impl Tool for McpSearchToolsTool {
                 "query": {
                     "type": "string",
                     "minLength": 1,
-                    "pattern": "\\S",
                     "description": "Ranked full-text query. The BM25 index covers source metadata, tool id/name/title/description, and recursively useful input/output schema property names and descriptions."
                 },
                 "source": {
                     "type": "string",
                     "minLength": 1,
-                    "pattern": "\\S",
                     "description": format!("Optional model-visible source id returned by `{MCP_LIST_SOURCES}`.")
                 },
                 "limit": {
@@ -953,13 +951,11 @@ impl Tool for McpGetToolTool {
                 "source": {
                     "type": "string",
                     "minLength": 1,
-                    "pattern": "\\S",
                     "description": format!("Model-visible source id returned by `{MCP_LIST_SOURCES}` or `{MCP_SEARCH_TOOLS}`.")
                 },
                 "tool": {
                     "type": "string",
                     "minLength": 1,
-                    "pattern": "\\S",
                     "description": format!("Model-visible tool id returned by `{MCP_SEARCH_TOOLS}`.")
                 }
             },
@@ -1086,13 +1082,11 @@ impl Tool for McpCallToolTool {
                 "source": {
                     "type": "string",
                     "minLength": 1,
-                    "pattern": "\\S",
                     "description": format!("Model-visible source id returned by `{MCP_LIST_SOURCES}` or `{MCP_SEARCH_TOOLS}`.")
                 },
                 "tool": {
                     "type": "string",
                     "minLength": 1,
-                    "pattern": "\\S",
                     "description": format!("Model-visible tool id returned by `{MCP_SEARCH_TOOLS}`.")
                 },
                 "arguments": {
@@ -1198,6 +1192,42 @@ mod tests {
         assert_eq!(second, "a_b_2");
     }
 
+    #[test]
+    fn catalog_identifier_schemas_avoid_host_regex_patterns() {
+        let catalog = Arc::new(Catalog::new(Vec::new()));
+        let search_schema = McpSearchToolsTool {
+            catalog: catalog.clone(),
+            description: String::new(),
+        }
+        .input_schema();
+        let get_schema = McpGetToolTool {
+            catalog: catalog.clone(),
+        }
+        .input_schema();
+        let call_schema = McpCallToolTool {
+            catalog,
+            resources: Arc::new(BridgedResourceStore::new(
+                crate::types::ArtifactEgressConfig::default(),
+            )),
+        }
+        .input_schema();
+
+        let assert_identifier = |schema: &Value, field: &str| {
+            let property = &schema["properties"][field];
+            assert_eq!(property["minLength"], 1);
+            assert!(
+                property.get("pattern").is_none(),
+                "{field} must not expose a regex pattern to the host"
+            );
+        };
+
+        assert_identifier(&search_schema, "query");
+        assert_identifier(&search_schema, "source");
+        assert_identifier(&get_schema, "source");
+        assert_identifier(&get_schema, "tool");
+        assert_identifier(&call_schema, "source");
+        assert_identifier(&call_schema, "tool");
+    }
     #[test]
     fn schema_terms_include_recursive_property_names_and_descriptions() {
         let mut terms = HashMap::new();
