@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Codexify chats</title>
+<style>
+:root { color-scheme:light dark; --bg:#f5f7f6; --panel:#fff; --ink:#202427; --muted:#6b7475; --line:#dce2df; --accent:#136f50; --selected:#e4f3ed; }
+@media(prefers-color-scheme:dark) { :root { --bg:#171b1a; --panel:#202625; --ink:#edf1ef; --muted:#aab5b1; --line:#39423f; --accent:#82d9b1; --selected:#174c3e; } }
+* { box-sizing:border-box; }
+body { margin:0; background:var(--bg); color:var(--ink); font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+button { font:inherit; cursor:pointer; }
+#layout { display:grid; grid-template-columns:minmax(245px,300px) minmax(0,1fr); height:100dvh; min-height:420px; }
+aside { display:flex; flex-direction:column; min-height:0; background:var(--panel); border-right:1px solid var(--line); }
+aside header { padding:20px 18px 14px; border-bottom:1px solid var(--line); }
+aside h1 { margin:0; font-size:17px; }
+aside p { margin:5px 0 0; font-size:12px; color:var(--muted); }
+#conversations { overflow:auto; flex:1; padding:8px; }
+.conversation { display:grid; grid-template-columns:20px minmax(0,1fr) 8px; gap:9px; align-items:center; width:100%; padding:11px 9px; text-align:left; color:inherit; border:0; border-radius:10px; background:transparent; }
+.conversation:hover { background:var(--bg); }
+.conversation[aria-current="true"] { background:var(--selected); }
+.conversation:focus-visible { outline:2px solid var(--accent); outline-offset:-2px; }
+.presence { display:grid; place-items:center; width:17px; height:17px; border-radius:50%; border:1.5px solid currentColor; font-size:10px; line-height:1; font-weight:700; }
+.presence.online { background:#159b27; border-color:#159b27; color:white; }
+.presence.away { background:#eba916; border-color:#eba916; color:white; }
+.presence.offline { color:#85898d; }
+.conversation-main { min-width:0; }
+.conversation-title { display:block; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; font-weight:600; }
+.conversation-detail { display:block; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; font-size:11px; color:var(--muted); margin-top:3px; }
+.unread { width:7px; height:7px; background:#2488d3; border-radius:50%; }
+.unread[hidden] { display:none; }
+#list-note { padding:10px 16px; border-top:1px solid var(--line); color:var(--muted); font-size:11px; }
+main { min-width:0; min-height:0; display:flex; justify-content:center; padding:18px; }
+#chat-host { width:min(100%,900px); min-height:0; background:var(--panel); border:1px solid var(--line); border-radius:18px; overflow:hidden; }
+#placeholder { display:grid; place-items:center; height:100%; color:var(--muted); padding:24px; text-align:center; }
+#error { color:#ad2d30; padding:10px 16px; font-size:12px; }
+@media(max-width:680px) { #layout { grid-template-columns:minmax(145px,33%) minmax(0,1fr); } main { padding:0; } #chat-host { border:0; border-radius:0; } .conversation { grid-template-columns:16px minmax(0,1fr) 7px; gap:5px; padding:9px 5px; } aside header { padding:12px 8px; } aside h1 { font-size:14px; } aside p { font-size:10px; } }
+</style>
+</head>
+<body>
+<div id="layout">
+  <aside aria-label="Conversations">
+    <header><h1>Agent chats</h1><p>Most recent message first</p></header>
+    <div id="error" hidden></div>
+    <nav id="conversations" aria-label="Agent chat conversations"></nav>
+    <div id="list-note">Local titles come from the first chat entry (preferring a user entry); ChatGPT titles are not exposed by the connector.</div>
+  </aside>
+  <main><div id="chat-host"><div id="placeholder">Select a conversation to view its chat.</div></div></main>
+</div>
+<!-- CHAT_TEMPLATE -->
+<script>
+/* CHAT_SCRIPT */
+(() => {
+  "use strict";
+  const token = location.hash.slice(1) || sessionStorage.getItem("owner-chat-token");
+  if (location.hash) history.replaceState(null, "", location.pathname);
+  if (token) sessionStorage.setItem("owner-chat-token", token);
+  const list = document.getElementById("conversations");
+  const host = document.getElementById("chat-host");
+  const errorNode = document.getElementById("error");
+  let selected = null, controller = null, chats = [];
+  let seen = {};
+  try { seen = JSON.parse(localStorage.getItem("owner-chat-seen-v1") || "{}"); } catch {}
+
+  function showError(message) { errorNode.hidden = !message; errorNode.textContent = message || ""; }
+  function remember(id, end) {
+    if (!Number.isSafeInteger(end) || end <= (seen[id] || 0)) return;
+    seen[id] = end;
+    try { localStorage.setItem("owner-chat-seen-v1", JSON.stringify(seen)); } catch {}
+    renderList();
+  }
+  function presence(lastCall, now) {
+    if (!Number.isFinite(lastCall) || now - lastCall >= 600000) return ["offline", "×"];
+    if (now - lastCall >= 240000) return ["away", "◷"];
+    return ["online", "✓"];
+  }
+  function textNode(tag, className, text) {
+    const node = document.createElement(tag); node.className = className; node.textContent = text; return node;
+  }
+  async function api(path, options = {}) {
+    const response = await fetch(path, {
+      ...options,
+      headers:{ Authorization:`Bearer ${token}`, ...(options.body ? {"Content-Type":"application/json"} : {}) },
+      cache:"no-store"
+    });
+    if (!response.ok) throw new Error((await response.text()) || `Request failed (${response.status})`);
+    return response;
+  }
+  function renderList() {
+    const now = Date.now();
+    list.replaceChildren();
+    if (!chats.length) {
+      list.append(textNode("p", "conversation-detail", "No persisted conversations yet."));
+      return;
+    }
+    for (const chat of chats) {
+      const button = document.createElement("button");
+      button.type = "button"; button.className = "conversation";
+      button.setAttribute("aria-current", String(chat.id === selected));
+      button.title = `${chat.title} · ${chat.workspace}`;
+      button.addEventListener("click", () => select(chat.id));
+      const [state, symbol] = presence(chat.last_agent_call_at_ms, now);
+      const icon = textNode("span", `presence ${state}`, symbol);
+      icon.title = `Agent ${state} (based on last tool call)`;
+      const content = textNode("span", "conversation-main", "");
+      content.append(textNode("span", "conversation-title", chat.title));
+      const date = chat.last_entry_at_ms ? new Date(chat.last_entry_at_ms).toLocaleString() : "No messages";
+      content.append(textNode("span", "conversation-detail", `${chat.workspace} · ${date}`));
+      const dot = textNode("span", "unread", "");
+      dot.hidden = chat.id === selected || chat.last_entry_end <= (seen[chat.id] || 0);
+      dot.setAttribute("aria-label", "New chat entry");
+      button.append(icon, content, dot);
+      list.append(button);
+    }
+  }
+  function select(id) {
+    if (id === selected) return;
+    controller?.close(); controller = null; selected = id;
+    host.replaceChildren();
+    const shell = document.createElement("div");
+    shell.style.height = "100%";
+    const scope = shell.attachShadow({ mode:"open" });
+    scope.append(document.getElementById("chat-template").content.cloneNode(true));
+    host.append(shell);
+    const key = `owner-chat-widget-v1:${id}`;
+    const bridge = {
+      getState() { try { return JSON.parse(localStorage.getItem(key) || "{}"); } catch { return {}; } },
+      setState(value) { try { localStorage.setItem(key, JSON.stringify(value)); } catch {} },
+      reportSize() {},
+      async callTool(name, args) {
+        let path = `/api/chats/${id}`;
+        let options = {};
+        if (name === "chat_ui_state") {
+          const query = new URLSearchParams();
+          if (args.revision) query.set("revision", args.revision);
+          if (args.before !== undefined) query.set("before", args.before);
+          if (query.size) path += `?${query}`;
+        } else if (name === "chat_ui_send") {
+          path += "/send";
+          options = { method:"POST", body:JSON.stringify({request_id:args.request_id, message:args.message}) };
+        } else if (name === "chat_ui_file") {
+          path += `/file?${new URLSearchParams({href:args.href})}`;
+        } else throw new Error("Unknown chat operation");
+        const payload = await (await api(path, options)).json();
+        if (name === "chat_ui_state") {
+          const end = chats.find(chat => chat.id === id)?.last_entry_end;
+          remember(id, end);
+        }
+        return payload;
+      },
+      async downloadFile(resource) {
+        const response = await api(`/api/files?${new URLSearchParams({uri:resource.uri})}`);
+        const blob = await response.blob();
+        const link = document.createElement("a");
+        link.href = URL.createObjectURL(blob);
+        link.download = resource.name || "download";
+        link.click();
+        setTimeout(() => URL.revokeObjectURL(link.href), 30000);
+      },
+      async openLink(href) {
+        const url = new URL(href, location.href);
+        if (!["https:", "http:", "mailto:"].includes(url.protocol)) throw new Error("Unsupported link");
+        window.open(url.href, "_blank", "noopener,noreferrer");
+      }
+    };
+    controller = window.mountCodexifyChat(scope, bridge);
+    controller.setAvailable(true);
+    renderList();
+  }
+  async function refresh() {
+    if (document.hidden) return;
+    try {
+      const payload = await (await api("/api/chats")).json();
+      chats = payload.chats || [];
+      showError("");
+      renderList();
+      if (selected && !chats.some(chat => chat.id === selected)) {
+        controller?.close(); controller = null; selected = null;
+        host.replaceChildren(textNode("div", "", "Conversation is no longer available."));
+      }
+    } catch (error) { showError(error.message || "Chat list unavailable"); }
+  }
+  window.addEventListener("storage", event => {
+    if (event.key === "owner-chat-seen-v1") {
+      try { seen = JSON.parse(event.newValue || "{}"); } catch {}
+      renderList();
+    }
+  });
+  if (!token) showError("Open this page using the URL printed by `codexify chat`.");
+  else { void refresh(); setInterval(refresh, 2000); setInterval(renderList, 30000); }
+})();
+</script>
+</body>
+</html>

@@ -168,6 +168,8 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum CliCommand {
+    /// Print the private, localhost-only owner chat URL for the running service.
+    Chat,
     /// Inspect or edit the selected Codexify JSON configuration.
     Config(ConfigArgs),
     /// Diagnose the local Codexify installation without changing it.

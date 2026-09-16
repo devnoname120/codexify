@@ -543,6 +543,20 @@ User appends carry a request ID for idempotent retries, while history reads pars
 agent/user boundaries and plain editor appends into paged component-only data.
 The normal user-text parser strips framing but preserves complete user Markdown.
 
+The local owner interface (`owner_chat.rs`) uses a second loopback-only Axum
+listener, separate from the MCP transport and tunnel. A per-process token is
+written to a private runtime file; `codexify chat` verifies the listener and
+prints a URL with the token in its fragment. Authenticated owner API requests
+select only persisted stable-identity chat directories, and use the same
+`MarkdownChatStore` and `ChatFile` locks as MCP widget requests. The sidebar
+summarizes those files without advancing delivery or read cursors; its title
+comes from chat content because ChatGPT does not send a conversation title.
+The existing chat component is mounted in the owner page through a local API
+bridge, with per-browser draft and seen-position state. File downloads use the
+existing artifact-egress store and workspace binding validation. This listener
+is not a security boundary against MCP clients that can execute unrestricted
+commands as the same OS user.
+
 The widget embeds markdown-it and converts its tokens to allowlisted DOM nodes,
 not raw HTML. A private file-link resolver reuses the artifact egress store and
 workspace checks. Explicit `chatLink` capabilities select exact exports; legacy

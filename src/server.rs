@@ -1082,6 +1082,7 @@ pub async fn start_http_server(mut config: AppConfig) -> anyhow::Result<()> {
     let factory_project_bindings = project_bindings.clone();
     let factory_connector_schemas = connector_schemas.clone();
     let factory_markdown_chat = Arc::new(crate::markdown_chat::MarkdownChatStore::default());
+    let owner_chat_store = factory_markdown_chat.clone();
     let factory_conversation_authorizations = conversation_authorizations.clone();
     let factory_conversation_exec_sessions = conversation_exec_sessions.clone();
     let factory_diff_checkpoints = diff_checkpoints.clone();
@@ -1144,6 +1145,14 @@ pub async fn start_http_server(mut config: AppConfig) -> anyhow::Result<()> {
         "0.0.0.0"
     };
     let listener = tokio::net::TcpListener::bind((bind_host, config.port)).await?;
+    let _owner_chat = if config.markdown_chat.enabled {
+        Some(
+            crate::owner_chat::start(config.clone(), owner_chat_store, artifact_egress.clone())
+                .await?,
+        )
+    } else {
+        None
+    };
 
     println!(
         "\nCodexify MCP Bridge (Rust) running on http://{}:{}",

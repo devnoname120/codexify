@@ -11,7 +11,7 @@ use super::MAX_UNREAD_BYTES;
 
 #[path = "widget.rs"]
 mod widget;
-pub use widget::{UserSendReceipt, WidgetPage};
+pub use widget::{OwnerChatSummary, UserSendReceipt, WidgetPage};
 
 const HEADER: &str = "# Codexify Chat\n\nAppend user messages at the bottom and save the file. Do not change earlier content\nwhile the agent is active. The agent sends messages only through chat_write.\n";
 const AGENT_START: &str = "\n\n<!-- codexify-agent-message:v1:start id=\"";
@@ -76,6 +76,16 @@ pub struct ChatFile {
     path: PathBuf,
     cursor_path: Option<PathBuf>,
     cursor: Mutex<Option<Cursor>>,
+    owner_summary_cache: Mutex<Option<OwnerSummaryCache>>,
+}
+
+#[derive(Clone)]
+struct OwnerSummaryCache {
+    length: u64,
+    modified: std::time::SystemTime,
+    title: String,
+    last_entry_end: u64,
+    last_entry_at_ms: u64,
 }
 
 impl ChatFile {
@@ -85,6 +95,7 @@ impl ChatFile {
             path,
             cursor_path,
             cursor: Mutex::new(None),
+            owner_summary_cache: Mutex::new(None),
         }
     }
 

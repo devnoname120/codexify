@@ -1541,6 +1541,42 @@ never ends a turn.
 
 ### Chat widget
 
+#### Standalone owner chat
+
+With `agentChat.enabled`, the service also starts a separate localhost-only
+owner interface. Run `codexify chat` on that computer and open the printed
+private URL. The command verifies the running interface; no extra configuration
+key or second chat store is needed. The URL fragment contains an ephemeral
+access token, which is kept in a private runtime file under `~/.codexify`
+(mode 0600 on Unix).
+Do not share the URL or that file. It changes when the service restarts. The
+interface is not served by the MCP tunnel, and its APIs require the token.
+
+The left pane lists persisted conversations sorted by the timestamp of their
+latest chat entry. It shows the same online/away/offline tool-activity state as
+the embedded widget, plus a blue dot for a new entry not yet viewed in that
+browser. Seen positions and unfinished drafts are stored locally in the
+browser; chat messages, delivery receipts, activity, and counters come from the
+same server-side chat files and update while both views are open. Selecting a
+conversation loads the same chat component, including pagination, sending,
+Markdown, receipts, tool counters, and exported-file downloads. Sending from
+either view appends to the same conversation channel. This does not restart a
+stopped ChatGPT turn.
+
+ChatGPT's conversation display title is not part of the connector metadata.
+The list therefore derives a local title from the first user chat entry, or
+the first agent entry if no user entry exists. It shows “Untitled conversation”
+if there is none. It does not claim to reproduce
+ChatGPT's title. Transport-scoped chats without a stable conversation identity
+are not listed, because they cannot be safely associated with a durable chat.
+
+The localhost/token boundary prevents direct access through the tunnel but is
+**not an isolation boundary from connector users**: unrestricted tool execution
+under the service's OS account can read the same files and runtime token. Use a
+separate OS account or sandbox if connector users must not access owner data.
+
+#### Embedded ChatGPT widget
+
 When both `agentChat.enabled` and `uiWidgets` are enabled, `setup` advertises
 `ui://codexify/setup-chat/v3/mcp-app.html`. Call setup once per conversation: its
 card contains the workspace controls and one persistent chat panel. `chat_read`,

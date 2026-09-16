@@ -216,6 +216,55 @@ impl Drop for BindingLock {
 }
 
 impl ProjectBindingStore {
+    /// Validated workspace roots for the local owner chat view. Chat transcripts
+    /// themselves carry no project path, so use the durable bindings when present.
+    pub(crate) fn owner_chat_work_dirs(
+        &self,
+        config: &AppConfig,
+    ) -> std::collections::HashMap<String, PathBuf> {
+        let mut roots = std::collections::HashMap::new();
+        if !config.multi_project {
+            return roots;
+        }
+        let Ok(access_root) = canonical_access_root(config) else {
+            return roots;
+        };
+        for path in self.binding_files(&access_root) {
+            let Some(key) = path.file_stem().and_then(|stem| stem.to_str()) else {
+                continue;
+            };
+            if key.len() != 64 || !key.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                continue;
+            }
+            if let Ok(Some(binding)) = self.read_binding(&path, &access_root) {
+                roots.insert(key.to_owned(), binding.project_root);
+            }
+        }
+        let directory = self.access_root_dir(&access_root);
+        for entry in std::fs::read_dir(directory).into_iter().flatten().flatten() {
+            if !entry.file_type().is_ok_and(|kind| kind.is_file()) {
+                continue;
+            }
+            let path = entry.path();
+            if path
+                .extension()
+                .is_none_or(|extension| extension != "no-project")
+            {
+                continue;
+            }
+            let Some(key) = path.file_stem().and_then(|stem| stem.to_str()) else {
+                continue;
+            };
+            if key.len() != 64 || !key.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                continue;
+            }
+            if let Ok(Some(root)) = self.read_without_project_binding(&path, &access_root, key) {
+                roots.insert(key.to_owned(), root);
+            }
+        }
+        roots
+    }
+
     pub fn for_current_user() -> Self {
         let home = home_dir().unwrap_or_else(|| PathBuf::from("."));
         Self::new_with_scratch_dir(

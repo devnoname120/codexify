@@ -39,6 +39,15 @@ pub struct UserSendReceipt {
     pub created_at_ms: Option<u64>,
 }
 
+#[derive(Debug, Serialize)]
+pub struct OwnerChatSummary {
+    pub title: String,
+    pub last_entry_end: u64,
+    pub last_entry_at_ms: u64,
+    pub last_agent_call_at_ms: Option<u64>,
+    pub total_tool_calls: u64,
+}
+
 struct Span {
     id: String,
     role: &'static str,
@@ -185,6 +194,75 @@ fn spans(file: &mut File) -> Result<Vec<Span>, String> {
 }
 
 impl ChatFile {
+    /// A compact owner-view listing, without advancing the agent's read cursor.
+    pub async fn owner_summary(self: &Arc<Self>) -> Result<OwnerChatSummary, String> {
+        self.run(|chat| {
+            chat.with_cursor(|cursor, file| {
+                check_cursor(file, cursor)?;
+                let metadata = file.metadata().map_err(io_error)?;
+                let modified = metadata.modified().map_err(io_error)?;
+                let mut cache = chat
+                    .owner_summary_cache
+                    .lock()
+                    .map_err(|_| "Owner chat summary is unavailable")?;
+                if let Some(cached) = cache.as_ref()
+                    && cached.length == metadata.len()
+                    && cached.modified == modified
+                {
+                    return Ok(OwnerChatSummary {
+                        title: cached.title.clone(),
+                        last_entry_end: cached.last_entry_end,
+                        last_entry_at_ms: cached.last_entry_at_ms,
+                        last_agent_call_at_ms: cursor.last_agent_call_at_ms,
+                        total_tool_calls: cursor.total_tool_calls,
+                    });
+                }
+                let records = spans(file)?;
+                let title = records
+                    .iter()
+                    .find(|span| span.role == "user")
+                    .or_else(|| records.first())
+                    .and_then(|span| {
+                        read_range(
+                            file,
+                            span.body_start,
+                            span.body_end.min(span.body_start + 512),
+                            512,
+                        )
+                        .ok()
+                    })
+                    .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+                    .map(|text| text.split_whitespace().collect::<Vec<_>>().join(" "))
+                    .filter(|text| !text.is_empty())
+                    .map(|text| text.chars().take(72).collect())
+                    .unwrap_or_else(|| "Untitled conversation".into());
+                let last = records.last();
+                let modified_ms = modified
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64;
+                let summary = OwnerChatSummary {
+                    title,
+                    last_entry_end: last.map_or(0, |span| span.end),
+                    last_entry_at_ms: last
+                        .and_then(|span| span.created_at_ms)
+                        .unwrap_or(modified_ms),
+                    last_agent_call_at_ms: cursor.last_agent_call_at_ms,
+                    total_tool_calls: cursor.total_tool_calls,
+                };
+                *cache = Some(OwnerSummaryCache {
+                    length: metadata.len(),
+                    modified,
+                    title: summary.title.clone(),
+                    last_entry_end: summary.last_entry_end,
+                    last_entry_at_ms: summary.last_entry_at_ms,
+                });
+                Ok(summary)
+            })
+        })
+        .await
+    }
+
     #[doc(hidden)]
     pub async fn record_agent_call(self: &Arc<Self>, at_ms: u64) -> Result<(), String> {
         self.run(move |chat| {

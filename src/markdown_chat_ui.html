@@ -105,7 +105,7 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
   let hostCapabilities = {};
   let statusKind = "normal";
   let available = bridge === null;
-  const saved = window.openai?.widgetState?.privateContent || {};
+  const saved = (bridge?.getState?.() || window.openai?.widgetState)?.privateContent || {};
   input.value = typeof saved.draft === "string" ? saved.draft : "";
   collapsed = saved.collapsed === true;
   for (const message of Array.isArray(saved.pending) ? saved.pending : []) {
@@ -176,8 +176,12 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
   }
   function save() {
     clearTimeout(saveTimer);
-    const state = { privateContent:{ ...window.openai?.widgetState?.privateContent, draft:input.value, collapsed, pending:[...pendingSends.values()] } };
-    try { Promise.resolve(window.openai?.setWidgetState?.(state)).catch(() => {}); } catch {}
+    const current = (bridge?.getState?.() || window.openai?.widgetState)?.privateContent || {};
+    const state = { privateContent:{ ...current, draft:input.value, collapsed, pending:[...pendingSends.values()] } };
+    try {
+      if (bridge?.setState) bridge.setState(state);
+      else Promise.resolve(window.openai?.setWidgetState?.(state)).catch(() => {});
+    } catch {}
   }
   function status(text, error = false, kind = "action") {
     statusKind = kind;
@@ -459,8 +463,13 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
     tornDown = true; clearTimeout(pollTimer); clearTimeout(saveTimer); clearTimeout(presenceTimer); clearTimeout(messageClockTimer);
     for (const waiter of rpcPending.values()) { clearTimeout(waiter.timer); waiter.reject(new Error("Widget closed.")); }
     rpcPending.clear();
+    window.removeEventListener("message", onMessage);
+    window.removeEventListener("openai:set_globals", onGlobals);
+    window.removeEventListener("focus", onFocus);
+    window.removeEventListener("pagehide", teardown);
+    document.removeEventListener("visibilitychange", onVisibility);
   }
-  window.addEventListener("message", event => {
+  function onMessage(event) {
     if (bridge) return;
     if (event.source !== window.parent || event.data?.jsonrpc !== "2.0") return;
     const message = event.data;
@@ -468,17 +477,21 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
     if (message.method === "ui/notifications/host-context-changed") theme(message.params);
     else if (message.method === "ui/notifications/tool-input" || message.method === "ui/notifications/tool-result") { revision = null; void refresh(); }
     else if (message.method === "ui/resource-teardown") { teardown(); if (message.id !== undefined) post({ id:message.id, result:{} }); }
-  });
-  window.addEventListener("openai:set_globals", event => {
+  }
+  function onGlobals(event) {
     const globals = event.detail?.globals;
     theme(globals);
     if (globals && ["toolInput", "toolOutput", "toolResponseMetadata"].some(key => Object.prototype.hasOwnProperty.call(globals, key))) {
       revision = null; void refresh();
     }
-  });
-  window.addEventListener("focus", () => { render(); void refresh(); });
+  }
+  function onFocus() { render(); void refresh(); }
+  function onVisibility() { updatePresence(); render(); schedule(); if (!document.hidden) void refresh(); }
+  window.addEventListener("message", onMessage);
+  window.addEventListener("openai:set_globals", onGlobals);
+  window.addEventListener("focus", onFocus);
   window.addEventListener("pagehide", teardown);
-  document.addEventListener("visibilitychange", () => { updatePresence(); render(); schedule(); if (!document.hidden) void refresh(); });
+  document.addEventListener("visibilitychange", onVisibility);
   const intersection = typeof IntersectionObserver === "function" ? new IntersectionObserver(entries => {
     const nextVisible = entries[0].isIntersecting;
     if (nextVisible === visible) return;

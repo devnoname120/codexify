@@ -169,6 +169,16 @@ the previous agent message and increments live while the agent works. Widget
 polling and other app-only helpers do not inflate either count. Widget sends do
 not start a new ChatGPT turn.
 
+To monitor all persisted chats outside ChatGPT, run `codexify chat` on the
+computer running the service and open the printed URL. The standalone view
+lists conversations by their latest chat entry, with activity state and an
+unread dot, and reuses the widget's message history, composer, receipts, file
+downloads, and tool counters. It connects to a separate localhost listener,
+not the shared MCP tunnel. ChatGPT does not pass conversation titles to the
+connector, so list titles are derived from chat entries (preferring the first
+user entry). See the
+[standalone chat reference](docs/REFERENCE.md#standalone-owner-chat).
+
 If `agentChat.notifications` is configured, the server also attempts one
 notification when this indicator turns offline after 10 minutes without an agent
 tool call. The next agent call re-arms the alert. This works without an open

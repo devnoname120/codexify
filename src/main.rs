@@ -166,6 +166,10 @@ async fn main() {
 async fn run(mut cli: Cli) -> anyhow::Result<()> {
     if let Some(command) = cli.command.take() {
         match command {
+            CliCommand::Chat => {
+                println!("{}", codexify::owner_chat::dashboard_url().await?);
+                return Ok(());
+            }
             CliCommand::Config(args) => {
                 return codexify::config_cli::run(&cli, args);
             }

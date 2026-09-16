@@ -6,6 +6,24 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.5.2] - 2026-09-16
+
+### Added
+
+- `codexify chat` opens a private, localhost-only owner view of persisted agent
+  chats outside ChatGPT. A conversation list sorts by the latest chat entry and
+  shows the same online/away/offline activity states, per-browser unread dots,
+  and locally derived titles. The selected chat reuses the embedded widget's
+  history, composer, receipts, Markdown, downloads, and live tool counters; both
+  views use the same server-side channel.
+
+### Security
+
+- The owner view uses a separate loopback listener and an ephemeral access
+  token; it is not routed through the MCP tunnel. This does not isolate chats
+  from connector users with unrestricted tool execution under the same OS
+  account.
+
 ## [1.5.1] - 2026-09-16
 
 ### Added
@@ -410,7 +428,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   drained through bounded head/tail buffers, while component-only `_meta` remains
   outside the model-visible limit.
 
-[Unreleased]: https://github.com/devnoname120/codexify/compare/v1.5.1...HEAD
+[Unreleased]: https://github.com/devnoname120/codexify/compare/v1.5.2...HEAD
+[1.5.2]: https://github.com/devnoname120/codexify/compare/v1.5.1...v1.5.2
 [1.5.1]: https://github.com/devnoname120/codexify/compare/v1.5.0...v1.5.1
 [1.5.0]: https://github.com/devnoname120/codexify/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/devnoname120/codexify/compare/v1.3.0...v1.4.0

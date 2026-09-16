@@ -19,7 +19,8 @@ use crate::project_bindings::ConversationIdentity;
 use crate::types::AppConfig;
 
 pub use storage::{
-    AppendReceipt, ChatFile, ChatSnapshot, NotificationState, UserSendReceipt, WidgetPage,
+    AppendReceipt, ChatFile, ChatSnapshot, NotificationState, OwnerChatSummary, UserSendReceipt,
+    WidgetPage,
 };
 pub use wait::WaitOutcome;
 
@@ -220,13 +221,21 @@ impl MarkdownChatStore {
                 .map_err(|_| "Cannot resolve the Markdown chat directory")?
                 .join(path)
         };
+        self.chat_at_path(path, conversation.is_some())
+    }
+
+    pub(crate) fn chat_at_path(
+        &self,
+        path: PathBuf,
+        persistent: bool,
+    ) -> Result<Arc<ChatFile>, String> {
         let mut channels = self
             .channels
             .lock()
             .map_err(|_| "Markdown chat store is unavailable")?;
         Ok(channels
             .entry(path.clone())
-            .or_insert_with(|| Arc::new(ChatFile::new(path, conversation.is_some())))
+            .or_insert_with(|| Arc::new(ChatFile::new(path, persistent)))
             .clone())
     }
 
