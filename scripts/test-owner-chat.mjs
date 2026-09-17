@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import test from "node:test";
 import { chatHtml } from "./chat-widget-source.mjs";
@@ -27,9 +27,9 @@ test(`${engineName}: standalone owner view restores its URL selection`, { timeou
     page.on("pageerror", error => errors.push(error.message));
     const now = Date.now();
     const chats = [
-      { id:"a".repeat(64), title:"Fix tests", workspace:"project-a", last_entry_end:200, last_entry_at_ms:now, last_agent_call_at_ms:now, total_tool_calls:3 },
-      { id:"b".repeat(64), title:"Review files", workspace:"project-b", last_entry_end:100, last_entry_at_ms:now - 60000, last_agent_call_at_ms:now - 300000, total_tool_calls:1 },
-      { id:"c".repeat(64), title:"Old task", workspace:"project-c", last_entry_end:75, last_entry_at_ms:now - 120000, last_agent_call_at_ms:null, total_tool_calls:0 }
+      { id:"a".repeat(64), title:"Fix tests", workspace:"project-a", lastEntryEnd:200, lastEntryAtMs:now, lastAgentCallAtMs:now, totalToolCalls:3 },
+      { id:"b".repeat(64), title:"Review files", workspace:"project-b", lastEntryEnd:100, lastEntryAtMs:now - 60000, lastAgentCallAtMs:now - 300000, totalToolCalls:1 },
+      { id:"c".repeat(64), title:"Old task", workspace:"project-c", lastEntryEnd:75, lastEntryAtMs:now - 120000, lastAgentCallAtMs:null, totalToolCalls:0 }
     ];
     const messages = new Map(chats.map(chat => [chat.id, []]));
     const seenRequests = [];
@@ -44,16 +44,16 @@ test(`${engineName}: standalone owner view restores its URL selection`, { timeou
       const id = url.pathname.split("/")[3];
       if (url.pathname.endsWith("/send")) {
         const body = request.postDataJSON();
-        const end = chats.find(chat => chat.id === id).last_entry_end += 100;
+        const end = chats.find(chat => chat.id === id).lastEntryEnd += 100;
         messages.get(id).push({ id:body.request_id, role:"user", markdown:body.message, start:end - 100, end, created_at_ms:Date.now(), tool_call_count:null });
         return route.fulfill({ json:{ _meta:{ [META]:{ sent:{ id:body.request_id, end, created_at_ms:Date.now() } } } } });
       }
       if (url.pathname.startsWith("/api/chats/")) {
         const rows = messages.get(id);
         return route.fulfill({ json:{ _meta:{ [META]:{
-          chat_file:`/private/${id}/CHAT.md`, revision:String(chats.find(chat => chat.id === id).last_entry_end),
-          delivered_through:0, read_through:0, last_agent_call_at_ms:chats.find(chat => chat.id === id).last_agent_call_at_ms,
-          total_tool_calls:chats.find(chat => chat.id === id).total_tool_calls, server_time_ms:Date.now(),
+          chat_file:`/private/${id}/CHAT.md`, revision:String(chats.find(chat => chat.id === id).lastEntryEnd),
+          delivered_through:0, read_through:0, last_agent_call_at_ms:chats.find(chat => chat.id === id).lastAgentCallAtMs,
+          total_tool_calls:chats.find(chat => chat.id === id).totalToolCalls, server_time_ms:Date.now(),
           messages:rows, has_more:false, before:rows[0]?.start ?? null, unchanged:false
         } } } });
       }
@@ -65,12 +65,18 @@ test(`${engineName}: standalone owner view restores its URL selection`, { timeou
     assert.deepEqual(await page.locator(".conversation-title").allTextContents(), ["Fix tests", "Review files", "Old task"]);
     assert.deepEqual(await page.locator(".presence").evaluateAll(nodes => nodes.map(node => [...node.classList].at(-1))), ["online", "away", "offline"]);
     assert.equal(await page.locator(".unread:not([hidden])").count(), 3);
+    for (const size of await page.locator(".presence").evaluateAll(nodes => nodes.map(node => node.getBoundingClientRect().width))) assert(size <= 14);
+    assert(!((await page.locator(".conversation-detail").allTextContents()).some(text => text.includes("No messages"))));
     await page.getByRole("button", { name:/Fix tests/ }).click();
     assert.equal(new URL(page.url()).searchParams.get("chat"), chats[0].id);
     const chat = page.locator("#chat-host").locator("div").first().locator("#draft");
     await chat.fill("Please run the test suite");
     await chat.press("Enter");
     await page.locator("#chat-host").getByText("Please run the test suite").waitFor();
+    if (process.env.CODEXIFY_WORKSPACE_SCREENSHOTS) {
+      mkdirSync(process.env.CODEXIFY_WORKSPACE_SCREENSHOTS, { recursive:true });
+      await page.screenshot({ path:`${process.env.CODEXIFY_WORKSPACE_SCREENSHOTS}/${engineName.toLowerCase()}-sidebar.png`, fullPage:true });
+    }
     await page.getByRole("button", { name:/Review files/ }).click();
     assert.equal(new URL(page.url()).searchParams.get("chat"), chats[1].id);
     await page.locator("#chat-host").getByText("Please run the test suite").waitFor({ state:"hidden" });

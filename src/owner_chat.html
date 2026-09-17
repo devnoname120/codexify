@@ -20,10 +20,11 @@ aside p { margin:5px 0 0; font-size:12px; color:var(--muted); }
 .conversation:hover { background:var(--bg); }
 .conversation[aria-current="true"] { background:var(--selected); }
 .conversation:focus-visible { outline:2px solid var(--accent); outline-offset:-2px; }
-.presence { display:grid; place-items:center; width:17px; height:17px; border-radius:50%; border:1.5px solid currentColor; font-size:10px; line-height:1; font-weight:700; }
+.presence { display:grid; place-items:center; width:13px; height:13px; flex:none; border-radius:50%; }
+.presence svg { display:block; width:13px; height:13px; }
 .presence.online { background:#159b27; border-color:#159b27; color:white; }
 .presence.away { background:#eba916; border-color:#eba916; color:white; }
-.presence.offline { color:#85898d; }
+.presence.offline { color:#85898d; background:#fff; }
 .conversation-main { min-width:0; }
 .conversation-title { display:block; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; font-weight:600; }
 .conversation-detail { display:block; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; font-size:11px; color:var(--muted); margin-top:3px; }
@@ -58,7 +59,7 @@ main { min-width:0; min-height:0; display:flex; justify-content:center; padding:
   const list = document.getElementById("conversations");
   const host = document.getElementById("chat-host");
   const errorNode = document.getElementById("error");
-  let selected = null, controller = null, chats = [];
+  let selected = null, controller = null, chats = [], clockOffset = 0, presenceTimer = null;
   const chatIdPattern = /^[0-9a-f]{64}$/;
   let seen = {};
   try { seen = JSON.parse(localStorage.getItem("owner-chat-seen-v1") || "{}"); } catch {}
@@ -71,9 +72,20 @@ main { min-width:0; min-height:0; display:flex; justify-content:center; padding:
     renderList();
   }
   function presence(lastCall, now) {
-    if (!Number.isFinite(lastCall) || now - lastCall >= 600000) return ["offline", "×"];
-    if (now - lastCall >= 240000) return ["away", "◷"];
-    return ["online", "✓"];
+    if (!Number.isFinite(lastCall) || now - lastCall >= 600000) return "offline";
+    if (now - lastCall >= 240000) return "away";
+    return "online";
+  }
+  function presenceIcon(state) {
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("viewBox", "0 0 24 24"); svg.setAttribute("aria-hidden", "true");
+    const circle = document.createElementNS(svg.namespaceURI, "circle");
+    for (const [key,value] of Object.entries({cx:12,cy:12,r:10.5,fill:state === "offline" ? "#fff" : "currentColor",stroke:"currentColor","stroke-width":2.5})) circle.setAttribute(key,String(value));
+    circle.style.color = state === "online" ? "#159b27" : state === "away" ? "#eba916" : "#85898d";
+    svg.append(circle);
+    const path = document.createElementNS(svg.namespaceURI, "path");
+    for (const [key,value] of Object.entries({d:state === "online" ? "m6.5 12 3.5 3.5 7.5-8" : state === "away" ? "M12 5.5V12l5.6 3.2" : "m8 8 8 8m0-8-8 8",fill:"none",stroke:state === "offline" ? "#85898d" : "#fff","stroke-width":3,"stroke-linecap":"round","stroke-linejoin":"round"})) path.setAttribute(key,String(value));
+    svg.append(path); return svg;
   }
   function textNode(tag, className, text) {
     const node = document.createElement(tag); node.className = className; node.textContent = text; return node;
@@ -88,7 +100,10 @@ main { min-width:0; min-height:0; display:flex; justify-content:center; padding:
     return response;
   }
   function renderList() {
-    const now = Date.now();
+    const now = Date.now() + clockOffset;
+    clearTimeout(presenceTimer);
+    const next = chats.flatMap(chat => [240000,600000].map(age => chat.lastAgentCallAtMs + age - now)).filter(delay => Number.isFinite(delay) && delay > 0);
+    if (!document.hidden && next.length) presenceTimer = setTimeout(renderList, Math.max(1, Math.min(...next)));
     list.replaceChildren();
     if (!chats.length) {
       list.append(textNode("p", "conversation-detail", "No persisted conversations yet."));
@@ -100,15 +115,16 @@ main { min-width:0; min-height:0; display:flex; justify-content:center; padding:
       button.setAttribute("aria-current", String(chat.id === selected));
       button.title = `${chat.title} · ${chat.workspace}`;
       button.addEventListener("click", () => select(chat.id));
-      const [state, symbol] = presence(chat.last_agent_call_at_ms, now);
-      const icon = textNode("span", `presence ${state}`, symbol);
+      const state = presence(chat.lastAgentCallAtMs, now);
+      const icon = textNode("span", `presence ${state}`, "");
+      icon.append(presenceIcon(state));
       icon.title = `Agent ${state} (based on last tool call)`;
       const content = textNode("span", "conversation-main", "");
       content.append(textNode("span", "conversation-title", chat.title));
-      const date = chat.last_entry_at_ms ? new Date(chat.last_entry_at_ms).toLocaleString() : "No messages";
+      const date = chat.lastEntryAtMs ? new Date(chat.lastEntryAtMs).toLocaleString() : "No messages";
       content.append(textNode("span", "conversation-detail", `${chat.workspace} · ${date}`));
       const dot = textNode("span", "unread", "");
-      dot.hidden = chat.id === selected || chat.last_entry_end <= (seen[chat.id] || 0);
+      dot.hidden = chat.id === selected || chat.lastEntryEnd <= (seen[chat.id] || 0);
       dot.setAttribute("aria-label", "New chat entry");
       button.append(icon, content, dot);
       list.append(button);
@@ -160,7 +176,7 @@ main { min-width:0; min-height:0; display:flex; justify-content:center; padding:
         } else throw new Error("Unknown chat operation");
         const payload = await (await api(path, options)).json();
         if (name === "chat_ui_state") {
-          const end = chats.find(chat => chat.id === id)?.last_entry_end;
+          const end = chats.find(chat => chat.id === id)?.lastEntryEnd;
           remember(id, end);
         }
         return payload;
@@ -199,12 +215,15 @@ main { min-width:0; min-height:0; display:flex; justify-content:center; padding:
     try {
       const payload = await (await api("/api/chats")).json();
       chats = payload.chats || [];
+      if (Number.isSafeInteger(payload.serverTimeMs)) clockOffset = payload.serverTimeMs - Date.now();
       showError("");
       selectFromUrl();
       renderList();
     } catch (error) { showError(error.message || "Chat list unavailable"); }
   }
   window.addEventListener("popstate", selectFromUrl);
+  window.addEventListener("focus", () => { renderList(); void refresh(); });
+  document.addEventListener("visibilitychange", () => { renderList(); if (!document.hidden) void refresh(); });
   window.addEventListener("storage", event => {
     if (event.key === "owner-chat-seen-v1") {
       try { seen = JSON.parse(event.newValue || "{}"); } catch {}
