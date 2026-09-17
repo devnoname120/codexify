@@ -15,6 +15,56 @@ const NEXT_CONTINUE_OR_AWAIT: &str = "continue_or_chat_await";
 const NEXT_CHAT_WRITE: &str = "chat_write";
 const NEXT_CHAT_AWAIT: &str = "chat_await";
 
+fn active_workspace(
+    config: &AppConfig,
+    session: &SessionState,
+    context: &ToolRequestContext,
+) -> Result<Option<std::path::PathBuf>, String> {
+    if !config.multi_project {
+        return Ok(Some(config.work_dir.clone()));
+    }
+    match context.conversation.as_ref() {
+        Some(identity) => context
+            .project_bindings
+            .selected_project_root(config, identity),
+        None => match session.binding_state(config)? {
+            crate::project_bindings::ProjectBindingState::Project(selection) => {
+                Ok(Some(selection.project_root))
+            }
+            crate::project_bindings::ProjectBindingState::WithoutProject {
+                scratch_root, ..
+            } => Ok(Some(scratch_root)),
+            crate::project_bindings::ProjectBindingState::Unselected { .. } => Ok(None),
+        },
+    }
+}
+
+async fn workspace_transition(
+    config: &AppConfig,
+    session: &SessionState,
+    context: &ToolRequestContext,
+    previous: Option<&std::path::Path>,
+) -> Result<Option<std::path::PathBuf>, String> {
+    loop {
+        let current = active_workspace(config, session, context)?;
+        if current.as_deref() != previous {
+            return Ok(current);
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+fn workspace_wait_result(status: &str, root: Option<&std::path::Path>) -> ToolResult {
+    let (content, next) = match root {
+        Some(root) => (format!("The user selected workspace {}. Call get_agent_brief now to load this workspace's instructions, environment and saved state before doing any project work.", root.display()), "get_agent_brief"),
+        None => ("No workspace is selected. Keep the setup project picker visible and wait with chat_await. A greeting or missing project context is not a request for scratch; do not call set_project_root unless the user explicitly chooses a workspace.".into(), NEXT_CHAT_AWAIT),
+    };
+    ToolResult::text(content.clone()).with_structured(json!({
+        "status":status,"content":content,"chat_file":Value::Null,"notification":"not_configured",
+        "required_next_action":next,"assistant_turn_may_end":false
+    }))
+}
+
 #[derive(Clone, Copy)]
 pub enum ChatTool {
     Read,
@@ -133,11 +183,11 @@ impl Tool for ChatTool {
         Some(json!({
             "type":"object",
             "properties":{
-                "status":{"type":"string", "enum":["written","message","empty","timeout","cancelled"]},
+                "status":{"type":"string", "enum":["written","message","empty","timeout","cancelled","workspace_selected","workspace_selection"]},
                 "content":{"type":"string"},
-                "chat_file":{"type":"string"},
+                "chat_file":{"type":["string","null"]},
                 "notification":{"type":"string", "enum":["not_configured","pending","accepted","failed","cancelled"]},
-                "required_next_action":{"type":"string", "enum":["continue_or_chat_await","chat_write","chat_await"]},
+                "required_next_action":{"type":"string", "enum":["continue_or_chat_await","chat_write","chat_await","get_agent_brief"]},
                 "assistant_turn_may_end":{"type":"boolean", "const":false}
             },
             "required":["status","content","chat_file","notification","required_next_action","assistant_turn_may_end"],
@@ -147,6 +197,10 @@ impl Tool for ChatTool {
 
     fn manages_model_output_budget(&self) -> bool {
         true
+    }
+
+    fn requires_project_root(&self) -> bool {
+        !matches!(self, Self::Await)
     }
 
     async fn call(&self, _args: Value, _config: &AppConfig, _session: &SessionState) -> ToolResult {
@@ -160,6 +214,50 @@ impl Tool for ChatTool {
         session: &SessionState,
         context: &ToolRequestContext,
     ) -> ToolResult {
+        let base_config = config;
+        if !config.markdown_chat.enabled {
+            return ToolResult::error("Markdown chat is disabled");
+        }
+        let effective;
+        let config = if matches!(self, Self::Await) {
+            if let Err(error) = parse_tool_args::<EmptyArgs>(args.clone()) {
+                return *error;
+            }
+            let root = match active_workspace(config, session, context) {
+                Ok(root) => root,
+                Err(error) => return ToolResult::error(error),
+            };
+            let Some(root) = root else {
+                return tokio::select! {
+                    biased;
+                    _ = context.cancellation.cancelled() => workspace_wait_result("cancelled", None),
+                    changed = tokio::time::timeout(Duration::from_millis(config.markdown_chat.max_wait_ms), workspace_transition(config, session, context, None)) => match changed {
+                        Ok(Ok(root)) => workspace_wait_result("workspace_selected", root.as_deref()),
+                        Ok(Err(error)) => ToolResult::error(error),
+                        Err(_) => workspace_wait_result("timeout", None),
+                    }
+                };
+            };
+            let pending = match &context.conversation {
+                Some(identity) => context
+                    .project_bindings
+                    .pending_workspace_change(config, identity),
+                None => Ok(session.pending_workspace_change()),
+            };
+            match pending {
+                Ok(Some(_)) => return workspace_wait_result("workspace_selected", Some(&root)),
+                Err(error) => return ToolResult::error(error),
+                Ok(None) => {}
+            }
+            effective = {
+                let mut selected = config.clone();
+                selected.work_dir = root;
+                selected
+            };
+            &effective
+        } else {
+            config
+        };
         let chat = match context
             .markdown_chat
             .chat(config, context.conversation.as_ref(), session)
@@ -264,7 +362,15 @@ impl Tool for ChatTool {
                 }
                 Err(error) => ToolResult::error(error),
             },
-            Self::Await => match chat.wait(Duration::from_millis(config.markdown_chat.max_wait_ms), context.cancellation.clone()).await {
+            Self::Await => match tokio::select! {
+                outcome = chat.wait(Duration::from_millis(config.markdown_chat.max_wait_ms), context.cancellation.clone()) => outcome,
+                changed = workspace_transition(base_config, session, context, Some(&config.work_dir)) => {
+                    return match changed {
+                        Ok(root) => workspace_wait_result(if root.is_some() { "workspace_selected" } else { "workspace_selection" }, root.as_deref()),
+                        Err(error) => ToolResult::error(error),
+                    };
+                }
+            } {
                 Ok(WaitOutcome::Message(snapshot)) => with_message(
                     result(
                         "message",

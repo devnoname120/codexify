@@ -283,6 +283,25 @@ button { font: inherit; }
   .doctor-actions { justify-content: flex-start; }
   .check-detail, .check-remediation { margin-left: 0; }
 }
+.project-entry { display:flex; align-items:stretch; gap:6px; }
+.project-entry .project-row { flex:1; min-width:0; }
+.worktree-action { flex:0 0 auto; max-width:108px; font-size:11px; }
+.github-choice { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:7px; }
+.github-choice label, .github-choice .project-count { grid-column:1/-1; }
+.github-choice label { color:var(--muted); font-size:12px; font-weight:600; }
+.github-choice .project-search { min-width:0; }
+.worktree-options { margin-top:10px; border:1px solid var(--border); border-radius:10px; padding:10px; }
+.worktree-options h4 { margin:0 0 6px; }
+.worktree-option { padding:9px 0; border-top:1px solid var(--border); }
+.worktree-option .workspace-path { display:block; margin:5px 0; overflow-wrap:anywhere; }
+.worktree-option .project-count { margin:4px 0 7px; }
+.switch-project { margin-top:12px; }
+dialog.refresh-popover { color:var(--text); background:var(--bg); border:1px solid var(--border); border-radius:14px; padding:20px; width:min(420px,calc(100% - 28px)); max-height:calc(100dvh - 28px); overflow:auto; box-sizing:border-box; box-shadow:0 14px 60px #0004; }
+dialog.refresh-popover::backdrop { background:rgb(0 0 0 / .48); }
+.refresh-popover h3 { margin:0 0 12px; font-size:16px; }
+.refresh-popover p { font-size:13px; line-height:1.55; }
+.refresh-popover a { color:var(--accent, #1571bb); display:inline-block; margin:4px 0 16px; }
+.refresh-popover .popover-actions { display:flex; justify-content:flex-end; }
 </style>
 </head>
 <body>
@@ -319,6 +338,10 @@ button { font: inherit; }
   let projectSearchTimer = null;
   let projectQueryGeneration = 0;
   let projectSelecting = false;
+  let githubUrl = "";
+  let worktreeGeneration = 0;
+  let worktreeCatalog = null;
+  let refreshPopover = null;
   let createWorktree = null;
   let worktreeChoiceEdited = false;
   let projectRevision = 0;
@@ -584,8 +607,8 @@ button { font: inherit; }
   function refreshSettingsHref() {
     const slug = connectorSlug();
     return slug
-      ? `#settings/Plugins/plugin_asdk_app_${slug}:~:text=Information-,Refresh,-Connected`
-      : "#settings/Plugins";
+      ? `https://chatgpt.com/#settings/Plugins/plugin_asdk_app_${slug}:~:text=Information-,Refresh,-Connected`
+      : "https://chatgpt.com/#settings/Plugins";
   }
 
   function addDebugEntry(entry) {
@@ -972,7 +995,33 @@ button { font: inherit; }
     });
 
     const results = el("div", "project-results");
-    for (const candidate of projectCatalog.projects) results.append(projectRow(candidate));
+    for (const candidate of projectCatalog.projects) {
+      const entry = el("div", "project-entry");
+      const worktrees = actionButton("Worktrees", "worktree-action", () => { void loadWorktrees(candidate.selector); }, projectSelecting);
+      worktrees.setAttribute("aria-label", `Existing worktrees for ${candidate.name || candidate.selector}`);
+      entry.append(projectRow(candidate), worktrees);
+      results.append(entry);
+    }
+
+    const github = el("div", "github-choice");
+    const githubLabel = el("label", "", "GitHub URL");
+    githubLabel.htmlFor = "github-url";
+    const urlInput = el("input", "project-search");
+    urlInput.id = "github-url";
+    urlInput.type = "text";
+    urlInput.inputMode = "url";
+    urlInput.autocapitalize = "off";
+    urlInput.spellcheck = false;
+    urlInput.placeholder = "https://github.com/owner/repository";
+    urlInput.setAttribute("aria-label", "GitHub URL");
+    urlInput.value = githubUrl;
+    urlInput.disabled = projectSelecting;
+    const useUrl = actionButton("Use URL", "", () => { void chooseGithubUrl(); }, projectSelecting || !githubUrl.trim() || createWorktree === null);
+    urlInput.addEventListener("input", () => { githubUrl = urlInput.value; useUrl.disabled = projectSelecting || !githubUrl.trim() || createWorktree === null; });
+    urlInput.addEventListener("keydown", event => {
+      if (event.key === "Enter" && !event.isComposing) { event.preventDefault(); void chooseGithubUrl(); }
+    });
+    github.append(githubLabel, urlInput, useUrl, el("div", "project-count", "Repository, pull request, branch, or commit URL."));
 
     const projectFailed = projectCatalog.phase === "error" || projectCatalog.phase === "selection_error";
     const stateClass = projectFailed ? "project-state failure" : "project-state";
@@ -1003,7 +1052,8 @@ button { font: inherit; }
       count.textContent += `${count.textContent ? " · " : ""}${projectCatalog.warnings[0]}`;
     }
 
-    picker.append(scratch, worktreeChoice, search, results, state, count);
+    picker.append(scratch, worktreeChoice, github, search, results, state, count);
+    if (worktreeCatalog) picker.append(renderWorktrees());
     section.append(picker);
     return section;
   }
@@ -1011,6 +1061,7 @@ button { font: inherit; }
   function renderSelectedWorkspace(project) {
     const section = el("section", "workspace");
     const withoutProject = project.status === "without_project";
+    const linkedWorktree = project.managedWorktree || Boolean(project.sourcePath && project.activePath && project.sourcePath !== project.activePath);
     const heading = el("div", "workspace-head");
     heading.append(
       el("h3", "workspace-title", withoutProject ? "Chat without a project" : "Project selected"),
@@ -1018,20 +1069,93 @@ button { font: inherit; }
         ? "Structured file operations use this private scratch workspace, and commands start there."
         : project.managedWorktree
           ? "This chat uses an isolated managed worktree."
+          : linkedWorktree ? "This chat reuses an existing Git worktree."
           : "This chat uses the source checkout directly.")
     );
     section.append(heading);
-    if (project.name) section.append(el("div", "workspace-name", project.name));
+    if (project.name && !withoutProject) section.append(el("div", "workspace-name", project.name));
     const fields = el("div", "workspace-fields");
     fields.append(workspaceField(
-      withoutProject ? "Scratch" : project.managedWorktree ? "Worktree" : "Path",
+      withoutProject ? "Scratch" : linkedWorktree ? "Worktree" : "Path",
       project.activePath
     ));
-    if (!withoutProject && project.managedWorktree && project.sourcePath) {
+    if (!withoutProject && linkedWorktree && project.sourcePath) {
       fields.append(workspaceField("Source", project.sourcePath));
     }
     section.append(fields);
+    if (project.selectionAvailable) section.append(actionButton(
+      "Switch to another project", "switch-project", () => { void switchWorkspace(); }, projectSelecting
+    ));
     return section;
+  }
+
+  async function chooseGithubUrl() {
+    if (projectSelecting || createWorktree === null || !githubUrl.trim()) return;
+    await selectWorkspace({ path:githubUrl.trim(), createWorktree });
+  }
+
+  function renderWorktrees() {
+    const panel = el("div", "worktree-options");
+    panel.id = "worktree-options";
+    panel.append(el("h4", "", "Existing worktrees"));
+    if (worktreeCatalog.phase === "loading") panel.append(el("p", "project-count", "Loading worktrees…"));
+    else if (worktreeCatalog.error) panel.append(el("p", "project-state failure", worktreeCatalog.error));
+    else {
+      panel.append(el("p", "project-count", "Reuse a checkout unchanged. Another conversation may still be using it."));
+      if (!worktreeCatalog.rows.length) panel.append(el("p", "project-count", "No available worktrees."));
+      for (const worktree of worktreeCatalog.rows) {
+        const row = el("div", "worktree-option");
+        row.append(el("strong", "", worktree.name), el("span", "workspace-path", worktree.path));
+        const last = Number.isFinite(worktree.lastUsedAtMs) ? new Date(worktree.lastUsedAtMs).toLocaleString() : "Not recorded";
+        row.append(el("div", "project-count", `${worktree.sourceCheckout ? "Source checkout · " : ""}Last used: ${last}`));
+        const use = actionButton("Use this worktree", "", () => {
+          void selectWorkspace({ path:worktreeCatalog.path, worktreePath:worktree.path }, "setup_ui_reuse_worktree");
+        }, projectSelecting);
+        use.setAttribute("aria-label", `Use worktree ${worktree.name}`);
+        row.append(use); panel.append(row);
+      }
+    }
+    panel.append(actionButton("Close worktree list", "", () => { worktreeGeneration++; worktreeCatalog = null; renderCurrent(); }, projectSelecting));
+    return panel;
+  }
+
+  async function loadWorktrees(path) {
+    const generation = ++worktreeGeneration;
+    worktreeCatalog = { path, phase:"loading", rows:[], error:null };
+    renderCurrent();
+    try {
+      const result = await callTool("setup_ui_list_worktrees", { path });
+      if (generation !== worktreeGeneration) return;
+      const failure = toolFailureText(result);
+      if (failure) throw new Error(failure);
+      const listing = structuredPayload(result, value => Array.isArray(value.worktrees));
+      if (!listing) throw new Error("The worktree list was incomplete.");
+      worktreeCatalog = { path, phase:"ready", rows:listing.worktrees, error:null };
+    } catch (error) {
+      if (generation !== worktreeGeneration) return;
+      worktreeCatalog = { path, phase:"error", rows:[], error:errorText(error) };
+    }
+    renderCurrent();
+  }
+
+  async function switchWorkspace() {
+    if (projectSelecting || !currentData?.project?.activePath) return;
+    const expectedPath = currentData.project.activePath;
+    projectSelecting = true; projectRevision++; worktreeGeneration++;
+    renderCurrent();
+    try {
+      const result = await callTool("setup_ui_switch_project", { expectedPath });
+      const failure = toolFailureText(result);
+      if (failure) throw new Error(failure);
+      currentData = { ...currentData, project:{ status:"unselected", selectionAvailable:true, accessRoot:currentData.project.accessRoot, activePath:null, sourcePath:null } };
+      projectCatalog = { phase:"idle", query:"", projects:[], total:0, warnings:[], error:null };
+      worktreeCatalog = null;
+      actionState = { kind:null, message:null, tone:null, pending:false };
+    } catch (error) {
+      actionState = { kind:"switch", message:errorText(error), tone:"failure", pending:false };
+    } finally {
+      projectSelecting = false; projectRevision++; renderCurrent(); maybeStartProjectLoad();
+    }
   }
 
   function renderProjectSection() {
@@ -1100,25 +1224,28 @@ button { font: inherit; }
     renderCurrent();
   }
 
-  async function selectWorkspace(argumentsValue) {
+  async function selectWorkspace(argumentsValue, toolName = "set_project_root") {
     if (projectSelecting || !currentData) return;
     if (projectSearchTimer !== null) {
       clearTimeout(projectSearchTimer);
       projectSearchTimer = null;
     }
     projectQueryGeneration += 1;
+    worktreeGeneration += 1;
     projectRevision += 1;
     projectSelecting = true;
     renderCurrent();
     const startedAt = performance.now();
     try {
-      const result = await callTool("set_project_root", argumentsValue);
+      const result = await callTool(toolName, argumentsValue);
       const failure = toolFailureText(result);
       if (failure) throw new Error(failure);
       const selection = projectSelectionPayload(result);
       if (!selection) throw new Error("The workspace-selection result was incomplete.");
       captureTiming("set_project_root", result, startedAt);
       const project = projectStateFromSelection(selection);
+      worktreeCatalog = null;
+      githubUrl = "";
       projectRevision += 1;
       currentData = {
         ...currentData,
@@ -1293,9 +1420,10 @@ button { font: inherit; }
 
   function renderCurrent() {
     if (!currentData) return;
-    const previousSearch = document.getElementById("project-search");
-    const restoreSearch = previousSearch === document.activeElement
+    const previousSearch = [document.getElementById("project-search"), document.getElementById("github-url")].find(node => node && node === document.activeElement);
+    const restoreSearch = previousSearch
       ? {
+          id:previousSearch.id,
           start: previousSearch.selectionStart,
           end: previousSearch.selectionEnd
         }
@@ -1343,7 +1471,7 @@ button { font: inherit; }
     renderContinuation();
     refreshDebugFooter();
     if (restoreSearch) {
-      const nextSearch = document.getElementById("project-search");
+      const nextSearch = document.getElementById(restoreSearch.id);
       if (nextSearch && !nextSearch.disabled) {
         nextSearch.focus();
         if (restoreSearch.start !== null && restoreSearch.end !== null) {
@@ -1414,6 +1542,7 @@ button { font: inherit; }
       currentData = { ...currentData, ...data, project };
       updateChatConfiguration(result);
       updateState = data.update;
+      if (["current", "conversation_stale"].includes(data.connectorSchema.status)) refreshPopover?.close();
       if (actionState.kind === "refresh" && ["current", "conversation_stale"].includes(data.connectorSchema.status)) {
         actionState = { kind: null, message: null, tone: null, pending: false };
         root.querySelector(".feedback")?.remove();
@@ -1578,27 +1707,36 @@ button { font: inherit; }
   async function openRefreshSettings() {
     if (actionState.pending) return;
     if (!await refreshStatus() || currentData.connectorSchema.status !== "stale") return;
-    actionState = { kind: "refresh", message: "Opening connector settings…", tone: null, pending: true };
-    renderCurrent();
-    try {
-      await openLink(refreshSettingsHref());
-      actionState = ["current", "conversation_stale"].includes(currentData.connectorSchema.status)
-        ? { kind: null, message: null, tone: null, pending: false }
-        : {
-        kind: "refresh",
-        message: "In ChatGPT settings, select Codexify if needed, scroll below the list of tools, and click Refresh.",
-        tone: null,
-        pending: false
-      };
-    } catch (error) {
-      actionState = {
-        kind: "refresh",
-        message: `Could not open connector settings: ${errorText(error)}`,
-        tone: "failure",
-        pending: false
-      };
-    }
-    renderCurrent();
+    if (refreshPopover) return;
+    const dialog = el("dialog", "refresh-popover");
+    refreshPopover = dialog;
+    dialog.setAttribute("aria-labelledby", "refresh-popover-title");
+    const title = el("h3", "", "Refresh the Codexify connector");
+    title.id = "refresh-popover-title";
+    dialog.append(title, el("p", "", "Go to Settings → Plugins → click on the Codexify connector → scroll all the way to the bottom → next to Information, press Refresh."));
+    dialog.append(el("p", "", "After refreshing, start a new conversation to use the latest schema. Opening settings alone does not refresh the connector."));
+    const link = el("a", "", "Open connector settings");
+    link.href = refreshSettingsHref();
+    const note = el("p", "project-state");
+    link.addEventListener("click", event => {
+      event.preventDefault();
+      void openLink(link.href).catch(error => { note.textContent = `Could not open settings: ${errorText(error)}. Open Settings → Plugins manually.`; });
+    });
+    const actions = el("div", "popover-actions");
+    actions.append(actionButton("Close", "", () => dialog.close()));
+    dialog.append(link, note, actions);
+    dialog.addEventListener("close", () => {
+      dialog.remove(); refreshPopover = null;
+      root.querySelector(".status-list")?.querySelector("button")?.focus();
+    });
+    dialog.addEventListener("click", event => {
+      if (event.target === dialog) {
+        const rect = dialog.getBoundingClientRect();
+        if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) dialog.close();
+      }
+    });
+    document.body.append(dialog);
+    dialog.showModal();
   }
 
   async function sendAutofixPrompt() {
@@ -1667,6 +1805,7 @@ button { font: inherit; }
       applyHostContext(message.params);
     } else if (message.method === "ui/resource-teardown") {
       tornDown = true;
+      refreshPopover?.close();
       chatController?.close();
       clearInterval(statusTimer);
       for (const waiter of pending.values()) { clearTimeout(waiter.timer); waiter.reject(new Error("Widget closed.")); }

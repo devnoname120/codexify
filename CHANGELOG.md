@@ -6,6 +6,22 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Setup supports GitHub URL entry, explicit project switching, and listing/reusing
+  existing project worktrees with paths, names, and recorded last-use dates.
+  Workspace-change notices require the agent to reload its project brief.
+- Per-tunnel schema reload records cover anonymous discovery and survive
+  restarts. The refresh action opens a dimmed instructions popover with a
+  connector-settings deep link and the existing text fragment.
+
+### Fixed
+
+- Greetings leave the project picker open instead of selecting scratch to unlock
+  Markdown chat; `chat_await` can wait for the user's initial workspace choice.
+- The standalone owner-chat sidebar reads the API's camelCase activity fields,
+  uses smaller presence icons, and stays aligned with the selected chat header.
+
 ## [1.5.3] - 2026-09-16
 
 ### Added

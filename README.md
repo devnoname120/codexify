@@ -136,8 +136,11 @@ Then ask for a concrete change, for example:
 
 > Fix the failing test, run it again, and show me the diff. Do not commit yet.
 
-A conversation stays attached to its selected project. Start another chat for a
-different project; see the [workspace guide](https://github.com/devnoname120/codexify/wiki/Multi-Project-Mode)
+A greeting leaves the setup project picker open; scratch is selected only by an
+explicit choice. Paste a GitHub repository/PR/branch/commit URL, search local
+projects, or use **Worktrees** to reuse an existing checkout. After selection,
+**Switch to another project** reopens the picker without deleting prior files.
+The agent receives the new path and must reload the project instructions. See the [workspace guide](https://github.com/devnoname120/codexify/wiki/Multi-Project-Mode)
 for project selection and worktree options.
 
 ## Markdown chat (optional)

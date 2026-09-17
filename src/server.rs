@@ -66,6 +66,8 @@ const HTTP_SERVER_STOP_TIMEOUT: Duration = Duration::from_secs(10);
 // Connector refreshes must observe the current configuration and embedded UI,
 // so modern clients may store these responses but must consider them stale at once.
 const DEFAULT_CACHE_TTL_MS: u64 = 0;
+const WORKSPACE_CHANGE_FIELD: &str = "workspace_changed";
+const WORKSPACE_CHANGE_DESCRIPTION: &str = "User-selected workspace transition. Stop using old paths and call get_agent_brief before further project work. Omitted when no transition is pending.";
 
 fn should_emit_ordinary_tool_completion(
     tool_log_call: Option<&crate::tool_logging::ToolLogCall>,
@@ -315,18 +317,25 @@ fn advertised_tool(tool: &dyn Tool, config: &AppConfig) -> rmcp::model::Tool {
     if let Some(meta) = meta {
         advertised = advertised.with_meta(meta);
     }
-    let output = if config.markdown_chat.enabled {
-        let mut schema = crate::markdown_chat::output::schema(tool.output_schema());
+    let mut fields = Vec::new();
+    if config.markdown_chat.enabled {
+        fields.push((
+            crate::markdown_chat::USER_MESSAGE_FIELD,
+            crate::markdown_chat::output::USER_MESSAGE_DESCRIPTION,
+        ));
+    }
+    if config.multi_project && !app_only_tool(tool) {
+        fields.push((WORKSPACE_CHANGE_FIELD, WORKSPACE_CHANGE_DESCRIPTION));
+    }
+    let output = if fields.is_empty() {
+        tool.output_schema()
+    } else {
+        let mut schema =
+            crate::markdown_chat::output::schema_with_fields(tool.output_schema(), &fields);
         if tool.permits_missing_structured_content() {
-            // Passthrough tools can legitimately return only content blocks.
-            schema
-                .as_object_mut()
-                .expect("object output schema")
-                .remove("required");
+            schema.as_object_mut().unwrap().remove("required");
         }
         Some(schema)
-    } else {
-        tool.output_schema()
     };
     if let Some(output) = output
         && let Some(object) = output.as_object()
@@ -406,12 +415,10 @@ impl ServerHandler for CodexHandler {
                 .and_then(|request| request.meta.as_ref())
                 .and_then(crate::connector_schema::caller_key)
         });
-        if let Some(caller) = caller
-            && let Err(error) = self.connector_schemas.record_reload(
-                &caller,
-                &crate::connector_schema::schema_version(&self.config),
-            )
-        {
+        if let Err(error) = self.connector_schemas.discovered(
+            caller.as_deref(),
+            &crate::connector_schema::schema_version(&self.config),
+        ) {
             tracing::warn!(%error, "could not save connector schema reload version");
         }
 
@@ -549,14 +556,15 @@ impl ServerHandler for CodexHandler {
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, McpError> {
-        let connector_schema_version = crate::connector_schema::caller_key(&context.meta)
-            .or_else(|| {
-                request
-                    .meta
-                    .as_ref()
-                    .and_then(crate::connector_schema::caller_key)
-            })
-            .and_then(|caller| self.connector_schemas.version(&caller));
+        let schema_caller = crate::connector_schema::caller_key(&context.meta).or_else(|| {
+            request
+                .meta
+                .as_ref()
+                .and_then(crate::connector_schema::caller_key)
+        });
+        let connector_schema_version = self
+            .connector_schemas
+            .connector_version(schema_caller.as_deref());
         let conversation = ConversationIdentity::from_request_meta(&context.meta).or_else(|| {
             request
                 .meta
@@ -598,6 +606,19 @@ impl ServerHandler for CodexHandler {
         let authorized_before = self
             .conversation_auth_error("chat_read", conversation.as_ref())
             .is_none();
+        let model_call = !tool.is_some_and(|tool| app_only_tool(tool.as_ref()));
+        let workspace_at_start = if model_call && authorized_before {
+            match conversation.as_ref() {
+                Some(identity) => {
+                    self.project_bindings
+                        .dispatch_workspace(&self.config, identity)
+                        .await
+                }
+                None => self.session.dispatch_workspace(&self.config).await,
+            }
+        } else {
+            Ok((None, None))
+        };
         let activity = if agent_call && authorized_before {
             self.record_chat_activity(conversation.as_ref(), called_at_ms)
                 .await
@@ -722,13 +743,34 @@ impl ServerHandler for CodexHandler {
                     }
                 }
                 Some(tool) if tool.requires_project_root() => {
-                    let resolved = match conversation.as_ref() {
-                        Some(identity) => self
-                            .project_bindings
-                            .effective_config(&self.config, identity),
-                        None => session.effective_config(&self.config),
+                    let resolved = if !model_call {
+                        match conversation.as_ref() {
+                            Some(identity) => self
+                                .project_bindings
+                                .effective_config(&self.config, identity),
+                            None => session.effective_config(&self.config),
+                        }
+                    } else {
+                        workspace_at_start.as_ref().map_err(Clone::clone).and_then(|(root, change)| {
+                        if let Some(change) = change
+                            && name != "get_agent_brief" {
+                            return Err(change.notice(root.as_deref()));
+                        }
+                        let root = root.as_ref().ok_or_else(|| "No workspace is selected. Leave the setup project picker open for the user. A greeting is not consent to scratch. Use chat_await to wait for selection; do not pick a project merely to enable chat_write.".to_string())?;
+                        let mut effective = self.config.as_ref().clone();
+                        effective.work_dir = root.clone();
+                        Ok(effective)
+                    })
                     };
                     match resolved {
+                        Err(_)
+                            if name == "get_agent_brief"
+                                && matches!(&workspace_at_start, Ok((None, _))) =>
+                        {
+                            let mut config = self.config.as_ref().clone();
+                            config.conversation_auth_token = None;
+                            ToolResult::text(build_initial_instructions(&config))
+                        }
                         Err(error) => ToolResult::error(error),
                         Ok(effective_config) => {
                             let owner = match conversation.as_ref() {
@@ -831,28 +873,77 @@ impl ServerHandler for CodexHandler {
         }
 
         if !result.is_error
+            && name == "get_agent_brief"
+            && let Ok((Some(root), Some(change))) = &workspace_at_start
+        {
+            if let Some(identity) = conversation.as_ref() {
+                if let Err(error) = self
+                    .project_bindings
+                    .acknowledge_workspace_change(&self.config, identity, &change.revision, root)
+                    .await
+                {
+                    result = ToolResult::error(format!(
+                        "Could not acknowledge the new workspace instructions: {error}"
+                    ));
+                }
+            } else {
+                self.session
+                    .acknowledge_workspace_change(&change.revision, root)
+                    .await;
+            }
+        }
+
+        let used_root = if matches!(
+            name.as_str(),
+            SetProjectRoot::NAME | crate::tools::setup_ui_action::SELECT_NAME
+        ) {
+            self.selected_project_root(conversation.as_ref())
+        } else {
+            workspace_at_start
+                .as_ref()
+                .ok()
+                .and_then(|(root, _)| root.clone())
+        };
+        if (model_call || name == crate::tools::setup_ui_action::SELECT_NAME)
+            && authorized_before
+            && !result.is_error
+            && let Some(root) = used_root
+            && let Err(error) = crate::worktrees::touch_workspace(&self.config, &root)
+        {
+            tracing::debug!(%error, "could not record workspace last use");
+        }
+
+        if !result.is_error
             && self
                 .conversation_auth_error("chat_read", conversation.as_ref())
                 .is_none()
             && let Some(identity) = conversation.as_ref()
-            && let Err(error) = self.connector_schemas.remember_conversation_version(
-                identity,
-                reported_schema
-                    .as_deref()
-                    .unwrap_or(&crate::connector_schema::schema_version(&self.config)),
-            )
+            && let Some(reported_schema) = reported_schema.as_deref()
+            && let Err(error) = self
+                .connector_schemas
+                .remember_conversation_version(identity, reported_schema)
         {
             tracing::warn!(%error, "could not save conversation schema baseline");
         }
 
         let mut delivery = None;
+        let chat_delivery_root = if !result.is_error
+            && matches!(name.as_str(), "chat_read" | "chat_write" | "chat_await")
+        {
+            workspace_at_start
+                .as_ref()
+                .ok()
+                .and_then(|(root, _)| root.clone())
+        } else {
+            self.selected_project_root(conversation.as_ref())
+        };
         if self.config.markdown_chat.enabled
             && !tool.is_some_and(|tool| app_only_tool(tool.as_ref()))
             && !context.ct.is_cancelled()
             && self
                 .conversation_auth_error("chat_read", conversation.as_ref())
                 .is_none()
-            && let Some(root) = self.selected_project_root(conversation.as_ref())
+            && let Some(root) = chat_delivery_root
         {
             let mut effective = self.config.as_ref().clone();
             effective.work_dir = root;
@@ -937,17 +1028,47 @@ impl ServerHandler for CodexHandler {
                 audit.finish_tool(call, &call_identity, &result, duration_ms, start_scope);
             }
         }
+        let mut output_fields = Vec::new();
         if self.config.markdown_chat.enabled {
-            crate::markdown_chat::output::attach(
-                &mut result,
-                tool.and_then(|tool| tool.output_schema()).as_ref(),
-            );
+            output_fields.push((
+                crate::markdown_chat::USER_MESSAGE_FIELD,
+                result.new_chat_message_from_user.take(),
+            ));
         }
         if !context.ct.is_cancelled()
             && let Some((chat, end)) = delivery
             && let Err(error) = chat.mark_delivered(end).await
         {
             tracing::warn!(%error, "could not persist Markdown chat delivery receipt");
+        }
+        if self.config.multi_project && model_call {
+            let notice = if authorized_before {
+                let change = match conversation.as_ref() {
+                    Some(identity) => self
+                        .project_bindings
+                        .pending_workspace_change(&self.config, identity),
+                    None => Ok(self.session.pending_workspace_change()),
+                };
+                match change {
+                    Ok(Some(change)) => Some(
+                        change.notice(self.selected_project_root(conversation.as_ref()).as_deref()),
+                    ),
+                    Ok(None) => None,
+                    Err(error) => Some(format!(
+                        "Workspace state could not be verified: {error}. Do not continue project work until get_agent_brief succeeds."
+                    )),
+                }
+            } else {
+                None
+            };
+            output_fields.push((WORKSPACE_CHANGE_FIELD, notice));
+        }
+        if !output_fields.is_empty() {
+            crate::markdown_chat::output::attach_fields(
+                &mut result,
+                tool.and_then(|tool| tool.output_schema()).as_ref(),
+                output_fields,
+            );
         }
         Ok(to_call_tool_result(result).into())
     }
@@ -1102,44 +1223,58 @@ pub async fn start_http_server(mut config: AppConfig) -> anyhow::Result<()> {
         http_config.allowed_hosts = config.allowed_hosts.clone();
     }
 
-    let factory_config = config.clone();
-    let factory_tools = tools.clone();
-    let factory_project_bindings = project_bindings.clone();
-    let factory_connector_schemas = connector_schemas.clone();
-    let factory_markdown_chat = Arc::new(crate::markdown_chat::MarkdownChatStore::default());
-    let owner_chat_store = factory_markdown_chat.clone();
-    let factory_conversation_authorizations = conversation_authorizations.clone();
-    let factory_conversation_exec_sessions = conversation_exec_sessions.clone();
-    let factory_diff_checkpoints = diff_checkpoints.clone();
-    let factory_artifact_egress = artifact_egress.clone();
-    let factory_bridged_resources = bridged_resources.clone();
-    let factory_audit = audit.clone();
-    let factory_tool_logging = tool_logging.clone();
-    let factory_next_tool_call_id = next_tool_call_id.clone();
-    let service = StreamableHttpService::new(
-        move || {
-            let session = SessionState::new();
-            session.spawn_idle_reaper(Duration::from_millis(factory_config.exec.idle_timeout_ms));
-            Ok(CodexHandler {
-                config: factory_config.clone(),
-                tools: factory_tools.clone(),
-                project_bindings: factory_project_bindings.clone(),
-                connector_schemas: factory_connector_schemas.clone(),
-                markdown_chat: factory_markdown_chat.clone(),
-                conversation_authorizations: factory_conversation_authorizations.clone(),
-                conversation_exec_sessions: factory_conversation_exec_sessions.clone(),
-                diff_checkpoints: factory_diff_checkpoints.clone(),
-                artifact_egress: factory_artifact_egress.clone(),
-                bridged_resources: factory_bridged_resources.clone(),
-                audit: factory_audit.clone(),
-                tool_logging: factory_tool_logging.clone(),
-                next_tool_call_id: factory_next_tool_call_id.clone(),
-                session,
-            })
-        },
-        Arc::new(LocalSessionManager::default()),
-        http_config,
-    );
+    let owner_chat_store = Arc::new(crate::markdown_chat::MarkdownChatStore::default());
+    let make_service = |factory_connector_schemas: Arc<
+        crate::connector_schema::ConnectorSchemaStore,
+    >| {
+        let factory_config = config.clone();
+        let factory_tools = tools.clone();
+        let factory_project_bindings = project_bindings.clone();
+        let factory_markdown_chat = owner_chat_store.clone();
+        let factory_conversation_authorizations = conversation_authorizations.clone();
+        let factory_conversation_exec_sessions = conversation_exec_sessions.clone();
+        let factory_diff_checkpoints = diff_checkpoints.clone();
+        let factory_artifact_egress = artifact_egress.clone();
+        let factory_bridged_resources = bridged_resources.clone();
+        let factory_audit = audit.clone();
+        let factory_tool_logging = tool_logging.clone();
+        let factory_next_tool_call_id = next_tool_call_id.clone();
+        StreamableHttpService::new(
+            move || {
+                let session = SessionState::new();
+                session
+                    .spawn_idle_reaper(Duration::from_millis(factory_config.exec.idle_timeout_ms));
+                Ok(CodexHandler {
+                    config: factory_config.clone(),
+                    tools: factory_tools.clone(),
+                    project_bindings: factory_project_bindings.clone(),
+                    connector_schemas: factory_connector_schemas.clone(),
+                    markdown_chat: factory_markdown_chat.clone(),
+                    conversation_authorizations: factory_conversation_authorizations.clone(),
+                    conversation_exec_sessions: factory_conversation_exec_sessions.clone(),
+                    diff_checkpoints: factory_diff_checkpoints.clone(),
+                    artifact_egress: factory_artifact_egress.clone(),
+                    bridged_resources: factory_bridged_resources.clone(),
+                    audit: factory_audit.clone(),
+                    tool_logging: factory_tool_logging.clone(),
+                    next_tool_call_id: factory_next_tool_call_id.clone(),
+                    session,
+                })
+            },
+            Arc::new(LocalSessionManager::default()),
+            http_config.clone(),
+        )
+    };
+
+    let mut mcp_routes = Router::new().nest_service("/mcp", make_service(connector_schemas));
+    for tunnel in config.configured_openai_tunnels() {
+        mcp_routes = mcp_routes.nest_service(
+            &crate::openai_tunnel::local_mcp_path(tunnel),
+            make_service(Arc::new(
+                crate::connector_schema::ConnectorSchemaStore::for_tunnel(&tunnel.tunnel_id),
+            )),
+        );
+    }
 
     let app = Router::new()
         .route("/health", get(health))
@@ -1153,7 +1288,7 @@ pub async fn start_http_server(mut config: AppConfig) -> anyhow::Result<()> {
                 )
             }),
         })
-        .nest_service("/mcp", service)
+        .merge(mcp_routes)
         .layer(axum::middleware::from_fn_with_state(
             config.clone(),
             require_auth,
@@ -2046,6 +2181,7 @@ mod tests {
 
     include!("server_markdown_chat_tests.rs");
     include!("server_markdown_chat_widget_tests.rs");
+    include!("server_workspace_tests.rs");
 
     fn handler_with_tools(
         root: &std::path::Path,

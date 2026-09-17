@@ -1,7 +1,8 @@
 use rmcp::model::{MetaObject, Resource, ResourceContents};
 use serde_json::json;
 
-pub const SETUP_UI_URI: &str = "ui://codexify/setup/v6/mcp-app.html";
+pub const SETUP_UI_URI: &str = "ui://codexify/setup/v7/mcp-app.html";
+pub const PREVIOUS_SETUP_UI_URI_V6: &str = "ui://codexify/setup/v6/mcp-app.html";
 pub const PREVIOUS_SETUP_UI_URI_V5: &str = "ui://codexify/setup/v5/mcp-app.html";
 pub const PREVIOUS_SETUP_UI_URI: &str = "ui://codexify/setup/v4/mcp-app.html";
 pub const PREVIOUS_SETUP_UI_URI_V3: &str = "ui://codexify/setup/v3/mcp-app.html";
@@ -61,6 +62,7 @@ pub fn resource() -> Resource {
 
 pub fn contents_for_uri(uri: &str) -> Option<ResourceContents> {
     if uri != SETUP_UI_URI
+        && uri != PREVIOUS_SETUP_UI_URI_V6
         && uri != PREVIOUS_SETUP_UI_URI_V5
         && uri != PREVIOUS_SETUP_UI_URI
         && uri != PREVIOUS_SETUP_UI_URI_V3
@@ -98,7 +100,8 @@ mod tests {
 
     #[test]
     fn current_and_legacy_setup_resource_uris_are_readable() {
-        assert_eq!(SETUP_UI_URI, "ui://codexify/setup/v6/mcp-app.html");
+        assert_eq!(SETUP_UI_URI, "ui://codexify/setup/v7/mcp-app.html");
+        assert!(contents_for_uri(PREVIOUS_SETUP_UI_URI_V6).is_some());
         assert!(contents_for_uri(PREVIOUS_SETUP_UI_URI_V5).is_some());
         assert!(contents_for_uri(PREVIOUS_SETUP_UI_URI_V3).is_some());
         assert!(contents_for_uri(PREVIOUS_SETUP_UI_URI_V2).is_some());
@@ -163,7 +166,7 @@ mod tests {
             picker.find("Chat without a project").unwrap() < picker.find("const search").unwrap(),
             "the projectless option must be constructed before the search input"
         );
-        assert!(picker.contains("picker.append(scratch, worktreeChoice, search"));
+        assert!(picker.contains("picker.append(scratch, worktreeChoice, github, search"));
         let search_handler = &text[text.find("search.addEventListener(\"input\"").unwrap()..];
         assert!(
             search_handler.find("projectQueryGeneration += 1").unwrap()

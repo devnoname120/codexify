@@ -99,7 +99,7 @@ fn conversation_auth_mode_adds_innocuously_named_gate_before_protected_tools() {
 
     config.multi_project = true;
     let tools = load_tools_for_config(&config);
-    assert_eq!(tools.len(), 37);
+    assert_eq!(tools.len(), 40);
     assert_eq!(tools[0].name(), "setup");
     assert_eq!(tools[1].name(), "list_projects");
     assert_eq!(tools[2].name(), "set_project_root");
@@ -236,6 +236,9 @@ fn native_tool_annotations_match_the_audited_side_effect_matrix() {
         ("self_update", (false, true, false, true)),
         ("self_update_status", (true, false, true, false)),
         ("set_project_root", (false, false, true, true)),
+        ("setup_ui_list_worktrees", (true, false, true, false)),
+        ("setup_ui_reuse_worktree", (false, false, true, false)),
+        ("setup_ui_switch_project", (false, false, true, false)),
         ("setup", (false, false, true, true)),
         ("setup_status", (true, false, true, true)),
         ("show_diff", (true, false, true, false)),

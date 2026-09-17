@@ -24,6 +24,9 @@ use crate::types::{AppConfig, OpenAiTunnelConfig};
 use crate::util::home_dir;
 
 pub const TUNNEL_CLIENT_VERSION: &str = "0.0.12";
+pub(crate) fn local_mcp_path(settings: &OpenAiTunnelConfig) -> String {
+    format!("/mcp/{}", settings.tunnel_id)
+}
 const RELEASE_BASE: &str = "https://github.com/openai/tunnel-client/releases/download/v0.0.12";
 const MAX_DOWNLOAD_BYTES: usize = 100 * 1024 * 1024;
 const MAX_BINARY_BYTES: u64 = 64 * 1024 * 1024;
@@ -164,7 +167,11 @@ pub async fn start_for(
     let log_path = runtime_dir.path().join("tunnel.log");
     let log = private_log_file(&log_path)?;
     let log_stderr = log.try_clone().context("clone OpenAI tunnel log handle")?;
-    let target_url = format!("http://127.0.0.1:{}/mcp", config.port);
+    let target_url = format!(
+        "http://127.0.0.1:{}{}",
+        config.port,
+        local_mcp_path(settings)
+    );
 
     let mut command = Command::new(&client_path);
     isolate_tunnel_child_env(&mut command);

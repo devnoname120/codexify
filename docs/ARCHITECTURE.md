@@ -164,10 +164,10 @@ Five integration surfaces are exposed to the client:
    source checkout is not already at the fetched commit, the binding path creates a
    detached managed worktree at that commit rather than moving the source checkout;
    worktree mode `Never` rejects that case. The no-project form creates a private
-   scratch root outside the access root. With `openai/session`, the immutable
+   scratch root outside the access root. With `openai/session`, the durable
    project or scratch selection is written through the shared
    `ProjectBindingStore`; without it, it is stored in the current `SessionState`,
-   whose scratch directory is temporary. Re-selecting the same choice is
+   whose binding is temporary but scratch files persist. Re-selecting the same choice is
    idempotent, selecting a different one is rejected before cloning, fetching, or
    creating a replacement workspace, and a clone destination collision never
    overwrites existing data.
@@ -1135,16 +1135,18 @@ checks replace only status rows so they cannot interrupt workspace clicks. Old
 tool-result snapshots cannot replace newer live data, and failed checks hide
 obsolete version/action claims.
 
-`ConnectorSchemaStore` records the running package version when `tools/list`
-serves a schema to an identified caller. Its scope combines the configured tunnel
-or HTTP endpoint with `openai/subject` and optional `openai/organization`, never
-`openai/session`. Caller identifiers are hashed into private filenames, not used
-for authorization. This scope separates accounts and organizations, but identical
-endpoint/caller metadata cannot distinguish duplicate connector installations.
-Anonymous discovery is not attributed to the last caller or broadcast to all
-callers. Reload versions are atomically persisted outside the repository and
-shared across MCP transports. A failed disk write keeps the in-process observation
-and logs the persistence failure.
+`ConnectorSchemaStore` records the schema version served by `tools/list`. Native
+OpenAI tunnel clients each target `/mcp/<tunnel-id>`, with an independent transport
+manager and a store scoped to that tunnel ID. They share tools, conversation
+bindings, commands, and chat state. This makes otherwise anonymous discovery
+attributable without guessing a caller from a recent conversation. The legacy
+`/mcp` route still uses `openai/subject` plus `openai/organization` and ignores
+anonymous discovery. Per-tunnel persistence does not depend on other configured
+tunnels. Multiple installations sharing the same anonymous tunnel are one scope;
+use separate tunnels when they need independent freshness tracking. Only
+`tools/list` records reloads; ordinary calls and setup markers never update the
+connector observation. Setup's first reported conversation version is retained
+separately and is not guessed from the running version when the marker is absent.
 
 The card retains the original `connectorSchema.observedVersion` and sends it as
 `setup_status.conversationVersion`; the server supplies `connectorVersion` from
@@ -1431,7 +1433,7 @@ units to match the TS `text.length` / `text.slice`.
   (`tempfile`-isolated), including the suite ported from the TS Bun project.
 - Memory / skills tests pin `memory.dir` / `skills.dirs` to temp dirs so they never
   touch the real home; plugin discovery is suppressed when `skills.dirs` is set.
-- `tests/project_selection.rs` covers pre-selection blocking, immutable canonical
+- `tests/project_selection.rs` covers pre-selection blocking, explicitly resettable canonical
   bindings, concurrent session isolation, traversal and symlink escapes,
   project-keyed persistent state, deferred project instructions, and CLI/config
   activation.
@@ -1483,3 +1485,31 @@ Run: `cargo test`. Build a standalone binary: `cargo build --release`.
 | Native file import reports an untrusted URL | The supplied value was not a ChatGPT-native file parameter or its temporary provider URL no longer matches the supported OpenAI file-service boundary. Reattach or regenerate the file instead of passing a URL manually. |
 | `export_host_file` is missing | `artifactEgress.enabled` is false, or the connector cached an older manifest. Enable it and remove/re-add the connector so ChatGPT refreshes `tools/list`. |
 | An exported-file resource is unknown or unavailable | Native exported-file records do not expire on `referenceTtlMs` and survive Codexify restarts. The resource is unavailable only when its durable record is missing/invalid, or when no retained snapshot exists and the recorded source fallback is disabled, missing, unsafe, or over `maxFileBytes`. Re-export to create a new capability. Bridged upstream resources remain process-local and expire under `referenceTtlMs`/`maxReferences`. |
+
+
+### Explicit workspace transitions
+
+The app-only `setup_ui_switch_project` checks the displayed expected path and
+archives the old binding before persisting an awaiting-selection marker. That
+marker prevents dispatch into a partially cleared binding. Selection completes
+the marker, and `get_agent_brief` acknowledges its exact revision/root; a racing
+second switch cannot be acknowledged by an older brief. Ordinary project work
+is gated on this acknowledgment. Every model-visible multi-project result can
+carry `workspace_changed`, independent of whether Markdown chat is enabled.
+The shared output adapter puts chat and workspace notices at the same top level
+without overwriting arbitrary upstream output.
+
+`chat_await` can wait for an initial selection without allocating scratch. When
+already selected, it waits for either transcript input or a workspace transition.
+Calls that began before a switch retain their original effective directory.
+Old binding records keep previous managed worktrees protected from automatic
+cleanup; explicit user cleanup remains separate.
+
+`setup_ui_list_worktrees` reads Git's NUL-delimited worktree catalogue, validates
+registrations and subproject mapping, and reads lightweight usage timestamps
+from workspace metadata. `setup_ui_reuse_worktree` selects a revalidated entry
+without checkout/creation or changing files. UI listing does not update usage.
+Successful agent calls record use at most once per minute. The sidebar consumes
+the actual camelCase owner-list API, while the embedded chat page retains its
+separate snake_case payload. Both account for the server clock and age indicators
+locally across the four- and ten-minute boundaries.

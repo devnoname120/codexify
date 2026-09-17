@@ -890,7 +890,7 @@ async fn chatgpt_conversation_cannot_switch_projects_after_restart() {
         .await
         .unwrap_err();
     assert!(error.contains("already bound"));
-    assert!(error.contains("Start a new chat"));
+    assert!(error.contains("Switch to another project"));
 }
 
 #[tokio::test]
@@ -1202,11 +1202,13 @@ async fn initialize_instructions_defer_project_state_until_selection() {
     let initial = build_initial_instructions(&config);
     assert!(initial.contains("list_projects"));
     assert!(initial.contains("set_project_root"));
-    assert!(initial.contains("call `list_projects`"));
+    assert!(initial.contains("setup project picker"));
     assert!(initial.contains("withoutProject=true"));
     assert!(initial.contains("private scratch workspace"));
-    assert!(initial.contains("ask the user"));
-    assert!(!initial.contains("setup card"));
+    assert!(initial.contains("let the user search/select"));
+    assert!(initial.contains("chat_await"));
+    assert!(initial.contains("only says hello"));
+    assert!(initial.contains("Do not choose scratch"));
     assert!(initial.contains("<not selected>"));
     assert!(!initial.contains("ACCESS-ROOT-INSTRUCTION"));
     assert!(!initial.contains("SELECTED-PROJECT-INSTRUCTION"));

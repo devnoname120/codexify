@@ -15,6 +15,13 @@ use crate::process_env::scrub_untrusted_child_env;
 use crate::types::{AppConfig, WorktreeUpstreamRefreshMode};
 
 const METADATA_VERSION: u32 = 1;
+
+#[path = "existing_worktrees.rs"]
+mod existing;
+pub use existing::{
+    ExistingWorktree, existing_worktree_choice, last_used_at_ms, list_existing_worktrees,
+    touch_workspace, validate_registered_worktree,
+};
 const METADATA_FILENAME: &str = ".codexify-worktree.json";
 const LEGACY_METADATA_FILENAME: &str = ".codex-free-worktree.json";
 const LOCAL_ENVIRONMENT_CONFIG_KEY: &str = "codex.localEnvironmentConfigPath";

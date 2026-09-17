@@ -48,6 +48,8 @@ class Element extends Events {
   }
   setAttribute(name, value) { this.attributes[name] = String(value); }
   focus() { this.focused = true; }
+  showModal() { this.open = true; }
+  close() { this.open = false; this.emit("close"); }
   select() { this.setSelectionRange(0, this.value.length); }
   setSelectionRange(start, end) { this.selectionStart = start; this.selectionEnd = end; }
   get classList() {
@@ -141,10 +143,10 @@ function harness(initial, live = initial) {
     setInterval: (callback, delay) => timer(callback, delay, true), clearInterval: id => timers.delete(id),
     requestAnimationFrame: callback => queueMicrotask(callback)
   });
-  const buttons = () => root.descendants().filter(node => node.tagName === "button");
+  const buttons = () => body.descendants().filter(node => node.tagName === "button");
   return {
     state, root, document,
-    text: () => root.textContent,
+    text: () => body.textContent,
     hasButton: label => buttons().some(node => node.textContent === label),
     async click(label) {
       const button = buttons().find(node => node.textContent === label);
@@ -198,10 +200,15 @@ for (const enabled of [true, false]) {
 test("reload elsewhere replaces Refresh with a new-conversation message and clears feedback", async () => {
   const card = harness(payload("stale")); await drain();
   await card.click("Refresh");
+  assert.equal(card.state.links.length, 0);
+  const dialog = card.document.body.querySelector("dialog");
+  assert.ok(dialog.open);
+  const link = dialog.querySelector("a");
+  link.emit("click", { preventDefault() {} }); await drain();
   assert.equal(card.state.links.length, 1);
   assert.match(card.state.links[0].href, /plugin_asdk_app_test:~:text=Information-,Refresh,-Connected$/);
   assert.equal(card.hasButton("Refresh"), true);
-  assert.match(card.text(), /In ChatGPT settings/);
+  assert.match(card.text(), /Settings → Plugins/);
   card.state.live = payload("conversation_stale"); await card.tick();
   assert.match(card.text(), /This conversation uses schema v1\.2\.3\. Start a new conversation/);
   assert.equal(card.hasButton("Refresh"), false);

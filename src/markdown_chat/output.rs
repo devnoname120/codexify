@@ -1,9 +1,10 @@
 use serde_json::{Map, Value, json};
 
+#[cfg(test)]
 use super::USER_MESSAGE_FIELD;
 use crate::types::{ToolContent, ToolResult};
 
-fn needs_envelope(schema: Option<&Value>) -> bool {
+fn needs_envelope(schema: Option<&Value>, field: &str) -> bool {
     let Some(schema) = schema.and_then(Value::as_object) else {
         return false;
     };
@@ -11,7 +12,7 @@ fn needs_envelope(schema: Option<&Value>) -> bool {
         || schema
             .get("properties")
             .and_then(Value::as_object)
-            .is_some_and(|properties| properties.contains_key(USER_MESSAGE_FIELD))
+            .is_some_and(|properties| properties.contains_key(field))
         || schema.keys().any(|key| {
             !matches!(
                 key.as_str(),
@@ -30,8 +31,27 @@ fn needs_envelope(schema: Option<&Value>) -> bool {
         })
 }
 
+#[cfg(test)]
 pub(crate) fn schema(original: Option<Value>) -> Value {
-    let mut augmented = if needs_envelope(original.as_ref()) {
+    schema_with_field(
+        original,
+        USER_MESSAGE_FIELD,
+        "Complete new user text from this conversation's CHAT.md, never truncated by Codexify. Omitted when no user text is pending. Ordinary tool results do not acknowledge it; call chat_read.",
+    )
+}
+
+pub(crate) const USER_MESSAGE_DESCRIPTION: &str = "Complete new user text from this conversation's CHAT.md, never truncated by Codexify. Omitted when no user text is pending. Ordinary tool results do not acknowledge it; call chat_read.";
+
+#[cfg(test)]
+pub(crate) fn schema_with_field(original: Option<Value>, field: &str, description: &str) -> Value {
+    schema_with_fields(original, &[(field, description)])
+}
+
+pub(crate) fn schema_with_fields(original: Option<Value>, fields: &[(&str, &str)]) -> Value {
+    let mut augmented = if fields
+        .iter()
+        .any(|(field, _)| needs_envelope(original.as_ref(), field))
+    {
         // The original contract is validated before wrapping; its root-local refs must not move.
         json!({"type":"object", "properties":{"upstream_result":{}}, "additionalProperties":false})
     } else {
@@ -47,19 +67,46 @@ pub(crate) fn schema(original: Option<Value>) -> Value {
         .or_insert_with(|| json!({}))
         .as_object_mut()
         .expect("output properties must be an object");
-    properties.insert(USER_MESSAGE_FIELD.into(), json!({
-        "type":"string",
-        "description":"Complete new user text from this conversation's CHAT.md, never truncated by Codexify. Omitted when no user text is pending. Ordinary tool results do not acknowledge it; call chat_read."
-    }));
+    for (field, description) in fields {
+        properties.insert(
+            (*field).into(),
+            json!({
+                "type":"string",
+                "description":description
+            }),
+        );
+    }
     augmented
 }
 
+#[cfg(test)]
 pub(crate) fn attach(result: &mut ToolResult, original_schema: Option<&Value>) {
+    let message = result.new_chat_message_from_user.take();
+    attach_field(result, original_schema, USER_MESSAGE_FIELD, message);
+}
+
+#[cfg(test)]
+pub(crate) fn attach_field(
+    result: &mut ToolResult,
+    original_schema: Option<&Value>,
+    field: &str,
+    message: Option<String>,
+) {
+    attach_fields(result, original_schema, vec![(field, message)]);
+}
+
+pub(crate) fn attach_fields(
+    result: &mut ToolResult,
+    original_schema: Option<&Value>,
+    fields: Vec<(&str, Option<String>)>,
+) {
     let original = result.structured_content.take();
-    let wrap = needs_envelope(original_schema)
-        || original
-            .as_ref()
-            .is_some_and(|value| !value.is_object() || value.get(USER_MESSAGE_FIELD).is_some());
+    let wrap = fields
+        .iter()
+        .any(|(field, _)| needs_envelope(original_schema, field))
+        || original.as_ref().is_some_and(|value| {
+            !value.is_object() || fields.iter().any(|(field, _)| value.get(*field).is_some())
+        });
     let mut object = if wrap {
         let mut object = Map::new();
         if let Some(original) = original {
@@ -71,16 +118,14 @@ pub(crate) fn attach(result: &mut ToolResult, original_schema: Option<&Value>) {
             .and_then(|value| value.as_object().cloned())
             .unwrap_or_default()
     };
-    if let Some(message) = result
-        .new_chat_message_from_user
-        .take()
-        .filter(|message| !message.is_empty())
-    {
-        object.insert(USER_MESSAGE_FIELD.into(), Value::String(message.clone()));
-        // Some MCP hosts only deliver content blocks to the model.
-        result.content.push(ToolContent::Text(
-            json!({USER_MESSAGE_FIELD:message}).to_string(),
-        ));
+    for (field, message) in fields {
+        if let Some(message) = message.filter(|message| !message.is_empty()) {
+            object.insert(field.into(), Value::String(message.clone()));
+            // Some MCP hosts only deliver content blocks to the model.
+            result
+                .content
+                .push(ToolContent::Text(json!({field:message}).to_string()));
+        }
     }
     result.structured_content = Some(Value::Object(object));
 }
@@ -116,6 +161,37 @@ mod tests {
                 .len(),
             500_000
         );
+    }
+
+    #[test]
+    fn chat_and_workspace_notices_share_one_top_level_envelope() {
+        for original in [
+            None,
+            Some(json!({"type":"object","additionalProperties":true})),
+            Some(crate::tool::text_output_schema()),
+        ] {
+            let schema = schema_with_fields(
+                original.clone(),
+                &[
+                    (USER_MESSAGE_FIELD, "user"),
+                    ("workspace_changed", "workspace"),
+                ],
+            );
+            let mut result =
+                ToolResult::text("original").with_structured(json!({"content":"original"}));
+            attach_fields(
+                &mut result,
+                original.as_ref(),
+                vec![
+                    (USER_MESSAGE_FIELD, Some("full user text".into())),
+                    ("workspace_changed", Some("new workspace".into())),
+                ],
+            );
+            let value = result.structured_content.unwrap();
+            assert_eq!(value[USER_MESSAGE_FIELD], "full user text");
+            assert_eq!(value["workspace_changed"], "new workspace");
+            assert!(jsonschema::is_valid(&schema, &value));
+        }
     }
 
     #[test]

@@ -245,7 +245,7 @@ fn project_info(
 fn next_step_for_project(project: &SetupProjectInfo) -> String {
     match project.status {
         SetupProjectStatus::Unselected => {
-            format!("{} If the intended project is already unambiguous, call `set_project_root` directly, passing `createWorktree=false` if the user asked to use the source checkout without a worktree or `createWorktree=true` if they requested a worktree; an explicit user preference overrides the configured mode. Otherwise let the user choose a project or Chat without a project in the setup card. Then call `get_agent_brief`.", crate::tools::set_project_root::SetProjectRoot::RESUME_GUIDANCE)
+            format!("{} If the intended project is already unambiguous, call `set_project_root` directly, passing `createWorktree=false` if the user asked to use the source checkout without a worktree or `createWorktree=true` if they requested a worktree; an explicit user preference overrides the configured mode. Otherwise leave the setup project picker visible and let the user search/select. A greeting such as hello is NOT a request for scratch. Never select Chat without a project by default or merely to enable chat_write. When Markdown chat is enabled, call chat_await with no workspace to wait for the selection; otherwise wait for the user. Then call `get_agent_brief`.", crate::tools::set_project_root::SetProjectRoot::RESUME_GUIDANCE)
         }
         SetupProjectStatus::Selected => {
             "Call `get_agent_brief` before using project tools.".to_string()
@@ -614,7 +614,7 @@ impl Tool for UnrestrictedSetup {
         "Open Codexify setup".into()
     }
     fn description(&self) -> String {
-        "Call setup once to open workspace selection and this conversation's Markdown chat. No setup reference is required on this server. Continue with get_agent_brief and use the chat tools without reopening setup.".into()
+        "Call setup once to open workspace selection and this conversation's Markdown chat. No setup reference is required on this server. When the intended project is unclear or the user only says hello, leave the picker open and wait; do not select scratch by default. chat_await can wait for a selection without any workspace. After selection call get_agent_brief.".into()
     }
     fn describe(&self, config: &AppConfig) -> String {
         format!(
@@ -1119,7 +1119,7 @@ mod tests {
             structured["nextStep"]
                 .as_str()
                 .unwrap()
-                .contains("setup card")
+                .contains("setup project picker")
         );
     }
 

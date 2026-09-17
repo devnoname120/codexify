@@ -37,5 +37,6 @@ pub mod tree;
 pub mod update_memory_note;
 pub mod update_plan;
 pub mod view_image;
+pub mod workspace_ui;
 pub mod write_file;
 pub mod write_stdin;

@@ -12,7 +12,12 @@ use sha2::{Digest, Sha256};
 use crate::types::AppConfig;
 
 pub(crate) fn schema_version(config: &AppConfig) -> String {
-    version_for_markdown_chat(config.markdown_chat.enabled)
+    let version = version_for_markdown_chat(config.markdown_chat.enabled);
+    if config.multi_project {
+        format!("{version}+workspace-v1")
+    } else {
+        version
+    }
 }
 
 pub(crate) fn version_for_markdown_chat(enabled: bool) -> String {
@@ -28,6 +33,7 @@ pub(crate) fn version_for_markdown_chat(enabled: bool) -> String {
 pub(crate) struct ConnectorSchemaStore {
     versions: Mutex<HashMap<String, String>>,
     directory: Option<PathBuf>,
+    tunnel_scoped: bool,
 }
 
 pub(crate) fn caller_key(meta: &RequestMetaObject) -> Option<String> {
@@ -57,6 +63,42 @@ fn private_key(parts: &[&str]) -> String {
 }
 
 impl ConnectorSchemaStore {
+    pub(crate) fn new(directory: Option<PathBuf>, tunnel_scoped: bool) -> Self {
+        Self {
+            directory,
+            tunnel_scoped,
+            ..Default::default()
+        }
+    }
+    pub(crate) fn for_tunnel(tunnel_id: &str) -> Self {
+        Self::new(
+            crate::util::home_dir().map(|home| {
+                home.join(".codexify/connector-schemas")
+                    .join(private_key(&["tunnel", tunnel_id]))
+            }),
+            true,
+        )
+    }
+
+    pub(crate) fn discovered(&self, caller: Option<&str>, version: &str) -> std::io::Result<()> {
+        match if self.tunnel_scoped {
+            Some("tunnel")
+        } else {
+            caller
+        } {
+            Some(key) => self.record_reload(key, version),
+            None => Ok(()),
+        }
+    }
+
+    pub(crate) fn connector_version(&self, caller: Option<&str>) -> Option<String> {
+        self.version(if self.tunnel_scoped {
+            "tunnel"
+        } else {
+            caller?
+        })
+    }
+
     pub(crate) fn conversation_version(
         &self,
         conversation: &crate::project_bindings::ConversationIdentity,
@@ -148,6 +190,56 @@ mod tests {
             version_for_markdown_chat(true)
         );
         assert_eq!(version_for_markdown_chat(false), env!("CARGO_PKG_VERSION"));
+    }
+
+    #[test]
+    fn anonymous_tunnel_discovery_is_persistent_and_independent_of_conversation_echoes() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = |name: &str| ConnectorSchemaStore {
+            directory: Some(dir.path().join(name)),
+            tunnel_scoped: true,
+            ..Default::default()
+        };
+        let first = store("first");
+        let second = store("second");
+        let chat =
+            crate::project_bindings::ConversationIdentity::from_openai_session("old-chat").unwrap();
+        first.remember_conversation_version(&chat, "old").unwrap();
+        assert!(first.connector_version(None).is_none());
+        first.discovered(None, "new").unwrap();
+        second.discovered(None, "old").unwrap();
+        assert_eq!(
+            store("first")
+                .connector_version(Some("a-caller"))
+                .as_deref(),
+            Some("new")
+        );
+        assert_eq!(
+            store("second").connector_version(None).as_deref(),
+            Some("old")
+        );
+        first.remember_conversation_version(&chat, "new").unwrap();
+        assert_eq!(first.conversation_version(&chat).as_deref(), Some("old"));
+        assert_eq!(first.connector_version(None).as_deref(), Some("new"));
+        first.discovered(None, "rollback").unwrap();
+        assert_eq!(
+            store("first").connector_version(None).as_deref(),
+            Some("rollback")
+        );
+        let direct = ConnectorSchemaStore::default();
+        direct.discovered(None, "new").unwrap();
+        assert!(direct.connector_version(None).is_none());
+    }
+
+    #[test]
+    fn tunnel_records_do_not_depend_on_other_configured_tunnels() {
+        let a = ConnectorSchemaStore::for_tunnel("tunnel_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        let b = ConnectorSchemaStore::for_tunnel("tunnel_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+        assert_ne!(a.directory, b.directory);
+        assert_eq!(
+            a.directory,
+            ConnectorSchemaStore::for_tunnel("tunnel_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").directory
+        );
     }
 
     #[test]

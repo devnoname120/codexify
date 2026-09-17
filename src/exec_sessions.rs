@@ -688,6 +688,7 @@ pub struct SessionState {
     /// conversation-scoped view derived through `with_exec_state`, and carries
     /// the managed-worktree details when worktree isolation is enabled.
     project_binding: Arc<StdMutex<Option<TransportProjectBindingState>>>,
+    workspace_change: Arc<StdMutex<Option<crate::project_bindings::WorkspaceChange>>>,
     /// Serializes concurrent `set_project_root` calls on this transport session
     /// so a managed worktree is created at most once. Shared with derived views.
     project_selection_lock: Arc<TokioMutex<()>>,
@@ -990,6 +991,11 @@ fn validated_transport_selection(
             &metadata_path,
         )?;
         (Some(worktree_git_root), Some(worktrees_root))
+    } else if project_root != source_project_root && binding.worktree_git_root.is_some() {
+        let root = std::fs::canonicalize(binding.worktree_git_root.as_ref().unwrap())
+            .map_err(|error| error.to_string())?;
+        crate::worktrees::validate_registered_worktree(&source_project_root, &project_root, &root)?;
+        (Some(root), None)
     } else {
         if project_root != source_project_root {
             return Err(format!(
@@ -1024,6 +1030,7 @@ impl Default for SessionState {
             connector_authorized: Arc::new(AtomicBool::new(false)),
             plan: Arc::new(StdMutex::new(None)),
             project_binding: Arc::new(StdMutex::new(None)),
+            workspace_change: Arc::new(StdMutex::new(None)),
             project_selection_lock: Arc::new(TokioMutex::new(())),
             diff: TransportDiffState::new(),
             audit_id: TRANSPORT_SESSION_COUNTER.fetch_add(1, Ordering::Relaxed),
@@ -1051,6 +1058,7 @@ impl SessionState {
             connector_authorized: self.connector_authorized.clone(),
             plan: self.plan.clone(),
             project_binding: self.project_binding.clone(),
+            workspace_change: self.workspace_change.clone(),
             project_selection_lock: self.project_selection_lock.clone(),
             diff: self.diff.clone(),
             audit_id: self.audit_id,
@@ -1112,7 +1120,7 @@ impl SessionState {
                 Ok(effective)
             }
             ProjectBindingState::Unselected { .. } => Err(format!(
-                "No project root is selected for this MCP transport session. Call `set_project_root` with an existing directory beneath the access root `{}`, an HTTPS/SSH Git repository URL ending in `.git`, or an exact GitHub repository, branch, pull-request, or commit URL. Repository URLs reuse a matching checkout or clone into the configured clone directory. If only a project name or purpose is known, call `list_projects` first. To continue without a project, call `set_project_root` with `withoutProject=true`. Then call `get_agent_brief` before using project tools.",
+                "No project root is selected for this MCP transport session. Call `set_project_root` with an existing directory beneath the access root `{}`, an HTTPS/SSH Git repository URL ending in `.git`, or an exact GitHub repository, branch, pull-request, or commit URL. Repository URLs reuse a matching checkout or clone into the configured clone directory. If only a project name or purpose is known, call `list_projects` first. Leave the setup project picker open when intent is unclear or the user only says hello. chat_await can wait without selecting anything. Select `withoutProject=true` ONLY for an explicit user request for scratch; never as a default. Then call `get_agent_brief` before using project tools.",
                 config.work_dir.display()
             )),
         }
@@ -1206,14 +1214,14 @@ impl SessionState {
                     });
                 }
                 return Err(format!(
-                    "This MCP transport session is already bound to source project `{}` and cannot switch to `{}`. Open a new session for another project.",
+                    "This MCP transport session is already bound to source project `{}` and cannot switch to `{}` implicitly. Use Switch to another project in the setup card first.",
                     current.source_project_root.display(),
                     reference.display()
                 ));
             }
             Some(TransportProjectBindingState::WithoutProject { .. }) => {
                 return Err(format!(
-                    "This MCP transport session is already configured to chat without a project and cannot switch to `{}`. Open a new session to attach a project.",
+                    "This MCP transport session is already configured to chat without a project and cannot switch to `{}` implicitly. Use Switch to another project in the setup card first.",
                     reference.display()
                 ));
             }
@@ -1318,7 +1326,7 @@ impl SessionState {
             }
             Some(TransportProjectBindingState::Project(binding)) => {
                 return Err(format!(
-                    "This MCP transport session is already bound to source project `{}` and cannot switch to chat without a project. Open a new session for another choice.",
+                    "This MCP transport session is already bound to source project `{}` and cannot switch to chat without a project implicitly. Use Switch to another project in the setup card first.",
                     binding.source_project_root.display()
                 ));
             }
@@ -1352,6 +1360,120 @@ impl SessionState {
 
     pub fn diff_state(&self) -> TransportDiffState {
         self.diff.clone()
+    }
+
+    pub fn pending_workspace_change(&self) -> Option<crate::project_bindings::WorkspaceChange> {
+        let mut change = self.workspace_change.lock().unwrap().clone()?;
+        change.awaiting_selection = self.selected_project_root().is_none();
+        Some(change)
+    }
+
+    pub async fn dispatch_workspace(
+        &self,
+        config: &AppConfig,
+    ) -> Result<
+        (
+            Option<PathBuf>,
+            Option<crate::project_bindings::WorkspaceChange>,
+        ),
+        String,
+    > {
+        if !config.multi_project {
+            return Ok((Some(config.work_dir.clone()), None));
+        }
+        let _lock = self.project_selection_lock.lock().await;
+        let root = match self.binding_state(config)? {
+            ProjectBindingState::Project(selection) => Some(selection.project_root),
+            ProjectBindingState::WithoutProject { scratch_root, .. } => Some(scratch_root),
+            ProjectBindingState::Unselected { .. } => None,
+        };
+        Ok((root, self.pending_workspace_change()))
+    }
+
+    pub async fn reuse_worktree(
+        &self,
+        config: &AppConfig,
+        project: &str,
+        path: &Path,
+    ) -> Result<ProjectRootSelection, String> {
+        let (access_root, source) = crate::project_bindings::resolve_project_root(config, project)?;
+        let _lock = self.project_selection_lock.lock().await;
+        let choice = crate::worktrees::existing_worktree_choice(config, &source, path).await?;
+        if let Some(existing) = self.selected_project_root() {
+            if existing == choice.path
+                && let ProjectBindingState::Project(selection) = self.binding_state(config)?
+            {
+                return Ok(selection);
+            }
+            return Err(
+                "Use Switch to another project before selecting a different worktree.".into(),
+            );
+        }
+        let metadata = if choice.managed_worktree {
+            Some(load_metadata(
+                &metadata_path_for_worktree(&choice.git_root).ok_or("Missing worktree metadata")?,
+            )?)
+        } else {
+            None
+        };
+        let binding = TransportProjectBinding {
+            source_project_root: source,
+            project_root: choice.path.clone(),
+            repository_url: None,
+            managed_worktree: choice.managed_worktree,
+            worktree_git_root: (!choice.source_checkout).then_some(choice.git_root),
+            worktrees_root: metadata.map(|meta| PathBuf::from(meta.worktrees_root)),
+        };
+        let mut selection = validated_transport_selection(config, access_root, binding.clone())?;
+        selection.newly_selected = true;
+        selection.warnings.push("Reusing an existing worktree unchanged; avoid concurrent edits from other conversations.".into());
+        *self.project_binding.lock().unwrap() =
+            Some(TransportProjectBindingState::Project(binding));
+        let _ = crate::worktrees::touch_workspace(config, &choice.path);
+        Ok(selection)
+    }
+
+    pub async fn switch_to_picker(
+        &self,
+        config: &AppConfig,
+        expected: &Path,
+    ) -> Result<(), String> {
+        if !config.multi_project {
+            return Err("Workspace switching requires multi-project mode".into());
+        }
+        let _lock = self.project_selection_lock.lock().await;
+        if self.selected_project_root().is_none()
+            && self
+                .pending_workspace_change()
+                .is_some_and(|change| change.previous_root == expected)
+        {
+            return Ok(());
+        }
+        let current = self
+            .selected_project_root()
+            .ok_or("No workspace is selected")?;
+        if current != expected {
+            return Err(
+                "Workspace changed since this card was displayed. Refresh before switching.".into(),
+            );
+        }
+        *self.workspace_change.lock().unwrap() =
+            Some(crate::project_bindings::WorkspaceChange::new(current));
+        *self.project_binding.lock().unwrap() = None;
+        *self.plan.lock().unwrap() = None;
+        Ok(())
+    }
+
+    pub async fn acknowledge_workspace_change(&self, revision: &str, expected: &Path) {
+        let _lock = self.project_selection_lock.lock().await;
+        let mut change = self.workspace_change.lock().unwrap();
+        if change
+            .as_ref()
+            .is_some_and(|change| change.revision == revision)
+            && self.selected_project_root().as_deref() == Some(expected)
+        {
+            *change = None;
+        }
     }
 }
 

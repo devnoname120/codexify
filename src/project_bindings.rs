@@ -21,6 +21,10 @@ use crate::worktrees::{
 
 pub const OPENAI_SESSION_META_KEY: &str = "openai/session";
 
+#[path = "workspace_switch.rs"]
+mod workspace_switch;
+pub use workspace_switch::WorkspaceChange;
+
 const BINDING_VERSION: u32 = 2;
 const LEGACY_BINDING_VERSION: u32 = 1;
 const WITHOUT_PROJECT_BINDING_VERSION: u32 = 1;
@@ -307,7 +311,7 @@ impl ProjectBindingStore {
             }
             None => {
                 return Err(format!(
-                    "No project root is selected for this ChatGPT conversation. Call `set_project_root` with an existing directory beneath the access root `{}`, an HTTPS/SSH Git repository URL ending in `.git`, or an exact GitHub repository, branch, pull-request, or commit URL. Repository URLs reuse a matching checkout or clone into the configured clone directory. If only a project name or purpose is known, call `list_projects` first. To continue without a project, call `set_project_root` with `withoutProject=true`. Then call `get_agent_brief` before using project tools. The selection is stored by ChatGPT conversation ID and will survive MCP reconnects and server restarts.",
+                    "No project root is selected for this ChatGPT conversation. Call `set_project_root` with an existing directory beneath the access root `{}`, an HTTPS/SSH Git repository URL ending in `.git`, or an exact GitHub repository, branch, pull-request, or commit URL. Repository URLs reuse a matching checkout or clone into the configured clone directory. If only a project name or purpose is known, call `list_projects` first. Leave the setup project picker open when intent is unclear or the user only says hello. chat_await can wait without selecting anything. Select `withoutProject=true` ONLY for an explicit user request for scratch; never as a default. Then call `get_agent_brief` before using project tools. The selection is stored by ChatGPT conversation ID and will survive MCP reconnects and server restarts.",
                     config.work_dir.display()
                 ));
             }
@@ -384,6 +388,7 @@ impl ProjectBindingStore {
         let access_root = canonical_access_root(config)?;
         let binding_path = self.binding_path(&access_root, identity);
         let binding_lock = acquire_lock(&binding_path).await?;
+        self.clear_suspended_selection(&access_root, identity)?;
 
         match self.resolved_binding_state_at(identity, &access_root)? {
             Some(ResolvedBindingState::Project(mut current)) => {
@@ -412,14 +417,14 @@ impl ProjectBindingStore {
                 }
 
                 return Err(format!(
-                    "This ChatGPT conversation is already bound to source project `{}` and cannot switch to `{}`. Start a new chat for another project.",
+                    "This ChatGPT conversation is already bound to source project `{}` and cannot switch to `{}` implicitly. Use Switch to another project in the setup card first.",
                     current.source_project_root.display(),
                     reference.display()
                 ));
             }
             Some(ResolvedBindingState::WithoutProject(_)) => {
                 return Err(format!(
-                    "This ChatGPT conversation is already configured to chat without a project and cannot switch to `{}`. Start a new chat to attach a project.",
+                    "This ChatGPT conversation is already configured to chat without a project and cannot switch to `{}` implicitly. Use Switch to another project in the setup card first.",
                     reference.display()
                 ));
             }
@@ -502,6 +507,7 @@ impl ProjectBindingStore {
             });
         }
 
+        self.finish_workspace_selection(&access_root, identity)?;
         drop(assignment_lock);
         drop(binding_lock);
 
@@ -530,6 +536,7 @@ impl ProjectBindingStore {
         let access_root = canonical_access_root(config)?;
         let binding_path = self.binding_path(&access_root, identity);
         let binding_lock = acquire_lock(&binding_path).await?;
+        self.clear_suspended_selection(&access_root, identity)?;
 
         match self.resolved_binding_state_at(identity, &access_root)? {
             Some(ResolvedBindingState::WithoutProject(scratch_root)) => {
@@ -542,7 +549,7 @@ impl ProjectBindingStore {
             }
             Some(ResolvedBindingState::Project(binding)) => {
                 return Err(format!(
-                    "This ChatGPT conversation is already bound to source project `{}` and cannot switch to chat without a project. Start a new chat for another choice.",
+                    "This ChatGPT conversation is already bound to source project `{}` and cannot switch to chat without a project implicitly. Use Switch to another project in the setup card first.",
                     binding.source_project_root.display()
                 ));
             }
@@ -565,6 +572,7 @@ impl ProjectBindingStore {
             }
             return Err(error);
         }
+        self.finish_workspace_selection(&access_root, identity)?;
         drop(binding_lock);
         Ok(WithoutProjectSelection {
             access_root,
@@ -592,6 +600,7 @@ impl ProjectBindingStore {
         let access_root = canonical_access_root(config)?;
         let binding_path = self.binding_path(&access_root, identity);
         let _lock = acquire_lock(&binding_path).await?;
+        self.clear_suspended_selection(&access_root, identity)?;
         let existing = self.resolved_binding_state_at(identity, &access_root)?;
         let newly_selected = existing.is_none();
         let binding = if let Some(existing) = existing {
@@ -606,7 +615,7 @@ impl ProjectBindingStore {
         } else {
             // Only an already validated binding can authorize a managed path outside the access root.
             let project = self
-                .binding_files(&access_root)
+                .saved_binding_files(&access_root)
                 .into_iter()
                 .filter_map(|path| {
                     self.read_binding(&path, &access_root)
@@ -637,13 +646,15 @@ impl ProjectBindingStore {
                 self.write_binding(&binding_path, &stored)?;
                 ResolvedBindingState::Project(binding)
             } else {
-                let scratch = std::fs::read_dir(self.access_root_dir(&access_root))
+                let current_files = std::fs::read_dir(self.access_root_dir(&access_root))
                     .into_iter()
                     .flatten()
                     .flatten()
-                    .find_map(|entry| {
-                        let path = entry.path();
-                        if !entry.file_type().ok()?.is_file() || path.extension()? != "no-project" {
+                    .map(|entry| entry.path());
+                let scratch = current_files
+                    .chain(self.previous_binding_files(&access_root))
+                    .find_map(|path| {
+                        if !path.is_file() || path.extension()? != "no-project" {
                             return None;
                         }
                         let key = path.file_stem()?.to_str()?;
@@ -671,6 +682,7 @@ impl ProjectBindingStore {
                 ResolvedBindingState::WithoutProject(scratch_root)
             }
         };
+        self.finish_workspace_selection(&access_root, identity)?;
         Ok(match binding {
             ResolvedBindingState::Project(binding) => WorkspaceSelection::Project(selection_from_binding(
                 access_root, binding, config.worktrees.mode, newly_selected, false,
@@ -692,7 +704,7 @@ impl ProjectBindingStore {
         }
         let access_root = canonical_access_root(config)?;
         let mut roots = HashSet::new();
-        for path in self.binding_files(&access_root) {
+        for path in self.saved_binding_files(&access_root) {
             if let Ok(Some(binding)) = self.read_binding(&path, &access_root)
                 && binding.managed_worktree
             {
@@ -716,6 +728,12 @@ impl ProjectBindingStore {
         identity: &ConversationIdentity,
         access_root: &Path,
     ) -> Result<Option<ResolvedBindingState>, String> {
+        if self
+            .pending_change_at(access_root, identity)?
+            .is_some_and(|change| change.awaiting_selection)
+        {
+            return Ok(None);
+        }
         let path = self.binding_path(access_root, identity);
         let project = match self.read_binding(&path, access_root)? {
             Some(binding) => Some(binding),
@@ -965,6 +983,27 @@ impl ProjectBindingStore {
             })?;
         if !binding.managed_worktree {
             if project_root != source_project_root {
+                if let Some(root) = binding.worktree_git_root.as_deref() {
+                    let root = canonical_binding_dir(
+                        root,
+                        "registered worktree",
+                        path,
+                        "Select another worktree.",
+                    )?;
+                    crate::worktrees::validate_registered_worktree(
+                        &source_project_root,
+                        &project_root,
+                        &root,
+                    )?;
+                    return Ok(Some(ResolvedProjectBinding {
+                        source_project_root,
+                        project_root,
+                        repository_url,
+                        managed_worktree: false,
+                        worktree_git_root: Some(root),
+                        worktrees_root: None,
+                    }));
+                }
                 return Err(format!(
                     "The direct project binding at {} has inconsistent source and active roots. Start a new chat or remove that binding file.",
                     path.display()

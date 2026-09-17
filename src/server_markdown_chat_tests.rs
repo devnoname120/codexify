@@ -169,10 +169,20 @@ fn markdown_chat_all_advertised_outputs_have_an_optional_user_message() {
     config.markdown_chat.enabled = false;
     for tool in crate::registry::load_tools_for_config(&config) {
         let advertised = advertised_tool(tool.as_ref(), &config);
-        assert_eq!(
-            serde_json::to_value(advertised.output_schema).unwrap(),
-            json!(tool.output_schema())
+        let schema = serde_json::to_value(advertised.output_schema).unwrap();
+        assert!(
+            schema["properties"]
+                .get(crate::markdown_chat::USER_MESSAGE_FIELD)
+                .is_none()
         );
+        if !app_only_tool(tool.as_ref()) {
+            assert_eq!(
+                schema["properties"][WORKSPACE_CHANGE_FIELD]["type"],
+                "string"
+            );
+        } else {
+            assert_eq!(schema, json!(tool.output_schema()));
+        }
     }
 }
 

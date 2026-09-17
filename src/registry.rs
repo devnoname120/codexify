@@ -50,6 +50,11 @@ pub fn load_tools_for_config(config: &AppConfig) -> Vec<Box<dyn Tool>> {
             tools.push(Box::new(tools::setup_ui_action::SetupUiAction::Select));
         }
     }
+    if config.multi_project && config.ui_widgets {
+        tools.push(Box::new(tools::workspace_ui::WorkspaceUi::Switch));
+        tools.push(Box::new(tools::workspace_ui::WorkspaceUi::Worktrees));
+        tools.push(Box::new(tools::workspace_ui::WorkspaceUi::Reuse));
+    }
     tools
 }
 
