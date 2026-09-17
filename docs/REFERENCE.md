@@ -1666,15 +1666,17 @@ state. No background follow-up message is posted to ChatGPT, and the widget does
 not claim that a stopped agent can be restarted by sending to the file.
 
 The header shows the total number of model-visible Codexify tool calls recorded
-for the conversation. A compact standalone label before each later agent bubble
-shows the calls since the previous agent bubble. While work continues after the
-latest agent bubble, the same label appears after the visible history and updates
-through live state polling; the next agent bubble fixes that count into history.
-The `chat_write` that creates the later bubble is included. Counts are stored in
-private cursor state, and each new agent transcript marker snapshots the total so
-intervals survive reloads and server restarts. Existing pre-counter bubbles have
-no invented historical count. App-only widget state, send, file, setup, and
-project-selection helpers are excluded.
+for the conversation. Compact labels between messages show the calls in each
+interval. Both agent messages and saved user messages snapshot the count, so
+sending a user message leaves earlier calls above it; only subsequent calls
+appear below it. The pending bubble uses the last observed count until its send
+receipt supplies the persisted boundary. Retries reuse the original boundary,
+even after more calls or a server restart. The `chat_write` that creates a later
+agent bubble is included. Counts are stored in private cursor state and transcript
+markers, so intervals survive reloads. Historical or manually appended messages
+without counters break interval calculation rather than inventing a split;
+the header still reports the recorded total. App-only widget state, send, file,
+setup, and project-selection helpers are excluded.
 
 | Indicator | Meaning |
 | --- | --- |

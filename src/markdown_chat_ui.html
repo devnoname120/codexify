@@ -226,7 +226,7 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
       markerNodes.set(key, node);
     }
     node.textContent = toolCallLabel(count);
-    node.title = live ? "Tool calls since the latest agent message. This updates while the agent works." : "Tool calls between these agent messages.";
+    node.title = live ? "Tool calls since the preceding message. This updates while the agent works." : "Tool calls between these messages.";
     return node;
   }
   function updatePresence() {
@@ -323,24 +323,23 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
     el("empty").hidden = messages.length > 0;
     if (!messages.length && chatFile) el("empty").textContent = "Messages here stay in this conversation. Send an instruction to the agent below.";
     let previousNode = el("empty");
-    let previousAgentCalls = null, latestAgentId = null;
+    let previousCalls = null, latestMessageId = null;
     const activeMarkers = new Set();
     for (const message of messages) {
-      if (message.role === "agent") {
-        const current = Number.isSafeInteger(message.tool_call_count) && message.tool_call_count >= 0 ? message.tool_call_count : null;
-        if (previousAgentCalls !== null && current !== null && current >= previousAgentCalls) {
-          const calls = current - previousAgentCalls;
-          if (calls > 0) {
-            const key = `before:${message.id}`;
-            const marker = toolCallMarker(key, calls, false);
-            activeMarkers.add(key);
-            if (previousNode.nextSibling !== marker) list.insertBefore(marker, previousNode.nextSibling);
-            previousNode = marker;
-          }
+      const current = Number.isSafeInteger(message.tool_call_count) && message.tool_call_count >= 0 ? message.tool_call_count : null;
+      if (previousCalls !== null && current !== null && current >= previousCalls) {
+        const calls = current - previousCalls;
+        if (calls > 0) {
+          const key = `before:${message.id}`;
+          const marker = toolCallMarker(key, calls, false);
+          activeMarkers.add(key);
+          if (previousNode.nextSibling !== marker) list.insertBefore(marker, previousNode.nextSibling);
+          previousNode = marker;
         }
-        previousAgentCalls = current;
-        latestAgentId = current === null ? null : message.id;
       }
+      // Missing historical boundaries cannot be split reliably around a user message.
+      previousCalls = current;
+      latestMessageId = current === null ? null : message.id;
       let node = nodes.get(message.id);
       if (!node) {
         node = make("article", "message " + message.role); node.dataset.messageId = message.id;
@@ -354,10 +353,10 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
       if (previousNode.nextSibling !== node) list.insertBefore(node, previousNode.nextSibling);
       previousNode = node;
     }
-    if (latestAgentId !== null && Number.isSafeInteger(totalToolCalls) && totalToolCalls >= previousAgentCalls) {
-      const calls = totalToolCalls - previousAgentCalls;
+    if (latestMessageId !== null && Number.isSafeInteger(totalToolCalls) && totalToolCalls >= previousCalls) {
+      const calls = totalToolCalls - previousCalls;
       if (calls > 0) {
-        const key = `live:${latestAgentId}`;
+        const key = `live:${latestMessageId}`;
         const marker = toolCallMarker(key, calls, true);
         activeMarkers.add(key);
         if (previousNode.nextSibling !== marker) list.insertBefore(marker, previousNode.nextSibling);
@@ -423,7 +422,7 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
       const payload = await call("chat_ui_send", { request_id:message.id, message:message.markdown });
       if (payload.sent?.id !== message.id || !Number.isSafeInteger(payload.sent.end)) throw new Error("The send receipt was incomplete. Retry uses the same message ID.");
       pendingSends.delete(message.id);
-      if (!records.has(message.id)) records.set(message.id, { ...message, pending:false, failed:false, start:payload.sent.end - 1, end:payload.sent.end, created_at_ms:payload.sent.created_at_ms });
+      if (!records.has(message.id)) records.set(message.id, { ...message, pending:false, failed:false, start:payload.sent.end - 1, end:payload.sent.end, created_at_ms:payload.sent.created_at_ms, tool_call_count:payload.sent.tool_call_count ?? null });
       status("Saved to CHAT.md. The agent receives it on a tool response."); revision = null;
       void refresh();
     } catch (error) {
@@ -434,7 +433,7 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
   el("composer").addEventListener("submit", event => {
     event.preventDefault();
     if (!available || sending || !input.value.trim()) return;
-    const message = { id:crypto.randomUUID(), role:"user", markdown:input.value, pending:true, failed:false, created_at_ms:Date.now() };
+    const message = { id:crypto.randomUUID(), role:"user", markdown:input.value, pending:true, failed:false, created_at_ms:Date.now(), tool_call_count:totalToolCalls };
     input.value = ""; resizeInput(); void deliver(message); input.focus(); list.scrollTop = list.scrollHeight;
   });
   input.addEventListener("keydown", event => {

@@ -627,6 +627,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(sent["_meta"][CHAT_WIDGET_META]["sent"]["id"], "owner-send");
+        assert_eq!(
+            sent["_meta"][CHAT_WIDGET_META]["sent"]["tool_call_count"],
+            0
+        );
         let same_chat = chat.read(false).await.unwrap();
         assert!(same_chat.text.contains("Check the build"));
         let page: Value = client
@@ -641,6 +645,10 @@ mod tests {
         assert_eq!(
             page["_meta"][CHAT_WIDGET_META]["messages"][0]["markdown"],
             "Check the build"
+        );
+        assert_eq!(
+            page["_meta"][CHAT_WIDGET_META]["messages"][0]["tool_call_count"],
+            0
         );
         let renamed: Value = client
             .get(format!("{base}/api/chats"))

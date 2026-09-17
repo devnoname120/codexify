@@ -60,6 +60,7 @@ async fn markdown_chat_widget_send_poll_and_agent_delivery_are_separate() {
             .is_none()
     );
     let end = payload(&sent)["sent"]["end"].as_u64().unwrap();
+    assert_eq!(payload(&sent)["sent"]["tool_call_count"], 0);
     for _ in 0..2 {
         let state = client
             .call_tool(request("chat_ui_state", json!({}), "widget-owner"))
@@ -68,6 +69,7 @@ async fn markdown_chat_widget_send_poll_and_agent_delivery_are_separate() {
         assert_eq!(payload(&state)["delivered_through"], 0);
         assert!(payload(&state)["last_agent_call_at_ms"].is_null());
         assert_eq!(payload(&state)["total_tool_calls"], 0);
+        assert_eq!(payload(&state)["messages"][0]["tool_call_count"], 0);
         assert!(payload(&state)["read_through"].as_u64().unwrap() < end);
         assert!(
             state

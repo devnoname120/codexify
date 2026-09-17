@@ -37,6 +37,7 @@ pub struct UserSendReceipt {
     pub id: String,
     pub end: u64,
     pub created_at_ms: Option<u64>,
+    pub tool_call_count: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -394,11 +395,12 @@ impl ChatFile {
                     if read_range(file, span.body_start, span.body_end, MAX_UNREAD_BYTES)? != message.as_bytes() {
                         return Err("This request ID already belongs to a different message.".into());
                     }
-                    return Ok(UserSendReceipt { id, end: span.end, created_at_ms: span.created_at_ms });
+                    return Ok(UserSendReceipt { id, end: span.end, created_at_ms: span.created_at_ms, tool_call_count: span.tool_call_count });
                 }
             }
             let created_at_ms = super::super::now_ms();
-            let block = format!("{USER_START}{id}\" created_at_ms=\"{created_at_ms}\" -->\n\n## User\n\n{message}\n\n<!-- codexify-user-message:v1:end id=\"{id}\" -->\n");
+            let tool_call_count = cursor.total_tool_calls;
+            let block = format!("{USER_START}{id}\" created_at_ms=\"{created_at_ms}\" tool_call_count=\"{tool_call_count}\" -->\n\n## User\n\n{message}\n\n<!-- codexify-user-message:v1:end id=\"{id}\" -->\n");
             file.write_all(block.as_bytes()).map_err(io_error)?;
             let end = file.stream_position().map_err(io_error)?;
             file.sync_all().map_err(io_error)?;
@@ -406,7 +408,7 @@ impl ChatFile {
                 .and_then(|handle| same_file::Handle::from_path(&chat.path).map(|current| current == handle))
                 .map_err(io_error)?;
             if !same { return Err("CHAT.md changed during send; reload and retry with the same request ID.".into()); }
-            Ok(UserSendReceipt { id, end, created_at_ms: Some(created_at_ms) })
+            Ok(UserSendReceipt { id, end, created_at_ms: Some(created_at_ms), tool_call_count: Some(tool_call_count) })
         })).await
     }
 

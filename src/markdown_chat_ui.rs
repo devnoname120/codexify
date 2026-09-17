@@ -69,7 +69,7 @@ fn resource_meta() -> MetaObject {
         "ui":{"prefersBorder":false,"csp":{"connectDomains":[],"resourceDomains":[]}},
         "openai/widgetPrefersBorder":false,
         "openai/widgetCSP":{"connect_domains":[],"resource_domains":[]},
-        "openai/widgetDescription":"Codexify setup with one conversation-specific chat panel. One grey tick means sent, two grey ticks mean returned to the agent, and two blue ticks mean acknowledged by a chat tool. Compact counters show model-visible Codexify tool calls for the conversation and between agent messages. Agent presence reflects the last agent tool call, not a live connection."
+        "openai/widgetDescription":"Codexify setup with one conversation-specific chat panel. One grey tick means sent, two grey ticks mean returned to the agent, and two blue ticks mean acknowledged by a chat tool. Compact counters show model-visible Codexify tool calls for the conversation and between messages, preserving their position when the user sends. Agent presence reflects the last agent tool call, not a live connection."
     })).expect("chat resource metadata")
 }
 

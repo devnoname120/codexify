@@ -56,7 +56,7 @@ class ChatBackend {
   add(role, markdown, id = `fixture-${this.messages.length}`) {
     const start = this.end;
     this.end += markdown.length + 150;
-    const message = { id, role, markdown, start, end:this.end, created_at_ms:Date.now(), tool_call_count:role === "agent" ? this.totalToolCalls : null };
+    const message = { id, role, markdown, start, end:this.end, created_at_ms:Date.now(), tool_call_count:this.totalToolCalls };
     this.messages.push(message); this.revision++;
     return message;
   }
@@ -78,7 +78,7 @@ class ChatBackend {
       if (message) assert.equal(message.markdown, args.message);
       else message = this.add("user", args.message, args.request_id);
       if (this.failAfterSave) { this.failAfterSave = false; throw new Error("Response lost after save"); }
-      return { content:[{ type:"text", text:"Message saved." }], _meta:{ [META]:{ sent:{ id:message.id, end:message.end, created_at_ms:message.created_at_ms } } } };
+      return { content:[{ type:"text", text:"Message saved." }], _meta:{ [META]:{ sent:{ id:message.id, end:message.end, created_at_ms:message.created_at_ms, tool_call_count:message.tool_call_count } } } };
     }
     assert.equal(name, "chat_ui_state", "UI must use only app-only chat tools");
     if (this.failState) throw new Error("Temporary state failure");
@@ -155,6 +155,116 @@ async function mount(browser, backend, { width = 390, theme = "light", count = 1
 
 async function refresh(frame) {
   await frame.locator("body").evaluate(() => window.dispatchEvent(new Event("focus")));
+}
+
+async function timeline(frame) {
+  return frame.locator("#messages > .message, #messages > .tool-call-marker")
+    .evaluateAll(nodes => nodes.map(node => node.classList.contains("tool-call-marker") ? node.textContent : node.querySelector(".markdown").textContent));
+}
+
+async function expectTimeline(frame, expected) {
+  let actual;
+  for (let attempt = 0; attempt < 80; attempt++) {
+    actual = await timeline(frame);
+    if (JSON.stringify(actual) === JSON.stringify(expected)) return;
+    await sleep(50);
+  }
+  assert.deepEqual(actual, expected);
+}
+
+for (const [engineName, engine] of [["Chromium", chromium], ["WebKit", webkit]]) {
+  test(`${engineName}: tool-call chronology`, { timeout:120000 }, async t => {
+    const browser = await engine.launch();
+    try {
+      await t.test("send freezes earlier calls above the user; only subsequent calls follow it", async () => {
+        const backend = new ChatBackend();
+        backend.totalToolCalls = 1;
+        backend.add("agent", "I am running the regression tests.");
+        backend.totalToolCalls = 20;
+        const { page, frames:[frame], errors } = await mount(browser, backend, { combined:true });
+        await expectTimeline(frame, ["I am running the regression tests.", "19 tool calls"]);
+        const normalCall = backend.call.bind(backend);
+        let releaseSend;
+        const held = new Promise(resolve => { releaseSend = resolve; });
+        backend.call = async (name, args) => {
+          if (name === "chat_ui_send") await held;
+          return normalCall(name, args);
+        };
+        await frame.getByRole("textbox").fill("And now?");
+        await frame.getByRole("textbox").press("Enter");
+        await frame.getByText("Sending...", { exact:true }).waitFor();
+        try {
+          await expectTimeline(frame, ["I am running the regression tests.", "19 tool calls", "And now?"]);
+        } finally { releaseSend(); }
+        await frame.getByRole("img", { name:"Saved to CHAT.md", exact:true }).waitFor();
+        await expectTimeline(frame, ["I am running the regression tests.", "19 tool calls", "And now?"]);
+        backend.totalToolCalls = 22;
+        await refresh(frame);
+        await expectTimeline(frame, ["I am running the regression tests.", "19 tool calls", "And now?", "2 tool calls"]);
+        if (process.env.CODEXIFY_CHAT_MARKER_PREVIEW_DIR) {
+          mkdirSync(process.env.CODEXIFY_CHAT_MARKER_PREVIEW_DIR, { recursive:true });
+          await frame.locator("#chat").screenshot({ path:`${process.env.CODEXIFY_CHAT_MARKER_PREVIEW_DIR}/${engineName.toLowerCase()}-after-send.png` });
+        }
+        assert.deepEqual(errors, []);
+        await page.close();
+      });
+      await t.test("several user messages preserve chronological intervals across cards and reloads", async () => {
+        const backend = new ChatBackend();
+        backend.totalToolCalls = 2; backend.add("agent", "Starting.");
+        backend.totalToolCalls = 5; backend.add("user", "First instruction.");
+        backend.totalToolCalls = 7; backend.add("user", "Second instruction.");
+        backend.add("user", "One more detail.");
+        backend.totalToolCalls = 8; backend.add("agent", "Acknowledged.");
+        backend.totalToolCalls = 10;
+        const expected = ["Starting.", "3 tool calls", "First instruction.", "2 tool calls", "Second instruction.", "One more detail.", "1 tool call", "Acknowledged.", "2 tool calls"];
+        for (const bridge of ["legacy", "mcp"]) {
+          const { page, frames, errors } = await mount(browser, backend, { count:2, bridge });
+          for (const frame of frames) {
+            await expectTimeline(frame, expected);
+            await refresh(frame);
+            await expectTimeline(frame, expected);
+          }
+          assert.deepEqual(errors, []); await page.close();
+        }
+        backend.pageSize = 3;
+        const { page, frames:[frame] } = await mount(browser, backend);
+        await expectTimeline(frame, expected.slice(4));
+        await frame.getByRole("button", { name:"Load earlier messages", exact:true }).click();
+        await expectTimeline(frame, expected);
+        await page.close();
+      });
+      await t.test("lost response retries retain the saved counter even when history is unavailable", async () => {
+        const backend = new ChatBackend();
+        backend.totalToolCalls = 1; backend.add("agent", "Working.");
+        backend.totalToolCalls = 4;
+        const { page, frames:[frame], errors } = await mount(browser, backend);
+        await expectTimeline(frame, ["Working.", "3 tool calls"]);
+        backend.failAfterSave = true; backend.failState = true;
+        await frame.getByRole("textbox").fill("Status?");
+        await frame.getByRole("textbox").press("Enter");
+        await frame.getByRole("button", { name:"Retry", exact:true }).waitFor();
+        await expectTimeline(frame, ["Working.", "3 tool calls", "Status?"]);
+        backend.totalToolCalls = 8;
+        await frame.getByRole("button", { name:"Retry", exact:true }).click();
+        await frame.getByRole("img", { name:"Saved to CHAT.md", exact:true }).waitFor();
+        await expectTimeline(frame, ["Working.", "3 tool calls", "Status?"]);
+        assert.equal(backend.messages.length, 2);
+        backend.failState = false; await refresh(frame);
+        await expectTimeline(frame, ["Working.", "3 tool calls", "Status?", "4 tool calls"]);
+        assert.deepEqual(errors, []); await page.close();
+      });
+      await t.test("legacy gaps do not invent a call split; new boundaries resume counting", async () => {
+        const backend = new ChatBackend();
+        backend.totalToolCalls = 1; backend.add("agent", "Older report.");
+        backend.totalToolCalls = 5; backend.add("user", "Old message without a counter.").tool_call_count = null;
+        backend.totalToolCalls = 7; backend.add("agent", "New report.");
+        backend.totalToolCalls = 8;
+        const { page, frames:[frame], errors } = await mount(browser, backend);
+        await expectTimeline(frame, ["Older report.", "Old message without a counter.", "New report.", "1 tool call"]);
+        assert.deepEqual(errors, []); await page.close();
+      });
+    } finally { await browser.close(); }
+  });
 }
 
 for (const [engineName, engine] of [["Chromium", chromium], ["WebKit", webkit]]) {
@@ -311,7 +421,7 @@ for (const [engineName, engine] of [["Chromium", chromium], ["WebKit", webkit]])
         assert.deepEqual(await markers.allTextContents(), ["3 tool calls"]);
         const order = await frame.locator("#messages > .message, #messages > .tool-call-marker")
           .evaluateAll(nodes => nodes.map(node => node.classList.contains("tool-call-marker") ? node.textContent : node.querySelector(".markdown")?.textContent));
-        assert.deepEqual(order, ["First progress report.", "Keep going.", "3 tool calls", "Second progress report."]);
+        assert.deepEqual(order, ["First progress report.", "3 tool calls", "Keep going.", "Second progress report."]);
 
         backend.totalToolCalls = 5;
         await refresh(frame);

@@ -45,8 +45,9 @@ test(`${engineName}: standalone owner view restores its URL selection`, { timeou
       if (url.pathname.endsWith("/send")) {
         const body = request.postDataJSON();
         const end = chats.find(chat => chat.id === id).lastEntryEnd += 100;
-        messages.get(id).push({ id:body.request_id, role:"user", markdown:body.message, start:end - 100, end, created_at_ms:Date.now(), tool_call_count:null });
-        return route.fulfill({ json:{ _meta:{ [META]:{ sent:{ id:body.request_id, end, created_at_ms:Date.now() } } } } });
+        const tool_call_count = chats.find(chat => chat.id === id).totalToolCalls;
+        messages.get(id).push({ id:body.request_id, role:"user", markdown:body.message, start:end - 100, end, created_at_ms:Date.now(), tool_call_count });
+        return route.fulfill({ json:{ _meta:{ [META]:{ sent:{ id:body.request_id, end, created_at_ms:Date.now(), tool_call_count } } } } });
       }
       if (url.pathname.startsWith("/api/chats/")) {
         const rows = messages.get(id);

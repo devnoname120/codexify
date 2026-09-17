@@ -17,6 +17,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Chat tool-call markers remain above user messages sent after those calls;
+  per-message counters preserve the chronology across retries and reloads.
 - Greetings leave the project picker open instead of selecting scratch to unlock
   Markdown chat; `chat_await` can wait for the user's initial workspace choice.
 - The standalone owner-chat sidebar reads the API's camelCase activity fields,
