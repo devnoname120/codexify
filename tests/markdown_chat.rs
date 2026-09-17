@@ -25,7 +25,7 @@ fn user_append(path: &std::path::Path, text: &str) {
 fn markdown_chat_defaults_and_validation() {
     let config: MarkdownChatConfig = serde_json::from_str("{}").unwrap();
     assert!(!config.enabled);
-    assert_eq!(config.max_wait_ms, 270_000);
+    assert_eq!(config.max_wait_ms, 115_000);
     assert!(config.notifications.is_none());
     assert!(config.validate().is_ok());
     for wait in [0, 999, 300_001, u64::MAX] {

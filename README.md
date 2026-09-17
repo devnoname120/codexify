@@ -152,7 +152,7 @@ sending another ChatGPT message. Enable the feature in your Codexify config:
 {
   "agentChat": {
     "enabled": true,
-    "maxWaitMs": 270000
+    "maxWaitMs": 115000
   }
 }
 ```

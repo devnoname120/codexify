@@ -902,7 +902,7 @@ names.
   "conversationAuthToken": null,
   "agentChat": {
     "enabled": false,
-    "maxWaitMs": 270000,
+    "maxWaitMs": 115000,
     "notifications": null
   },
   "multiProject": false,
@@ -1487,7 +1487,7 @@ guarantee quota savings, or keep a host-terminated turn alive.
 {
   "agentChat": {
     "enabled": true,
-    "maxWaitMs": 270000,
+    "maxWaitMs": 115000,
     "notifications": {
       "urls": ["ntfys://ntfy.example/codexify?image=no"],
       "pythonPath": "/absolute/path/to/notifications-venv/bin/python",
@@ -1497,7 +1497,7 @@ guarantee quota savings, or keep a host-terminated turn alive.
 }
 ```
 
-`enabled` defaults to `false`; `maxWaitMs` defaults to **270000 ms (4 min 30 s)**
+`enabled` defaults to `false`; `maxWaitMs` defaults to **115000 ms (1 min 55 s)**
 and must be between 1000 and 300000. The tools do not accept a timeout override.
 Omit `notifications`, or set it to `null`,
 for file-only communication. Configure only one notification backend. Credentials
@@ -1783,7 +1783,7 @@ missed wake-up. No background polling continues after the tool returns.
 The offline-alert timer is separate from `chat_await` and runs in the server
 when notifications are configured.
 
-The 270-second default is a configurable choice, **not a documented ChatGPT
+The 115-second default is a configurable choice, **not a documented ChatGPT
 maximum**. A [first-hand report](https://community.openai.com/t/agentsdk-and-chatgpt-ui-fails-running-time-consuming-mcp-tool-with-typeerror-fetch-failed/1366562)
 describes approximately five-minute and later shorter timeouts; [OpenAI Support](https://community.openai.com/t/progress-notifications-not-working-in-chatgpt-mcp-ts-sdk-1-20-0/1367559/5)
 states that no fixed ChatGPT web MCP timeout is documented. Reduce `maxWaitMs`

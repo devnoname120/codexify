@@ -24,7 +24,7 @@ pub use storage::{
 };
 pub use wait::WaitOutcome;
 
-pub const DEFAULT_MAX_WAIT_MS: u64 = 270_000;
+pub const DEFAULT_MAX_WAIT_MS: u64 = 115_000;
 pub const MAX_UNREAD_BYTES: usize = 16 * 1024 * 1024;
 pub const USER_MESSAGE_FIELD: &str = "new_chat_message_from_user";
 pub const OFFLINE_AFTER_MS: u64 = 600_000;
