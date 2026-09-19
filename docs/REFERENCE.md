@@ -1945,10 +1945,13 @@ The same choice is the first action in the setup card. It creates a durable priv
 scratch workspace for a ChatGPT conversation and shows its active path after the
 selection succeeds.
 
-On a later turn in an already-bound chat, the path does not need to be repeated:
+On a later turn in an already-bound chat, reuse the workspace and brief already
+in context. Normally load the brief once per conversation/workspace, not once
+per task. Read it again after a workspace change, relevant instruction changes,
+or context compaction that dropped the earlier brief:
 
 ```
-Call get_agent_brief and follow it for the rest of this task.
+Continue using this workspace and its instructions.
 
 Task: <what you want done>
 ```
@@ -2028,9 +2031,24 @@ description: Cut and publish a release of this project
 
 Repo skills come first, so a project decides how a name behaves inside it; a personal skill of the same name is shadowed and `skills_list` says so rather than merging the two.
 
-**Plugin skills.** Codexify mirrors Codex's local plugin-skill discovery. It reads enabled `[plugins."<plugin>@<marketplace>"]` entries from the Codex user `config.toml`, resolves the same active cache version (`local` wins; otherwise Codex's semver/lexical ordering), and reads the plugin manifest rather than assuming every cache entry has a `skills/` directory. Legacy manifests can declare one or more skill roots and are searched recursively; current Agent Plugin manifests use the conventional direct-child `skills/` layout. Legacy migrated-command skills are included too, and `[[skills.config]]` name/path disable rules are honored. Plugin skills use the manifest namespace as `<plugin>:<skill>`. Codexify also retains compatible Claude Code plugin discovery, using the highest installed Claude plugin version. Turn all plugin-skill discovery off with `"skills": { "includePlugins": false }`. Setting `skills.dirs` overrides the standalone roots and, by default, disables plugin discovery too — set `includePlugins: true` alongside `dirs` to keep it.
+**Plugin skills.** Codexify mirrors Codex's local plugin-skill discovery. It reads enabled `[plugins."<plugin>@<marketplace>"]` entries from the Codex user `config.toml`, resolves the same active cache version (`local` wins; otherwise Codex's semver/lexical ordering), and reads the plugin manifest rather than assuming every cache entry has a `skills/` directory. Legacy manifests can declare one or more skill roots and are searched recursively; current Agent Plugin manifests use the conventional direct-child `skills/` layout. Legacy migrated-command skills are included too, and `[[skills.config]]` name/path disable rules are honored. Plugin skills use the manifest namespace as `<plugin>:<skill>`. Claude Code plugin discovery uses `installPath` entries in `~/.claude/plugins/installed_plugins.json`, not an inventory of cached versions. Project/local installations apply only within their recorded project path and take precedence over user installations. An absent or empty registry offers no Claude plugin skills; an unreadable or malformed registry produces a discovery warning, without falling back to stale cache entries. Turn all plugin-skill discovery off with `"skills": { "includePlugins": false }`. Setting `skills.dirs` overrides the standalone roots and, by default, disables plugin discovery too — set `includePlugins: true` alongside `dirs` to keep it.
 
-**What the model sees.** The catalogue — a name and a description per skill — goes into the project-aware brief under a `## Skills` heading. In single-project mode that is available at initialization; in multi-project mode it arrives from `get_agent_brief` after selection. Bodies are not loaded: `skills_read` fetches one only once a skill has actually been chosen. That is the progressive disclosure that makes a large library affordable on a small context window. The section is omitted entirely when nothing is installed.
+**What the model sees.** The catalogue — a name and the full trigger description per implicitly invocable skill — goes into the project-aware brief under a `## Skills` heading. In single-project mode that is available at initialization; in multi-project mode it arrives from `get_agent_brief` after selection. Bodies are not loaded: `skills_read` fetches one only once a skill has actually been chosen. UI captions such as `interface.short_description` do not replace the trigger description. The section is omitted entirely when no skill permits implicit invocation.
+
+**Invocation policy.** A skill can opt out of automatic selection in its
+`agents/openai.yaml`:
+
+```yaml
+policy:
+  allow_implicit_invocation: false
+```
+
+Such skills are omitted from the brief but remain available through `skills_list`
+and `skills_read`, labeled as explicit-only. This applies to repository, user,
+and plugin skills alike. Missing policy metadata defaults to allowing implicit
+invocation. Invalid or unreadable metadata produces a discovery warning and
+disables implicit invocation without removing explicit access. These are
+selection instructions for the agent, not an access-control mechanism.
 
 **Reaching the rest of a package.** Reference files, scripts and assets are read with `skills_read` and the skill's name, passing the file's path as `resource`. `read_file` will not do: it is confined to the active project root, and user- and plugin-scope skills live in your home directory. Paths inside a skill are relative to the skill's own directory, and a `resource` that tries to leave it is rejected — so the only thing this opens up is the inside of a skill you or the project deliberately installed. Reading a `SKILL.md` lists the package's other files, since the model cannot glob a directory it cannot see.
 

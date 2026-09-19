@@ -128,8 +128,15 @@ impl Tool for SkillsRead {
         let mut parts: Vec<String> = vec![
             format!("{} — {}", skill.name, path.display()),
             String::new(),
-            window.lines.join("\n"),
         ];
+        if !skill.allow_implicit_invocation {
+            parts.push(
+                "Policy: explicit invocation only; use only when the user requests this skill."
+                    .to_string(),
+            );
+            parts.push(String::new());
+        }
+        parts.push(window.lines.join("\n"));
         if let Some(notice) = &window.notice {
             parts.push(String::new());
             parts.push(notice.clone());

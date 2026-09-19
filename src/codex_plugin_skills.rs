@@ -18,6 +18,7 @@ use walkdir::WalkDir;
 use crate::codex_config::{codex_config_path, load_codex_config};
 use crate::skills::{
     MAX_SKILL_NAME_BYTES, SKILL_FILENAME, Skill, SkillScope, SkillWarning, parse_skill_frontmatter,
+    skill_allows_implicit_invocation,
 };
 
 const PLUGINS_CACHE_DIR: &str = "plugins/cache";
@@ -504,6 +505,7 @@ fn discover_root_skills(
                     name,
                     description: parsed.description,
                     short_description: parsed.short_description,
+                    allow_implicit_invocation: skill_allows_implicit_invocation(&dir, warnings),
                     dir,
                     path,
                     scope: SkillScope::Plugin,
@@ -642,6 +644,32 @@ mod tests {
         );
         fs::create_dir_all(temp.path().join("local")).unwrap();
         assert_eq!(active_plugin_version(temp.path()).as_deref(), Some("local"));
+    }
+
+    #[test]
+    fn codex_plugin_skill_respects_openai_invocation_policy() {
+        let home = tempfile::tempdir().unwrap();
+        let root = write_legacy_plugin(
+            home.path(),
+            "market",
+            "sample",
+            "1.0.0",
+            r#"{"name":"sample"}"#,
+        );
+        let skill = root.join("skills/manual");
+        write_skill(&skill.join("SKILL.md"), "manual", "Use only on request");
+        fs::create_dir_all(skill.join("agents")).unwrap();
+        fs::write(
+            skill.join("agents/openai.yaml"),
+            "policy:\n  allow_implicit_invocation: false\n",
+        )
+        .unwrap();
+        let config = parse_config("[plugins.\"sample@market\"]\nenabled = true\n");
+        let (skills, warnings) = discover_codex_plugin_skills_from(home.path(), &config);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].name, "sample:manual");
+        assert!(!skills[0].allow_implicit_invocation);
     }
 
     #[test]

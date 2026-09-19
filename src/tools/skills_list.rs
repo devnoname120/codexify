@@ -42,13 +42,16 @@ pub fn render_skill_list(catalog: &SkillCatalog, enabled: bool) -> String {
                 skill.scope.as_str(),
                 skill.description
             ));
+            if !skill.allow_implicit_invocation {
+                lines.push("  Policy: explicit invocation only; use only when the user requests this skill.".to_string());
+            }
             lines.push(format!("  {}", skill.path.display()));
         }
     }
 
     if !catalog.warnings.is_empty() {
         lines.push(String::new());
-        lines.push("Not offered:".to_string());
+        lines.push("Discovery warnings:".to_string());
         for warning in &catalog.warnings {
             lines.push(format!("- {}: {}", warning.path.display(), warning.message));
         }
@@ -81,7 +84,7 @@ impl Tool for SkillsList {
 
     fn description(&self) -> String {
         format!(
-            "List the skills available for this project. A skill is a set of instructions stored in a {SKILL_FILENAME}, covering a task the user or the repository has already worked out how to do well. Skills are found under .agents/skills, .codex/skills and .claude/skills, in the project and in the user's home directory, plus enabled installed Codex and Claude Code plugins. Each entry gives a name and a description of when it applies; call skills_read with the name to get the instructions themselves. If the user names a skill, or the task clearly matches one of these descriptions, use it."
+            "List the skills available for this project, including explicit-only skills omitted from the agent brief. A skill is a set of instructions stored in a {SKILL_FILENAME}, covering a task the user or the repository has already worked out how to do well. Skills are found under .agents/skills, .codex/skills and .claude/skills, in the project and in the user's home directory, plus installed Codex and Claude Code plugins. Each entry gives a name, a description of when it applies, and its invocation policy; call skills_read with the name to get the instructions. Use explicit-only skills only when the user requests them, not merely because the task matches their description."
         )
     }
 
@@ -101,10 +104,11 @@ impl Tool for SkillsList {
                         "properties": {
                             "name": { "type": "string", "description": "Name to pass to skills_read." },
                             "description": { "type": "string", "description": "When this skill applies." },
+                            "allow_implicit_invocation": { "type": "boolean", "description": "False means use only when the user explicitly requests this skill." },
                             "scope": { "type": "string", "description": "`repo` for a skill shipped with the project, `user` for a personal one, or `plugin` for a plugin-bundled skill." },
                             "path": { "type": "string", "description": format!("Absolute path of the {SKILL_FILENAME}.") }
                         },
-                        "required": ["name", "description", "scope", "path"],
+                        "required": ["name", "description", "allow_implicit_invocation", "scope", "path"],
                         "additionalProperties": false
                     }
                 },
@@ -125,6 +129,7 @@ impl Tool for SkillsList {
                 json!({
                     "name": skill.name,
                     "description": skill.description,
+                    "allow_implicit_invocation": skill.allow_implicit_invocation,
                     "scope": skill.scope.as_str(),
                     "path": skill.path.display().to_string(),
                 })

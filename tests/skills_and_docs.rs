@@ -446,6 +446,161 @@ fn render_catalog_name_and_reason_per_skill() {
     assert_eq!(rendered, "- alpha (repo) \u{2014} Does alpha things");
 }
 
+#[tokio::test]
+async fn explicit_invocation_skills_stay_readable_but_leave_the_brief() {
+    let dir = TempDir::new().unwrap();
+    let root = repo_root(dir.path());
+    let manual = write_skill(&root, "manual", &default_skill_body("manual"));
+    write_file(
+        &manual.join("agents/openai.yaml"),
+        "policy:\n  allow_implicit_invocation: false\n",
+    );
+    write_skill(&root, "automatic", &default_skill_body("automatic"));
+    let mut config = skills_config(dir.path());
+    config.memory.enabled = Some(false);
+    let catalog = discover_skills(&config);
+    assert_eq!(catalog.skills.len(), 2);
+    assert!(catalog.warnings.is_empty());
+    let rendered = render_skill_catalog(&catalog).unwrap();
+    assert!(rendered.contains("automatic"));
+    assert!(!rendered.contains("manual"));
+    assert!(!build_instructions(&config).contains("Does manual things"));
+
+    let session = SessionState::new();
+    let listed = SkillsList.call(json!({}), &config, &session).await;
+    assert!(listed.joined_text().contains("explicit invocation only"));
+    let entries = listed.structured_content.unwrap();
+    assert_eq!(entries["skills"][0]["allow_implicit_invocation"], true);
+    assert_eq!(entries["skills"][1]["allow_implicit_invocation"], false);
+    let read = SkillsRead
+        .call(json!({"name": "manual"}), &config, &session)
+        .await;
+    assert!(!read.is_error);
+    assert!(read.joined_text().contains("Do the thing."));
+    assert!(read.joined_text().contains("explicit invocation only"));
+    let metadata = SkillsRead
+        .call(
+            json!({"name": "manual", "resource": "agents/openai.yaml"}),
+            &config,
+            &session,
+        )
+        .await;
+    assert!(!metadata.is_error);
+    assert!(
+        metadata
+            .joined_text()
+            .contains("allow_implicit_invocation: false")
+    );
+}
+
+#[test]
+fn invocation_policy_does_not_replace_trigger_descriptions_with_ui_copy() {
+    let dir = TempDir::new().unwrap();
+    let root = repo_root(dir.path());
+    for (name, metadata) in [
+        ("absent", None),
+        ("empty", Some("")),
+        (
+            "interface",
+            Some("interface:\n  short_description: UI label\n"),
+        ),
+        ("empty_policy", Some("policy: {}\n")),
+        ("null_policy", Some("policy: null\n")),
+        (
+            "enabled",
+            Some("policy:\n  allow_implicit_invocation: true\n"),
+        ),
+    ] {
+        let skill = write_skill(&root, name, &default_skill_body(name));
+        if let Some(metadata) = metadata {
+            write_file(&skill.join("agents/openai.yaml"), metadata);
+        }
+    }
+    let catalog = discover_skills(&skills_config(dir.path()));
+    assert!(catalog.warnings.is_empty(), "{:?}", catalog.warnings);
+    let rendered = render_skill_catalog(&catalog).unwrap();
+    for skill in &catalog.skills {
+        assert!(rendered.contains(&skill.description));
+    }
+    assert!(!rendered.contains("UI label"));
+}
+
+#[test]
+fn invalid_invocation_policy_warns_without_removing_explicit_access() {
+    for metadata in [
+        "policy: [unclosed",
+        "policy: false\n",
+        "policy:\n  allow_implicit_invocation: 'false'\n",
+        "policy:\n  allow_implicit_invocation: []\n",
+        "[]\n",
+    ] {
+        let dir = TempDir::new().unwrap();
+        let skill = write_skill(
+            &repo_root(dir.path()),
+            "manual",
+            &default_skill_body("manual"),
+        );
+        let path = skill.join("agents/openai.yaml");
+        write_file(&path, metadata);
+        let catalog = discover_skills(&skills_config(dir.path()));
+        assert!(render_skill_catalog(&catalog).is_none(), "{metadata}");
+        assert!(find_skill(&catalog, "manual").is_some());
+        assert_eq!(catalog.warnings.len(), 1, "{metadata}");
+        assert_eq!(catalog.warnings[0].path, path);
+        assert!(
+            catalog.warnings[0]
+                .message
+                .contains("implicit invocation disabled")
+        );
+    }
+}
+
+#[test]
+fn unreadable_invocation_policy_does_not_enable_automatic_selection() {
+    let dir = TempDir::new().unwrap();
+    let skill = write_skill(
+        &repo_root(dir.path()),
+        "manual",
+        &default_skill_body("manual"),
+    );
+    std::fs::create_dir_all(skill.join("agents/openai.yaml")).unwrap();
+    let catalog = discover_skills(&skills_config(dir.path()));
+    assert!(render_skill_catalog(&catalog).is_none());
+    assert!(find_skill(&catalog, "manual").is_some());
+    assert_eq!(catalog.warnings.len(), 1);
+}
+
+#[test]
+fn explicit_invocation_policy_does_not_unshadow_a_lower_priority_skill() {
+    let dir = TempDir::new().unwrap();
+    let skill = write_skill(
+        &repo_root(dir.path()),
+        "deploy",
+        &default_skill_body("deploy"),
+    );
+    write_file(
+        &skill.join("agents/openai.yaml"),
+        "policy:\n  allow_implicit_invocation: false\n",
+    );
+    let user = dir.path().join("personal");
+    write_skill(&user, "deploy", &default_skill_body("deploy"));
+    let mut config = skills_config(dir.path());
+    config.skills.dirs = Some(vec![user.to_string_lossy().into_owned()]);
+    let catalog = discover_skills(&config);
+    assert_eq!(catalog.skills.len(), 1);
+    assert_eq!(catalog.skills[0].scope, SkillScope::Repo);
+    assert!(render_skill_catalog(&catalog).is_none());
+}
+
+#[test]
+fn brief_reloading_guidance_is_conversation_scoped() {
+    let description = GetAgentBrief.description();
+    assert!(description.contains("once per conversation/workspace"));
+    assert!(description.contains("workspace change"));
+    assert!(description.contains("compaction"));
+    assert!(!description.contains("at the start of a task"));
+}
+
 // --- project-doc: candidateFilenames ------------------------------------
 
 #[test]
@@ -995,6 +1150,7 @@ async fn skills_list_gives_name_reason_path() {
         json!([{
             "name": "deploy",
             "description": "Ship a release",
+            "allow_implicit_invocation": true,
             "scope": "repo",
             "path": skill_path,
         }])
@@ -1031,7 +1187,7 @@ async fn skills_list_reports_skill_it_could_not_offer() {
     let session = SessionState::new();
     let r = SkillsList.call(json!({}), &config, &session).await;
     let text = r.joined_text();
-    assert!(text.contains("Not offered:"));
+    assert!(text.contains("Discovery warnings:"));
     assert!(text.contains("description"));
 }
 

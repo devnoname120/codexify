@@ -5,7 +5,7 @@
 //! names and descriptions in the prompt, and reads a body only once a skill is
 //! chosen — the progressive disclosure that keeps a large library affordable.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use crate::codex_plugin_skills::discover_codex_plugin_skills;
@@ -57,6 +57,7 @@ pub struct Skill {
     pub name: String,
     pub description: String,
     pub short_description: Option<String>,
+    pub allow_implicit_invocation: bool,
     /// Directory holding SKILL.md. Resources resolve against it, never work-dir.
     pub dir: PathBuf,
     /// Absolute path of the SKILL.md itself.
@@ -233,6 +234,44 @@ pub fn parse_skill_frontmatter(
     })
 }
 
+#[derive(serde::Deserialize)]
+struct SkillAgentMetadata {
+    policy: Option<SkillInvocationPolicy>,
+}
+
+#[derive(serde::Deserialize)]
+struct SkillInvocationPolicy {
+    allow_implicit_invocation: Option<bool>,
+}
+
+pub(crate) fn skill_allows_implicit_invocation(
+    dir: &Path,
+    warnings: &mut Vec<SkillWarning>,
+) -> bool {
+    let path = dir.join("agents/openai.yaml");
+    let contents = match std::fs::read_to_string(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return true,
+        result => result.map_err(|error| error.to_string()),
+    };
+    let metadata = contents.and_then(|contents| {
+        serde_yaml::from_str::<Option<SkillAgentMetadata>>(&contents)
+            .map_err(|error| error.to_string())
+    });
+    match metadata {
+        Ok(metadata) => metadata
+            .and_then(|metadata| metadata.policy)
+            .and_then(|policy| policy.allow_implicit_invocation)
+            .unwrap_or(true),
+        Err(error) => {
+            warnings.push(SkillWarning {
+                path,
+                message: format!("invalid skill metadata: {error}; implicit invocation disabled"),
+            });
+            false
+        }
+    }
+}
+
 fn is_directory(path: &Path) -> bool {
     path.is_dir()
 }
@@ -297,6 +336,7 @@ pub fn discover_skills(config: &AppConfig) -> SkillCatalog {
                 name: parsed.name,
                 description: parsed.description,
                 short_description: parsed.short_description,
+                allow_implicit_invocation: skill_allows_implicit_invocation(&dir, &mut warnings),
                 dir,
                 path,
                 scope: root.scope,
@@ -311,7 +351,7 @@ pub fn discover_skills(config: &AppConfig) -> SkillCatalog {
     // source behind the same includePlugins switch.
     if plugins_enabled(config) {
         let (codex_plugin_skills, codex_plugin_warnings) = discover_codex_plugin_skills();
-        let (claude_plugin_skills, claude_plugin_warnings) = discover_claude_plugin_skills();
+        let (claude_plugin_skills, claude_plugin_warnings) = discover_claude_plugin_skills(config);
         for skill in codex_plugin_skills.into_iter().chain(claude_plugin_skills) {
             let key = skill.name.to_lowercase();
             if let Some(shadowed) = by_name.get(&key) {
@@ -340,71 +380,140 @@ pub fn discover_skills(config: &AppConfig) -> SkillCatalog {
     }
 }
 
-/// A version-dir name as a sort key. The numeric dotted core is compared first
-/// (so `0.0.14` ranks above `0.0.9`), then a prerelease/build suffix ranks
-/// *below* the same core without one (so `1.0.0` beats `1.0.0-rc1`).
-fn version_key(v: &str) -> (Vec<u64>, u8) {
-    let core = v.split(['-', '+']).next().unwrap_or(v);
-    let nums: Vec<u64> = core
-        .split('.')
-        .map(|p| p.parse::<u64>().unwrap_or(0))
-        .collect();
-    let no_suffix = u8::from(!(v.contains('-') || v.contains('+')));
-    (nums, no_suffix)
+#[derive(serde::Deserialize)]
+struct ClaudePluginRegistry {
+    plugins: BTreeMap<String, serde_json::Value>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ClaudePluginInstallation {
+    scope: Option<String>,
+    project_path: Option<PathBuf>,
+    install_path: PathBuf,
+}
+
+fn claude_installation_priority(
+    installation: &ClaudePluginInstallation,
+    work_dir: &Path,
+) -> Option<(u8, usize)> {
+    let priority = match installation.scope.as_deref().unwrap_or("user") {
+        "user" => return Some((0, 0)),
+        "managed" => return Some((3, 0)),
+        "project" => 1,
+        "local" => 2,
+        _ => return None,
+    };
+    let project = installation.project_path.as_ref()?;
+    if !project.is_absolute() {
+        return None;
+    }
+    let project = project.canonicalize().unwrap_or_else(|_| project.clone());
+    work_dir
+        .starts_with(&project)
+        .then(|| (priority, project.components().count()))
 }
 
 /// Skills bundled with installed Claude Code plugins.
-///
-/// The layout is `~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/skills/<skill>/SKILL.md`.
-/// For each plugin the highest installed version is used, and each skill is
-/// namespaced `<plugin>:<name>` to keep it distinct from standalone skills.
-fn discover_claude_plugin_skills() -> (Vec<Skill>, Vec<SkillWarning>) {
+fn discover_claude_plugin_skills(config: &AppConfig) -> (Vec<Skill>, Vec<SkillWarning>) {
+    let Some(home) = home_dir() else {
+        return (Vec::new(), Vec::new());
+    };
+    discover_claude_plugin_skills_from(&home, config)
+}
+
+fn discover_claude_plugin_skills_from(
+    home: &Path,
+    config: &AppConfig,
+) -> (Vec<Skill>, Vec<SkillWarning>) {
     let mut skills: Vec<Skill> = Vec::new();
     let mut warnings: Vec<SkillWarning> = Vec::new();
-
-    let Some(home) = home_dir() else {
-        return (skills, warnings);
+    let registry_path = home.join(".claude/plugins/installed_plugins.json");
+    let contents = match std::fs::read_to_string(&registry_path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return (skills, warnings),
+        result => result.map_err(|error| error.to_string()),
     };
-    let cache = home.join(".claude").join("plugins").join("cache");
+    let registry = contents.and_then(|contents| {
+        serde_json::from_str::<ClaudePluginRegistry>(&contents).map_err(|error| error.to_string())
+    });
+    let registry = match registry {
+        Ok(registry) => registry,
+        Err(error) => {
+            warnings.push(SkillWarning {
+                path: registry_path,
+                message: format!("cannot read Claude plugin registry: {error}"),
+            });
+            return (skills, warnings);
+        }
+    };
+    let work_dir = config
+        .work_dir
+        .canonicalize()
+        .unwrap_or_else(|_| config.work_dir.clone());
 
-    for marketplace in sorted_entries(&cache) {
-        let mp_dir = cache.join(&marketplace);
-        if !is_directory(&mp_dir) {
+    for (key, value) in registry.plugins {
+        let Some((plugin, marketplace)) = key.rsplit_once('@') else {
+            continue;
+        };
+        if plugin.is_empty() || marketplace.is_empty() {
             continue;
         }
-        for plugin in sorted_entries(&mp_dir) {
-            let plugin_dir = mp_dir.join(&plugin);
-            if !is_directory(&plugin_dir) {
+        let installations: Result<Vec<ClaudePluginInstallation>, _> = if value.is_array() {
+            serde_json::from_value(value)
+        } else {
+            serde_json::from_value(value).map(|installation| vec![installation])
+        };
+        let installations = match installations {
+            Ok(installations) => installations,
+            Err(error) => {
+                warnings.push(SkillWarning {
+                    path: registry_path.clone(),
+                    message: format!("invalid Claude plugin `{key}` installation: {error}"),
+                });
                 continue;
             }
-            // Pick the highest installed version directory.
-            let version = sorted_entries(&plugin_dir)
-                .into_iter()
-                .filter(|v| is_directory(&plugin_dir.join(v)))
-                .max_by(|a, b| version_key(a).cmp(&version_key(b)));
-            let Some(version) = version else { continue };
-
-            let skills_dir = plugin_dir.join(&version).join("skills");
-            for entry in sorted_entries(&skills_dir) {
-                let dir = skills_dir.join(&entry);
-                if !is_directory(&dir) {
-                    continue;
-                }
-                let path = dir.join(SKILL_FILENAME);
-                let Ok(contents) = std::fs::read_to_string(&path) else {
-                    continue;
-                };
-                match parse_skill_frontmatter(&contents, &entry) {
-                    Ok(parsed) => skills.push(Skill {
-                        name: format!("{plugin}:{}", parsed.name),
-                        description: parsed.description,
-                        short_description: parsed.short_description,
-                        dir,
-                        path,
-                        scope: SkillScope::Plugin,
-                    }),
-                    Err(message) => warnings.push(SkillWarning { path, message }),
-                }
+        };
+        let installation = installations
+            .into_iter()
+            .filter_map(|installation| {
+                claude_installation_priority(&installation, &work_dir)
+                    .map(|priority| (priority, installation))
+            })
+            .max_by_key(|(priority, _)| *priority);
+        let Some((_, installation)) = installation else {
+            continue;
+        };
+        if !installation.install_path.is_absolute() {
+            warnings.push(SkillWarning {
+                path: registry_path.clone(),
+                message: format!("Claude plugin `{key}` installPath must be absolute"),
+            });
+            continue;
+        }
+        let skills_dir = installation.install_path.join("skills");
+        for entry in sorted_entries(&skills_dir) {
+            let dir = skills_dir.join(&entry);
+            if !is_directory(&dir) {
+                continue;
+            }
+            let path = dir.join(SKILL_FILENAME);
+            let Ok(contents) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            match parse_skill_frontmatter(&contents, &entry) {
+                Ok(parsed) => skills.push(Skill {
+                    name: format!("{plugin}:{}", parsed.name),
+                    description: parsed.description,
+                    short_description: parsed.short_description,
+                    allow_implicit_invocation: skill_allows_implicit_invocation(
+                        &dir,
+                        &mut warnings,
+                    ),
+                    dir,
+                    path,
+                    scope: SkillScope::Plugin,
+                }),
+                Err(message) => warnings.push(SkillWarning { path, message }),
             }
         }
     }
@@ -496,17 +605,13 @@ pub fn skill_package_files(skill: &Skill, max: usize) -> Vec<String> {
 /// The catalogue as the model should see it. `None` when there is nothing to
 /// offer, so callers can leave the whole section out.
 pub fn render_skill_catalog(catalog: &SkillCatalog) -> Option<String> {
-    if catalog.skills.is_empty() {
-        return None;
-    }
-    Some(
-        catalog
-            .skills
-            .iter()
-            .map(|s| format!("- {} ({}) — {}", s.name, s.scope.as_str(), s.description))
-            .collect::<Vec<_>>()
-            .join("\n"),
-    )
+    let entries: Vec<_> = catalog
+        .skills
+        .iter()
+        .filter(|skill| skill.allow_implicit_invocation)
+        .map(|s| format!("- {} ({}) — {}", s.name, s.scope.as_str(), s.description))
+        .collect();
+    (!entries.is_empty()).then(|| entries.join("\n"))
 }
 
 #[cfg(test)]
@@ -514,13 +619,185 @@ mod plugin_tests {
     use super::*;
     use crate::config::default_config;
 
+    fn write_claude_skill(home: &Path, version: &str, name: &str) -> PathBuf {
+        let plugin = home
+            .join(".claude/plugins/cache/market/sample")
+            .join(version);
+        let skill = plugin.join("skills").join(name);
+        std::fs::create_dir_all(&skill).unwrap();
+        std::fs::write(
+            skill.join(SKILL_FILENAME),
+            format!("---\nname: {name}\ndescription: Use {name}\n---\nBody\n"),
+        )
+        .unwrap();
+        plugin
+    }
+
+    fn write_claude_registry(home: &Path, plugins: serde_json::Value) {
+        let path = home.join(".claude/plugins/installed_plugins.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            path,
+            serde_json::json!({"version": 2, "plugins": plugins}).to_string(),
+        )
+        .unwrap();
+    }
+
     #[test]
-    fn version_key_orders_numerically() {
-        assert!(version_key("0.0.14") > version_key("0.0.9"));
-        assert!(version_key("1.2.0") > version_key("1.1.9"));
-        // A stable release outranks its own prerelease.
-        assert!(version_key("1.0.0") > version_key("1.0.0-rc1"));
-        assert!(version_key("1.0.0") > version_key("1.0.0+build5"));
+    fn claude_cached_skills_require_an_installed_registry_entry() {
+        let home = tempfile::tempdir().unwrap();
+        write_claude_skill(home.path(), "1.0.0", "stale");
+        let config = default_config(home.path().to_path_buf());
+        let (skills, warnings) = discover_claude_plugin_skills_from(home.path(), &config);
+        assert!(skills.is_empty());
+        assert!(warnings.is_empty());
+        write_claude_registry(home.path(), serde_json::json!({}));
+        let (skills, warnings) = discover_claude_plugin_skills_from(home.path(), &config);
+        assert!(skills.is_empty());
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn claude_uses_the_registered_path_not_the_highest_cached_version() {
+        let home = tempfile::tempdir().unwrap();
+        let registered = write_claude_skill(home.path(), "1.0.0", "registered");
+        write_claude_skill(home.path(), "2.0.0", "stale");
+        write_claude_registry(
+            home.path(),
+            serde_json::json!({
+                "sample@market": [{"scope": "user", "installPath": registered}]
+            }),
+        );
+        let config = default_config(home.path().to_path_buf());
+        let (skills, warnings) = discover_claude_plugin_skills_from(home.path(), &config);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].name, "sample:registered");
+        assert!(skills[0].path.starts_with(registered));
+    }
+
+    #[test]
+    fn claude_invalid_registry_does_not_fall_back_to_cached_skills() {
+        let home = tempfile::tempdir().unwrap();
+        write_claude_skill(home.path(), "1.0.0", "stale");
+        let path = home.path().join(".claude/plugins/installed_plugins.json");
+        let config = default_config(home.path().to_path_buf());
+        for contents in ["{", "{}", "{\"plugins\": []}"] {
+            std::fs::write(&path, contents).unwrap();
+            let (skills, warnings) = discover_claude_plugin_skills_from(home.path(), &config);
+            assert!(skills.is_empty(), "{contents}");
+            assert_eq!(warnings.len(), 1, "{contents}");
+            assert_eq!(warnings[0].path, path);
+        }
+    }
+
+    #[test]
+    fn claude_project_installations_do_not_leak_into_other_projects() {
+        let home = tempfile::tempdir().unwrap();
+        let user = write_claude_skill(home.path(), "1.0.0", "user");
+        let local = write_claude_skill(home.path(), "2.0.0", "local");
+        let project = home.path().join("project");
+        std::fs::create_dir_all(project.join("src")).unwrap();
+        write_claude_registry(
+            home.path(),
+            serde_json::json!({
+                "sample@market": [
+                    {"scope": "user", "installPath": user},
+                    {"scope": "local", "projectPath": project, "installPath": local}
+                ]
+            }),
+        );
+        for (cwd, expected) in [
+            (project.join("src"), "sample:local"),
+            (home.path().join("project-other"), "sample:user"),
+        ] {
+            let config = default_config(cwd);
+            let (skills, warnings) = discover_claude_plugin_skills_from(home.path(), &config);
+            assert!(warnings.is_empty(), "{warnings:?}");
+            assert_eq!(skills.len(), 1);
+            assert_eq!(skills[0].name, expected);
+        }
+    }
+
+    #[test]
+    fn claude_legacy_registration_preserves_explicit_only_skills() {
+        let home = tempfile::tempdir().unwrap();
+        let original = write_claude_skill(home.path(), "1.0.0", "manual");
+        let installed = home.path().join("custom-install");
+        std::fs::rename(original, &installed).unwrap();
+        std::fs::create_dir_all(installed.join("skills/manual/agents")).unwrap();
+        std::fs::write(
+            installed.join("skills/manual/agents/openai.yaml"),
+            "policy:\n  allow_implicit_invocation: false\n",
+        )
+        .unwrap();
+        write_claude_registry(
+            home.path(),
+            serde_json::json!({
+                "sample@market": {"installPath": installed}
+            }),
+        );
+        let config = default_config(home.path().to_path_buf());
+        let (skills, warnings) = discover_claude_plugin_skills_from(home.path(), &config);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].name, "sample:manual");
+        assert!(!skills[0].allow_implicit_invocation);
+    }
+
+    #[test]
+    fn claude_broken_installation_does_not_hide_other_plugins_or_use_cache() {
+        let home = tempfile::tempdir().unwrap();
+        let registered = write_claude_skill(home.path(), "1.0.0", "registered");
+        write_claude_skill(home.path(), "2.0.0", "stale");
+        let config = default_config(home.path().to_path_buf());
+        for broken in [
+            serde_json::json!({}),
+            serde_json::json!({"installPath": "relative"}),
+        ] {
+            write_claude_registry(
+                home.path(),
+                serde_json::json!({
+                    "sample@market": broken,
+                    "working@market": [{"scope": "user", "installPath": registered}]
+                }),
+            );
+            let (skills, warnings) = discover_claude_plugin_skills_from(home.path(), &config);
+            assert_eq!(skills.len(), 1);
+            assert_eq!(skills[0].name, "working:registered");
+            assert_eq!(warnings.len(), 1);
+        }
+        write_claude_registry(
+            home.path(),
+            serde_json::json!({
+                "sample@market": [{"scope": "user", "installPath": home.path().join("missing")}]
+            }),
+        );
+        let (skills, _) = discover_claude_plugin_skills_from(home.path(), &config);
+        assert!(skills.is_empty());
+    }
+
+    #[test]
+    fn claude_scoped_installation_requires_an_applicable_project_path() {
+        let home = tempfile::tempdir().unwrap();
+        let registered = write_claude_skill(home.path(), "1.0.0", "registered");
+        let config = default_config(home.path().to_path_buf());
+        for scope in ["project", "local"] {
+            for project in [
+                None,
+                Some(PathBuf::from("relative")),
+                Some(home.path().join("other")),
+            ] {
+                write_claude_registry(
+                    home.path(),
+                    serde_json::json!({
+                        "sample@market": [{"scope": scope, "projectPath": project, "installPath": registered}]
+                    }),
+                );
+                let (skills, _) = discover_claude_plugin_skills_from(home.path(), &config);
+                assert!(skills.is_empty());
+            }
+        }
     }
 
     #[test]
