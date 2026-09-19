@@ -902,6 +902,7 @@ names.
   "conversationAuthToken": null,
   "agentChat": {
     "enabled": false,
+    "port": 3120,
     "maxWaitMs": 115000,
     "notifications": null
   },
@@ -1487,6 +1488,7 @@ guarantee quota savings, or keep a host-terminated turn alive.
 {
   "agentChat": {
     "enabled": true,
+    "port": 3120,
     "maxWaitMs": 115000,
     "notifications": {
       "urls": ["ntfys://ntfy.example/codexify?image=no"],
@@ -1497,7 +1499,11 @@ guarantee quota savings, or keep a host-terminated turn alive.
 }
 ```
 
-`enabled` defaults to `false`; `maxWaitMs` defaults to **115000 ms (1 min 55 s)**
+`enabled` defaults to `false`; `port` defaults to `3120` for a stable
+standalone-chat listener. Set `port` to another integer from 1 to 65535, or to
+`null` to ask the OS for an available localhost port whenever the service
+starts. It cannot equal the main top-level `port` while agent chat is enabled.
+`maxWaitMs` defaults to **115000 ms (1 min 55 s)**
 and must be between 1000 and 300000. The tools do not accept a timeout override.
 Omit `notifications`, or set it to `null`,
 for file-only communication. Configure only one notification backend. Credentials
@@ -1606,8 +1612,10 @@ guarantee that ChatGPT never ends a turn.
 
 With `agentChat.enabled`, the service also starts a separate localhost-only
 owner interface. Run `codexify chat` on that computer and open the printed
-private URL. The command verifies the running interface; no extra configuration
-key or second chat store is needed. The URL fragment contains an ephemeral
+private URL. The command verifies the running interface; no second chat store is
+needed. The listener defaults to port `3120`; set `agentChat.port` to another
+port or to `null` for an OS-assigned port. It always binds only to `127.0.0.1`.
+The URL fragment contains an ephemeral
 access token, which is kept in a private runtime file under `~/.codexify`
 (mode 0600 on Unix).
 Do not share the URL or that file. It changes when the service restarts. The
@@ -1626,10 +1634,9 @@ stopped ChatGPT turn.
 
 Selecting a conversation updates the owner page's `?chat=<opaque-id>` URL.
 Reloading restores that conversation, and browser Back/Forward switches chats
-without a full navigation. The access token remains in session storage after
-the initial URL fragment is removed; a copied URL without that fragment does
-not authorize a fresh browser session. Run `codexify chat` again to get a
-private entry link for a new session.
+without a full navigation. The access token remains in the URL fragment and in
+session storage, so copying the complete URL also copies the credential. Run
+`codexify chat` again after a service restart because the token is ephemeral.
 
 ChatGPT's conversation display title is not part of the connector metadata.
 The list therefore derives a local title from the first user chat entry, or

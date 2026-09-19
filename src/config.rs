@@ -1638,6 +1638,12 @@ fn load_config_with_announcements(
     }
     let markdown_chat = file.agent_chat.unwrap_or_default();
     markdown_chat.validate()?;
+    let port = cli.port.or(file.port).unwrap_or(3000);
+    if markdown_chat.enabled && markdown_chat.port == Some(port) {
+        return Err(
+            "agentChat.port must differ from the main MCP port when agentChat is enabled".into(),
+        );
+    }
 
     let config = AppConfig {
         work_dir,
@@ -1650,7 +1656,7 @@ fn load_config_with_announcements(
         worktrees,
         api_key,
         conversation_auth_token,
-        port: cli.port.or(file.port).unwrap_or(3000),
+        port,
         tree,
         command,
         exec,
@@ -2196,7 +2202,10 @@ mod tests {
                 ],
             ),
             ("memory", &["dir", "enabled", "maxBytes"]),
-            ("agentChat", &["enabled", "maxWaitMs", "notifications"]),
+            (
+                "agentChat",
+                &["enabled", "maxWaitMs", "notifications", "port"],
+            ),
             ("skills", &["dirs", "enabled", "includePlugins"]),
             ("codexMcp", &["cliPath", "enabled", "useCli"]),
             ("projectCatalog", &["codexConfig", "entries"]),

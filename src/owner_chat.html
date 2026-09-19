@@ -54,7 +54,6 @@ main { min-width:0; min-height:0; display:flex; justify-content:center; padding:
 (() => {
   "use strict";
   const token = location.hash.slice(1) || sessionStorage.getItem("owner-chat-token");
-  if (location.hash) history.replaceState(null, "", location.pathname + location.search);
   if (token) sessionStorage.setItem("owner-chat-token", token);
   const list = document.getElementById("conversations");
   const host = document.getElementById("chat-host");
@@ -146,7 +145,7 @@ main { min-width:0; min-height:0; display:flex; justify-content:center; padding:
     if (updateUrl) {
       const url = new URL(location.href);
       url.searchParams.set("chat", id);
-      history.pushState(null, "", url.pathname + url.search);
+      history.pushState(null, "", url.pathname + url.search + url.hash);
     }
     controller?.close(); controller = null; selected = id;
     host.replaceChildren();

@@ -8,6 +8,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `agentChat.port` pins the standalone owner-chat listener to localhost port
+  `3120` by default; set it to another port or to `null` for an OS-assigned port.
 - Setup supports GitHub URL entry, explicit project switching, and listing/reusing
   existing project worktrees with paths, names, and recorded last-use dates.
   Workspace-change notices require the agent to reload its project brief.
@@ -17,6 +19,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- The standalone owner-chat access key remains in the URL fragment across page
+  load, conversation selection, browser navigation, and reload.
 - Chat tool-call markers remain above user messages sent after those calls;
   per-message counters preserve the chronology across retries and reloads.
 - Greetings leave the project picker open instead of selecting scratch to unlock

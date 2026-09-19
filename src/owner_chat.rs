@@ -6,6 +6,7 @@ use std::path::{Path as FilePath, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use anyhow::Context as _;
 use axum::body::Body;
 use axum::extract::{Path, Query, State};
 use axum::http::{Request, StatusCode, header};
@@ -470,7 +471,7 @@ pub async fn start(
     chats: Arc<MarkdownChatStore>,
     artifacts: Arc<ArtifactEgressStore>,
 ) -> anyhow::Result<OwnerServer> {
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await?;
+    let listener = bind_owner_listener(&config).await?;
     let port = listener.local_addr()?.port();
     let token = crate::auth::generate_internal_bearer_token()?;
     let state = OwnerState {
@@ -500,6 +501,16 @@ pub async fn start(
         }
     });
     Ok(OwnerServer { token, task })
+}
+
+async fn bind_owner_listener(config: &AppConfig) -> anyhow::Result<tokio::net::TcpListener> {
+    let port = config.markdown_chat.port.unwrap_or(0);
+    tokio::net::TcpListener::bind(("127.0.0.1", port))
+        .await
+        .with_context(|| match config.markdown_chat.port {
+            Some(port) => format!("bind standalone agent chat to 127.0.0.1:{port}"),
+            None => "bind standalone agent chat to an ephemeral loopback port".into(),
+        })
 }
 
 fn router(state: OwnerState) -> Router {
@@ -557,6 +568,37 @@ mod tests {
     use super::*;
     use crate::exec_sessions::SessionState;
     use crate::project_bindings::ConversationIdentity;
+
+    #[tokio::test]
+    async fn owner_listener_uses_the_configured_port_or_an_ephemeral_default() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = crate::config::default_config(temp.path().into());
+        assert_eq!(
+            config.markdown_chat.port,
+            Some(crate::markdown_chat::DEFAULT_OWNER_CHAT_PORT)
+        );
+
+        config.markdown_chat.port = None;
+        let ephemeral = bind_owner_listener(&config).await.unwrap();
+        assert_ne!(ephemeral.local_addr().unwrap().port(), 0);
+        drop(ephemeral);
+
+        let reservation = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let fixed_port = reservation.local_addr().unwrap().port();
+        drop(reservation);
+        config.markdown_chat.port = Some(fixed_port);
+
+        let fixed = bind_owner_listener(&config).await.unwrap();
+        assert_eq!(fixed.local_addr().unwrap().port(), fixed_port);
+        let error = bind_owner_listener(&config).await.err().unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains(&format!("127.0.0.1:{fixed_port}"))
+        );
+    }
 
     #[tokio::test]
     async fn owner_api_lists_sends_and_reads_the_same_persisted_chat() {

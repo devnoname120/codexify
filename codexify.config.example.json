@@ -88,6 +88,7 @@
   },
   "agentChat": {
     "enabled": false,
+    "port": 3120,
     "maxWaitMs": 270000,
     "notifications": {
       "urls": ["ntfys://ntfy.example/codexify?image=no"],

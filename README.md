@@ -152,10 +152,15 @@ sending another ChatGPT message. Enable the feature in your Codexify config:
 {
   "agentChat": {
     "enabled": true,
+    "port": 3120,
     "maxWaitMs": 115000
   }
 }
 ```
+
+`agentChat.port` defaults the separate standalone chat listener to localhost
+port `3120`. Set it to `null` to use an OS-assigned port instead. It must differ
+from the main top-level `port` when agent chat is enabled.
 
 Restart Codexify, refresh the connector's tools in ChatGPT Settings, and start a
 new conversation. `get_agent_brief` reports that conversation's `CHAT.md` path,

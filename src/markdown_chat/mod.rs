@@ -25,6 +25,7 @@ pub use storage::{
 pub use wait::WaitOutcome;
 
 pub const DEFAULT_MAX_WAIT_MS: u64 = 115_000;
+pub const DEFAULT_OWNER_CHAT_PORT: u16 = 3120;
 pub const MAX_UNREAD_BYTES: usize = 16 * 1024 * 1024;
 pub const USER_MESSAGE_FIELD: &str = "new_chat_message_from_user";
 pub const OFFLINE_AFTER_MS: u64 = 600_000;
@@ -41,6 +42,7 @@ pub(crate) fn now_ms() -> u64 {
 #[serde(default, deny_unknown_fields, rename_all = "camelCase")]
 pub struct MarkdownChatConfig {
     pub enabled: bool,
+    pub port: Option<u16>,
     pub max_wait_ms: u64,
     pub notifications: Option<NotificationsConfig>,
 }
@@ -49,6 +51,7 @@ impl Default for MarkdownChatConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            port: Some(DEFAULT_OWNER_CHAT_PORT),
             max_wait_ms: DEFAULT_MAX_WAIT_MS,
             notifications: None,
         }
@@ -110,6 +113,9 @@ impl NotificationsConfig {
 
 impl MarkdownChatConfig {
     pub fn validate(&self) -> Result<(), String> {
+        if self.port == Some(0) {
+            return Err("agentChat.port must be between 1 and 65535, or null".into());
+        }
         if !(1_000..=300_000).contains(&self.max_wait_ms) {
             return Err("agentChat.maxWaitMs must be between 1000 and 300000".into());
         }

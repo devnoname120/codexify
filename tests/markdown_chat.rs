@@ -4,7 +4,7 @@ use std::sync::Arc;
 use clap::Parser;
 use codexify::config::{Cli, default_config, load_config_quiet};
 use codexify::exec_sessions::SessionState;
-use codexify::markdown_chat::{MarkdownChatConfig, MarkdownChatStore};
+use codexify::markdown_chat::{DEFAULT_OWNER_CHAT_PORT, MarkdownChatConfig, MarkdownChatStore};
 use codexify::project_bindings::ConversationIdentity;
 
 fn fixture() -> (tempfile::TempDir, codexify::types::AppConfig) {
@@ -25,6 +25,7 @@ fn user_append(path: &std::path::Path, text: &str) {
 fn markdown_chat_defaults_and_validation() {
     let config: MarkdownChatConfig = serde_json::from_str("{}").unwrap();
     assert!(!config.enabled);
+    assert_eq!(config.port, Some(DEFAULT_OWNER_CHAT_PORT));
     assert_eq!(config.max_wait_ms, 115_000);
     assert!(config.notifications.is_none());
     assert!(config.validate().is_ok());
@@ -35,6 +36,8 @@ fn markdown_chat_defaults_and_validation() {
         };
         assert!(config.validate().is_err());
     }
+    let invalid_port: MarkdownChatConfig = serde_json::from_str(r#"{"port":0}"#).unwrap();
+    assert!(invalid_port.validate().is_err());
     for url in ["", "not a service URL", "ntfys://topic/\n", "https://["] {
         let config: MarkdownChatConfig =
             serde_json::from_value(serde_json::json!({"notifications":{"urls":[url]}})).unwrap();
@@ -54,16 +57,39 @@ fn config_loader_reads_agent_chat_without_exposing_timeout_in_tools() {
     let path = root.path().join("config.json");
     std::fs::write(&path, serde_json::json!({
         "workDir": root.path(), "codexMcp": {"enabled": false},
-        "agentChat": {"enabled": true, "maxWaitMs": 270000, "notifications": {"urls":["ntfys://test-token@ntfy.sh/topic?auth=token&image=no"]}}
+        "agentChat": {"enabled": true, "port": 43123, "maxWaitMs": 270000, "notifications": {"urls":["ntfys://test-token@ntfy.sh/topic?auth=token&image=no"]}}
     }).to_string()).unwrap();
     let cli = Cli::try_parse_from(["codexify", "--config", path.to_str().unwrap()]).unwrap();
     let config = load_config_quiet(cli).unwrap();
     assert!(config.markdown_chat.enabled);
+    assert_eq!(config.markdown_chat.port, Some(43123));
     assert_eq!(config.markdown_chat.max_wait_ms, 270000);
     assert_eq!(
         config.markdown_chat.notifications.unwrap().urls,
         vec!["ntfys://test-token@ntfy.sh/topic?auth=token&image=no"]
     );
+}
+
+#[test]
+fn agent_chat_port_cannot_collide_with_the_main_listener() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("config.json");
+    std::fs::write(
+        &path,
+        serde_json::json!({
+            "workDir": root.path(),
+            "port": 43123,
+            "codexMcp": {"enabled": false},
+            "agentChat": {"enabled": true, "port": 43123}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let cli = Cli::try_parse_from(["codexify", "--config", path.to_str().unwrap()]).unwrap();
+
+    let error = load_config_quiet(cli).err().unwrap();
+
+    assert!(error.contains("agentChat.port must differ from the main MCP port"));
 }
 
 #[test]
@@ -82,6 +108,7 @@ fn legacy_markdown_chat_key_migrates_without_a_runtime_alias() {
     let config = load_config_quiet(cli).unwrap();
 
     assert!(config.markdown_chat.enabled);
+    assert_eq!(config.markdown_chat.port, Some(DEFAULT_OWNER_CHAT_PORT));
     let migrated: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
     assert_eq!(migrated["schemaVersion"], 1);

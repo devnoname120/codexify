@@ -6,6 +6,7 @@
   "forceReadOnlyToolAnnotations": false,
   "agentChat": {
     "enabled": false,
+    "port": 3120,
     "maxWaitMs": 270000,
     "notifications": null
   },
