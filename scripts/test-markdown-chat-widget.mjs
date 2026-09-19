@@ -300,7 +300,7 @@ for (const [engineName, engine] of [["Chromium", chromium], ["WebKit", webkit]])
           "[docs]: https://example.com/docs \"Documentation\"", "[image]: sandbox:/mnt/data/report%20one.png", "",
           "[Unsafe](javascript:alert(1)) <script>alert(1)</script>"
         ].join("\n"));
-        const { page, frames:[frame], errors, downloads, hostMessages } = await mount(browser, backend, { combined:true });
+        const { page, frames:[frame], errors, downloads, hostMessages } = await mount(browser, backend, { combined:true, bridge:"mcp" });
         await frame.locator(".markdown table").waitFor();
         assert.equal(await frame.locator(".markdown th").count(), 2);
         assert.equal(await frame.locator(".markdown td").count(), 4);
@@ -329,7 +329,7 @@ for (const [engineName, engine] of [["Chromium", chromium], ["WebKit", webkit]])
       await t.test("unsupported file downloads explain the limitation without opening a sandbox URL", async () => {
         const backend = new ChatBackend(); backend.downloadsSupported = false;
         backend.add("agent", "[Report](sandbox:/mnt/data/report%20one.png)");
-        const { page, frames:[frame], downloads, hostMessages, errors } = await mount(browser, backend, { combined:true });
+        const { page, frames:[frame], downloads, hostMessages, errors } = await mount(browser, backend, { combined:true, bridge:"mcp" });
         await frame.getByRole("link", { name:"Report", exact:true }).click();
         await frame.getByText("This host cannot download files from a widget. Open the exported attachment in the ChatGPT conversation.", { exact:true }).waitFor();
         assert.equal(downloads.length, 0);
@@ -411,6 +411,7 @@ for (const [engineName, engine] of [["Chromium", chromium], ["WebKit", webkit]])
         assert.deepEqual(await markers.allTextContents(), ["1 tool call"]);
         backend.totalToolCalls = 4;
         await refresh(frame);
+        await frame.getByText("4 tool calls", { exact:true }).waitFor();
         assert.equal(await total.textContent(), "4 tool calls");
         assert.deepEqual(await markers.allTextContents(), ["3 tool calls"]);
 
@@ -425,6 +426,7 @@ for (const [engineName, engine] of [["Chromium", chromium], ["WebKit", webkit]])
 
         backend.totalToolCalls = 5;
         await refresh(frame);
+        await frame.getByText("5 tool calls", { exact:true }).waitFor();
         assert.equal(await total.textContent(), "5 tool calls");
         assert.deepEqual(await markers.allTextContents(), ["3 tool calls", "1 tool call"]);
         assert(!backend.calls.some(call => call.name === "chat_ui_send"));

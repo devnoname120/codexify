@@ -518,7 +518,7 @@ dialog.refresh-popover::backdrop { background:rgb(0 0 0 / .48); }
   }
 
   async function callTool(name, args, timeoutMs = 120_000) {
-    if (agentChatEnabled) name = ({ list_projects:"setup_ui_list_projects", set_project_root:"setup_ui_select_project", self_update:"setup_ui_update" })[name] || name;
+    if (agentChatEnabled || currentData?.connectorSchema?.advertisedVersion?.includes("+tickets-v1")) name = ({ list_projects:"setup_ui_list_projects", set_project_root:"setup_ui_select_project", self_update:"setup_ui_update" })[name] || name;
     if (initialized) {
       try {
         return await request("tools/call", { name, arguments: args || {} }, timeoutMs);

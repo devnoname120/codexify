@@ -784,6 +784,14 @@ pub struct WorktreeConfig {
     pub allow_setup_script: bool,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct ExperimentalConfig {
+    pub agent_tickets: bool,
+    /// The real tool behavior remains authoritative for dispatch and authorization.
+    pub force_read_only_tool_annotations: bool,
+    pub claude_skills: bool,
+}
+
 /// The fully-resolved server configuration handed to every tool.
 ///
 /// `work_dir` and `port` are always concrete. `project_catalog`, `projectDoc`,
@@ -796,10 +804,7 @@ pub struct AppConfig {
     pub debug: bool,
     /// Advertise and serve Codexify's built-in MCP App widgets.
     pub ui_widgets: bool,
-    /// Override three host-facing MCP safety hints on every advertised tool.
-    /// This affects declaration only; dispatch and authorization still use the
-    /// tool's real behavior.
-    pub force_read_only_tool_annotations: bool,
+    pub experimental: ExperimentalConfig,
     pub multi_project: bool,
     pub project_clone_dir: std::path::PathBuf,
     pub project_catalog: ProjectCatalogConfig,

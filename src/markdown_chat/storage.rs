@@ -51,6 +51,8 @@ struct Cursor {
     tool_call_epoch: Option<String>,
     #[serde(default)]
     tool_call_sequence: u64,
+    #[serde(default)]
+    ticket_rejection_notified: bool,
 }
 
 pub struct ChatSnapshot {
@@ -155,6 +157,27 @@ impl ChatFile {
     pub async fn append(self: &Arc<Self>, message: String) -> Result<AppendReceipt, String> {
         self.run(move |chat| chat.append_sync(&message, || {}))
             .await
+    }
+
+    pub(crate) async fn warn_ticket_rejection(self: &Arc<Self>) -> Result<bool, String> {
+        self.run(|chat| {
+            chat.with_cursor(|cursor, file| {
+                if cursor.ticket_rejection_notified {
+                    return Ok(false);
+                }
+                check_cursor(file, cursor)?;
+                let block = agent_block(crate::agent_tickets::WARNING, cursor.total_tool_calls);
+                file.write_all(block.as_bytes()).map_err(io_error)?;
+                file.sync_all().map_err(io_error)?;
+                // A server notice must not acknowledge user text on behalf of the winning branch.
+                let mut next = cursor.clone();
+                next.ticket_rejection_notified = true;
+                chat.save_cursor(&next)?;
+                *cursor = next;
+                Ok(true)
+            })
+        })
+        .await
     }
 
     pub async fn set_notification(
@@ -328,10 +351,7 @@ impl ChatFile {
         }
         self.with_cursor(|cursor, file| {
             let before = snapshot(file, cursor)?;
-            let id = format!("{}-{}", chrono::Utc::now().timestamp_micros(), MESSAGE_COUNTER.fetch_add(1, Ordering::Relaxed));
-            let created_at_ms = super::now_ms();
-            let tool_call_count = cursor.total_tool_calls;
-            let block = format!("{AGENT_START}{id}\" created_at_ms=\"{created_at_ms}\" tool_call_count=\"{tool_call_count}\" -->\n\n## Agent\n\n{message}\n\n<!-- codexify-agent-message:v1:end id=\"{id}\" -->\n");
+            let block = agent_block(message, cursor.total_tool_calls);
             before_append();
             file.write_all(block.as_bytes()).map_err(io_error)?;
             let end = file.stream_position().map_err(io_error)?;
@@ -359,6 +379,18 @@ impl ChatFile {
             Ok(AppendReceipt { user_text, end_offset: end, cursor_warning })
         })
     }
+}
+
+fn agent_block(message: &str, tool_call_count: u64) -> String {
+    let id = format!(
+        "{}-{}",
+        chrono::Utc::now().timestamp_micros(),
+        MESSAGE_COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
+    let created_at_ms = super::now_ms();
+    format!(
+        "{AGENT_START}{id}\" created_at_ms=\"{created_at_ms}\" tool_call_count=\"{tool_call_count}\" -->\n\n## Agent\n\n{message}\n\n<!-- codexify-agent-message:v1:end id=\"{id}\" -->\n"
+    )
 }
 
 fn private_directory(path: &Path) -> Result<(), String> {

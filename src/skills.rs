@@ -20,8 +20,8 @@ pub const MAX_SKILL_NAME_BYTES: usize = 64;
 pub const MAX_SKILL_PACKAGE_FILES: usize = 50;
 
 /// The skill subdirectory pairs searched inside each project directory and
-/// under the home directory: `.agents/skills`, `.codex/skills`, and
-/// `.claude/skills` (Claude Code's location).
+/// under the home directory: `.agents/skills`, `.codex/skills`, and optionally
+/// `.claude/skills` when experimental Claude discovery is enabled.
 const SKILL_DIR_NAMES: &[(&str, &str)] = &[
     (".agents", "skills"),
     (".codex", "skills"),
@@ -101,6 +101,9 @@ pub fn skill_roots(config: &AppConfig) -> Vec<SkillRoot> {
 
     for dir in project_dirs(config) {
         for (a, b) in SKILL_DIR_NAMES {
+            if *a == ".claude" && !config.experimental.claude_skills {
+                continue;
+            }
             roots.push(SkillRoot {
                 path: dir.join(a).join(b),
                 scope: SkillScope::Repo,
@@ -127,6 +130,9 @@ pub fn skill_roots(config: &AppConfig) -> Vec<SkillRoot> {
         None => {
             if let Some(home) = home_dir() {
                 for (a, b) in SKILL_DIR_NAMES {
+                    if *a == ".claude" && !config.experimental.claude_skills {
+                        continue;
+                    }
                     roots.push(SkillRoot {
                         path: home.join(a).join(b),
                         scope: SkillScope::User,
@@ -346,9 +352,7 @@ pub fn discover_skills(config: &AppConfig) -> SkillCatalog {
         }
     }
 
-    // Plugin skills use the same qualified-name scheme as Codex. Native Codex
-    // plugins come first; Claude Code plugin discovery remains as a compatibility
-    // source behind the same includePlugins switch.
+    // Native Codex plugins retain precedence over the opt-in Claude source.
     if plugins_enabled(config) {
         let (codex_plugin_skills, codex_plugin_warnings) = discover_codex_plugin_skills();
         let (claude_plugin_skills, claude_plugin_warnings) = discover_claude_plugin_skills(config);
@@ -416,6 +420,9 @@ fn claude_installation_priority(
 
 /// Skills bundled with installed Claude Code plugins.
 fn discover_claude_plugin_skills(config: &AppConfig) -> (Vec<Skill>, Vec<SkillWarning>) {
+    if !config.experimental.claude_skills {
+        return (Vec::new(), Vec::new());
+    }
     let Some(home) = home_dir() else {
         return (Vec::new(), Vec::new());
     };
@@ -426,6 +433,9 @@ fn discover_claude_plugin_skills_from(
     home: &Path,
     config: &AppConfig,
 ) -> (Vec<Skill>, Vec<SkillWarning>) {
+    if !config.experimental.claude_skills {
+        return (Vec::new(), Vec::new());
+    }
     let mut skills: Vec<Skill> = Vec::new();
     let mut warnings: Vec<SkillWarning> = Vec::new();
     let registry_path = home.join(".claude/plugins/installed_plugins.json");
@@ -619,6 +629,12 @@ mod plugin_tests {
     use super::*;
     use crate::config::default_config;
 
+    fn claude_config(work_dir: PathBuf) -> AppConfig {
+        let mut config = default_config(work_dir);
+        config.experimental.claude_skills = true;
+        config
+    }
+
     fn write_claude_skill(home: &Path, version: &str, name: &str) -> PathBuf {
         let plugin = home
             .join(".claude/plugins/cache/market/sample")
@@ -644,10 +660,43 @@ mod plugin_tests {
     }
 
     #[test]
+    fn experimental_claude_discovery_is_opt_in() {
+        let home = tempfile::tempdir().unwrap();
+        let registered = write_claude_skill(home.path(), "1.0.0", "registered");
+        write_claude_registry(
+            home.path(),
+            serde_json::json!({
+                "sample@market": [{"scope":"user", "installPath":registered}]
+            }),
+        );
+        let mut config = default_config(home.path().to_path_buf());
+        assert!(
+            !skill_roots(&config)
+                .iter()
+                .any(|root| root.path.ends_with(".claude/skills"))
+        );
+        let (skills, warnings) = discover_claude_plugin_skills_from(home.path(), &config);
+        assert!(skills.is_empty());
+        assert!(warnings.is_empty());
+        config.experimental.claude_skills = true;
+        assert!(
+            skill_roots(&config)
+                .iter()
+                .any(|root| root.path.ends_with(".claude/skills"))
+        );
+        assert_eq!(
+            discover_claude_plugin_skills_from(home.path(), &config)
+                .0
+                .len(),
+            1
+        );
+    }
+
+    #[test]
     fn claude_cached_skills_require_an_installed_registry_entry() {
         let home = tempfile::tempdir().unwrap();
         write_claude_skill(home.path(), "1.0.0", "stale");
-        let config = default_config(home.path().to_path_buf());
+        let config = claude_config(home.path().to_path_buf());
         let (skills, warnings) = discover_claude_plugin_skills_from(home.path(), &config);
         assert!(skills.is_empty());
         assert!(warnings.is_empty());
@@ -668,7 +717,7 @@ mod plugin_tests {
                 "sample@market": [{"scope": "user", "installPath": registered}]
             }),
         );
-        let config = default_config(home.path().to_path_buf());
+        let config = claude_config(home.path().to_path_buf());
         let (skills, warnings) = discover_claude_plugin_skills_from(home.path(), &config);
         assert!(warnings.is_empty(), "{warnings:?}");
         assert_eq!(skills.len(), 1);
@@ -681,7 +730,7 @@ mod plugin_tests {
         let home = tempfile::tempdir().unwrap();
         write_claude_skill(home.path(), "1.0.0", "stale");
         let path = home.path().join(".claude/plugins/installed_plugins.json");
-        let config = default_config(home.path().to_path_buf());
+        let config = claude_config(home.path().to_path_buf());
         for contents in ["{", "{}", "{\"plugins\": []}"] {
             std::fs::write(&path, contents).unwrap();
             let (skills, warnings) = discover_claude_plugin_skills_from(home.path(), &config);
@@ -711,7 +760,7 @@ mod plugin_tests {
             (project.join("src"), "sample:local"),
             (home.path().join("project-other"), "sample:user"),
         ] {
-            let config = default_config(cwd);
+            let config = claude_config(cwd);
             let (skills, warnings) = discover_claude_plugin_skills_from(home.path(), &config);
             assert!(warnings.is_empty(), "{warnings:?}");
             assert_eq!(skills.len(), 1);
@@ -737,7 +786,7 @@ mod plugin_tests {
                 "sample@market": {"installPath": installed}
             }),
         );
-        let config = default_config(home.path().to_path_buf());
+        let config = claude_config(home.path().to_path_buf());
         let (skills, warnings) = discover_claude_plugin_skills_from(home.path(), &config);
         assert!(warnings.is_empty(), "{warnings:?}");
         assert_eq!(skills.len(), 1);
@@ -750,7 +799,7 @@ mod plugin_tests {
         let home = tempfile::tempdir().unwrap();
         let registered = write_claude_skill(home.path(), "1.0.0", "registered");
         write_claude_skill(home.path(), "2.0.0", "stale");
-        let config = default_config(home.path().to_path_buf());
+        let config = claude_config(home.path().to_path_buf());
         for broken in [
             serde_json::json!({}),
             serde_json::json!({"installPath": "relative"}),
@@ -781,7 +830,7 @@ mod plugin_tests {
     fn claude_scoped_installation_requires_an_applicable_project_path() {
         let home = tempfile::tempdir().unwrap();
         let registered = write_claude_skill(home.path(), "1.0.0", "registered");
-        let config = default_config(home.path().to_path_buf());
+        let config = claude_config(home.path().to_path_buf());
         for scope in ["project", "local"] {
             for project in [
                 None,
@@ -802,7 +851,7 @@ mod plugin_tests {
 
     #[test]
     fn plugins_default_on_but_off_when_dirs_overridden() {
-        let mut config = default_config(std::env::temp_dir());
+        let mut config = claude_config(std::env::temp_dir());
         assert!(
             plugins_enabled(&config),
             "default (no dirs) should scan plugins"

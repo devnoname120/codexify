@@ -3,7 +3,11 @@
   "workDir": null,
   "debug": false,
   "uiWidgets": true,
-  "forceReadOnlyToolAnnotations": false,
+  "experimental": {
+    "agentTickets": false,
+    "forceReadOnlyToolAnnotations": false,
+    "claudeSkills": false
+  },
   "agentChat": {
     "enabled": false,
     "port": 3120,

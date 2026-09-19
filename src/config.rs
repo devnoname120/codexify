@@ -22,10 +22,11 @@ use crate::openai_tunnel::validate_tunnel_id;
 use crate::project_catalog::{ProjectCatalog, discover_project_catalog_at};
 use crate::types::{
     AppConfig, ArtifactEgressConfig, ArtifactIngressConfig, AuditConfig, CodexProjectCatalogConfig,
-    CommandConfig, ConversationAuthToken, DiffConfig, ExecConfig, IgnoreConfig, McpServerSpec,
-    McpToolExposure, MemoryConfig, OpenAiTunnelConfig, OutputConfig, ProjectCatalogConfig,
-    ProjectCatalogEntryConfig, ProjectDocConfig, SkillsConfig, ToolLogLevel, ToolLogMode,
-    ToolLoggingConfig, TreeConfig, WorktreeConfig, WorktreeMode, WorktreeUpstreamRefreshMode,
+    CommandConfig, ConversationAuthToken, DiffConfig, ExecConfig, ExperimentalConfig, IgnoreConfig,
+    McpServerSpec, McpToolExposure, MemoryConfig, OpenAiTunnelConfig, OutputConfig,
+    ProjectCatalogConfig, ProjectCatalogEntryConfig, ProjectDocConfig, SkillsConfig, ToolLogLevel,
+    ToolLogMode, ToolLoggingConfig, TreeConfig, WorktreeConfig, WorktreeMode,
+    WorktreeUpstreamRefreshMode,
 };
 use crate::util::home_dir;
 
@@ -585,6 +586,14 @@ impl PartialMcpServerSpec {
 }
 
 #[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PartialExperimental {
+    agent_tickets: Option<bool>,
+    force_read_only_tool_annotations: Option<bool>,
+    claude_skills: Option<bool>,
+}
+
+#[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct FileConfig {
     #[serde(rename = "schemaVersion")]
@@ -592,6 +601,7 @@ struct FileConfig {
     work_dir: Option<String>,
     debug: Option<bool>,
     ui_widgets: Option<bool>,
+    experimental: Option<PartialExperimental>,
     force_read_only_tool_annotations: Option<bool>,
     api_key: Option<String>,
     conversation_auth_token: Option<String>,
@@ -830,7 +840,7 @@ pub fn default_config(work_dir: std::path::PathBuf) -> AppConfig {
         work_dir,
         debug: false,
         ui_widgets: true,
-        force_read_only_tool_annotations: false,
+        experimental: ExperimentalConfig::default(),
         multi_project: false,
         project_catalog: ProjectCatalogConfig::default(),
         worktrees: default_worktree_config(),
@@ -1645,11 +1655,19 @@ fn load_config_with_announcements(
         );
     }
 
+    let experimental = file.experimental.unwrap_or_default();
     let config = AppConfig {
         work_dir,
         debug: file.debug.unwrap_or(false),
         ui_widgets: file.ui_widgets.unwrap_or(true),
-        force_read_only_tool_annotations: file.force_read_only_tool_annotations.unwrap_or(false),
+        experimental: ExperimentalConfig {
+            agent_tickets: experimental.agent_tickets.unwrap_or(false),
+            force_read_only_tool_annotations: experimental
+                .force_read_only_tool_annotations
+                .or(file.force_read_only_tool_annotations)
+                .unwrap_or(false),
+            claude_skills: experimental.claude_skills.unwrap_or(false),
+        },
         multi_project: cli.multi_project || file.multi_project.unwrap_or(false),
         project_clone_dir,
         project_catalog,
@@ -1927,6 +1945,105 @@ mod tests {
     }
 
     #[test]
+    fn agent_tickets_default_off_and_require_a_boolean() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(
+            !default_config(root.path().to_path_buf())
+                .experimental
+                .agent_tickets
+        );
+        assert!(
+            !default_config(root.path().to_path_buf())
+                .experimental
+                .claude_skills
+        );
+        assert!(
+            serde_json::from_str::<FileConfig>(r#"{"experimental":{"agentTickets":"true"}}"#)
+                .is_err()
+        );
+        assert_eq!(
+            serde_json::from_str::<FileConfig>(r#"{"experimental":{"agentTickets":true}}"#)
+                .unwrap()
+                .experimental
+                .unwrap()
+                .agent_tickets,
+            Some(true)
+        );
+        assert_eq!(
+            serde_json::from_str::<FileConfig>(r#"{"experimental":{"agentTickets":false}}"#)
+                .unwrap()
+                .experimental
+                .unwrap()
+                .agent_tickets,
+            Some(false)
+        );
+        assert!(
+            serde_json::from_str::<FileConfig>(r#"{}"#)
+                .unwrap()
+                .experimental
+                .is_none()
+        );
+        assert!(
+            serde_json::from_str::<FileConfig>(r#"{"experimental":{"unknownFlag":true}}"#).is_err()
+        );
+    }
+
+    #[test]
+    fn experimental_config_loads_flags_from_nested_section() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("config.json");
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "schemaVersion": 1,
+                "workDir": root.path(),
+                "codexMcp": {"enabled": false},
+                "experimental": {
+                    "agentTickets": true,
+                    "forceReadOnlyToolAnnotations": true,
+                    "claudeSkills": true
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let args = Cli::parse_from(["codexify", "--config", path.to_str().unwrap()]);
+        let config = load_config(args).unwrap();
+        assert!(config.experimental.agent_tickets);
+        assert!(config.experimental.force_read_only_tool_annotations);
+        assert!(config.experimental.claude_skills);
+        assert!(
+            serde_json::from_str::<FileConfig>(r#"{"experimental":{"agentTickets":"true"}}"#)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn experimental_flags_override_legacy_annotation_hint() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("config.json");
+        for flag in [None, Some(false), Some(true)] {
+            let mut value = serde_json::json!({
+                "schemaVersion": 1,
+                "workDir": root.path(),
+                "codexMcp": {"enabled": false},
+                "forceReadOnlyToolAnnotations": true,
+                "experimental": {"agentTickets": true}
+            });
+            if let Some(flag) = flag {
+                value["experimental"]["forceReadOnlyToolAnnotations"] = flag.into();
+            }
+            std::fs::write(&path, value.to_string()).unwrap();
+            let args = Cli::parse_from(["codexify", "--config", path.to_str().unwrap()]);
+            let config = load_config(args).unwrap();
+            assert_eq!(
+                config.experimental.force_read_only_tool_annotations,
+                flag.unwrap_or(true)
+            );
+        }
+    }
+
+    #[test]
     fn exec_config_serializes_only_runtime_resource_settings() {
         let root = tempfile::tempdir().unwrap();
         let exec = serde_json::to_value(default_config(root.path().to_path_buf()).exec).unwrap();
@@ -2098,7 +2215,7 @@ mod tests {
             "debug",
             "diff",
             "exec",
-            "forceReadOnlyToolAnnotations",
+            "experimental",
             "ignore",
             "agentChat",
             "mcpServers",
@@ -2125,6 +2242,14 @@ mod tests {
         assert_keys(&example, "codexify.config.example.json", &example_top_level);
 
         for (path, keys) in [
+            (
+                "experimental",
+                &[
+                    "agentTickets",
+                    "forceReadOnlyToolAnnotations",
+                    "claudeSkills",
+                ][..],
+            ),
             (
                 "worktrees",
                 &[
@@ -2277,7 +2402,11 @@ mod tests {
     #[test]
     fn forced_read_only_tool_annotations_default_off_and_can_be_enabled() {
         let root = tempfile::tempdir().unwrap();
-        assert!(!default_config(root.path().to_path_buf()).force_read_only_tool_annotations);
+        assert!(
+            !default_config(root.path().to_path_buf())
+                .experimental
+                .force_read_only_tool_annotations
+        );
 
         let config_path = root.path().join("codexify.config.json");
         std::fs::write(
@@ -2293,7 +2422,12 @@ mod tests {
 
         let mut args = cli(root.path(), &config_path);
         args.work_dir = None;
-        assert!(load_config(args).unwrap().force_read_only_tool_annotations);
+        assert!(
+            load_config(args)
+                .unwrap()
+                .experimental
+                .force_read_only_tool_annotations
+        );
     }
 
     #[test]

@@ -3,7 +3,11 @@
   "workDir": "/absolute/path/to/projects",
   "debug": false,
   "uiWidgets": true,
-  "forceReadOnlyToolAnnotations": false,
+  "experimental": {
+    "agentTickets": false,
+    "forceReadOnlyToolAnnotations": false,
+    "claudeSkills": false
+  },
   "apiKey": null,
   "conversationAuthToken": null,
   "port": 3000,

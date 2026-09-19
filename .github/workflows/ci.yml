@@ -55,7 +55,7 @@ jobs:
       - name: Format
         run: |
           cargo fmt --all --check
-          rustfmt --edition 2024 --check src/server_markdown_chat_tests.rs src/server_markdown_chat_widget_tests.rs src/server_workspace_tests.rs
+          rustfmt --edition 2024 --check src/server_markdown_chat_tests.rs src/server_markdown_chat_widget_tests.rs src/server_workspace_tests.rs src/server_agent_ticket_tests.rs
 
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
@@ -148,6 +148,9 @@ jobs:
 
       - name: Test Markdown chat dispatch, watching, and schemas
         run: cargo test --lib markdown_chat
+
+      - name: Test agent ticket coordination and persistence
+        run: cargo test --lib agent_ticket
 
       - uses: actions/setup-python@v7
         id: notification-python

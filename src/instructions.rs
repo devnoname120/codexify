@@ -70,11 +70,14 @@ pub const AGENT_BRIEF: &str = concat!(
 );
 
 fn configured_agent_brief(config: &AppConfig) -> String {
-    let brief = if config.markdown_chat.enabled {
+    let mut brief = if config.markdown_chat.enabled {
         format!("{MARKDOWN_CHAT_INSTRUCTIONS}\n\n{AGENT_BRIEF}")
     } else {
         AGENT_BRIEF.to_string()
     };
+    if config.experimental.agent_tickets {
+        brief = format!("{}\n\n{brief}", crate::agent_tickets::INSTRUCTIONS);
+    }
     let mut host_file_guidance = Vec::new();
     if config.artifact_ingress.enabled {
         host_file_guidance.push("- Use import_host_file when the user attaches a file or asks you to place a ChatGPT-generated file into the project. Do not reconstruct binary files through write_file or substitute an arbitrary URL.");
@@ -97,7 +100,14 @@ fn configured_agent_brief(config: &AppConfig) -> String {
 /// after the MCP initialize exchange.
 pub fn build_initial_instructions(config: &AppConfig) -> String {
     if config.conversation_auth_token.is_some() {
-        return CONVERSATION_AUTH_INSTRUCTIONS.to_string();
+        return if config.experimental.agent_tickets {
+            format!(
+                "{CONVERSATION_AUTH_INSTRUCTIONS}\n\n{}",
+                crate::agent_tickets::INSTRUCTIONS
+            )
+        } else {
+            CONVERSATION_AUTH_INSTRUCTIONS.to_string()
+        };
     }
     if !config.multi_project {
         return build_instructions(config);
@@ -189,6 +199,19 @@ pub fn build_instructions(config: &AppConfig) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_tickets_instructions_and_schema_marker_are_opt_in() {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = crate::config::default_config(root.path().to_path_buf());
+        config.conversation_auth_token = Some("a".repeat(64).into());
+        assert!(!build_initial_instructions(&config).contains("codexify_ticket"));
+        assert!(!crate::connector_schema::schema_version(&config).contains("tickets-v1"));
+        config.experimental.agent_tickets = true;
+        assert!(build_initial_instructions(&config).contains(crate::agent_tickets::INSTRUCTIONS));
+        assert!(configured_agent_brief(&config).contains(crate::agent_tickets::INSTRUCTIONS));
+        assert!(crate::connector_schema::schema_version(&config).contains("tickets-v1"));
+    }
 
     #[test]
     fn conversation_auth_initialization_withholds_project_context() {

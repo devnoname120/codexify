@@ -8,6 +8,18 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `experimental.agentTickets` (disabled by default) prevents stale agent branches
+  from dispatching tools through a short single-use ticket chain. Widget-only
+  helpers remain exempt; stable conversation tickets survive reconnects and
+  restarts. A server-written chat warning identifies a blocked possible duplicate;
+  cancellation observed at the response handoff check preserves the old ticket.
+  The first call after ten minutes offline can reclaim the chain, but never steals
+  an in-flight reservation. Enabling it requires serial tool calls and a connector
+  schema refresh.
+- The `experimental` section groups ticketing, `forceReadOnlyToolAnnotations`, and
+  automatic Claude skill/plugin discovery (`claudeSkills`), all disabled by default.
+  The former top-level read-only override remains a compatibility fallback; an
+  explicit nested value takes precedence.
 - `agentChat.port` pins the standalone owner-chat listener to localhost port
   `3120` by default; set it to another port or to `null` for an OS-assigned port.
 - Setup supports GitHub URL entry, explicit project switching, and listing/reusing

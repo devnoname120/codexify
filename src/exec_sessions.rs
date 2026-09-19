@@ -683,6 +683,7 @@ fn reap_conversation_states(
 pub struct SessionState {
     exec: Arc<ExecSessionState>,
     connector_authorized: Arc<AtomicBool>,
+    pub(crate) agent_ticket: Arc<TokioMutex<Option<crate::agent_tickets::Ticket>>>,
     pub plan: Arc<StdMutex<Option<PlanState>>>,
     /// The transport-session project binding. Shared (behind `Arc`) with any
     /// conversation-scoped view derived through `with_exec_state`, and carries
@@ -1028,6 +1029,7 @@ impl Default for SessionState {
         Self {
             exec: Arc::new(ExecSessionState::new()),
             connector_authorized: Arc::new(AtomicBool::new(false)),
+            agent_ticket: Arc::new(TokioMutex::new(None)),
             plan: Arc::new(StdMutex::new(None)),
             project_binding: Arc::new(StdMutex::new(None)),
             workspace_change: Arc::new(StdMutex::new(None)),
@@ -1056,6 +1058,7 @@ impl SessionState {
         Self {
             exec,
             connector_authorized: self.connector_authorized.clone(),
+            agent_ticket: self.agent_ticket.clone(),
             plan: self.plan.clone(),
             project_binding: self.project_binding.clone(),
             workspace_change: self.workspace_change.clone(),

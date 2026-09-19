@@ -84,7 +84,7 @@ impl Tool for SkillsList {
 
     fn description(&self) -> String {
         format!(
-            "List the skills available for this project, including explicit-only skills omitted from the agent brief. A skill is a set of instructions stored in a {SKILL_FILENAME}, covering a task the user or the repository has already worked out how to do well. Skills are found under .agents/skills, .codex/skills and .claude/skills, in the project and in the user's home directory, plus installed Codex and Claude Code plugins. Each entry gives a name, a description of when it applies, and its invocation policy; call skills_read with the name to get the instructions. Use explicit-only skills only when the user requests them, not merely because the task matches their description."
+            "List the skills available for this project, including explicit-only skills omitted from the agent brief. A skill is a set of instructions stored in a {SKILL_FILENAME}, covering a task the user or the repository has already worked out how to do well. Skills are found under .agents/skills and .codex/skills in the project and user's home directory, plus installed Codex plugins. Automatic .claude/skills and Claude Code plugin discovery requires experimental.claudeSkills. Each entry gives a name, a description of when it applies, and its invocation policy; call skills_read with the name to get the instructions. Use explicit-only skills only when the user requests them, not merely because the task matches their description."
         )
     }
 

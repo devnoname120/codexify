@@ -33,6 +33,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tower_http::cors::{Any, CorsLayer};
 
+use crate::agent_tickets::AgentTicketStore;
 use crate::artifact_egress::{ARTIFACT_RESOURCE_URI_PREFIX, ArtifactEgressStore};
 use crate::audit::{
     AuditLogger, AuditScope, argument_field_names, summarize_arguments, summarize_output,
@@ -113,6 +114,7 @@ pub struct CodexHandler {
     markdown_chat: Arc<crate::markdown_chat::MarkdownChatStore>,
     conversation_authorizations: Arc<ConversationAuthorizationStore>,
     conversation_exec_sessions: Arc<ConversationExecSessionStore>,
+    agent_tickets: Arc<AgentTicketStore>,
     diff_checkpoints: Arc<DiffCheckpointManager>,
     artifact_egress: Arc<ArtifactEgressStore>,
     bridged_resources: Arc<BridgedResourceStore>,
@@ -123,6 +125,34 @@ pub struct CodexHandler {
 }
 
 impl CodexHandler {
+    async fn ticket_rejection(
+        &self,
+        error: String,
+        conversation: Option<&ConversationIdentity>,
+    ) -> ToolResult {
+        if error == crate::agent_tickets::REJECTED
+            && self.config.markdown_chat.enabled
+            && self
+                .conversation_auth_error("chat_read", conversation)
+                .is_none()
+            && let Some(root) = self.selected_project_root(conversation)
+        {
+            let mut config = self.config.as_ref().clone();
+            config.work_dir = root;
+            let warning = match self
+                .markdown_chat
+                .chat(&config, conversation, &self.session)
+            {
+                Ok(chat) => chat.warn_ticket_rejection().await,
+                Err(error) => Err(error),
+            };
+            if let Err(error) = warning {
+                tracing::warn!(%error, "could not write duplicate-agent warning to chat");
+            }
+        }
+        ToolResult::error(error)
+    }
+
     async fn record_chat_activity(
         &self,
         conversation: Option<&ConversationIdentity>,
@@ -287,11 +317,20 @@ fn without_widget_advertisement(
 }
 
 fn advertised_tool(tool: &dyn Tool, config: &AppConfig) -> rmcp::model::Tool {
-    let schema = tool.input_schema().as_object().cloned().unwrap_or_default();
+    let ticketed = config.experimental.agent_tickets && !app_only_tool(tool);
+    let input = if ticketed {
+        crate::agent_tickets::input_schema(tool.input_schema())
+    } else {
+        tool.input_schema()
+    };
+    let schema = input.as_object().cloned().unwrap_or_default();
     let mut annotations = tool
         .annotations()
         .unwrap_or_else(|| tool.behavior().annotations());
-    if config.force_read_only_tool_annotations {
+    if ticketed {
+        annotations.idempotent_hint = Some(false);
+    }
+    if config.experimental.force_read_only_tool_annotations {
         annotations.read_only_hint = Some(true);
         annotations.destructive_hint = Some(false);
         annotations.open_world_hint = Some(false);
@@ -318,6 +357,12 @@ fn advertised_tool(tool: &dyn Tool, config: &AppConfig) -> rmcp::model::Tool {
         advertised = advertised.with_meta(meta);
     }
     let mut fields = Vec::new();
+    if ticketed {
+        fields.push((
+            crate::agent_tickets::OUTPUT_FIELD,
+            crate::agent_tickets::OUTPUT_DESCRIPTION,
+        ));
+    }
     if config.markdown_chat.enabled {
         fields.push((
             crate::markdown_chat::USER_MESSAGE_FIELD,
@@ -572,10 +617,51 @@ impl ServerHandler for CodexHandler {
                 .and_then(ConversationIdentity::from_request_meta)
         });
         let name = request.name.as_ref().to_string();
-        let args = request
+        let mut args = request
             .arguments
             .map(Value::Object)
             .unwrap_or_else(|| json!({}));
+        let tool = self.tools.iter().find(|t| t.name() == name);
+        let model_call = !tool.is_some_and(|tool| app_only_tool(tool.as_ref()));
+        let ticketed = self.config.experimental.agent_tickets && model_call;
+        let mut ticket_argument_error = None;
+        let ticket_permit = if ticketed {
+            if context.ct.is_cancelled() {
+                return Ok(to_call_tool_result(ToolResult::error(
+                    "Call cancelled before ticket reservation; this call did not run and the ticket is unchanged.",
+                ))
+                .into());
+            }
+            let supplied = match crate::agent_tickets::take_ticket(&mut args) {
+                Ok(ticket) => ticket,
+                Err(error) => {
+                    return Ok(to_call_tool_result(
+                        self.ticket_rejection(error, conversation.as_ref()).await,
+                    )
+                    .into());
+                }
+            };
+            let next = match self
+                .agent_tickets
+                .reserve(conversation.as_ref(), &self.session, supplied)
+                .await
+            {
+                Ok(ticket) => ticket,
+                Err(error) => {
+                    return Ok(to_call_tool_result(
+                        self.ticket_rejection(error, conversation.as_ref()).await,
+                    )
+                    .into());
+                }
+            };
+            if let Some(tool) = tool {
+                ticket_argument_error =
+                    crate::agent_tickets::unwrap_arguments(&mut args, &tool.input_schema()).err();
+            }
+            Some(next)
+        } else {
+            None
+        };
         let reported_schema = (name == AUTHORIZATION_TOOL_WIRE_NAME)
             .then(|| args.get("connectorVersion").and_then(Value::as_str))
             .flatten()
@@ -598,7 +684,6 @@ impl ServerHandler for CodexHandler {
 
         // Keep `tool` as an Option so that even an unknown-tool call flows through
         // the audit begin/finish pairing below rather than short-circuiting.
-        let tool = self.tools.iter().find(|t| t.name() == name);
         let agent_call = self.config.markdown_chat.enabled
             && tool.is_some_and(|tool| !app_only_tool(tool.as_ref()))
             && !context.ct.is_cancelled();
@@ -606,7 +691,6 @@ impl ServerHandler for CodexHandler {
         let authorized_before = self
             .conversation_auth_error("chat_read", conversation.as_ref())
             .is_none();
-        let model_call = !tool.is_some_and(|tool| app_only_tool(tool.as_ref()));
         let workspace_at_start = if model_call && authorized_before {
             match conversation.as_ref() {
                 Some(identity) => {
@@ -685,6 +769,10 @@ impl ServerHandler for CodexHandler {
             self.conversation_auth_error(&name, conversation.as_ref())
         {
             error
+        } else if ticketed && context.ct.is_cancelled() {
+            ToolResult::error("Call cancelled before dispatch.")
+        } else if let Some(error) = ticket_argument_error {
+            ToolResult::error(format!("Invalid arguments for `{name}`: {error}"))
         } else if let Some(error) = tool.and_then(|tool| tool.validate_arguments(&args).err()) {
             ToolResult::error(format!("Invalid arguments for `{name}`: {error}"))
         } else {
@@ -1063,6 +1151,16 @@ impl ServerHandler for CodexHandler {
             };
             output_fields.push((WORKSPACE_CHANGE_FIELD, notice));
         }
+        if let Some(permit) = ticket_permit {
+            let next_ticket = match permit.commit(context.ct.clone()).await {
+                Ok(Some(ticket)) => ticket,
+                Ok(None) => return Ok(to_call_tool_result(ToolResult::error(
+                    "Call interrupted before ticket handoff. The original codexify_ticket is unchanged. Work may already have run; verify its outcome before retrying."
+                )).into()),
+                Err(error) => return Ok(to_call_tool_result(ToolResult::error(error)).into()),
+            };
+            output_fields.push((crate::agent_tickets::OUTPUT_FIELD, Some(next_ticket)));
+        }
         if !output_fields.is_empty() {
             crate::markdown_chat::output::attach_fields(
                 &mut result,
@@ -1136,6 +1234,8 @@ pub async fn start_http_server(mut config: AppConfig) -> anyhow::Result<()> {
     let connector_schemas =
         Arc::new(crate::connector_schema::ConnectorSchemaStore::for_current_user(&config));
     let conversation_exec_sessions = Arc::new(ConversationExecSessionStore::new());
+    let agent_tickets =
+        Arc::new(AgentTicketStore::for_current_user(&config).map_err(anyhow::Error::msg)?);
     conversation_exec_sessions
         .spawn_idle_reaper(Duration::from_millis(config.exec.idle_timeout_ms));
     let diff_checkpoints = Arc::new(DiffCheckpointManager::new());
@@ -1233,6 +1333,7 @@ pub async fn start_http_server(mut config: AppConfig) -> anyhow::Result<()> {
         let factory_markdown_chat = owner_chat_store.clone();
         let factory_conversation_authorizations = conversation_authorizations.clone();
         let factory_conversation_exec_sessions = conversation_exec_sessions.clone();
+        let factory_agent_tickets = agent_tickets.clone();
         let factory_diff_checkpoints = diff_checkpoints.clone();
         let factory_artifact_egress = artifact_egress.clone();
         let factory_bridged_resources = bridged_resources.clone();
@@ -1252,6 +1353,7 @@ pub async fn start_http_server(mut config: AppConfig) -> anyhow::Result<()> {
                     markdown_chat: factory_markdown_chat.clone(),
                     conversation_authorizations: factory_conversation_authorizations.clone(),
                     conversation_exec_sessions: factory_conversation_exec_sessions.clone(),
+                    agent_tickets: factory_agent_tickets.clone(),
                     diff_checkpoints: factory_diff_checkpoints.clone(),
                     artifact_egress: factory_artifact_egress.clone(),
                     bridged_resources: factory_bridged_resources.clone(),
@@ -2182,6 +2284,7 @@ mod tests {
     include!("server_markdown_chat_tests.rs");
     include!("server_markdown_chat_widget_tests.rs");
     include!("server_workspace_tests.rs");
+    include!("server_agent_ticket_tests.rs");
 
     fn handler_with_tools(
         root: &std::path::Path,
@@ -2203,6 +2306,7 @@ mod tests {
             project_bindings: Arc::new(ProjectBindingStore::new(root.join("bindings"))),
             conversation_authorizations: Arc::new(ConversationAuthorizationStore::new()),
             conversation_exec_sessions: Arc::new(ConversationExecSessionStore::new()),
+            agent_tickets: Arc::new(AgentTicketStore::default()),
             diff_checkpoints: Arc::new(DiffCheckpointManager::new()),
             artifact_egress: Arc::new(ArtifactEgressStore::new_at(
                 crate::types::ArtifactEgressConfig::default(),
@@ -2843,6 +2947,7 @@ mod tests {
             project_bindings: Arc::new(ProjectBindingStore::new(root.path().join("bindings"))),
             conversation_authorizations: Arc::new(ConversationAuthorizationStore::new()),
             conversation_exec_sessions: Arc::new(ConversationExecSessionStore::new()),
+            agent_tickets: Arc::new(AgentTicketStore::default()),
             diff_checkpoints: Arc::new(DiffCheckpointManager::new()),
             artifact_egress: Arc::new(ArtifactEgressStore::new_at(
                 crate::types::ArtifactEgressConfig::default(),
@@ -2947,6 +3052,7 @@ mod tests {
             project_bindings: Arc::new(ProjectBindingStore::new(root.path().join("bindings"))),
             conversation_authorizations: Arc::new(ConversationAuthorizationStore::new()),
             conversation_exec_sessions: Arc::new(ConversationExecSessionStore::new()),
+            agent_tickets: Arc::new(AgentTicketStore::default()),
             diff_checkpoints: Arc::new(DiffCheckpointManager::new()),
             artifact_egress: Arc::new(ArtifactEgressStore::new_at(
                 crate::types::ArtifactEgressConfig::default(),
@@ -2986,6 +3092,7 @@ mod tests {
             project_bindings: Arc::new(ProjectBindingStore::new(root.path().join("bindings"))),
             conversation_authorizations: authorizations.clone(),
             conversation_exec_sessions: Arc::new(ConversationExecSessionStore::new()),
+            agent_tickets: Arc::new(AgentTicketStore::default()),
             diff_checkpoints: Arc::new(DiffCheckpointManager::new()),
             artifact_egress: Arc::new(ArtifactEgressStore::new_at(
                 crate::types::ArtifactEgressConfig::default(),
@@ -3065,7 +3172,7 @@ mod tests {
     fn forced_read_only_tool_annotations_override_every_advertised_tool() {
         let root = tempfile::tempdir().unwrap();
         let mut config = crate::config::default_config(root.path().to_path_buf());
-        config.force_read_only_tool_annotations = true;
+        config.experimental.force_read_only_tool_annotations = true;
         let tools = crate::registry::load_tools_for_config(&config);
         assert!(!tools.is_empty());
 

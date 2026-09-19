@@ -99,6 +99,7 @@ function harness(initial, live = initial) {
   const window = new Events();
   const callTool = async (name, args) => {
     state.calls.push({ name, args: structuredClone(args) });
+    name = ({ setup_ui_list_projects: "list_projects", setup_ui_select_project: "set_project_root", setup_ui_update: "self_update" })[name] || name;
     if (name === "setup_status") {
       if (state.holdStatus) await new Promise(resolve => { state.resolveStatus = resolve; });
       if (state.fail) throw new Error("offline");
@@ -107,6 +108,7 @@ function harness(initial, live = initial) {
     if (name === "doctor") return { structuredContent: { ok: true, summary: { failures: 0, warnings: 0 }, checks: [] } };
     if (name === "list_projects") return { structuredContent: { projects: [{ name: "Demo", selector: "demo" }], total: 1 } };
     if (name === "set_project_root") return { structuredContent: { mode: "project", active_root: "/demo", managed_worktree: args.createWorktree } };
+    if (name === "self_update") return { content: [{ type: "text", text: "Update scheduled" }] };
     throw new Error(`Unexpected tool: ${name}`);
   };
   const parent = {
@@ -274,6 +276,27 @@ test("periodic status checks preserve workspace controls and explicit worktree c
   projectButton.emit("click"); await drain();
   assert.equal(card.state.calls.find(call => call.name === "set_project_root").args.createWorktree, false);
 });
+
+for (const markdownChat of [false, true]) {
+  test(`ticket-enabled setup uses private actions with Markdown chat ${markdownChat ? "enabled" : "disabled"}`, async () => {
+    const version = `1.2.4${markdownChat ? "+markdown-chat" : ""}+tickets-v1`;
+    const initial = payload("current", version);
+    Object.assign(initial.connectorSchema, { advertisedVersion: version, connectorVersion: version });
+    initial.project = { status: "unselected", selectionAvailable: true };
+    initial.update = { status: "update_available", currentVersion: "1.2.4", latestVersion: "1.2.5" };
+    const card = harness(initial); await drain();
+    assert.ok(card.state.calls.some(call => call.name === "setup_ui_list_projects"));
+    const projectButton = card.root.descendants().find(node => node.tagName === "button" && node.textContent.startsWith("Demo"));
+    assert.ok(projectButton);
+    projectButton.emit("click"); await drain();
+    assert.equal(card.state.calls.find(call => call.name === "setup_ui_select_project").args.path, "demo");
+    await card.click("Upgrade to v1.2.5");
+    assert.equal(card.state.calls.find(call => call.name === "setup_ui_update").args.confirm, true);
+    assert.equal(card.state.calls.some(call => ["list_projects", "set_project_root", "self_update"].includes(call.name)), false);
+    assert.ok(card.state.calls.every(call => !("codexify_ticket" in call.args)));
+    card.teardown();
+  });
+}
 
 test("teardown stops live status polling", async () => {
   const card = harness(payload("current", "1.2.4")); await drain();

@@ -53,7 +53,7 @@ flowchart LR
     ExecSessions[("Conversation exec sessions\n(in memory, idle-reaped)")]
     DiffRefs[("Git refs/codexify/diff\nproject-open + last-diff")]
     DiffUI["MCP App diff card\nui://codexify/diff/v5/mcp-app.html"]
-    SkillDirs[(".agents/skills\n.codex/skills\n.claude/skills")]
+    SkillDirs[(".agents/skills\n.codex/skills\n.claude/skills (opt-in)")]
     CodexCfg[("$CODEX_HOME\nconfig.toml")]
     CodexCli["optional Codex CLI\nmcp list/get --json"]
     Upstream[("Upstream MCP servers\nstdio / Streamable HTTP")]
@@ -897,7 +897,11 @@ names.
   "workDir": "/absolute/path/to/project",
   "debug": false,
   "uiWidgets": true,
-  "forceReadOnlyToolAnnotations": false,
+  "experimental": {
+    "agentTickets": false,
+    "forceReadOnlyToolAnnotations": false,
+    "claudeSkills": false
+  },
   "apiKey": null,
   "conversationAuthToken": null,
   "agentChat": {
@@ -1055,12 +1059,129 @@ metadata, component-only diff/updater payloads, and widget timing metadata. The
 underlying tools remain available, app-only helper tools remain private, and MCP
 resource support stays enabled for exported files and bridged resources.
 
-`forceReadOnlyToolAnnotations` defaults to `false`. When enabled, every tool
+## Experimental features
+
+The `experimental` section contains `agentTickets`,
+`forceReadOnlyToolAnnotations`, and `claudeSkills`; all default to `false`.
+Unknown experimental keys are rejected. Omitted or null flag values use the
+defaults (or the legacy fallback below); other non-boolean values are rejected.
+
+`experimental.claudeSkills` enables automatic discovery of project/home
+`.claude/skills` directories and the installed Claude Code plugin registry.
+Codex skill and plugin discovery does not require this flag. Explicit
+`skills.dirs` remain authoritative, including a Claude directory deliberately
+listed there. `skills.includePlugins` also applies to Claude plugin skills.
+
+`experimental.forceReadOnlyToolAnnotations` defaults to `false`. When enabled, every tool
 descriptor returned by `tools/list` declares `readOnlyHint: true`,
 `destructiveHint: false`, and `openWorldHint: false`. This is a testing-only
 schema override: it does not change tool implementations, dispatch,
 authorization, or side effects, and it preserves each tool's existing
-`idempotentHint` and other descriptor metadata.
+`idempotentHint` and other descriptor metadata. Ticketed model tools are separately
+marked non-idempotent. The former top-level `forceReadOnlyToolAnnotations` remains
+a compatibility fallback; an explicit nested value, including `false`, wins.
+
+## Agent tickets
+
+`experimental.agentTickets` defaults to `false`. Enable this single-use ticket
+chain to prevent two diverging agents in the same conversation from both
+continuing to call tools:
+
+```sh
+codexify config set experimental.agentTickets true
+codexify service restart
+```
+
+After changing the flag, refresh the connector's tools in ChatGPT Settings and
+start a new conversation so its cached schemas and instructions match. Disabling
+the flag uses the same commands with `false`. It does not delete ticket state.
+
+The first model-facing tool call omits `codexify_ticket` and claims the conversation's
+chain. Its result contains an eight-character `new_codexify_ticket`. Every subsequent
+call passes the latest value as `codexify_ticket`. The server reserves it before
+dispatch and replaces it at response handoff, including tool, argument-validation,
+and output-validation errors. A concurrent caller cannot claim a reserved ticket.
+The ticket is returned in both structured content and
+a small text block, after output truncation. Native tools and all upstream MCP
+exposure modes are guarded centrally. App-only widget helpers and protocol-level
+discovery/resource requests (`tools/list`, `resources/list`, `resources/read`)
+do not participate. A displayed tool such as `setup` or
+`show_diff` is still guarded; repeatedly calling `setup` cannot reset an active chain.
+The setup widget uses its private project/update actions even when Markdown chat
+is disabled, so user interactions never consume the agent's ticket.
+
+Calls must be serial, including read-only calls, chat tools, command polling,
+and MCP search/schema tools. While a chain is active, a missing, malformed, or
+consumed ticket rejects the call before dispatch, returns no replacement, and tells that agent branch
+to stop. A rejection does not change the winning branch's ticket. Tools with
+input schemas that cannot safely accommodate the extra field use an
+`arguments` envelope for their original arguments; the advertised schema shows
+the applicable shape. Codexify removes its own ticket before validating or
+forwarding the original tool arguments.
+
+With `agentChat.enabled`, the server itself writes a **Possible duplicate agent
+detected and blocked** warning into the selected workspace's chat. The notice is
+deduplicated per chat and does not acknowledge unread user messages or increase
+the active agent's call counter. Without a selected Markdown chat, the rejection
+response instructs the blocked branch to tell the user without making another
+tool call. A ticket mismatch is not proof of duplication: the warning also notes
+that a lost response or legitimate parallel call may be responsible. Codexify
+blocks dispatch and instructs the model to stop; it cannot terminate a remote
+model or commands already running.
+
+With stable ChatGPT conversation metadata, the current ticket is stored in one
+small file per conversation under `~/.codexify/agent-tickets/`, scoped by the
+configured access root and port. A nonblocking exclusive file lock holds the
+reservation until response handoff, including across processes sharing that
+scope; the replacement is flushed before returning the result. Dropping a
+reservation without committing leaves the previous ticket unchanged.
+Tickets survive transport replacement, project switching,
+and server restarts. Clients without stable conversation metadata have only a
+transport-local chain, which ends when that transport is replaced. Unreadable or
+corrupt ticket state refuses execution rather than resetting it. A persistence
+failure at handoff can occur after tool side effects; it returns no successor
+and requires user recovery.
+
+**Offline recovery.** The guard reuses the chat's ten-minute offline interval,
+measured conservatively from the last completed ticket handoff. When that interval
+has elapsed and no ticketed call is in flight, the next call may omit its ticket
+or supply an older, valid-shaped ticket. That call claims a new chain; competing
+calls using the old or missing ticket are rejected again. The persistent file's
+modification time records the last handoff, so this also works after restart.
+Rejected calls and widget interactions neither extend the deadline nor reset the
+chain. A held reservation is never stolen, even after ten minutes.
+
+This lets a user ask ChatGPT to continue after the conversation has gone offline,
+without obtaining a ticket from internal state. A rejected branch must not wait
+for expiry and restart itself; it may resume only when the user asks. Expiry is a
+deliberate availability trade-off: a stale fork can compete again after inactivity,
+and the server still cannot identify the original agent. Already-running commands
+are not cancelled by offline recovery.
+
+This is coordination, not authentication, agent identification, or exactly-once
+execution. Whichever fork consumes a shared ticket first wins; there is no way
+to establish which fork was the original from identical histories. If both
+forks see each other's subsequent tool results, they can keep learning the new
+tickets. Other connectors and already-running commands are outside the guard.
+
+A request that never reaches the server does not advance the ticket. Cancellation
+observed at the handoff check releases the reservation without advancing
+it either. This differs from connector-generated error responses, which do
+advance it. After a transport error with no result, the agent retains its last
+ticket; an interrupted command may still have produced side effects.
+
+A **502 after the server hands off its response cannot reliably be detected** by
+Codexify. MCP exposes cancellation and stream resumption, not an acknowledgement
+that ChatGPT received the result; a disconnected stream can remain live for
+[resumption](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports#resumability-and-redelivery).
+In that case the server may already have committed the successor, and retrying
+with the old ticket is rejected. Do not interpret a 502 as proof that no work ran.
+No automatic replay, ticket lookup, or immediate reset of an active chain is
+provided: those would let a losing fork rejoin while the winner is working. The
+user must resolve uncertain command outcomes, stop unwanted agents, and then
+resume after offline expiry, start a new conversation, or disable the flag.
+Agents must not recover tickets from state files or logs. The feature deliberately
+trades parallel tool use and immediate recovery for refusing stale branches.
 
 ## Diagnostics, tool payloads, and audit logging
 
@@ -1282,8 +1403,8 @@ The `skills` block governs `SKILL.md` discovery. See [Skills](#skills):
 | Key | Default | Description |
 |-----|---------|-------------|
 | `enabled` | `true` | `false` searches nothing; both tools say so and the catalogue leaves `instructions` |
-| `dirs` | `~/.agents/skills`, `~/.codex/skills`, `~/.claude/skills` | User-scope directories, **replacing** the home-directory defaults. Relative paths resolve against the work directory; project-scope roots are unaffected |
-| `includePlugins` | `true` | Discover enabled installed OpenAI Codex and Claude Code plugin skills. Setting `dirs` disables this unless you set it back to `true` |
+| `dirs` | `~/.agents/skills`, `~/.codex/skills` | User-scope directories, **replacing** the home-directory defaults. `experimental.claudeSkills` adds `~/.claude/skills` to the defaults. Relative paths resolve against the work directory; project-scope roots are unaffected |
+| `includePlugins` | `true` | Discover enabled installed OpenAI Codex plugin skills, plus Claude Code plugin skills when `experimental.claudeSkills` is enabled. Setting `dirs` disables this unless you set it back to `true` |
 
 The `codexMcp` block controls [automatic import of MCP servers configured in Codex](#bridging-other-mcp-servers):
 
@@ -2025,13 +2146,13 @@ description: Cut and publish a release of this project
 
 | Scope | Directories |
 |-------|-------------|
-| `repo` | `.agents/skills`, `.codex/skills` and `.claude/skills`, in every directory from the project root down to the active work directory; in multi-project mode the selected directory is the exact project root |
-| `user` | `~/.agents/skills`, `~/.codex/skills` and `~/.claude/skills`, or whatever `skills.dirs` names instead |
-| `plugin` | Enabled installed **OpenAI Codex plugin** skills under the active `~/.codex/plugins/cache/<marketplace>/<plugin>/<version>` package, plus installed **Claude Code plugin** skills under `~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/skills/*` |
+| `repo` | `.agents/skills` and `.codex/skills`, plus `.claude/skills` with `experimental.claudeSkills`, in every directory from the project root down to the active work directory; in multi-project mode the selected directory is the exact project root |
+| `user` | `~/.agents/skills` and `~/.codex/skills`, plus `~/.claude/skills` with `experimental.claudeSkills`, or whatever `skills.dirs` names instead |
+| `plugin` | Enabled installed **OpenAI Codex plugin** skills under the active `~/.codex/plugins/cache/<marketplace>/<plugin>/<version>` package, plus installed **Claude Code plugin** skills from their registered installation paths when `experimental.claudeSkills` is enabled |
 
 Repo skills come first, so a project decides how a name behaves inside it; a personal skill of the same name is shadowed and `skills_list` says so rather than merging the two.
 
-**Plugin skills.** Codexify mirrors Codex's local plugin-skill discovery. It reads enabled `[plugins."<plugin>@<marketplace>"]` entries from the Codex user `config.toml`, resolves the same active cache version (`local` wins; otherwise Codex's semver/lexical ordering), and reads the plugin manifest rather than assuming every cache entry has a `skills/` directory. Legacy manifests can declare one or more skill roots and are searched recursively; current Agent Plugin manifests use the conventional direct-child `skills/` layout. Legacy migrated-command skills are included too, and `[[skills.config]]` name/path disable rules are honored. Plugin skills use the manifest namespace as `<plugin>:<skill>`. Claude Code plugin discovery uses `installPath` entries in `~/.claude/plugins/installed_plugins.json`, not an inventory of cached versions. Project/local installations apply only within their recorded project path and take precedence over user installations. An absent or empty registry offers no Claude plugin skills; an unreadable or malformed registry produces a discovery warning, without falling back to stale cache entries. Turn all plugin-skill discovery off with `"skills": { "includePlugins": false }`. Setting `skills.dirs` overrides the standalone roots and, by default, disables plugin discovery too — set `includePlugins: true` alongside `dirs` to keep it.
+**Plugin skills.** Codexify mirrors Codex's local plugin-skill discovery. It reads enabled `[plugins."<plugin>@<marketplace>"]` entries from the Codex user `config.toml`, resolves the same active cache version (`local` wins; otherwise Codex's semver/lexical ordering), and reads the plugin manifest rather than assuming every cache entry has a `skills/` directory. Legacy manifests can declare one or more skill roots and are searched recursively; current Agent Plugin manifests use the conventional direct-child `skills/` layout. Legacy migrated-command skills are included too, and `[[skills.config]]` name/path disable rules are honored. Plugin skills use the manifest namespace as `<plugin>:<skill>`. With `experimental.claudeSkills` enabled, Claude Code plugin discovery uses `installPath` entries in `~/.claude/plugins/installed_plugins.json`, not an inventory of cached versions. Project/local installations apply only within their recorded project path and take precedence over user installations. An absent or empty registry offers no Claude plugin skills; an unreadable or malformed registry produces a discovery warning, without falling back to stale cache entries. Turn all plugin-skill discovery off with `"skills": { "includePlugins": false }`. Setting `skills.dirs` overrides the standalone roots and, by default, disables plugin discovery too — set `includePlugins: true` alongside `dirs` to keep it.
 
 **What the model sees.** The catalogue — a name and the full trigger description per implicitly invocable skill — goes into the project-aware brief under a `## Skills` heading. In single-project mode that is available at initialization; in multi-project mode it arrives from `get_agent_brief` after selection. Bodies are not loaded: `skills_read` fetches one only once a skill has actually been chosen. UI captions such as `interface.short_description` do not replace the trigger description. The section is omitted entirely when no skill permits implicit invocation.
 
@@ -2300,7 +2421,7 @@ Native tunnel mode ignores `allowedHosts` and forces the accepted authorities to
 - **One bounded exception in single-project mode**: [AGENTS.md](#agentsmd) discovery may read above `--work-dir`, up to the nearest `.git`. It is read-only, opens only `AGENTS.override.md`, `AGENTS.md` and any `projectDoc.fallbackFilenames`, and `get_project_doc` reports the absolute path of every file it used. Set `projectDoc.maxBytes` to `0` to switch it off, or `projectDoc.rootMarkers` to `[]` to keep the search inside the work directory. Multi-project mode does not perform this upward walk; its selected directory is the exact project root.
 - **Namespaced diff state inside Git**: ChatGPT diff checkpoints are exactly two refs per conversation/project pair under `refs/codexify/diff/`. Synthetic snapshots contain only the selected project path, are built through a temporary index, and never modify the real index or working tree. Generic MCP-client checkpoints are in memory only. Existing `refs/codexify/review/` checkpoints are migrated lazily into the diff namespace. The namespace grows with the number of distinct persistent conversation/project pairs; the diff section documents inspection and manual removal.
 - **Bounded state writes outside the work directory**: `remember` and `update_plan` write `memory.json` under `~/.codexify/projects/`. Multi-project mode writes one small project-binding record or scratch marker under `~/.codexify/conversation-projects/` for each ChatGPT conversation and access root; durable scratch contents live separately under `~/.codexify/scratch/conversations/`. Per-conversation authorization writes a small marker under `~/.codexify/conversation-authorizations/`. Native file export writes durable capability records and an LRU-bounded immutable snapshot pool under `~/.codexify/artifacts/`; records remain after snapshot eviction so old conversation links can use source fallback. Binding and authorization filenames are derived from a hash of `openai/session`; the raw identifier is not stored. Authorization namespaces include a one-way digest of the canonical work directory and configured token, while marker contents store only the grant. Set `memory.enabled` to `false` to disable plans and notes; set `artifactEgress.enabled` to `false` to disable new native exports and bridged resource proxying. Delete only state whose capabilities or bindings you intentionally want to invalidate. See [Context and memory](#context-and-memory).
-- **Bounded reads outside the work directory**: [skills](#skills) may live in `~/.agents/skills`, `~/.codex/skills`, `~/.claude/skills`, or an enabled installed Codex/Claude Code plugin. Codex plugin discovery reads only Codex's user config, active plugin-cache package, manifest, and declared skill roots; `skills_read` then opens files only inside a discovered skill package. Its `resource` path is checked against the skill's own directory, so it cannot walk out into the rest of your home directory. `skills_list` reports the absolute path of every skill it found. Set `skills.enabled` to `false` to switch it off, `skills.includePlugins` to `false` to suppress plugin packages, or `skills.dirs` to point the standalone user scope somewhere you choose.
+- **Bounded reads outside the work directory**: [skills](#skills) may live in `~/.agents/skills`, `~/.codex/skills`, or an enabled installed Codex plugin. Automatic reads of `~/.claude/skills` and the Claude plugin registry require `experimental.claudeSkills`. Codex plugin discovery reads only Codex's user config, active plugin-cache package, manifest, and declared skill roots; `skills_read` then opens files only inside a discovered skill package. Its `resource` path is checked against the skill's own directory, so it cannot walk out into the rest of your home directory. `skills_list` reports the absolute path of every skill it found. Set `skills.enabled` to `false` to switch it off, `skills.includePlugins` to `false` to suppress plugin packages, or `skills.dirs` to point the standalone user scope somewhere you choose.
 - **Read-only Codex configuration discovery**: MCP import and the project catalogue read the user-level Codex `config.toml` without rewriting it. Project discovery inspects only the top-level `projects` table, does not read candidate project contents, and suppresses rejected absolute paths from MCP output. Set `projectCatalog.codexConfig.enabled` to `false` to disable that provider. Native Codex trust does not override the Codexify access-root boundary.
 - **Command execution authority**: `exec_command` performs no command allow-listing or shell-token filtering. Every non-empty command runs through the selected shell with the full authority of the Codexify process. `exec.maxSessions`, `exec.idleTimeoutMs`, and output limits bound resources; they do not restrict what a command may do.
 - **Bridged servers carry delegated authority**: an explicit `mcpServers` entry or an automatically imported Codex MCP—including one contributed by a Codex plugin—can receive model-directed calls. A stdio upstream launches a real process that runs as your OS user; a Streamable HTTP upstream receives calls plus its configured bearer token and HTTP headers. Catalog mode reduces connector-schema exposure, not runtime authority: `mcp_call_tool` can still dispatch any filtered catalogue entry. Only bridge servers you trust, use `tools`/`disabledTools` to narrow callable operations, prefer catalog mode to keep transitive schemas private, keep secrets in `bearerTokenEnvVar`/`envHttpHeaders` rather than static JSON, set `codexMcp.useCli` to `false` to exclude plugin-only discovery, or set `codexMcp.enabled` to `false` to disable all automatic Codex import. Launch, connection, authentication, and handshake failures are reported rather than silently ignored.

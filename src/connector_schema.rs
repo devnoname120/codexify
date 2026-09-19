@@ -12,7 +12,10 @@ use sha2::{Digest, Sha256};
 use crate::types::AppConfig;
 
 pub(crate) fn schema_version(config: &AppConfig) -> String {
-    let version = version_for_markdown_chat(config.markdown_chat.enabled);
+    let mut version = version_for_markdown_chat(config.markdown_chat.enabled);
+    if config.experimental.agent_tickets {
+        version.push_str("+tickets-v1");
+    }
     if config.multi_project {
         format!("{version}+workspace-v1")
     } else {

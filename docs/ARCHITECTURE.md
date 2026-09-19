@@ -436,13 +436,31 @@ top-level `review` key to `diff`; resolved runtime configuration uses only the
 diff-named field. Top-level `uiWidgets` defaults to `true`; disabling it removes
 Codexify's MCP Apps capability/resource advertisement and widget-only metadata
 without disabling general MCP resources or the underlying tools. The testing-only
-`forceReadOnlyToolAnnotations` flag defaults to `false`; when enabled, the
+`experimental.forceReadOnlyToolAnnotations` flag defaults to `false`; when enabled, the
 `tools/list` projection forces the read-only, non-destructive, and closed-world
 hints without changing the underlying `ToolBehavior` used by dispatch. In
 multi-project mode, dispatch clones this
 config per call and substitutes the conversation's selected root—or the transport
 fallback—for `work_dir`; the static server policy, catalogue overlay, and bridge
-configuration remain shared. Native Codex project entries are intentionally re-read
+configuration remain shared. Optional `experimental.agentTickets` (default `false`) augments
+model-facing input/output schemas with `codexify_ticket` and `new_codexify_ticket`.
+The central dispatch guard reserves the supplied ticket before activity, project,
+or tool side effects, and app-only helpers bypass it. Stable conversation chains
+use nonblocking locked eight-byte files; generic clients use transport-local state.
+The reservation commits at response handoff, after output budgeting and underlying
+validation. Cancellation observed at the handoff check releases it without advancing. A downstream
+delivery failure after handoff is not observable and can still strand a branch.
+Connector error responses receive a successor, while rejected calls return neither
+a successor nor pending chat/workspace data. Rejections produce a deduplicated
+server-written warning without consuming pending user messages. This is an opt-in
+serial-call coordination mechanism, not an authentication or replay service.
+The existing ten-minute offline interval allows the next call to reclaim a chain
+with a stale or missing ticket after inactivity, but never while its reservation
+is held. File modification times (or in-memory timestamps) track the last handoff;
+rejected and widget-only calls do not extend the deadline. This permits recovery
+when the user asks ChatGPT to continue, at the cost of allowing stale forks to
+compete again after expiry.
+Native Codex project entries are intentionally re-read
 when the catalogue tool is called rather than copied into `AppConfig` at startup.
 `conversationAuthToken` is a top-level optional authentication secret with no CLI
 override; its presence also controls registry inclusion of the authorization gate
@@ -1077,16 +1095,19 @@ lowercased name, repo > user precedence) and surfaced through the instructions
 catalogue and `skills_list` / `skills_read`.
 
 ### 8.1 Standalone skills
-`.agents/skills`, `.codex/skills`, and `.claude/skills` — in each project
-directory (root → work dir) and under the home directory. Scope `repo` / `user`.
+`.agents/skills` and `.codex/skills` — in each project directory (root → work dir)
+and under the home directory. `experimental.claudeSkills` additionally enables
+`.claude/skills` in both scopes. Explicit `skills.dirs` replace the home defaults
+and remain authoritative. Scope `repo` / `user`.
 
 ### 8.2 Plugin skills
-Installed Claude Code plugins under
-`~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/skills/*`. The highest
-installed version per plugin is used; each skill is namespaced `<plugin>:<skill>`
-(e.g. `idasql:decompiler`). Scope `plugin`. Enabled by default; suppressed when an
-explicit `skills.dirs` override is set (which is also how the test suite isolates
-from the real home). Toggle with `skills.includePlugins`.
+Enabled installed Codex plugins use the active package and manifest-declared
+skill roots. Each skill is namespaced `<plugin>:<skill>`. Claude plugin discovery
+additionally requires `experimental.claudeSkills` (default `false`) and reads
+`installPath` entries from `~/.claude/plugins/installed_plugins.json`; it does not
+select the highest cached version. Project/local installations apply only under
+their registered project paths. Scope `plugin`. `skills.includePlugins` controls
+both sources and defaults off when an explicit `skills.dirs` override is set.
 
 ### 8.3 Generated gateway skills
 For each gateway-mode MCP server, codexify writes a `SKILL.md` to a per-port temp
@@ -1288,7 +1309,11 @@ focuses on relationships and defaults.
   "workDir": "/absolute/path/to/project", // required when --work-dir is omitted
   "debug": false,                         // component-only tool timing footers
   "uiWidgets": true,                     // built-in setup/diff/updater MCP Apps
-  "forceReadOnlyToolAnnotations": false, // testing-only tools/list hint override
+  "experimental": {
+    "agentTickets": false,                // single-use model tool-call chain
+    "forceReadOnlyToolAnnotations": false, // testing-only tools/list hint override
+    "claudeSkills": false                 // automatic Claude skill/registry reads
+  },
   "port": 3000,
   "apiKey": "…",                      // or --api-key; bearer token
   "conversationAuthToken": "0123456789abcdef…", // exactly 64 lowercase hex characters
