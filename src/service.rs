@@ -861,11 +861,19 @@ fn systemd_exec_escape(value: &str) -> String {
     systemd_escape(&value.replace('$', "$$"))
 }
 
+// WorkingDirectory= takes a raw path: systemd expands specifiers there, so only
+// % needs escaping. Unlike ExecStart= and Environment=, its parser never strips
+// quotes, so wrapping the value would embed the quote characters in the path.
+#[cfg(any(target_os = "linux", test))]
+fn systemd_path_escape(value: &str) -> String {
+    value.replace('%', "%%")
+}
+
 #[cfg(any(target_os = "linux", test))]
 fn systemd_unit(spec: &ServiceSpec) -> String {
     let executable = systemd_exec_escape(&spec.executable.to_string_lossy());
     let config = systemd_exec_escape(&spec.config.to_string_lossy());
-    let working_dir = systemd_escape(&spec.working_dir.to_string_lossy());
+    let working_dir = systemd_path_escape(&spec.working_dir.to_string_lossy());
     let home = systemd_escape(&format!("HOME={}", spec.home.display()));
     let path = systemd_escape(&format!("PATH={}", spec.path));
     format!(
@@ -2367,6 +2375,14 @@ mod tests {
         assert!(unit.contains("codexify & test"));
         assert!(unit.contains("$$HOME"));
         assert_eq!(powershell_quote("a'b"), "'a''b'");
+    }
+
+    #[test]
+    fn systemd_unit_writes_working_directory_as_raw_path() {
+        let root = Path::new("/tmp/codexify%s & test");
+        let unit = systemd_unit(&spec(root));
+        assert!(unit.contains("\nWorkingDirectory=/tmp/codexify%%s & test/config\n"));
+        assert!(!unit.contains("WorkingDirectory=\""));
     }
 
     #[test]

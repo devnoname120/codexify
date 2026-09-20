@@ -27,6 +27,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Markdown chat; `chat_await` can wait for the user's initial workspace choice.
 - The standalone owner-chat sidebar reads the API's camelCase activity fields,
   uses smaller presence icons, and stays aligned with the selected chat header.
+- `service install` writes the systemd unit's `WorkingDirectory=` value without
+  quotes, so `systemd` accepts the unit and `service enable` can start it.
 
 ## [1.5.3] - 2026-09-16
 
