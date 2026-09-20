@@ -2380,9 +2380,20 @@ mod tests {
     #[test]
     fn systemd_unit_writes_working_directory_as_raw_path() {
         let root = Path::new("/tmp/codexify%s & test");
-        let unit = systemd_unit(&spec(root));
-        assert!(unit.contains("\nWorkingDirectory=/tmp/codexify%%s & test/config\n"));
-        assert!(!unit.contains("WorkingDirectory=\""));
+        let spec = spec(root);
+        let unit = systemd_unit(&spec);
+        let working_directory = unit
+            .lines()
+            .find(|line| line.starts_with("WorkingDirectory="))
+            .expect("systemd unit should contain WorkingDirectory");
+        assert_eq!(
+            working_directory,
+            format!(
+                "WorkingDirectory={}",
+                spec.working_dir.to_string_lossy().replace('%', "%%")
+            )
+        );
+        assert!(!working_directory.contains('"'));
     }
 
     #[test]
