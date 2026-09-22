@@ -4,7 +4,8 @@ use std::sync::LazyLock;
 
 pub const CHAT_UI_URI: &str = "ui://codexify/markdown-chat/v2/mcp-app.html";
 pub const PREVIOUS_CHAT_UI_URI: &str = "ui://codexify/markdown-chat/v1/mcp-app.html";
-pub const SETUP_CHAT_UI_URI: &str = "ui://codexify/setup-chat/v4/mcp-app.html";
+pub const SETUP_CHAT_UI_URI: &str = "ui://codexify/setup-chat/v5/mcp-app.html";
+pub const PREVIOUS_SETUP_CHAT_UI_URI_V4: &str = "ui://codexify/setup-chat/v4/mcp-app.html";
 pub const PREVIOUS_SETUP_CHAT_UI_URI_V3: &str = "ui://codexify/setup-chat/v3/mcp-app.html";
 pub const PREVIOUS_SETUP_CHAT_UI_URI: &str = "ui://codexify/setup-chat/v2/mcp-app.html";
 pub const LEGACY_SETUP_CHAT_UI_URI: &str = "ui://codexify/setup-chat/v1/mcp-app.html";
@@ -87,6 +88,7 @@ pub fn resource() -> Resource {
 pub fn contents_for_uri(uri: &str) -> Option<ResourceContents> {
     let html = match uri {
         SETUP_CHAT_UI_URI
+        | PREVIOUS_SETUP_CHAT_UI_URI_V4
         | PREVIOUS_SETUP_CHAT_UI_URI_V3
         | PREVIOUS_SETUP_CHAT_UI_URI
         | LEGACY_SETUP_CHAT_UI_URI => SETUP_CHAT_UI_HTML.as_str(),
@@ -130,6 +132,7 @@ mod tests {
         assert!(contents_for_uri(PREVIOUS_CHAT_UI_URI).is_some());
         assert!(contents_for_uri(PREVIOUS_SETUP_CHAT_UI_URI).is_some());
         assert!(contents_for_uri(PREVIOUS_SETUP_CHAT_UI_URI_V3).is_some());
+        assert!(contents_for_uri(PREVIOUS_SETUP_CHAT_UI_URI_V4).is_some());
         assert!(contents_for_uri(LEGACY_SETUP_CHAT_UI_URI).is_some());
         assert!(contents_for_uri("ui://codexify/unrelated").is_none());
         if let Some(path) = std::env::var_os("CODEXIFY_CHAT_PREVIEW_HTML") {

@@ -24,6 +24,7 @@ h1 { display:flex; align-items:center; flex-wrap:wrap; gap:9px; font-size:15px; 
 .presence-symbol { width:14px; height:14px; flex:none; }
 #tool-total { color:var(--muted); font-size:11px; font-weight:400; white-space:nowrap; font-variant-numeric:tabular-nums; }
 .subtitle { font-size:12px; color:var(--muted); }
+#workspace-label { font-size:11px; color:var(--muted); overflow-wrap:anywhere; }
 .icon-button { width:34px; height:34px; padding:6px; border:0; background:transparent; color:var(--muted); border-radius:50%; }
 svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; stroke-width:1.9; stroke-linecap:round; stroke-linejoin:round; }
 #messages { overflow:auto; overscroll-behavior:contain; max-height:480px; min-height:130px; padding:16px; display:flex; flex-direction:column; gap:12px; scrollbar-width:thin; }
@@ -58,6 +59,8 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
 .ticks.read { color:var(--read); }
 .retry { border:0; background:transparent; color:var(--error); padding:0 4px; font-size:12px; }
 .footer { border-top:1px solid var(--border); padding:10px 12px 9px; background:var(--surface); }
+#retained-sends { margin:0 0 9px; color:var(--muted); font-size:11px; }
+#retained-sends p { margin:6px 0; white-space:pre-wrap; overflow-wrap:anywhere; }
 #composer { display:flex; gap:8px; align-items:flex-end; }
 #draft { flex:1; width:0; min-width:0; max-height:150px; resize:none; border:1px solid var(--border); border-radius:19px; background:var(--bg); color:var(--ink); padding:9px 13px; line-height:1.4; }
 #send { flex:0 0 38px; width:38px; height:38px; border:0; border-radius:50%; background:var(--accent); color:var(--bg); padding:9px; }
@@ -70,7 +73,7 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
 <body>
 <section id="chat" aria-label="Markdown chat for this conversation">
   <header class="header">
-    <div class="heading"><h1>Agent <span id="presence" role="status"></span><span id="tool-total" hidden></span></h1><div class="subtitle">Markdown chat · This conversation only</div></div>
+    <div class="heading"><h1>Agent <span id="presence" role="status"></span><span id="tool-total" hidden></span></h1><div class="subtitle">Markdown chat · This conversation only</div><div id="workspace-label" hidden></div></div>
     <button id="collapse" class="icon-button" aria-label="Collapse chat" aria-expanded="true" title="Collapse chat"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 14 6-6 6 6"/></svg></button>
   </header>
   <div id="panel">
@@ -79,6 +82,7 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
       <div id="empty">Loading this conversation...</div>
     </div>
     <div class="footer">
+      <details id="retained-sends" hidden><summary id="retained-summary"></summary><div id="retained-messages"></div></details>
       <form id="composer">
         <textarea id="draft" rows="1" aria-label="Message the agent" placeholder="Message the agent..." spellcheck="true"></textarea>
         <button id="send" type="submit" aria-label="Send message" title="Send message" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5m-6 6 6-6 6 6"/></svg></button>
@@ -105,12 +109,13 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
   let hostCapabilities = {};
   let statusKind = "normal";
   let available = bridge === null;
+  let workspace, generation = 0;
   const saved = (bridge?.getState?.() || window.openai?.widgetState)?.privateContent || {};
   input.value = typeof saved.draft === "string" ? saved.draft : "";
   collapsed = saved.collapsed === true;
   for (const message of Array.isArray(saved.pending) ? saved.pending : []) {
     if (typeof message.id === "string" && typeof message.markdown === "string") {
-      pendingSends.set(message.id, { ...message, failed:true, pending:false });
+      pendingSends.set(message.id, { ...message, chat_file:message.chat_file || saved.chat_file || null, failed:true, pending:false });
     }
   }
 
@@ -164,7 +169,9 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
       seen.add(value);
       if (value.isError || value.is_error) {
         const detail = (Array.isArray(value.content) ? value.content : []).filter(part => part.type === "text").map(part => part.text).join("\n");
-        throw new Error(detail || "The chat operation failed.");
+        const error = new Error(detail || "The chat operation failed.");
+        error.workspaceChanged = Boolean((value._meta || value.meta)?.[META]?.workspace_changed);
+        throw error;
       }
       payload ||= value[META];
       for (const key of ["_meta", "meta", "result", "call_tool_result", "callToolResult", "mcp_tool_result", "mcpToolResult", "toolResponseMetadata"]) {
@@ -175,9 +182,10 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
     return payload;
   }
   function save() {
+    if (tornDown) return;
     clearTimeout(saveTimer);
     const current = (bridge?.getState?.() || window.openai?.widgetState)?.privateContent || {};
-    const state = { privateContent:{ ...current, draft:input.value, collapsed, pending:[...pendingSends.values()] } };
+    const state = { privateContent:{ ...current, draft:input.value, collapsed, chat_file:chatFile, pending:[...pendingSends.values()] } };
     try {
       if (bridge?.setState) bridge.setState(state);
       else Promise.resolve(window.openai?.setWidgetState?.(state)).catch(() => {});
@@ -191,9 +199,10 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
   }
   function resizeInput() {
     input.style.height = "auto";
-    input.style.height = Math.min(150, input.scrollHeight) + "px";
+    const borderHeight = input.offsetHeight - input.clientHeight;
+    input.style.height = Math.min(150, input.scrollHeight + borderHeight) + "px";
     input.disabled = !available;
-    send.disabled = !available || sending || !input.value.trim();
+    send.disabled = !available || !chatFile || sending || !input.value.trim();
     size();
   }
   function size() {
@@ -248,10 +257,13 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
     if (!tornDown && !document.hidden && delay !== null) presenceTimer = setTimeout(updatePresence, Math.max(1, delay));
   }
   function markdown(container, text) {
+    const origin = generation, destination = requestDestination();
     window.renderCodexifyMarkdown(container, text, {
       async open(href, kind) {
+        if (!currentGeneration(origin)) return;
         if (kind === "file") {
-          const payload = await call("chat_ui_file", { href });
+          const payload = await call("chat_ui_file", { href, ...destination });
+          if (!currentGeneration(origin)) return;
           if (!payload.file || payload.file.type !== "resource_link") throw new Error("The connector returned no downloadable file.");
           if (bridge) await bridge.downloadFile(payload.file);
           else {
@@ -259,7 +271,7 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
             const response = await rpc("ui/download-file", { contents:[payload.file] });
             if (response?.isError) throw new Error("The host declined the file download.");
           }
-          status("File download requested.");
+          if (currentGeneration(origin)) status("File download requested.");
         } else if (kind === "anchor") {
           const slug = decodeURIComponent(href.slice(1));
           const heading = [...container.querySelectorAll("h1,h2,h3,h4,h5,h6")].find(node => node.textContent.toLowerCase().replace(/[^\p{L}\p{N} _-]/gu, "").replace(/ /g, "-") === slug);
@@ -269,7 +281,7 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
         else if (typeof window.openai?.openExternal === "function") await window.openai.openExternal({ href });
         else await rpc("ui/open-link", { url:href });
       },
-      error(error) { status(error.message || "The link could not be opened.", true); }
+      error(error) { if (currentGeneration(origin)) { status(error.message || "The link could not be opened.", true); workspaceMismatch(error); } }
     });
   }
   function messageTime(timestamp, now = Date.now()) {
@@ -319,7 +331,7 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
   function render() {
     if (tornDown) return;
     const atBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 50;
-    const messages = [...records.values()].sort((a, b) => a.start - b.start).concat([...pendingSends.values()]);
+    const messages = [...records.values()].sort((a, b) => a.start - b.start).concat([...pendingSends.values()].filter(message => chatFile && message.chat_file === chatFile));
     el("empty").hidden = messages.length > 0;
     if (!messages.length && chatFile) el("empty").textContent = "Messages here stay in this conversation. Send an instruction to the agent below.";
     let previousNode = el("empty");
@@ -346,8 +358,8 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
         node.append(make("div", "author", message.role === "user" ? "You" : "Agent"), make("div", "markdown"), make("div", "receipt"));
         nodes.set(message.id, node);
       }
-      if (node._markdown !== message.markdown) {
-        const body = node.querySelector(".markdown"); body.replaceChildren(); markdown(body, message.markdown); node._markdown = message.markdown;
+      if (node._markdown !== message.markdown || node._generation !== generation) {
+        const body = node.querySelector(".markdown"); body.replaceChildren(); markdown(body, message.markdown); node._markdown = message.markdown; node._generation = generation;
       }
       receipt(node.querySelector(".receipt"), message);
       if (previousNode.nextSibling !== node) list.insertBefore(node, previousNode.nextSibling);
@@ -365,6 +377,11 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
     for (const [key, node] of markerNodes) {
       if (!activeMarkers.has(key)) { node.remove(); markerNodes.delete(key); }
     }
+    const messageIds = new Set(messages.map(message => message.id));
+    for (const [id, node] of nodes) {
+      if (!messageIds.has(id)) { node.remove(); nodes.delete(id); }
+    }
+    renderRetainedSends();
     older.hidden = !hasMore; older.disabled = loadingOlder;
     if (atBottom && !loadingOlder) list.scrollTop = list.scrollHeight;
     scheduleMessageClock();
@@ -374,6 +391,7 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
     const pendingCount = pendingSends.size;
     if (typeof page.chat_file !== "string" || !Number.isSafeInteger(page.delivered_through)) throw new Error("Invalid chat state from connector.");
     if (chatFile && chatFile !== page.chat_file) throw new Error("This widget's conversation binding changed. Open a new chat widget.");
+    if (workspace && page.workspace_path && workspace !== page.workspace_path) throw new Error("Chat state belongs to a different workspace.");
     chatFile = page.chat_file;
     delivered = Math.max(delivered, page.delivered_through);
     if (Number.isSafeInteger(page.read_through)) readThrough = Math.max(readThrough, page.read_through);
@@ -398,7 +416,60 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
       if (!history) snapshotEnd = Math.max(snapshotEnd, ...[...(page.messages || [])].map(message => message.end));
     }
     render();
+    resizeInput();
     if (pendingCount !== pendingSends.size) save();
+  }
+  function currentGeneration(value) { return !tornDown && value === generation; }
+  function requestDestination() {
+    const result = {};
+    if (workspace) result.expected_workspace = workspace;
+    if (chatFile) result.expected_chat_file = chatFile;
+    return result;
+  }
+  function workspaceMismatch(error) {
+    if (error.workspaceChanged && bridge?.refreshWorkspace) void Promise.resolve(bridge.refreshWorkspace()).catch(() => {});
+  }
+  function renderRetainedSends() {
+    const retained = [...pendingSends.values()].filter(message => !chatFile || message.chat_file !== chatFile);
+    el("retained-sends").hidden = retained.length === 0;
+    el("retained-summary").textContent = `${retained.length} unconfirmed message${retained.length === 1 ? "" : "s"} retained outside this chat`;
+    const body = el("retained-messages");
+    const signature = JSON.stringify(retained.map(message => [message.id, message.chat_file, message.workspace_path, message.markdown]));
+    if (body._signature === signature) return;
+    body._signature = signature; body.replaceChildren();
+    for (const message of retained) {
+      body.append(make("p", "", message.workspace_path || message.chat_file || "Original destination unknown"), make("p", "", message.markdown));
+    }
+    if (retained.length) body.append(make("p", "", "Switch back to the original workspace to check or retry these messages. They will not be sent to this workspace."));
+  }
+  function setAvailable(value) {
+    if (tornDown || available === value) return;
+    // A late callback must not resume polling or change a newer context's state.
+    generation++;
+    available = value; refreshing = false; sending = false; loadingOlder = false;
+    clearTimeout(pollTimer); clearTimeout(messageClockTimer); clearTimeout(presenceTimer);
+    resizeInput();
+    if (value) { revision = null; void refresh(); }
+  }
+  function setWorkspace(path, enabled = true) {
+    if (tornDown) return;
+    path = typeof path === "string" && path ? path : null;
+    if (path === workspace) { setAvailable(Boolean(path) && enabled); return; }
+    generation++; workspace = path; available = Boolean(path) && enabled;
+    clearTimeout(pollTimer); clearTimeout(messageClockTimer); clearTimeout(presenceTimer);
+    refreshing = false; sending = false; loadingOlder = false;
+    chatFile = null; revision = null; before = null; hasMore = false; failures = 0; snapshotEnd = 0;
+    delivered = 0; readThrough = 0; lastAgentCall = null; totalToolCalls = null; clockOffset = 0;
+    records.clear();
+    for (const node of nodes.values()) node.remove();
+    for (const node of markerNodes.values()) node.remove();
+    nodes.clear(); markerNodes.clear();
+    list.scrollTop = 0;
+    const label = el("workspace-label"); label.hidden = !path; label.textContent = path || "";
+    el("empty").textContent = path ? "Loading this workspace's chat..." : "Select a workspace above to start this conversation's chat.";
+    status(path ? "Loading chat..." : "Select a workspace above.", false, "normal");
+    updatePresence(); updateToolTotal(); render(); resizeInput(); save();
+    if (available) void refresh();
   }
   function schedule() {
     clearTimeout(pollTimer);
@@ -407,33 +478,44 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
   }
   async function refresh() {
     if (!available || refreshing || tornDown || collapsed || !visible || document.hidden) return;
+    const origin = generation;
     refreshing = true;
     try {
-      applyPage(await call("chat_ui_state", revision ? { revision } : {})); failures = 0;
+      const page = await call("chat_ui_state", { ...requestDestination(), ...(revision ? { revision } : {}) });
+      if (!currentGeneration(origin)) return;
+      applyPage(page); failures = 0;
       if (statusKind !== "action") status("Enter to send. Shift + Enter for a new line.", false, "normal");
-    } catch (error) { failures++; status(error.message || "Connection unavailable. Messages are retained.", true, "connection"); }
-    finally { refreshing = false; schedule(); }
+    } catch (error) { if (currentGeneration(origin)) { failures++; status(error.message || "Connection unavailable. Messages are retained.", true, "connection"); workspaceMismatch(error); } }
+    finally { if (currentGeneration(origin)) { refreshing = false; schedule(); } }
   }
   async function deliver(message) {
-    if (!available || sending || tornDown) return;
+    if (!available || !chatFile || message.chat_file !== chatFile || sending || tornDown) return;
+    const origin = generation;
     sending = true; message.failed = false; message.pending = true;
     pendingSends.set(message.id, message); render(); resizeInput(); save();
     try {
-      const payload = await call("chat_ui_send", { request_id:message.id, message:message.markdown });
+      const args = { request_id:message.id, message:message.markdown, expected_chat_file:message.chat_file };
+      if (message.workspace_path) args.expected_workspace = message.workspace_path;
+      const payload = await call("chat_ui_send", args);
       if (payload.sent?.id !== message.id || !Number.isSafeInteger(payload.sent.end)) throw new Error("The send receipt was incomplete. Retry uses the same message ID.");
       pendingSends.delete(message.id);
+      if (!currentGeneration(origin)) return;
       if (!records.has(message.id)) records.set(message.id, { ...message, pending:false, failed:false, start:payload.sent.end - 1, end:payload.sent.end, created_at_ms:payload.sent.created_at_ms, tool_call_count:payload.sent.tool_call_count ?? null });
       status("Saved to CHAT.md. The agent receives it on a tool response."); revision = null;
       void refresh();
     } catch (error) {
-      if (!records.has(message.id)) { message.failed = true; message.pending = false; pendingSends.set(message.id, message); }
-      status(error.message || "Message delivery is unconfirmed. Retry without duplicating it.", true);
-    } finally { sending = false; render(); resizeInput(); save(); }
+      if (!currentGeneration(origin) || !records.has(message.id)) { message.failed = true; message.pending = false; pendingSends.set(message.id, message); }
+      if (currentGeneration(origin)) { status(error.message || "Message delivery is unconfirmed. Retry without duplicating it.", true); workspaceMismatch(error); }
+    } finally {
+      if (currentGeneration(origin)) { sending = false; render(); resizeInput(); }
+      else if (!tornDown) renderRetainedSends();
+      save();
+    }
   }
   el("composer").addEventListener("submit", event => {
     event.preventDefault();
-    if (!available || sending || !input.value.trim()) return;
-    const message = { id:crypto.randomUUID(), role:"user", markdown:input.value, pending:true, failed:false, created_at_ms:Date.now(), tool_call_count:totalToolCalls };
+    if (!available || !chatFile || sending || !input.value.trim()) return;
+    const message = { id:crypto.randomUUID(), role:"user", markdown:input.value, pending:true, failed:false, created_at_ms:Date.now(), tool_call_count:totalToolCalls, chat_file:chatFile, workspace_path:workspace || null };
     input.value = ""; resizeInput(); void deliver(message); input.focus(); list.scrollTop = list.scrollHeight;
   });
   input.addEventListener("keydown", event => {
@@ -441,12 +523,17 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
   });
   input.addEventListener("input", () => { resizeInput(); clearTimeout(saveTimer); saveTimer = setTimeout(save, 150); });
   older.addEventListener("click", async () => {
-    if (loadingOlder || before === null) return;
+    if (!available || loadingOlder || before === null) return;
+    const origin = generation;
     loadingOlder = true; older.disabled = true;
     const height = list.scrollHeight, top = list.scrollTop;
-    try { applyPage(await call("chat_ui_state", { before }), true); list.scrollTop = top + list.scrollHeight - height; }
-    catch (error) { status(error.message, true); }
-    finally { loadingOlder = false; older.disabled = false; }
+    try {
+      const page = await call("chat_ui_state", { before, ...requestDestination() });
+      if (!currentGeneration(origin)) return;
+      applyPage(page, true); list.scrollTop = top + list.scrollHeight - height;
+    }
+    catch (error) { if (currentGeneration(origin)) { status(error.message, true); workspaceMismatch(error); } }
+    finally { if (currentGeneration(origin)) { loadingOlder = false; older.disabled = false; } }
   });
   function setCollapsed() {
     el("panel").hidden = collapsed;
@@ -505,13 +592,8 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
     .catch(() => { if (!window.openai?.callTool) status("This host has not connected the chat widget.", true); });
   if (!bridge && window.openai?.callTool) void refresh();
   return {
-    setAvailable(value) {
-      const changed = available !== value;
-      available = value;
-      if (!value) { clearTimeout(pollTimer); clearTimeout(messageClockTimer); totalToolCalls = null; updateToolTotal(); el("empty").textContent = "Select a workspace above to start this conversation's chat."; }
-      resizeInput();
-      if (changed && value) { revision = null; void refresh(); }
-    },
+    setAvailable,
+    setWorkspace,
     setTheme:theme,
     close() { teardown(); intersection?.disconnect(); resize?.disconnect(); }
   };

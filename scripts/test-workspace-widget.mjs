@@ -5,7 +5,7 @@ import test from "node:test";
 import { setupChatHtml } from "./chat-widget-source.mjs";
 const { chromium, webkit } = createRequire(import.meta.url)("playwright");
 const META = "io.github.devnoname120/codexify/markdown-chat";
-const VERSION = "1.5.3+markdown-chat-v4+workspace-v1";
+const VERSION = "1.5.3+markdown-chat-v5+workspace-v1";
 
 async function screenshot(page, name) {
   if (!process.env.CODEXIFY_WORKSPACE_SCREENSHOTS) return;
@@ -46,7 +46,7 @@ async function fixture(browser, options = {}) {
       state.project = { status:"unselected", selectionAvailable:true, accessRoot:"/projects", activePath:null, sourcePath:null };
       return { structuredContent:{ content:"Workspace selection is open" } };
     }
-    if (name === "chat_ui_state") return { _meta:{ [META]:{ chat_file:`${state.project.activePath}/CHAT.md`, revision:"1", messages:[], read_through:0, delivered_through:0, last_agent_call_at_ms:Date.now(), server_time_ms:Date.now(), total_tool_calls:1, has_more:false, before:null } } };
+    if (name === "chat_ui_state") return { _meta:{ [META]:{ chat_file:`${state.project.activePath}/CHAT.md`, workspace_path:state.project.activePath, revision:"1", messages:[{ id:"welcome", role:"agent", markdown:`Chat for ${state.project.activePath}`, start:10, end:100, tool_call_count:1 }], read_through:0, delivered_through:0, last_agent_call_at_ms:Date.now(), server_time_ms:Date.now(), total_tool_calls:1, has_more:false, before:null } } };
     throw new Error(`Unexpected tool ${name}`);
   });
   await page.exposeFunction("hostLink", href => { links.push(href); return {}; });
@@ -92,6 +92,7 @@ for (const [name, engine] of [["chromium", chromium], ["webkit", webkit]]) {
       await page.getByRole("button", { name:"Switch to another project", exact:true }).waitFor();
       const selected = calls.filter(call => /select_project|set_project_root/.test(call.name)).at(-1);
       assert.deepEqual(selected.args, { path:"https://github.com/example/demo/pull/45", createWorktree:false });
+      await page.locator("#markdown-chat-host").getByText("Chat for /projects/demo", { exact:true }).waitFor();
       await page.locator("#markdown-chat-host #draft").fill("Keep this draft while choosing");
       await page.getByRole("button", { name:"Switch to another project", exact:true }).click();
       await github.waitFor();
@@ -102,6 +103,9 @@ for (const [name, engine] of [["chromium", chromium], ["webkit", webkit]]) {
       await page.getByRole("button", { name:"Use worktree earlier-fix", exact:true }).click();
       await page.getByRole("button", { name:"Switch to another project", exact:true }).waitFor();
       assert.equal(await page.locator("#markdown-chat-host #draft").inputValue(), "Keep this draft while choosing");
+      await page.locator("#markdown-chat-host").getByText("Chat for /worktrees/earlier/demo", { exact:true }).waitFor({ timeout:8000 });
+      assert.equal(await page.locator("#markdown-chat-host #status.error").count(), 0);
+      assert.equal(await page.locator("#markdown-chat-host").getByText("Chat for /projects/demo", { exact:true }).count(), 0);
       assert.deepEqual(calls.find(call => call.name === "setup_ui_reuse_worktree").args, { path:"demo", worktreePath:"/worktrees/earlier/demo" });
       assert.deepEqual(f.errors, []);
       assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));

@@ -1,4 +1,190 @@
 #[tokio::test]
+async fn markdown_chat_workspace_actions_keep_messages_and_receipts_in_the_selected_transcript() {
+    for stable in [true, false] {
+        let root = tempfile::tempdir().unwrap();
+        let projects = root.path().join("projects");
+        for name in ["a", "b"] {
+            std::fs::create_dir_all(projects.join(name)).unwrap();
+        }
+        let mut config = crate::config::default_config(projects);
+        config.multi_project = true;
+        config.markdown_chat.enabled = true;
+        config.memory.dir = Some(root.path().join("memory").display().to_string());
+        config.worktrees.mode = crate::types::WorktreeMode::Never;
+        let mut handler = handler_with_tools(
+            root.path(),
+            crate::registry::load_tools_for_config(&config),
+            crate::types::ToolLogLevel::Info,
+        );
+        handler.config = Arc::new(config);
+        let (server, client_transport) = tokio::io::duplex(128 * 1024);
+        let task = tokio::spawn(async move {
+            handler
+                .serve(server)
+                .await
+                .unwrap()
+                .waiting()
+                .await
+                .unwrap()
+        });
+        let client = ().serve(client_transport).await.unwrap();
+        let request = |name: &str, args: Value| {
+            let mut r = CallToolRequestParams::new(name.to_owned())
+                .with_arguments(args.as_object().unwrap().clone());
+            if stable {
+                r.meta =
+                    Some(serde_json::from_value(json!({"openai/session":"chat-rebind"})).unwrap());
+            }
+            r
+        };
+        let payload = |result: &rmcp::model::CallToolResult| {
+            result.meta.as_ref().unwrap()[crate::markdown_chat_ui::CHAT_WIDGET_META].clone()
+        };
+        let mut previous: Option<(String, Value)> = None;
+        for name in ["a", "b", "a"] {
+            if let Some((path, _)) = &previous {
+                let reset = client
+                    .call_tool(request(
+                        "setup_ui_switch_project",
+                        json!({"expectedPath":path}),
+                    ))
+                    .await
+                    .unwrap();
+                assert_ne!(reset.is_error, Some(true), "{reset:?}");
+            }
+            let selected = client
+                .call_tool(request(
+                    "setup_ui_select_project",
+                    json!({"path":name,"createWorktree":false}),
+                ))
+                .await
+                .unwrap();
+            assert_ne!(selected.is_error, Some(true), "{selected:?}");
+            let path = selected.structured_content.unwrap()["active_root"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            let state = client
+                .call_tool(request("chat_ui_state", json!({})))
+                .await
+                .unwrap();
+            let page = payload(&state);
+            let chat = page["chat_file"].as_str().unwrap();
+            let destination = json!({"expected_workspace":path,"expected_chat_file":chat});
+
+            let missing = client
+                .call_tool(request(
+                    "chat_ui_send",
+                    json!({"request_id":"old-widget","message":"Do not route implicitly"}),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(
+                missing.is_error,
+                Some(true),
+                "A stale widget must not send without a destination: {missing:?}"
+            );
+            assert_eq!(page["workspace_path"], path);
+            if let Some((old_path, old_page)) = &previous {
+                assert_ne!(old_page["chat_file"], page["chat_file"]);
+                let stale = json!({"expected_workspace":old_path,"expected_chat_file":old_page["chat_file"],"request_id":"stale-send","message":"Must stay out"});
+                let rejected = client
+                    .call_tool(request("chat_ui_send", stale))
+                    .await
+                    .unwrap();
+                assert_eq!(rejected.is_error, Some(true), "{rejected:?}");
+                assert_eq!(payload(&rejected)["workspace_changed"], true);
+                let rejected = client.call_tool(request("chat_ui_state", json!({"expected_workspace":old_path,"expected_chat_file":old_page["chat_file"],"before":999999}))).await.unwrap();
+                assert_eq!(rejected.is_error, Some(true), "{rejected:?}");
+                let rejected = client.call_tool(request("chat_ui_file", json!({"expected_workspace":old_path,"expected_chat_file":old_page["chat_file"],"href":"notes.txt"}))).await.unwrap();
+                assert_eq!(rejected.is_error, Some(true), "{rejected:?}");
+            }
+            let brief = client
+                .call_tool(request("get_agent_brief", json!({})))
+                .await
+                .unwrap();
+            assert_ne!(brief.is_error, Some(true), "{brief:?}");
+            let message = format!(
+                "Instruction for {name}: {}",
+                "x".repeat(if name == "a" { 1024 } else { 1 })
+            );
+            let mut send = destination.clone();
+            send["request_id"] = json!(format!("message-{name}"));
+            send["message"] = json!(message);
+            let receipt = client
+                .call_tool(request("chat_ui_send", send.clone()))
+                .await
+                .unwrap();
+            assert_ne!(receipt.is_error, Some(true), "{receipt:?}");
+            let end = payload(&receipt)["sent"]["end"].as_u64().unwrap();
+            let polled = payload(
+                &client
+                    .call_tool(request("chat_ui_state", destination.clone()))
+                    .await
+                    .unwrap(),
+            );
+            assert!(
+                polled["messages"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|row| row["markdown"] == message)
+            );
+            assert!(
+                !polled["messages"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|row| row["markdown"] == "Must stay out")
+            );
+            if name == "b" {
+                assert!(polled["read_through"].as_u64().unwrap() < end);
+                assert!(polled["delivered_through"].as_u64().unwrap() < end);
+            }
+            client
+                .call_tool(request("clock_curr_time", json!({})))
+                .await
+                .unwrap();
+            let delivered = payload(
+                &client
+                    .call_tool(request("chat_ui_state", destination.clone()))
+                    .await
+                    .unwrap(),
+            );
+            assert_eq!(delivered["delivered_through"], end);
+            let read = client
+                .call_tool(request("chat_read", json!({})))
+                .await
+                .unwrap();
+            assert_ne!(read.is_error, Some(true), "{read:?}");
+            let read = payload(
+                &client
+                    .call_tool(request("chat_ui_state", destination))
+                    .await
+                    .unwrap(),
+            );
+            assert!(read["read_through"].as_u64().unwrap() >= end);
+            let reply = client
+                .call_tool(request(
+                    "chat_write",
+                    json!({"message":format!("Reply for {name}")}),
+                ))
+                .await
+                .unwrap();
+            assert_ne!(reply.is_error, Some(true), "{reply:?}");
+            let retry = client
+                .call_tool(request("chat_ui_send", send))
+                .await
+                .unwrap();
+            assert_eq!(payload(&retry)["sent"], payload(&receipt)["sent"]);
+            previous = Some((path, page));
+        }
+        client.cancel().await.unwrap();
+        task.await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn workspace_picker_wait_and_switch_require_brief_without_touching_old_files() {
     for stable in [true, false] {
         let root = tempfile::tempdir().unwrap();

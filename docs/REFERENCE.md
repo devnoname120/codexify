@@ -1895,8 +1895,8 @@ not post a new ChatGPT message, consume instructions, or change agent presence.
 Set `uiWidgets` to `false` to keep the three agent chat tools and file-based
 communication but disable the cards and their app-only actions. Refresh the
 connector and start a new conversation after upgrading from the earlier chat
-widget schema (`+markdown-chat`, `+markdown-chat-v2`, or `+markdown-chat-v3` to
-`+markdown-chat-v4`). Already mounted older
+widget schema (`+markdown-chat` through `+markdown-chat-v4` to
+`+markdown-chat-v5`). Already mounted older
 cards cannot be removed by the server; new write/wait calls no longer create
 them once the host uses the new tool metadata. The feature remains disabled by
 default; installation alone does not enable it.
@@ -2507,6 +2507,22 @@ and directs the agent to reload AGENTS.md, environment, skills and saved state.
 This also works without Markdown chat. A pending `chat_await` wakes on the switch.
 The chat panel remains mounted and preserves an unsent draft; transcripts stay
 in their existing per-workspace, per-conversation metadata locations.
+
+The panel tracks the actual selected workspace, not only whether one is selected.
+A changed workspace resets history, pagination, receipt offsets, and counters
+before loading its transcript. The workspace path is shown in the chat header.
+Late requests from a previous context cannot repaint the panel, including after
+a rapid A → B → A switch. Theme, collapse state, and the composer draft remain.
+
+Private chat actions compare `expected_workspace` and `expected_chat_file` with
+the server-resolved destination; neither value is an arbitrary path selector.
+Sends and file actions require `expected_chat_file` in multi-project mode, so
+older mounted cards must be reloaded. Messages accepted for the previous workspace
+stay there. Failed or unconfirmed sends retain their original destination and
+request ID; they appear under a retained-messages section in other workspaces
+and can be checked or retried after returning. They are never automatically
+resent to the new workspace. Legacy pending messages with no known destination
+are retained for manual copying rather than assigned a guessed destination.
 
 ### Tunnel-scoped connector schema status
 

@@ -678,11 +678,13 @@ dialog.refresh-popover::backdrop { background:rgb(0 0 0 / .48); }
       const scope = chatHost.attachShadow({ mode:"open" });
       scope.append(template.content.cloneNode(true));
       root.after(chatHost);
-      chatController = window.mountCodexifyChat(scope, { callTool, openLink, downloadFile, reportSize:scheduleSizeReport });
+      chatController = window.mountCodexifyChat(scope, { callTool, openLink, downloadFile, reportSize:scheduleSizeReport, refreshWorkspace:() => { lastStatusCheckAt = 0; return refreshStatus(); } });
     }
     chatHost.hidden = false;
     chatController.setTheme({ theme:document.documentElement.dataset.theme || window.openai?.theme });
-    chatController.setAvailable(["selected", "without_project", "static"].includes(currentData.project?.status));
+    const selected = ["selected", "without_project", "static"].includes(currentData.project?.status);
+    if (selected && !currentData.project?.activePath) chatController.setAvailable(!projectSelecting);
+    else chatController.setWorkspace(selected ? currentData.project.activePath : null, !projectSelecting);
   }
 
   async function downloadFile(file) {

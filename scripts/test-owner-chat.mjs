@@ -73,6 +73,7 @@ test(`${engineName}: standalone owner view restores its URL selection`, { timeou
     assert.equal(new URL(page.url()).hash, "#test-token");
     const chat = page.locator("#chat-host").locator("div").first().locator("#draft");
     await chat.fill("Please run the test suite");
+    await page.locator("#chat-host #send:enabled").waitFor();
     await chat.press("Enter");
     await page.locator("#chat-host").getByText("Please run the test suite").waitFor();
     if (process.env.CODEXIFY_WORKSPACE_SCREENSHOTS) {

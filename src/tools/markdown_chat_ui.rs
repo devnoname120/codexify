@@ -18,6 +18,8 @@ pub enum ChatUiTool {
 #[serde(deny_unknown_fields)]
 struct FileArgs {
     href: String,
+    expected_workspace: Option<String>,
+    expected_chat_file: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -25,6 +27,8 @@ struct FileArgs {
 struct SendArgs {
     request_id: String,
     message: String,
+    expected_workspace: Option<String>,
+    expected_chat_file: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -34,6 +38,35 @@ struct StateArgs {
     before: Option<u64>,
     #[serde(default)]
     revision: Option<String>,
+    expected_workspace: Option<String>,
+    expected_chat_file: Option<String>,
+}
+
+fn check_destination(
+    config: &AppConfig,
+    chat_file: &std::path::Path,
+    expected_workspace: Option<&str>,
+    expected_chat_file: Option<&str>,
+    requires_destination: bool,
+) -> Result<(), Box<ToolResult>> {
+    let missing = config.multi_project && requires_destination && expected_chat_file.is_none();
+    let changed = expected_workspace
+        .is_some_and(|path| std::path::Path::new(path) != config.work_dir)
+        || expected_chat_file.is_some_and(|path| std::path::Path::new(path) != chat_file);
+    if !missing && !changed {
+        return Ok(());
+    }
+    let mut result = ToolResult::error(if missing {
+        "Reload the chat widget before sending or downloading: it must identify the transcript currently displayed. No message was appended or file resolved."
+    } else {
+        "Workspace changed. Refresh the selected workspace before retrying. No message was appended or file resolved."
+    });
+    result.meta = Some(
+        serde_json::from_value(json!({CHAT_WIDGET_META:{"workspace_changed":true}}))
+            .expect("chat context metadata"),
+    );
+    result.audit.sensitive_output = true;
+    Err(Box::new(result))
 }
 
 fn private_result(value: Value) -> ToolResult {
@@ -83,7 +116,7 @@ impl Tool for ChatUiTool {
         )
     }
     fn input_schema(&self) -> Value {
-        match self {
+        let mut schema = match self {
             Self::Send => json!({"type":"object", "properties":{
                 "request_id":{"type":"string", "pattern":"^[A-Za-z0-9_-]{1,80}$"},
                 "message":{"type":"string", "minLength":1, "writeOnly":true}
@@ -95,7 +128,21 @@ impl Tool for ChatUiTool {
             Self::File => {
                 json!({"type":"object", "properties":{"href":{"type":"string", "minLength":1, "maxLength":4096}}, "required":["href"], "additionalProperties":false})
             }
+        };
+        for (name, description) in [
+            (
+                "expected_workspace",
+                "The selected workspace displayed by setup. Compared with the server-resolved workspace; never used to select a path.",
+            ),
+            (
+                "expected_chat_file",
+                "The chat_file returned by the displayed chat state. Required for sends and file actions in multi-project mode; never used to select a transcript.",
+            ),
+        ] {
+            schema["properties"][name] =
+                json!({"type":"string","minLength":1,"description":description});
         }
+        schema
     }
     fn output_schema(&self) -> Option<Value> {
         Some(text_output_schema())
@@ -125,10 +172,23 @@ impl Tool for ChatUiTool {
         };
         match self {
             Self::File => {
-                let FileArgs { href } = match parse_tool_args(args) {
+                let FileArgs {
+                    href,
+                    expected_workspace,
+                    expected_chat_file,
+                } = match parse_tool_args(args) {
                     Ok(args) => args,
                     Err(error) => return *error,
                 };
+                if let Err(error) = check_destination(
+                    config,
+                    chat.path(),
+                    expected_workspace.as_deref(),
+                    expected_chat_file.as_deref(),
+                    true,
+                ) {
+                    return *error;
+                }
                 match context
                     .artifact_egress
                     .chat_file_link(&config.work_dir, &href, &context.cancellation)
@@ -148,20 +208,45 @@ impl Tool for ChatUiTool {
                 let SendArgs {
                     request_id,
                     message,
+                    expected_workspace,
+                    expected_chat_file,
                 } = match parse_tool_args(args) {
                     Ok(args) => args,
                     Err(error) => return *error,
                 };
+                if let Err(error) = check_destination(
+                    config,
+                    chat.path(),
+                    expected_workspace.as_deref(),
+                    expected_chat_file.as_deref(),
+                    true,
+                ) {
+                    return *error;
+                }
                 match chat.append_user(request_id, message).await {
                     Ok(receipt) => private_result(json!({"sent":receipt})),
                     Err(error) => ToolResult::error(error),
                 }
             }
             Self::State => {
-                let StateArgs { before, revision } = match parse_tool_args(args) {
+                let StateArgs {
+                    before,
+                    revision,
+                    expected_workspace,
+                    expected_chat_file,
+                } = match parse_tool_args(args) {
                     Ok(args) => args,
                     Err(error) => return *error,
                 };
+                if let Err(error) = check_destination(
+                    config,
+                    chat.path(),
+                    expected_workspace.as_deref(),
+                    expected_chat_file.as_deref(),
+                    false,
+                ) {
+                    return *error;
+                }
                 if let Some(activity) = context
                     .markdown_chat
                     .agent_activity(context.conversation.as_ref(), session)
@@ -170,7 +255,11 @@ impl Tool for ChatUiTool {
                     return ToolResult::error(error);
                 }
                 match chat.widget_page(before, revision).await {
-                    Ok(page) => private_result(serde_json::to_value(page).expect("chat page")),
+                    Ok(page) => {
+                        let mut page = serde_json::to_value(page).expect("chat page");
+                        page["workspace_path"] = json!(config.work_dir);
+                        private_result(page)
+                    }
                     Err(error) => ToolResult::error(error),
                 }
             }

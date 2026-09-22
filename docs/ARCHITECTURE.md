@@ -526,7 +526,7 @@ receive an `upstream_result` envelope rather than corrupting the original schema
 Text mirrors preserve visibility in hosts that ignore structured output. Disabled
 installations retain the original advertised schemas and do not expose chat tools.
 
-Schema revisions use an explicit `+markdown-chat-v4` suffix only when enabled, not a
+Schema revisions use an explicit `+markdown-chat-v5` suffix only when enabled, not a
 schema fingerprint. Connector reloads record the version actually advertised by
 the current configuration. A persisted conversation baseline supplies toggle
 warnings when discovery identity is absent; that baseline is not evidence of a
@@ -535,7 +535,7 @@ refreshing live status, so a same-version enable/disable is not mistaken for an
 up-to-date schema. Host cancellation and model-imposed limits remain outside the
 communication subsystem's control.
 
-The optional `setup-chat/v3` resource is linked only by `setup`, combining the
+The optional `setup-chat/v5` resource is linked only by `setup`, combining the
 setup UI with one chat panel in a shadow root. The panel lives outside the setup
 controls' rerendered root; both use the setup bridge without a second handshake.
 The old standalone chat resource remains readable for existing cards, but no
@@ -544,7 +544,16 @@ reference-free `setup` variant exposes the same status and panel without changin
 authorization behavior on protected servers.
 
 App-only `chat_ui_send` and `chat_ui_state` share the same resolved
-channel and file lock; the UI never supplies a path or conversation identity.
+channel and file lock. Optional expected workspace/transcript paths are comparison
+preconditions, not selectors: the server always resolves the destination from the
+authenticated conversation. Multi-project sends and file actions require the
+expected transcript so an older card cannot silently target a newly selected
+project. State responses include the resolved workspace path in private metadata.
+The setup controller passes the selected workspace to the mounted chat panel.
+Workspace transitions clear transcript-specific data while preserving the draft
+and per-destination pending sends. A local request generation discards late reads,
+receipts, and download callbacks from older contexts. Resets never move or rewrite
+transcripts; returning to a workspace reloads its persisted chat and receipts.
 The common model-visible dispatch boundary assigns conversation-scoped activity
 sequence numbers before execution. Cursor persistence merges those sequences by
 per-process epoch, making retries and out-of-order persistence idempotent while

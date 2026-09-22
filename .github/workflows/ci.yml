@@ -109,7 +109,7 @@ jobs:
         run: node --test scripts/test-markdown-chat-widget.mjs
 
       - name: Test workspace picker, reuse, switching, refresh dialog, and owner sidebar
-        run: node --test --test-concurrency=1 scripts/test-workspace-widget.mjs scripts/test-workspace-picker.mjs scripts/test-owner-chat.mjs
+        run: node --test --test-concurrency=1 scripts/test-workspace-widget.mjs scripts/test-workspace-picker.mjs scripts/test-owner-chat.mjs scripts/test-chat-workspace-switch.mjs
 
   service-platforms:
     name: Service integration (${{ matrix.os }})

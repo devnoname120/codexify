@@ -26,7 +26,7 @@ pub(crate) fn schema_version(config: &AppConfig) -> String {
 pub(crate) fn version_for_markdown_chat(enabled: bool) -> String {
     let version = env!("CARGO_PKG_VERSION");
     if enabled {
-        format!("{version}+markdown-chat-v4")
+        format!("{version}+markdown-chat-v5")
     } else {
         version.to_string()
     }

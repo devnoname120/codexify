@@ -429,10 +429,15 @@ async fn markdown_chat_private_selection_does_not_deliver_or_fake_activity() {
         selected.structured_content.as_ref().unwrap()["active_root"],
         json!(std::fs::canonicalize(&project).unwrap())
     );
+    let initial = client
+        .call_tool(request("chat_ui_state", json!({})))
+        .await
+        .unwrap();
+    let initial = &initial.meta.as_ref().unwrap()[crate::markdown_chat_ui::CHAT_WIDGET_META];
     let sent = client
         .call_tool(request(
             "chat_ui_send",
-            json!({"request_id":"private-send", "message":"Only the agent should consume this"}),
+            json!({"request_id":"private-send", "message":"Only the agent should consume this", "expected_chat_file":initial["chat_file"], "expected_workspace":initial["workspace_path"]}),
         ))
         .await
         .unwrap();

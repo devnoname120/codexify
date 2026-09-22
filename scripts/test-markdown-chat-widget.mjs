@@ -173,6 +173,63 @@ async function expectTimeline(frame, expected) {
 }
 
 for (const [engineName, engine] of [["Chromium", chromium], ["WebKit", webkit]]) {
+  test(`${engineName}: composer sizing`, { timeout:180000 }, async t => {
+    const browser = await engine.launch();
+    try {
+      for (const width of [370, 440, 640]) {
+        for (const combined of [false, true]) {
+          await t.test(`composer scrolls only at its height limit (${width}px, ${combined ? "setup" : "standalone"})`, async t => {
+            const backend = new ChatBackend();
+            const { page, frames:[frame], errors } = await mount(browser, backend, { width, combined });
+            t.after(() => page.close());
+            const input = frame.getByRole("textbox", { name:"Message the agent" });
+            const geometry = () => input.evaluate(node => {
+              const style = getComputedStyle(node);
+              node.scrollTop = node.scrollHeight;
+              return {
+                height:node.getBoundingClientRect().height,
+                limit:parseFloat(style.maxHeight),
+                minimum:parseFloat(style.lineHeight) + parseFloat(style.paddingTop) + parseFloat(style.paddingBottom),
+                clientHeight:node.clientHeight, scrollHeight:node.scrollHeight, scrollTop:node.scrollTop
+              };
+            });
+            const fits = async label => {
+              const box = await geometry();
+              assert(box.clientHeight >= Math.floor(box.minimum), `${label}: line is clipped ${JSON.stringify(box)}`);
+              assert.equal(box.scrollHeight, box.clientHeight, `${label}: unexpected overflow ${JSON.stringify(box)}`);
+              assert.equal(box.scrollTop, 0, `${label}: the composer must not scroll`);
+              return box.height;
+            };
+            const emptyHeight = await fits("initial empty field");
+            await input.fill("A short draft");
+            assert.equal(await fits("single line"), emptyHeight);
+            await input.fill("First line\nSecond line\nThird line");
+            assert(await fits("three lines") > emptyHeight);
+            await input.fill("A draft with enough words to wrap naturally on a narrow screen without reaching the composer height limit.");
+            await fits("wrapped draft");
+            const longDraft = Array.from({ length:24 }, (_, index) => `Line ${index + 1}`).join("\n");
+            await input.fill(longDraft);
+            const long = await geometry();
+            assert.equal(long.height, long.limit);
+            assert(long.scrollHeight > long.clientHeight);
+            assert(long.scrollTop > 0, "Long drafts must remain scrollable");
+            await input.fill("Short again");
+            assert.equal(await fits("shortened draft"), emptyHeight);
+            await input.fill("");
+            assert.equal(await fits("cleared draft"), emptyHeight);
+            await input.fill(longDraft);
+            await frame.getByRole("button", { name:"Send message", exact:true }).click();
+            await frame.getByRole("img", { name:"Saved to CHAT.md", exact:true }).waitFor();
+            assert.equal(await input.inputValue(), "");
+            assert.equal(await fits("empty after sending"), emptyHeight);
+            assert.equal(backend.messages.length, 1);
+            assert.equal(backend.messages[0].markdown, longDraft);
+            assert.deepEqual(errors, []);
+          });
+        }
+      }
+    } finally { await browser.close(); }
+  });
   test(`${engineName}: tool-call chronology`, { timeout:120000 }, async t => {
     const browser = await engine.launch();
     try {
