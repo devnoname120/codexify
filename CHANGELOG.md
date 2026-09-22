@@ -6,6 +6,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-09-23
+
 ### Added
 
 - `experimental.agentTickets` (disabled by default) prevents stale agent branches
@@ -29,8 +31,28 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   restarts. The refresh action opens a dimmed instructions popover with a
   connector-settings deep link and the existing text fragment.
 
+### Changed
+
+- Workspace-aware chat widgets use a new schema. After upgrading, refresh the
+  connector tools and reload older chat cards before sending messages or downloading files.
+- `chat_await` defaults to a 115-second wait rather than 270 seconds.
+- The agent brief is normally loaded once per conversation/workspace and reloaded
+  after relevant instruction changes or loss of its context, not for every task.
+
 ### Fixed
 
+- Skill discovery honors `policy.allow_implicit_invocation` from `agents/openai.yaml`.
+  Explicit-only skills stay available through `skills_list` and `skills_read` without
+  entering the automatic brief; full trigger descriptions are preserved.
+- Opt-in Claude plugin discovery uses registered installation paths and applicable
+  project scopes instead of offering stale cached plugins or guessing their version.
+- MCP catalogue schemas avoid host-incompatible regular expressions while keeping
+  argument validation in the tool handlers.
+- Switching workspaces reconnects the existing chat panel to the selected
+  transcript without mixing history, receipts, or late responses. Unconfirmed
+  sends retain their original destination rather than moving to another project.
+- The chat composer accounts for its borders when sizing short drafts, avoiding
+  clipped text and an unnecessary scrollbar while preserving scrolling for long drafts.
 - The standalone owner-chat access key remains in the URL fragment across page
   load, conversation selection, browser navigation, and reload.
 - Chat tool-call markers remain above user messages sent after those calls;
