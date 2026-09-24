@@ -6,6 +6,23 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.6.1] - 2026-09-24
+
+### Changed
+
+- Agent chat changes to away after three minutes and offline after five minutes.
+  The same five-minute interval applies to offline notifications and agent-ticket
+  recovery. An expired chain accepts a missing or stale string ticket while an
+  in-flight call retains its exclusive reservation.
+
+### Fixed
+
+- Ticket rejections add a yellow warning between chat messages on every rejected
+  call, including in chats that previously showed a warning. Existing warnings
+  also render outside agent message bubbles.
+- Audit JSONL records ticket reservation decisions and successor handoffs,
+  including rejections before tool dispatch, without storing ticket values.
+
 ## [1.6.0] - 2026-09-23
 
 ### Added
