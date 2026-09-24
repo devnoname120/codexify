@@ -33,6 +33,10 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
 .message { max-width:92%; border-radius:13px; padding:10px 12px 6px; align-self:flex-start; background:var(--agent); min-width:75px; }
 .message.user { align-self:flex-end; background:var(--user); border-bottom-right-radius:4px; }
 .message.agent { border-bottom-left-radius:4px; }
+.warning-banner { align-self:stretch; min-width:0; background:#fff3c4; color:#694b00; border:1px solid #e8c75c; padding:9px 12px; border-radius:8px; }
+:root[data-theme="dark"] .warning-banner { background:#473a19; color:#ffe6a0; border-color:#96742b; }
+@media (prefers-color-scheme:dark) { :root:not([data-theme="light"]) .warning-banner { background:#473a19; color:#ffe6a0; border-color:#96742b; } }
+.warning-banner .markdown p { margin:0; }
 .tool-call-marker { align-self:center; margin:-7px 0; padding:0 6px; color:var(--muted); font-size:10px; line-height:1.25; white-space:nowrap; font-variant-numeric:tabular-nums; }
 .author { font-size:11px; font-weight:650; margin-bottom:3px; color:var(--muted); }
 .markdown { overflow-wrap:anywhere; min-width:0; }
@@ -215,8 +219,8 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
   function presenceDetails(lastCall, now) {
     if (!Number.isFinite(lastCall)) return { state:"offline", label:"offline", delay:null };
     const age = Math.max(0, now - lastCall);
-    if (age < 240000) return { state:"online", label:"online", delay:240000 - age };
-    if (age < 600000) return { state:"away", label:`last seen ${Math.floor(age / 60000)} mins ago`, delay:60000 - age % 60000 };
+    if (age < 180000) return { state:"online", label:"online", delay:180000 - age };
+    if (age < 300000) return { state:"away", label:`last seen ${Math.floor(age / 60000)} mins ago`, delay:60000 - age % 60000 };
     return { state:"offline", label:"offline", delay:null };
   }
   function toolCallLabel(count) { return `${count} tool call${count === 1 ? "" : "s"}`; }
@@ -354,14 +358,19 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
       latestMessageId = current === null ? null : message.id;
       let node = nodes.get(message.id);
       if (!node) {
-        node = make("article", "message " + message.role); node.dataset.messageId = message.id;
-        node.append(make("div", "author", message.role === "user" ? "You" : "Agent"), make("div", "markdown"), make("div", "receipt"));
+        node = make(message.role === "warning" ? "div" : "article", message.role === "warning" ? "warning-banner" : "message " + message.role); node.dataset.messageId = message.id;
+        if (message.role === "warning") {
+          node.setAttribute("role", "alert");
+          node.append(make("div", "markdown"));
+        } else {
+          node.append(make("div", "author", message.role === "user" ? "You" : "Agent"), make("div", "markdown"), make("div", "receipt"));
+        }
         nodes.set(message.id, node);
       }
       if (node._markdown !== message.markdown || node._generation !== generation) {
         const body = node.querySelector(".markdown"); body.replaceChildren(); markdown(body, message.markdown); node._markdown = message.markdown; node._generation = generation;
       }
-      receipt(node.querySelector(".receipt"), message);
+      if (message.role !== "warning") receipt(node.querySelector(".receipt"), message);
       if (previousNode.nextSibling !== node) list.insertBefore(node, previousNode.nextSibling);
       previousNode = node;
     }
@@ -407,7 +416,7 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
     if (!page.unchanged) {
       const gap = !history && snapshotEnd > 0 && page.has_more && page.messages?.[0]?.start > snapshotEnd;
       for (const message of page.messages || []) {
-        if (!Number.isSafeInteger(message.start) || !Number.isSafeInteger(message.end) || typeof message.id !== "string" || typeof message.markdown !== "string" || !["user", "agent"].includes(message.role) || (message.tool_call_count != null && (!Number.isSafeInteger(message.tool_call_count) || message.tool_call_count < 0))) throw new Error("Invalid chat message from connector.");
+        if (!Number.isSafeInteger(message.start) || !Number.isSafeInteger(message.end) || typeof message.id !== "string" || typeof message.markdown !== "string" || !["user", "agent", "warning"].includes(message.role) || (message.tool_call_count != null && (!Number.isSafeInteger(message.tool_call_count) || message.tool_call_count < 0))) throw new Error("Invalid chat message from connector.");
         const previous = records.get(message.id);
         if (!previous || message.end >= previous.end) records.set(message.id, message);
         pendingSends.delete(message.id);

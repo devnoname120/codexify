@@ -26,11 +26,11 @@ pub(crate) const INSTRUCTIONS: &str = concat!(
     "A ticket rejection means another branch may have claimed or advanced the chain, or a response was lost. ",
     "Inform the user without another tool call and stop this agent branch, even if other instructions require chat_write or chat_await. ",
     "Do not retry a rejection, guess, repeat setup, or recover tickets from logs, files, or another branch. ",
-    "After ten minutes without a completed ticketed call and with no call in flight, the next call can reclaim the chain with no ticket or a stale valid ticket. ",
+    "After five minutes without a completed ticketed call and with no call in flight, the next call can reclaim the chain with no ticket or a stale ticket. ",
     "Do not wait for expiry or retry on your own. Only resume after the user asks, or recover by starting a new conversation or disabling experimental.agentTickets."
 );
 pub(crate) const REJECTED: &str = "Ticket rejected; this call did not run. Another or duplicated agent may have claimed or advanced this conversation, or a response was lost. Stop this agent branch now, including chat_write/chat_await. Do not retry, guess, repeat setup, or retrieve tickets from logs or state. Inform the user of this warning without another tool call. Only the user may recover.";
-pub(crate) const WARNING: &str = "**Possible duplicate agent detected and blocked.** Codexify refused its tool call and instructed that branch to stop. This rejected call did not advance the active chain. A lost response or a parallel call can also cause this warning; Codexify cannot terminate the remote model or already-running commands.";
+pub(crate) const WARNING: &str = "Duplicate agent detected. Its tool call was terminated.";
 
 pub(crate) struct Ticket {
     value: String,
@@ -53,9 +53,46 @@ enum TicketState {
 pub(crate) struct TicketPermit {
     state: TicketState,
     next: String,
+    acceptance: &'static str,
+}
+
+#[derive(Debug)]
+pub(crate) struct TicketFailure {
+    reason: &'static str,
+    message: String,
+}
+
+impl TicketFailure {
+    fn rejected(reason: &'static str) -> Self {
+        Self {
+            reason,
+            message: REJECTED.into(),
+        }
+    }
+
+    fn state(error: impl std::fmt::Display) -> Self {
+        Self {
+            reason: "state_unavailable",
+            message: state_error(error),
+        }
+    }
+
+    pub(crate) fn reason(&self) -> &'static str {
+        self.reason
+    }
+}
+
+impl std::fmt::Display for TicketFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
 }
 
 impl TicketPermit {
+    pub(crate) fn acceptance(&self) -> &'static str {
+        self.acceptance
+    }
+
     pub(crate) async fn commit(
         self,
         cancellation: CancellationToken,
@@ -118,7 +155,7 @@ impl AgentTicketStore {
         conversation: Option<&ConversationIdentity>,
         session: &SessionState,
         supplied: Option<String>,
-    ) -> Result<TicketPermit, String> {
+    ) -> Result<TicketPermit, TicketFailure> {
         let cell = if let Some(identity) = conversation {
             if let Some(directory) = &self.directory {
                 let path = directory.join(format!("{}.ticket", identity.stable_key()));
@@ -126,23 +163,23 @@ impl AgentTicketStore {
                     reserve_file(&path, supplied.as_deref())
                 })
                 .await
-                .map_err(|error| {
-                    format!("Ticket state unavailable; this call did not run: {error}")
-                })?;
+                .map_err(TicketFailure::state)?;
             }
             let mut conversations = self
                 .conversations
                 .lock()
-                .map_err(|_| state_error("poisoned state"))?;
+                .map_err(|_| TicketFailure::state("poisoned state"))?;
             conversations.entry(identity.clone()).or_default().clone()
         } else {
             session.agent_ticket.clone()
         };
-        let current = cell.try_lock_owned().map_err(|_| REJECTED.to_string())?;
+        let current = cell
+            .try_lock_owned()
+            .map_err(|_| TicketFailure::rejected("in_flight"))?;
         let offline = current
             .as_ref()
             .is_some_and(|ticket| is_offline(ticket.last_activity));
-        let next = successor(
+        let (next, acceptance) = successor(
             current.as_ref().map(|ticket| ticket.value.as_str()),
             supplied.as_deref(),
             offline,
@@ -150,6 +187,7 @@ impl AgentTicketStore {
         Ok(TicketPermit {
             state: TicketState::Memory(current),
             next,
+            acceptance,
         })
     }
 
@@ -161,7 +199,8 @@ impl AgentTicketStore {
         supplied: Option<String>,
     ) -> Result<String, String> {
         self.reserve(conversation, session, supplied)
-            .await?
+            .await
+            .map_err(|error| error.to_string())?
             .commit(CancellationToken::new())
             .await
             .map(Option::unwrap)
@@ -189,49 +228,54 @@ fn successor(
     current: Option<&str>,
     supplied: Option<&str>,
     offline: bool,
-) -> Result<String, String> {
-    if current != supplied && !offline {
-        return Err(REJECTED.into());
-    }
+) -> Result<(String, &'static str), TicketFailure> {
+    let acceptance = match (current, supplied) {
+        (None, None) => "initial",
+        (Some(current), Some(supplied)) if current == supplied => "matched",
+        (Some(_), None) if offline => "reclaimed_missing",
+        (Some(_), Some(_)) if offline => "reclaimed_stale",
+        (Some(_), None) => return Err(TicketFailure::rejected("missing")),
+        _ => return Err(TicketFailure::rejected("mismatch")),
+    };
     loop {
         let mut bytes = [0u8; 6];
-        getrandom::getrandom(&mut bytes).map_err(state_error)?;
+        getrandom::getrandom(&mut bytes).map_err(TicketFailure::state)?;
         let next = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
         if Some(next.as_str()) != current {
-            return Ok(next);
+            return Ok((next, acceptance));
         }
     }
 }
 
-fn reserve_file(path: &Path, supplied: Option<&str>) -> Result<TicketPermit, String> {
+fn reserve_file(path: &Path, supplied: Option<&str>) -> Result<TicketPermit, TicketFailure> {
     std::fs::create_dir_all(path.parent().expect("ticket path has a parent"))
-        .map_err(state_error)?;
+        .map_err(TicketFailure::state)?;
     let mut file = OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
         .truncate(false)
         .open(path)
-        .map_err(state_error)?;
+        .map_err(TicketFailure::state)?;
     file.try_lock().map_err(|error| match error {
-        TryLockError::WouldBlock => REJECTED.to_string(),
-        error => state_error(error),
+        TryLockError::WouldBlock => TicketFailure::rejected("in_flight"),
+        error => TicketFailure::state(error),
     })?;
     let mut current = String::new();
     Read::by_ref(&mut file)
         .take(9)
         .read_to_string(&mut current)
-        .map_err(state_error)?;
+        .map_err(TicketFailure::state)?;
     if !current.is_empty() && !valid_ticket(&current) {
-        return Err(state_error("invalid stored ticket"));
+        return Err(TicketFailure::state("invalid stored ticket"));
     }
     let offline = !current.is_empty()
         && is_offline(
             file.metadata()
                 .and_then(|metadata| metadata.modified())
-                .map_err(state_error)?,
+                .map_err(TicketFailure::state)?,
         );
-    let next = successor(
+    let (next, acceptance) = successor(
         (!current.is_empty()).then_some(current.as_str()),
         supplied,
         offline,
@@ -239,6 +283,7 @@ fn reserve_file(path: &Path, supplied: Option<&str>) -> Result<TicketPermit, Str
     Ok(TicketPermit {
         state: TicketState::File(file),
         next,
+        acceptance,
     })
 }
 
@@ -248,7 +293,7 @@ pub(crate) fn take_ticket(args: &mut Value) -> Result<Option<String>, String> {
         .and_then(|args| args.remove("codexify_ticket"))
     {
         None => Ok(None),
-        Some(Value::String(ticket)) if valid_ticket(&ticket) => Ok(Some(ticket)),
+        Some(Value::String(ticket)) => Ok(Some(ticket)),
         _ => Err(REJECTED.into()),
     }
 }
@@ -293,7 +338,7 @@ fn contains_local_reference(value: &Value) -> bool {
 
 pub(crate) fn input_schema(mut original: Value) -> Value {
     let ticket = json!({
-        "type":"string", "minLength":8, "maxLength":8, "pattern":"^[A-Za-z0-9_-]{8}$",
+        "type":"string",
         "description":"Latest new_codexify_ticket; omit only for the first agent call."
     });
     if needs_arguments_envelope(&original) {
@@ -371,7 +416,8 @@ mod tests {
     }
 
     fn advance_file(path: &Path, supplied: Option<&str>) -> Result<String, String> {
-        reserve_file(path, supplied)?
+        reserve_file(path, supplied)
+            .map_err(|error| error.to_string())?
             .commit_sync(&CancellationToken::new())
             .map(Option::unwrap)
     }
@@ -410,7 +456,8 @@ mod tests {
             .unwrap()
             .set_modified(offline)
             .unwrap();
-        let permit = reserve_file(&path, Some(&ticket)).unwrap();
+        let permit = reserve_file(&path, Some("wrong ticket shape")).unwrap();
+        assert_eq!(permit.acceptance(), "reclaimed_stale");
         assert!(reserve_file(&path, None).is_err());
         assert!(reserve_file(&path, Some("oldstate")).is_err());
         let current = permit
@@ -419,6 +466,7 @@ mod tests {
             .unwrap();
         assert!(advance_file(&path, None).is_err());
         assert!(advance_file(&path, Some(&current)).is_ok());
+        assert_ne!(ticket, current);
     }
 
     #[test]
@@ -623,24 +671,20 @@ mod tests {
     }
 
     #[test]
-    fn malformed_tickets_are_rejected_without_disclosing_a_successor() {
-        for ticket in [
-            Value::Null,
-            json!(42),
-            json!(""),
-            json!("too long to be a ticket"),
-            json!("abc defg"),
-        ] {
+    fn non_string_tickets_are_rejected_without_disclosing_a_successor() {
+        for ticket in [Value::Null, json!(42)] {
             assert_eq!(
                 take_ticket(&mut json!({"codexify_ticket":ticket})).unwrap_err(),
                 REJECTED
             );
         }
         assert!(take_ticket(&mut json!({})).unwrap().is_none());
-        assert_eq!(
-            take_ticket(&mut json!({"codexify_ticket":"ab_CD-12"})).unwrap(),
-            Some("ab_CD-12".into())
-        );
+        for ticket in ["ab_CD-12", "", "too long to be a ticket", "abc defg"] {
+            assert_eq!(
+                take_ticket(&mut json!({"codexify_ticket":ticket})).unwrap(),
+                Some(ticket.into())
+            );
+        }
     }
 
     #[test]

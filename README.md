@@ -172,7 +172,7 @@ setup controls. Chat tools update it without opening more cards. Send with the
 arrow button or Return; Shift+Return inserts a newline. One grey tick means saved
 to `CHAT.md`, two grey ticks mean returned to the agent, and two blue ticks mean
 acknowledged through `chat_read`, `chat_write`, or `chat_await`. The Agent indicator
-shows online for calls under four minutes old, last seen from four to under ten minutes,
+shows online for calls under three minutes old, last seen from three to under five minutes,
 and offline thereafter. These are tool-activity receipts, not proof of model
 comprehension. A small header total counts model-visible Codexify tool calls in
 the conversation. Between agent messages, a compact counter shows the calls since
@@ -191,7 +191,7 @@ user entry). See the
 [standalone chat reference](docs/REFERENCE.md#standalone-owner-chat).
 
 If `agentChat.notifications` is configured, the server also attempts one
-notification when this indicator turns offline after 10 minutes without an agent
+notification when this indicator turns offline after 5 minutes without an agent
 tool call. The next agent call re-arms the alert. This works without an open
 chat card, but the Codexify service must be running; no alert is sent before the
 first recorded agent call.

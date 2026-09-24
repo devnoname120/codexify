@@ -28,7 +28,7 @@ test(`${engineName}: standalone owner view restores its URL selection`, { timeou
     const now = Date.now();
     const chats = [
       { id:"a".repeat(64), title:"Fix tests", workspace:"project-a", lastEntryEnd:200, lastEntryAtMs:now, lastAgentCallAtMs:now, totalToolCalls:3 },
-      { id:"b".repeat(64), title:"Review files", workspace:"project-b", lastEntryEnd:100, lastEntryAtMs:now - 60000, lastAgentCallAtMs:now - 300000, totalToolCalls:1 },
+      { id:"b".repeat(64), title:"Review files", workspace:"project-b", lastEntryEnd:100, lastEntryAtMs:now - 60000, lastAgentCallAtMs:now - 240000, totalToolCalls:1 },
       { id:"c".repeat(64), title:"Old task", workspace:"project-c", lastEntryEnd:75, lastEntryAtMs:now - 120000, lastAgentCallAtMs:null, totalToolCalls:0 }
     ];
     const messages = new Map(chats.map(chat => [chat.id, []]));

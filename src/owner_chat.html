@@ -71,8 +71,8 @@ main { min-width:0; min-height:0; display:flex; justify-content:center; padding:
     renderList();
   }
   function presence(lastCall, now) {
-    if (!Number.isFinite(lastCall) || now - lastCall >= 600000) return "offline";
-    if (now - lastCall >= 240000) return "away";
+    if (!Number.isFinite(lastCall) || now - lastCall >= 300000) return "offline";
+    if (now - lastCall >= 180000) return "away";
     return "online";
   }
   function presenceIcon(state) {
@@ -101,7 +101,7 @@ main { min-width:0; min-height:0; display:flex; justify-content:center; padding:
   function renderList() {
     const now = Date.now() + clockOffset;
     clearTimeout(presenceTimer);
-    const next = chats.flatMap(chat => [240000,600000].map(age => chat.lastAgentCallAtMs + age - now)).filter(delay => Number.isFinite(delay) && delay > 0);
+    const next = chats.flatMap(chat => [180000,300000].map(age => chat.lastAgentCallAtMs + age - now)).filter(delay => Number.isFinite(delay) && delay > 0);
     if (!document.hidden && next.length) presenceTimer = setTimeout(renderList, Math.max(1, Math.min(...next)));
     list.replaceChildren();
     if (!chats.length) {

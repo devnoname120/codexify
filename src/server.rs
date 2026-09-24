@@ -624,9 +624,25 @@ impl ServerHandler for CodexHandler {
         let tool = self.tools.iter().find(|t| t.name() == name);
         let model_call = !tool.is_some_and(|tool| app_only_tool(tool.as_ref()));
         let ticketed = self.config.experimental.agent_tickets && model_call;
+        let call_id = self.next_tool_call_id.fetch_add(1, Ordering::Relaxed);
+        let ticket_supplied = match args.get("codexify_ticket") {
+            None => "missing",
+            Some(Value::String(_)) => "present",
+            Some(_) => "malformed",
+        };
         let mut ticket_argument_error = None;
         let ticket_permit = if ticketed {
             if context.ct.is_cancelled() {
+                if let Some(audit) = &self.audit {
+                    audit.ticket_reservation(
+                        call_id,
+                        &name,
+                        &self.audit_scope(conversation.as_ref()),
+                        ticket_supplied,
+                        "rejected",
+                        "cancelled",
+                    );
+                }
                 return Ok(to_call_tool_result(ToolResult::error(
                     "Call cancelled before ticket reservation; this call did not run and the ticket is unchanged.",
                 ))
@@ -635,6 +651,16 @@ impl ServerHandler for CodexHandler {
             let supplied = match crate::agent_tickets::take_ticket(&mut args) {
                 Ok(ticket) => ticket,
                 Err(error) => {
+                    if let Some(audit) = &self.audit {
+                        audit.ticket_reservation(
+                            call_id,
+                            &name,
+                            &self.audit_scope(conversation.as_ref()),
+                            ticket_supplied,
+                            "rejected",
+                            "malformed",
+                        );
+                    }
                     return Ok(to_call_tool_result(
                         self.ticket_rejection(error, conversation.as_ref()).await,
                     )
@@ -648,12 +674,33 @@ impl ServerHandler for CodexHandler {
             {
                 Ok(ticket) => ticket,
                 Err(error) => {
+                    if let Some(audit) = &self.audit {
+                        audit.ticket_reservation(
+                            call_id,
+                            &name,
+                            &self.audit_scope(conversation.as_ref()),
+                            ticket_supplied,
+                            "rejected",
+                            error.reason(),
+                        );
+                    }
                     return Ok(to_call_tool_result(
-                        self.ticket_rejection(error, conversation.as_ref()).await,
+                        self.ticket_rejection(error.to_string(), conversation.as_ref())
+                            .await,
                     )
                     .into());
                 }
             };
+            if let Some(audit) = &self.audit {
+                audit.ticket_reservation(
+                    call_id,
+                    &name,
+                    &self.audit_scope(conversation.as_ref()),
+                    ticket_supplied,
+                    "accepted",
+                    next.acceptance(),
+                );
+            }
             if let Some(tool) = tool {
                 ticket_argument_error =
                     crate::agent_tickets::unwrap_arguments(&mut args, &tool.input_schema()).err();
@@ -667,7 +714,6 @@ impl ServerHandler for CodexHandler {
             .flatten()
             .filter(|value| !value.is_empty() && value.len() <= 64)
             .map(str::to_owned);
-        let call_id = self.next_tool_call_id.fetch_add(1, Ordering::Relaxed);
         let tool_context = ToolRequestContext {
             conversation: conversation.clone(),
             connector_schema_version,
@@ -1154,10 +1200,30 @@ impl ServerHandler for CodexHandler {
         if let Some(permit) = ticket_permit {
             let next_ticket = match permit.commit(context.ct.clone()).await {
                 Ok(Some(ticket)) => ticket,
-                Ok(None) => return Ok(to_call_tool_result(ToolResult::error(
-                    "Call interrupted before ticket handoff. The original codexify_ticket is unchanged. Work may already have run; verify its outcome before retrying."
-                )).into()),
-                Err(error) => return Ok(to_call_tool_result(ToolResult::error(error)).into()),
+                Ok(None) => {
+                    if let Some(audit) = &self.audit {
+                        audit.ticket_handoff(
+                            call_id,
+                            &name,
+                            &self.audit_scope(conversation.as_ref()),
+                            "interrupted",
+                        );
+                    }
+                    return Ok(to_call_tool_result(ToolResult::error(
+                        "Call interrupted before ticket handoff. The original codexify_ticket is unchanged. Work may already have run; verify its outcome before retrying."
+                    )).into());
+                }
+                Err(error) => {
+                    if let Some(audit) = &self.audit {
+                        audit.ticket_handoff(
+                            call_id,
+                            &name,
+                            &self.audit_scope(conversation.as_ref()),
+                            "failed",
+                        );
+                    }
+                    return Ok(to_call_tool_result(ToolResult::error(error)).into());
+                }
             };
             output_fields.push((crate::agent_tickets::OUTPUT_FIELD, Some(next_ticket)));
         }
@@ -1166,6 +1232,14 @@ impl ServerHandler for CodexHandler {
                 &mut result,
                 tool.and_then(|tool| tool.output_schema()).as_ref(),
                 output_fields,
+            );
+        }
+        if ticketed && let Some(audit) = &self.audit {
+            audit.ticket_handoff(
+                call_id,
+                &name,
+                &self.audit_scope(conversation.as_ref()),
+                "successor_attached",
             );
         }
         Ok(to_call_tool_result(result).into())

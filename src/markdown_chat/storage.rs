@@ -15,6 +15,7 @@ pub use widget::{OwnerChatSummary, UserSendReceipt, WidgetPage};
 
 const HEADER: &str = "# Codexify Chat\n\nAppend user messages at the bottom and save the file. Do not change earlier content\nwhile the agent is active. The agent sends messages only through chat_write.\n";
 const AGENT_START: &str = "\n\n<!-- codexify-agent-message:v1:start id=\"";
+const WARNING_START: &str = "\n\n<!-- codexify-warning-message:v1:start id=\"";
 const ANCHOR_BYTES: usize = 64;
 const MAX_CURSOR_BYTES: u64 = 4096;
 static MESSAGE_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -51,8 +52,9 @@ struct Cursor {
     tool_call_epoch: Option<String>,
     #[serde(default)]
     tool_call_sequence: u64,
-    #[serde(default)]
-    ticket_rejection_notified: bool,
+    // Consume the old flag on read, then omit it from future cursor writes.
+    #[serde(default, rename = "ticketRejectionNotified", skip_serializing)]
+    _legacy_ticket_rejection_notified: bool,
 }
 
 pub struct ChatSnapshot {
@@ -159,22 +161,15 @@ impl ChatFile {
             .await
     }
 
-    pub(crate) async fn warn_ticket_rejection(self: &Arc<Self>) -> Result<bool, String> {
+    pub(crate) async fn warn_ticket_rejection(self: &Arc<Self>) -> Result<(), String> {
         self.run(|chat| {
             chat.with_cursor(|cursor, file| {
-                if cursor.ticket_rejection_notified {
-                    return Ok(false);
-                }
                 check_cursor(file, cursor)?;
-                let block = agent_block(crate::agent_tickets::WARNING, cursor.total_tool_calls);
+                let block = warning_block(crate::agent_tickets::WARNING, cursor.total_tool_calls);
                 file.write_all(block.as_bytes()).map_err(io_error)?;
                 file.sync_all().map_err(io_error)?;
                 // A server notice must not acknowledge user text on behalf of the winning branch.
-                let mut next = cursor.clone();
-                next.ticket_rejection_notified = true;
-                chat.save_cursor(&next)?;
-                *cursor = next;
-                Ok(true)
+                Ok(())
             })
         })
         .await
@@ -390,6 +385,18 @@ fn agent_block(message: &str, tool_call_count: u64) -> String {
     let created_at_ms = super::now_ms();
     format!(
         "{AGENT_START}{id}\" created_at_ms=\"{created_at_ms}\" tool_call_count=\"{tool_call_count}\" -->\n\n## Agent\n\n{message}\n\n<!-- codexify-agent-message:v1:end id=\"{id}\" -->\n"
+    )
+}
+
+fn warning_block(message: &str, tool_call_count: u64) -> String {
+    let id = format!(
+        "{}-{}",
+        chrono::Utc::now().timestamp_micros(),
+        MESSAGE_COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
+    let created_at_ms = super::now_ms();
+    format!(
+        "{WARNING_START}{id}\" created_at_ms=\"{created_at_ms}\" tool_call_count=\"{tool_call_count}\" -->\n\n## Warning\n\n{message}\n\n<!-- codexify-warning-message:v1:end id=\"{id}\" -->\n"
     )
 }
 

@@ -451,10 +451,10 @@ The reservation commits at response handoff, after output budgeting and underlyi
 validation. Cancellation observed at the handoff check releases it without advancing. A downstream
 delivery failure after handoff is not observable and can still strand a branch.
 Connector error responses receive a successor, while rejected calls return neither
-a successor nor pending chat/workspace data. Rejections produce a deduplicated
+a successor nor pending chat/workspace data. Each rejection produces a
 server-written warning without consuming pending user messages. This is an opt-in
 serial-call coordination mechanism, not an authentication or replay service.
-The existing ten-minute offline interval allows the next call to reclaim a chain
+The five-minute offline interval allows the next call to reclaim a chain
 with a stale or missing ticket after inactivity, but never while its reservation
 is held. File modification times (or in-memory timestamps) track the last handoff;
 rejected and widget-only calls do not extend the deadline. This permits recovery
@@ -563,7 +563,7 @@ interval labels and subtracts the latest snapshot from cursor state for the live
 in-progress label. App-only calls never enter this counter.
 The same model-visible activity starts a server-owned offline monitor only when
 Apprise notifications are configured. It compares the persisted last-call time
-against the widget's 10-minute offline threshold, claims the current activity
+against the widget's 5-minute offline threshold, claims the current activity
 period in the private cursor before provider delivery, and waits for a new call
 before it can alert again. App-only calls never re-arm or trigger the monitor.
 User appends carry a request ID for idempotent retries, while history reads parse
@@ -615,7 +615,7 @@ Widget history responses include the timestamp and server time even for an
 unchanged history revision. Presence changes therefore do not retransmit history.
 Private setup action aliases reuse the existing selection and updater handlers
 but exclude widget actions from passive delivery and activity. The UI uses
-server-relative time to transition at four and ten minutes, without mistaking
+server-relative time to transition at three and five minutes, without mistaking
 tool completion or widget polling for another agent invocation.
 
 Each rendered card polls the same conversation state, retaining its own unfinished
@@ -1546,4 +1546,4 @@ without checkout/creation or changing files. UI listing does not update usage.
 Successful agent calls record use at most once per minute. The sidebar consumes
 the actual camelCase owner-list API, while the embedded chat page retains its
 separate snake_case payload. Both account for the server clock and age indicators
-locally across the four- and ten-minute boundaries.
+locally across the three- and five-minute boundaries.

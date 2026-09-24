@@ -1119,15 +1119,16 @@ input schemas that cannot safely accommodate the extra field use an
 the applicable shape. Codexify removes its own ticket before validating or
 forwarding the original tool arguments.
 
-With `agentChat.enabled`, the server itself writes a **Possible duplicate agent
-detected and blocked** warning into the selected workspace's chat. The notice is
-deduplicated per chat and does not acknowledge unread user messages or increase
-the active agent's call counter. Without a selected Markdown chat, the rejection
-response instructs the blocked branch to tell the user without making another
-tool call. A ticket mismatch is not proof of duplication: the warning also notes
-that a lost response or legitimate parallel call may be responsible. Codexify
-blocks dispatch and instructs the model to stop; it cannot terminate a remote
-model or commands already running.
+With `agentChat.enabled`, each rejected call writes a yellow warning between
+messages in the selected workspace's chat: **Duplicate agent detected. Its tool
+call was terminated.** This is a server notice, not an agent message. It does
+not acknowledge unread user messages or increase the active agent's call
+counter. Without a selected Markdown chat, the rejection response instructs
+the blocked branch to tell the user without making another tool call. A ticket
+mismatch does not prove duplication: a lost response or legitimate parallel
+call can also cause rejection. Codexify rejects that tool call and instructs
+the model branch to stop; it cannot terminate the remote model or already-running
+commands.
 
 With stable ChatGPT conversation metadata, the current ticket is stored in one
 small file per conversation under `~/.codexify/agent-tickets/`, scoped by the
@@ -1142,14 +1143,14 @@ corrupt ticket state refuses execution rather than resetting it. A persistence
 failure at handoff can occur after tool side effects; it returns no successor
 and requires user recovery.
 
-**Offline recovery.** The guard reuses the chat's ten-minute offline interval,
+**Offline recovery.** The guard reuses the chat's five-minute offline interval,
 measured conservatively from the last completed ticket handoff. When that interval
 has elapsed and no ticketed call is in flight, the next call may omit its ticket
-or supply an older, valid-shaped ticket. That call claims a new chain; competing
+or supply an older or otherwise wrong string ticket. That call claims a new chain; competing
 calls using the old or missing ticket are rejected again. The persistent file's
 modification time records the last handoff, so this also works after restart.
 Rejected calls and widget interactions neither extend the deadline nor reset the
-chain. A held reservation is never stolen, even after ten minutes.
+chain. A held reservation is never stolen, even after five minutes.
 
 This lets a user ask ChatGPT to continue after the conversation has gone offline,
 without obtaining a ticket from internal state. A rejected branch must not wait
@@ -1246,6 +1247,8 @@ codexify \
 ```
 
 The append-only JSONL stream begins with `audit_started`, which identifies the server version, OS process, random run ID, and command-preview policy, then emits schema-version-2 `tool_start` and `tool_finish` records. Tool records carry an RFC 3339 timestamp, monotonic call ID, transport-session ID, hashed ChatGPT conversation and project identifiers, downstream and resolved tool identities (including raw MCP server/tool names), duration, status, argument shape, returned byte/token counts, truncation status when the tool can report it, and resident `exec_command` session/PID metadata. Argument summaries include only fields declared by the tool's input schema; unknown keys and dynamic maps are counted but their key names are omitted. Raw conversation identifiers, project paths, scalar argument values, image data, structured output, and returned text are not written.
+
+When agent tickets are enabled, `ticket_reservation` records each pre-dispatch decision, including rejected calls that never reach `tool_start`. It identifies the call, hashed conversation, tool, whether a ticket was supplied, and whether the guard matched it, reclaimed an offline chain, found it missing or mismatched, or found another call in flight. `ticket_handoff` records whether a successor was attached to the server response, interrupted, or failed. Neither record contains ticket values. A `successor_attached` event proves server-side response construction, not delivery to the remote model.
 
 Command previews are a separate opt-in because shell commands can contain credentials, source code, paths, and environment values:
 
@@ -1843,9 +1846,9 @@ in this conversation, including failed calls and calls still running:
 
 | Age of last call | Indicator |
 | --- | --- |
-| Less than 4 minutes | Green circle with a white checkmark and **online**. |
-| At least 4, less than 10 minutes | Orange circle with white hands pointing to 12 and 4, and **last seen x mins ago** (whole minutes). |
-| At least 10 minutes, or no recorded call | Grey outlined circle, white center, grey cross, and **offline**. |
+| Less than 3 minutes | Green circle with a white checkmark and **online**. |
+| At least 3, less than 5 minutes | Orange circle with white hands pointing to 12 and 4, and **last seen x mins ago** (whole minutes). |
+| At least 5 minutes, or no recorded call | Grey outlined circle, white center, grey cross, and **offline**. |
 
 Completion does not reset the invocation time. The timestamp survives service
 restarts for stable conversation identities; older records without it show
@@ -1856,7 +1859,7 @@ fails. These labels describe recent tool activity, not a live connection or a
 guarantee that the agent is currently working.
 
 When `agentChat.notifications` is configured, a server-side timer uses the same
-10-minute threshold to attempt one offline alert for each period without an
+5-minute threshold to attempt one offline alert for each period without an
 agent tool call. No alert is sent before the first call. A later agent call
 re-arms the alert; widget polling and user sends do not. The chat card can be
 closed, but the Codexify server must be running to detect the transition. The

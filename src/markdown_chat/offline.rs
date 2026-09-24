@@ -8,7 +8,7 @@ use tokio::sync::Notify;
 
 use super::{ChatFile, NotificationState, now_ms};
 
-pub(super) const MESSAGE: &str = "Agent status is offline: no Codexify tool call has been recorded for this conversation for 10 minutes.";
+pub(super) const MESSAGE: &str = "Agent status is offline: no Codexify tool call has been recorded for this conversation for 5 minutes.";
 
 pub(super) async fn monitor<F, Fut>(
     chat: Arc<ChatFile>,

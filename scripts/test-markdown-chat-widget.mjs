@@ -11,12 +11,12 @@ const ENABLED = "io.github.devnoname120/codexify/markdown-chat-enabled";
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 const presenceDetails = vm.runInNewContext("(" + html.slice(html.indexOf("function presenceDetails("), html.indexOf("  function toolCallLabel(")) + ")");
-test("presence: exact four/ten-minute boundaries, unknown activity, and clock skew", () => {
+test("presence: exact three/five-minute boundaries, unknown activity, and clock skew", () => {
   for (const [age, state, label] of [
-    [0, "online", "online"], [239999, "online", "online"],
+    [0, "online", "online"], [179999, "online", "online"],
+    [180000, "away", "last seen 3 mins ago"], [239999, "away", "last seen 3 mins ago"],
     [240000, "away", "last seen 4 mins ago"], [299999, "away", "last seen 4 mins ago"],
-    [300000, "away", "last seen 5 mins ago"], [599999, "away", "last seen 9 mins ago"],
-    [600000, "offline", "offline"], [3600000, "offline", "offline"], [-5000, "online", "online"]
+    [300000, "offline", "offline"], [3600000, "offline", "offline"], [-5000, "online", "online"]
   ]) {
     const actual = presenceDetails(1000000, 1000000 + age);
     assert.equal(actual.state, state, `age ${age}`);
@@ -590,17 +590,32 @@ for (const [engineName, engine] of [["Chromium", chromium], ["WebKit", webkit]])
         const { page, frames:[frame], errors } = await mount(browser, backend, { clock:now });
         await frame.locator("#presence[data-state='online']").waitFor();
         backend.failState = true;
-        await page.clock.fastForward(241000);
-        await frame.getByText("last seen 4 mins ago", { exact:true }).waitFor();
+        await page.clock.fastForward(181000);
+        await frame.getByText("last seen 3 mins ago", { exact:true }).waitFor();
         assert.equal(await frame.locator(".presence-symbol path").getAttribute("d"), "M12 5.5V12l5.6 3.2");
         await page.clock.fastForward(60000);
-        await frame.getByText("last seen 5 mins ago", { exact:true }).waitFor();
-        await page.clock.fastForward(300000);
+        await frame.getByText("last seen 4 mins ago", { exact:true }).waitFor();
+        await page.clock.fastForward(60000);
         await frame.locator("#presence[data-state='offline']").waitFor();
         assert.equal(await frame.locator(".presence-symbol circle").getAttribute("fill"), "#fff");
         assert.equal(await frame.locator(".presence-symbol path").count(), 2);
         assert.equal(backend.lastAgentCall, now, "UI calls must not change activity");
         assert.deepEqual(errors, []); await page.close();
+      });
+      await t.test("ticket warnings render between messages without agent bubbles", async () => {
+        const backend = new ChatBackend();
+        backend.add("user", "Continue.");
+        backend.add("warning", "Duplicate agent detected. Its tool call was terminated.");
+        backend.add("agent", "I stopped after the rejection.");
+        const { page, frames:[frame], errors } = await mount(browser, backend);
+        const alert = frame.locator(".warning-banner[role='alert']");
+        await alert.waitFor();
+        assert.equal(await alert.textContent(), "Duplicate agent detected. Its tool call was terminated.");
+        assert.equal(await alert.evaluate(node => node.className), "warning-banner");
+        assert.equal(await frame.locator(".message.agent").count(), 1);
+        assert.equal(await alert.evaluate(node => getComputedStyle(node).backgroundColor), "rgb(255, 243, 196)");
+        assert.deepEqual(errors, []);
+        await page.close();
       });
       for (const bridge of ["legacy", "mcp"]) {
         await t.test(`setup-only panel preserves its draft across status updates (${bridge})`, async () => {
@@ -667,7 +682,7 @@ for (const [engineName, engine] of [["Chromium", chromium], ["WebKit", webkit]])
       });
       for (const theme of ["light", "dark"]) {
         await t.test(`${theme} setup renders all three receipts and activity icons`, async () => {
-          for (const [state, minutes] of [["online", 3], ["away", 6], ["offline", 11]]) {
+          for (const [state, minutes] of [["online", 2], ["away", 4], ["offline", 6]]) {
             const backend = new ChatBackend();
             backend.lastAgentCall = Date.now() - minutes * 60000;
             backend.read = backend.add("user", "Use the existing worktree.").end;

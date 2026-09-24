@@ -327,7 +327,8 @@ async fn agent_tickets_disabled_preserves_ticket_free_calls_and_results() {
 }
 
 #[tokio::test]
-async fn agent_tickets_warn_once_without_consuming_user_messages_or_recording_loser_activity() {
+async fn agent_tickets_warn_on_every_rejection_without_consuming_user_messages_or_recording_loser_activity()
+ {
     use std::io::Write;
     let root = tempfile::tempdir().unwrap();
     let calls = Arc::new(AtomicU64::new(0));
@@ -386,9 +387,17 @@ async fn agent_tickets_warn_once_without_consuming_user_messages_or_recording_lo
     let transcript = std::fs::read_to_string(chat.path()).unwrap();
     assert_eq!(
         transcript
-            .matches("Possible duplicate agent detected and blocked")
+            .matches("Duplicate agent detected. Its tool call was terminated.")
             .count(),
-        1
+        3
+    );
+    let page = chat.widget_page(None, None).await.unwrap();
+    assert_eq!(
+        page.messages
+            .iter()
+            .filter(|message| message.role == "warning")
+            .count(),
+        3
     );
     assert_eq!(
         chat.read(false).await.unwrap().text.trim(),
@@ -405,6 +414,67 @@ async fn agent_tickets_warn_once_without_consuming_user_messages_or_recording_lo
             .unwrap()
             .contains("Pending instruction")
     );
+    client.cancel().await.unwrap();
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn agent_ticket_audit_records_rejections_and_handoffs_without_ticket_values() {
+    let root = tempfile::tempdir().unwrap();
+    let calls = Arc::new(AtomicU64::new(0));
+    let (client, server) = ticket_client(root.path(), calls, true).await;
+    let first = client
+        .call_tool(ticket_request("ticket_probe", None, json!({})))
+        .await
+        .unwrap();
+    let first_ticket = next_ticket(&first);
+    assert_ticket_rejected(
+        &client
+            .call_tool(ticket_request("ticket_probe", None, json!({})))
+            .await
+            .unwrap(),
+    );
+    assert_ticket_rejected(
+        &client
+            .call_tool(ticket_request("ticket_probe", Some("wrong"), json!({})))
+            .await
+            .unwrap(),
+    );
+    let second = client
+        .call_tool(ticket_request(
+            "ticket_probe",
+            Some(&first_ticket),
+            json!({}),
+        ))
+        .await
+        .unwrap();
+    let second_ticket = next_ticket(&second);
+    let audit = std::fs::read_to_string(root.path().join("audit.jsonl")).unwrap();
+    let events = audit
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    let reservations = events
+        .iter()
+        .filter(|event| event["event"] == "ticket_reservation")
+        .collect::<Vec<_>>();
+    assert_eq!(reservations.len(), 4);
+    assert_eq!(reservations[0]["reason"], "initial");
+    assert_eq!(reservations[1]["reason"], "missing");
+    assert_eq!(reservations[2]["reason"], "mismatch");
+    assert_eq!(reservations[3]["reason"], "matched");
+    assert_eq!(reservations[0]["supplied"], "missing");
+    assert_eq!(reservations[3]["supplied"], "present");
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["event"] == "ticket_handoff"
+                && event["outcome"] == "successor_attached")
+            .count(),
+        2
+    );
+    assert!(!audit.contains(&first_ticket));
+    assert!(!audit.contains(&second_ticket));
     client.cancel().await.unwrap();
     server.await.unwrap();
 }

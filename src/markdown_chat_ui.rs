@@ -121,6 +121,11 @@ mod tests {
             "if (age < {}) return {{ state:\"away\"",
             crate::markdown_chat::OFFLINE_AFTER_MS
         )));
+        assert!(html.contains(&format!(
+            "if (age < {}) return {{ state:\"online\"",
+            crate::markdown_chat::AWAY_AFTER_MS
+        )));
+        assert!(html.contains(".warning-banner"));
         assert!(html.contains("id=\"tool-total\""));
         assert!(html.contains("tool-call-marker"));
         assert_eq!(resource().uri, SETUP_CHAT_UI_URI);

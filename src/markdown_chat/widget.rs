@@ -103,7 +103,7 @@ fn marker_fields<'a>(role: &str, fields: &'a str) -> Option<(&'a str, Option<u64
 }
 
 fn start_marker(line: &str) -> Option<(&'static str, String, Option<u64>, Option<u64>)> {
-    for role in ["agent", "user"] {
+    for role in ["agent", "user", "warning"] {
         if let Some((id, time, tool_call_count)) = line
             .strip_prefix(&format!("<!-- codexify-{role}-message:v1:start id=\""))
             .and_then(|line| line.strip_suffix("\" -->\n"))
@@ -353,11 +353,19 @@ impl ChatFile {
                     if markdown.trim().is_empty() {
                         continue;
                     }
+                    let (role, markdown) = if span.role == "agent"
+                        && markdown
+                            .starts_with("**Possible duplicate agent detected and blocked.**")
+                    {
+                        ("warning", crate::agent_tickets::WARNING.to_string())
+                    } else {
+                        (span.role, markdown)
+                    };
                     bytes += markdown.len();
                     page.before = Some(span.start);
                     page.messages.push(WidgetMessage {
                         id: span.id,
-                        role: span.role.into(),
+                        role: role.into(),
                         markdown,
                         start: span.start,
                         end: span.end,
@@ -470,16 +478,24 @@ pub(super) fn user_text(text: &str) -> Result<String, String> {
     let mut output = String::new();
     let mut remaining = text;
     loop {
-        let candidate = [("agent", AGENT_START), ("user", USER_START)]
-            .into_iter()
-            .filter_map(|(role, prefix)| remaining.find(prefix).map(|start| (start, role, prefix)))
-            .min_by_key(|entry| entry.0);
+        let candidate = [
+            ("agent", AGENT_START),
+            ("user", USER_START),
+            ("warning", WARNING_START),
+        ]
+        .into_iter()
+        .filter_map(|(role, prefix)| remaining.find(prefix).map(|start| (start, role, prefix)))
+        .min_by_key(|entry| entry.0);
         let Some((start, role, prefix)) = candidate else {
             break;
         };
         output.push_str(&remaining[..start]);
         let marker = &remaining[start + prefix.len()..];
-        let heading = if role == "user" { "User" } else { "Agent" };
+        let heading = match role {
+            "user" => "User",
+            "warning" => "Warning",
+            _ => "Agent",
+        };
         let opening = format!("\" -->\n\n## {heading}\n\n");
         let Some((fields, body)) = marker.split_once(&opening) else {
             return Err("CHAT.md has an incomplete message; finish saving before retrying.".into());
@@ -538,5 +554,19 @@ mod tests {
         assert_eq!(page.total_tool_calls, 5);
         assert_eq!(page.last_agent_call_at_ms, Some(4000));
         assert_eq!(page.messages[0].tool_call_count, Some(5));
+    }
+
+    #[tokio::test]
+    async fn old_duplicate_warning_is_displayed_as_a_warning() {
+        let directory = tempfile::tempdir().unwrap();
+        let chat = Arc::new(ChatFile::new(directory.path().join("CHAT.md"), true));
+        chat.ensure().await.unwrap();
+        chat.append("**Possible duplicate agent detected and blocked.** Old explanation.".into())
+            .await
+            .unwrap();
+        let page = chat.widget_page(None, None).await.unwrap();
+        assert_eq!(page.messages.len(), 1);
+        assert_eq!(page.messages[0].role, "warning");
+        assert_eq!(page.messages[0].markdown, crate::agent_tickets::WARNING);
     }
 }

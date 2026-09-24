@@ -28,7 +28,8 @@ pub const DEFAULT_MAX_WAIT_MS: u64 = 115_000;
 pub const DEFAULT_OWNER_CHAT_PORT: u16 = 3120;
 pub const MAX_UNREAD_BYTES: usize = 16 * 1024 * 1024;
 pub const USER_MESSAGE_FIELD: &str = "new_chat_message_from_user";
-pub const OFFLINE_AFTER_MS: u64 = 600_000;
+pub const AWAY_AFTER_MS: u64 = 180_000;
+pub const OFFLINE_AFTER_MS: u64 = 300_000;
 
 pub(crate) fn now_ms() -> u64 {
     SystemTime::now()

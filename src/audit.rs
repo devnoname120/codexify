@@ -162,6 +162,55 @@ impl AuditLogger {
         }));
     }
 
+    /// Record ticket decisions without persisting either the supplied or successor value.
+    pub(crate) fn ticket_reservation(
+        &self,
+        call_id: u64,
+        tool: &str,
+        scope: &AuditScope,
+        supplied: &str,
+        outcome: &str,
+        reason: &str,
+    ) {
+        self.record(json!({
+            "schema_version": SCHEMA_VERSION,
+            "timestamp": timestamp(),
+            "event": "ticket_reservation",
+            "run_id": self.run_id,
+            "call_id": call_id,
+            "transport_session_id": scope.transport_session_id,
+            "conversation_id": scope.conversation_id,
+            "access_root_id": scope.access_root_id,
+            "project_id": scope.project_id,
+            "tool": tool,
+            "supplied": supplied,
+            "outcome": outcome,
+            "reason": reason,
+        }));
+    }
+
+    pub(crate) fn ticket_handoff(
+        &self,
+        call_id: u64,
+        tool: &str,
+        scope: &AuditScope,
+        outcome: &str,
+    ) {
+        self.record(json!({
+            "schema_version": SCHEMA_VERSION,
+            "timestamp": timestamp(),
+            "event": "ticket_handoff",
+            "run_id": self.run_id,
+            "call_id": call_id,
+            "transport_session_id": scope.transport_session_id,
+            "conversation_id": scope.conversation_id,
+            "access_root_id": scope.access_root_id,
+            "project_id": scope.project_id,
+            "tool": tool,
+            "outcome": outcome,
+        }));
+    }
+
     fn command_preview(&self, tool: &str, arguments: &Value) -> Option<String> {
         if !self.include_command_preview {
             return None;
