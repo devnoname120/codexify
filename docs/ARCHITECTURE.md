@@ -571,8 +571,13 @@ agent/user boundaries and plain editor appends into paged component-only data.
 The normal user-text parser strips framing but preserves complete user Markdown.
 
 The local owner interface (`owner_chat.rs`) uses a second loopback-only Axum
-listener, separate from the MCP transport and tunnel. A per-process token is
-written to a private runtime file; `codexify chat` verifies the listener and
+listener, separate from the MCP transport and tunnel. A persistent token and the
+last listener port are stored in the private `~/.codexify/owner-chat.json` file.
+First creation publishes a complete file without clobbering a concurrent
+creator; later starts reuse the winning token and atomically update only the
+port when necessary. Shutdown retains the credentials. Bounded reads reject
+malformed tokens, unsafe file types, and non-private Unix permissions instead
+of silently rotating the credential. `codexify chat` verifies the listener and
 prints a URL with the token in its fragment. Authenticated owner API requests
 select only persisted stable-identity chat directories, and use the same
 `MarkdownChatStore` and `ChatFile` locks as MCP widget requests. The sidebar

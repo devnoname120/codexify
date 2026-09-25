@@ -6,6 +6,16 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.6.4] - 2026-09-26
+
+### Fixed
+
+- Standalone owner-chat access tokens persist across service restarts in the
+  existing private `owner-chat.json` file, so saved chat URLs keep working with
+  a fixed listener port. Concurrent first starts share one token, changing the
+  listener port preserves it, and invalid or unsafe credential files are rejected
+  rather than silently replaced. Token rotation is now an explicit action.
+
 ## [1.6.3] - 2026-09-25
 
 ### Changed

@@ -1748,11 +1748,19 @@ owner interface. Run `codexify chat` on that computer and open the printed
 private URL. The command verifies the running interface; no second chat store is
 needed. The listener defaults to port `3120`; set `agentChat.port` to another
 port or to `null` for an OS-assigned port. It always binds only to `127.0.0.1`.
-The URL fragment contains an ephemeral
-access token, which is kept in a private runtime file under `~/.codexify`
-(mode 0600 on Unix).
-Do not share the URL or that file. It changes when the service restarts. The
-interface is not served by the MCP tunnel, and its APIs require the token.
+The URL fragment contains a persistent access token, stored with the last
+listener port in `~/.codexify/owner-chat.json` (mode 0600 on Unix). The token is
+generated only when this file is absent, and shutdown leaves the file intact.
+Restarts reuse its token, including a valid file left by an older release.
+Do not share the URL or that file. The interface is not served by the MCP tunnel,
+and its APIs require the token. The file's presence alone does not indicate that
+the service is running; `codexify chat` still verifies the live interface.
+
+Invalid, oversized, symlinked, or non-private Unix credential files are rejected
+rather than silently replaced. Restore a valid private file to retain the token.
+To explicitly rotate the token, stop Codexify, remove `~/.codexify/owner-chat.json`,
+then start it and run `codexify chat` for a new URL. Old URLs remain authorized
+until this deliberate rotation; restarting the service no longer revokes them.
 
 The left pane lists persisted conversations sorted by the timestamp of their
 latest chat entry. It shows the same waiting/online/away/offline state as
@@ -1768,8 +1776,10 @@ stopped ChatGPT turn.
 Selecting a conversation updates the owner page's `?chat=<opaque-id>` URL.
 Reloading restores that conversation, and browser Back/Forward switches chats
 without a full navigation. The access token remains in the URL fragment and in
-session storage, so copying the complete URL also copies the credential. Run
-`codexify chat` again after a service restart because the token is ephemeral.
+session storage, so copying the complete URL also copies the credential. With a
+fixed `agentChat.port`, the complete URL survives service restarts. Run
+`codexify chat` again if the listener port changes, including when using
+`agentChat.port: null`; the token itself remains unchanged.
 
 ChatGPT's conversation display title is not part of the connector metadata.
 The list therefore derives a local title from the first user chat entry, or

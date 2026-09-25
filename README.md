@@ -186,8 +186,10 @@ To monitor all persisted chats outside ChatGPT, run `codexify chat` on the
 computer running the service and open the printed URL. The standalone view
 lists conversations by their latest chat entry, with activity state and an
 unread dot, and reuses the widget's message history, composer, receipts, file
-downloads, and tool counters. It connects to a separate localhost listener,
-not the shared MCP tunnel. ChatGPT does not pass conversation titles to the
+downloads, and tool counters. Its private access token survives service restarts,
+so the same URL keeps working while the configured port remains unchanged.
+It connects to a separate localhost listener, not the shared MCP tunnel.
+ChatGPT does not pass conversation titles to the
 connector, so list titles are derived from chat entries (preferring the first
 user entry). See the
 [standalone chat reference](docs/REFERENCE.md#standalone-owner-chat).

@@ -1,7 +1,7 @@
 //! Local-only owner view of the persisted agent chats. This is deliberately not
 //! nested under `/mcp` and never shares the connector's tunnel listener.
 
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path as FilePath, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -14,7 +14,10 @@ use axum::middleware::Next;
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use base64::{Engine as _, engine::general_purpose::STANDARD};
+use base64::{
+    Engine as _,
+    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -43,20 +46,12 @@ struct RuntimeInfo {
 }
 
 pub struct OwnerServer {
-    token: String,
     task: tokio::task::JoinHandle<()>,
 }
 
 impl Drop for OwnerServer {
     fn drop(&mut self) {
         self.task.abort();
-        let path = runtime_path();
-        if let Ok(bytes) = std::fs::read(&path)
-            && let Ok(info) = serde_json::from_slice::<RuntimeInfo>(&bytes)
-            && info.token == self.token
-        {
-            let _ = std::fs::remove_file(path);
-        }
     }
 }
 
@@ -65,6 +60,110 @@ fn runtime_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".codexify")
         .join("owner-chat.json")
+}
+
+fn read_runtime(path: &FilePath) -> anyhow::Result<Option<RuntimeInfo>> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).context("inspect saved owner-chat credentials"),
+    };
+    anyhow::ensure!(
+        metadata.is_file() && !metadata.file_type().is_symlink(),
+        "Owner-chat credentials must be a regular non-symlink file: {}",
+        path.display()
+    );
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    let file = options
+        .open(path)
+        .context("open saved owner-chat credentials")?;
+    let metadata = file.metadata()?;
+    anyhow::ensure!(
+        metadata.is_file() && !metadata.file_type().is_symlink(),
+        "Owner-chat credentials must be a regular non-symlink file: {}",
+        path.display()
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        anyhow::ensure!(
+            metadata.uid() == unsafe { libc::geteuid() } && metadata.mode() & 0o077 == 0,
+            "Owner-chat credentials must belong to the current user and have mode 0600: {}",
+            path.display()
+        );
+    }
+    let mut bytes = Vec::new();
+    file.take(4097).read_to_end(&mut bytes)?;
+    anyhow::ensure!(
+        bytes.len() <= 4096,
+        "Saved owner-chat credentials are too large"
+    );
+    let info: RuntimeInfo = serde_json::from_slice(&bytes).map_err(|_| {
+        anyhow::anyhow!("Invalid saved owner-chat credentials in {}", path.display())
+    })?;
+    anyhow::ensure!(
+        info.port != 0
+            && info
+                .token
+                .strip_prefix("codexify_")
+                .and_then(|token| URL_SAFE_NO_PAD.decode(token).ok())
+                .is_some_and(|bytes| bytes.len() == 32),
+        "Invalid saved owner-chat credentials in {}",
+        path.display()
+    );
+    Ok(Some(info))
+}
+
+fn prepare_runtime(
+    parent: &FilePath,
+    info: &RuntimeInfo,
+) -> anyhow::Result<tempfile::NamedTempFile> {
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+    serde_json::to_writer(&mut temporary, info)?;
+    temporary.flush()?;
+    temporary.as_file().sync_all()?;
+    Ok(temporary)
+}
+
+fn load_or_create_runtime(path: &FilePath, port: u16) -> anyhow::Result<RuntimeInfo> {
+    let parent = path
+        .parent()
+        .context("owner-chat credentials have no parent directory")?;
+    std::fs::create_dir_all(parent)?;
+    let mut info = match read_runtime(path)? {
+        Some(info) => info,
+        None => {
+            let candidate = RuntimeInfo {
+                port,
+                token: crate::auth::generate_internal_bearer_token()?,
+            };
+            // Concurrent first starts must adopt the same credential, not overwrite it.
+            match prepare_runtime(parent, &candidate)?.persist_noclobber(path) {
+                Ok(_) => candidate,
+                Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    read_runtime(path)?
+                        .context("owner-chat credentials disappeared during initialization")?
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+    };
+    if info.port != port {
+        info.port = port;
+        prepare_runtime(parent, &info)?.persist(path)?;
+    }
+    Ok(info)
 }
 
 fn is_real_dir(path: &FilePath) -> bool {
@@ -477,34 +576,20 @@ pub async fn start(
 ) -> anyhow::Result<OwnerServer> {
     let listener = bind_owner_listener(&config).await?;
     let port = listener.local_addr()?.port();
-    let token = crate::auth::generate_internal_bearer_token()?;
+    let info = load_or_create_runtime(&runtime_path(), port)?;
     let state = OwnerState {
         config,
         chats,
         artifacts,
-        token: token.clone(),
+        token: info.token,
     };
     let app = router(state);
-    let path = runtime_path();
-    let parent = path.parent().expect("runtime parent");
-    std::fs::create_dir_all(parent)?;
-    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
-    serde_json::to_writer(
-        &mut temporary,
-        &RuntimeInfo {
-            port,
-            token: token.clone(),
-        },
-    )?;
-    temporary.flush()?;
-    temporary.as_file().sync_all()?;
-    temporary.persist(&path)?;
     let task = tokio::spawn(async move {
         if let Err(error) = axum::serve(listener, app).await {
             tracing::error!("owner chat listener stopped: {error}");
         }
     });
-    Ok(OwnerServer { token, task })
+    Ok(OwnerServer { task })
 }
 
 async fn bind_owner_listener(config: &AppConfig) -> anyhow::Result<tokio::net::TcpListener> {
@@ -539,12 +624,11 @@ fn router(state: OwnerState) -> Router {
 /// Return a verified local URL. The secret is only printed by this explicit CLI command.
 pub async fn dashboard_url() -> anyhow::Result<String> {
     crate::tls::ensure_crypto_provider();
-    let bytes = std::fs::read(runtime_path()).map_err(|_| {
+    let info = read_runtime(&runtime_path())?.ok_or_else(|| {
         anyhow::anyhow!(
             "Owner chat is unavailable; start the Codexify service with agentChat enabled"
         )
     })?;
-    let info: RuntimeInfo = serde_json::from_slice(&bytes)?;
     let url = format!("http://127.0.0.1:{}/", info.port);
     let response = reqwest::Client::builder()
         .timeout(Duration::from_secs(2))
@@ -572,6 +656,103 @@ mod tests {
     use super::*;
     use crate::exec_sessions::SessionState;
     use crate::project_bindings::ConversationIdentity;
+
+    #[test]
+    fn owner_credentials_reuse_existing_runtime_format_and_only_update_the_port() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("owner-chat.json");
+        let token = crate::auth::generate_internal_bearer_token().unwrap();
+        let mut legacy = tempfile::NamedTempFile::new_in(temp.path()).unwrap();
+        serde_json::to_writer(&mut legacy, &json!({"port":3120,"token":token})).unwrap();
+        legacy.persist(&path).unwrap();
+
+        let restored = load_or_create_runtime(&path, 43123).unwrap();
+        assert!(restored.token == token);
+        assert_eq!(restored.port, 43123);
+        let persisted = read_runtime(&path).unwrap().unwrap();
+        assert!(persisted.token == token);
+        assert_eq!(persisted.port, 43123);
+    }
+
+    #[test]
+    fn owner_credentials_concurrent_initialization_chooses_one_token() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("owner-chat.json");
+        let barrier = std::sync::Barrier::new(8);
+        let tokens = std::thread::scope(|scope| {
+            let tasks: Vec<_> = (0..8)
+                .map(|offset| {
+                    let path = &path;
+                    let barrier = &barrier;
+                    scope.spawn(move || {
+                        barrier.wait();
+                        load_or_create_runtime(path, 3120 + offset).unwrap().token
+                    })
+                })
+                .collect();
+            tasks
+                .into_iter()
+                .map(|task| task.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        assert!(tokens.iter().all(|token| token == &tokens[0]));
+        assert!(read_runtime(&path).unwrap().unwrap().token == tokens[0]);
+    }
+
+    #[test]
+    fn owner_credentials_reject_corruption_without_rotating_or_disclosing_secrets() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("owner-chat.json");
+        load_or_create_runtime(&path, 3120).unwrap();
+        for contents in [
+            Vec::new(),
+            b"not json".to_vec(),
+            br#"{"port":3120,"token":""}"#.to_vec(),
+            br#"{"port":3120,"token":"codexify_short"}"#.to_vec(),
+            br#"{"port":"private-marker","token":"private-marker"}"#.to_vec(),
+            vec![b' '; 4097],
+        ] {
+            std::fs::write(&path, &contents).unwrap();
+            let error = load_or_create_runtime(&path, 43123).err().unwrap();
+            assert!(!format!("{error:#}").contains("private-marker"));
+            assert!(std::fs::read(&path).unwrap() == contents);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn owner_credentials_are_private_and_reject_unsafe_paths() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("owner-chat.json");
+        load_or_create_runtime(&path, 3120).unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let contents = std::fs::read(&path).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(load_or_create_runtime(&path, 43123).is_err());
+        assert!(std::fs::read(&path).unwrap() == contents);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        load_or_create_runtime(&path, 43123).unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+
+        let link = temp.path().join("linked.json");
+        symlink(&path, &link).unwrap();
+        assert!(load_or_create_runtime(&link, 3120).is_err());
+        let dangling = temp.path().join("dangling.json");
+        symlink(temp.path().join("missing.json"), &dangling).unwrap();
+        assert!(load_or_create_runtime(&dangling, 3120).is_err());
+        assert!(!temp.path().join("missing.json").exists());
+        let directory = temp.path().join("directory.json");
+        std::fs::create_dir(&directory).unwrap();
+        assert!(load_or_create_runtime(&directory, 3120).is_err());
+    }
 
     #[tokio::test]
     async fn owner_listener_uses_the_configured_port_or_an_ephemeral_default() {
