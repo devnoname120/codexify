@@ -358,10 +358,13 @@ impl ChatFile {
                     if markdown.trim().is_empty() {
                         continue;
                     }
-                    let (role, markdown) = if span.role == "agent"
+                    let legacy_warning = (span.role == "agent"
                         && markdown
-                            .starts_with("**Possible duplicate agent detected and blocked.**")
-                    {
+                            .starts_with("**Possible duplicate agent detected and blocked.**"))
+                        || (span.role == "warning"
+                            && markdown.trim()
+                                == "Duplicate agent detected. Its tool call was terminated.");
+                    let (role, markdown) = if legacy_warning {
                         ("warning", crate::agent_tickets::WARNING.to_string())
                     } else {
                         (span.role, markdown)
@@ -575,5 +578,26 @@ mod tests {
         assert_eq!(page.messages.len(), 1);
         assert_eq!(page.messages[0].role, "warning");
         assert_eq!(page.messages[0].markdown, crate::agent_tickets::WARNING);
+    }
+
+    #[tokio::test]
+    async fn old_ticket_warning_uses_current_copy_without_rewriting_history() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("CHAT.md");
+        let chat = Arc::new(ChatFile::new(path.clone(), true));
+        chat.ensure().await.unwrap();
+        chat.warn_ticket_rejection().await.unwrap();
+        let historical = std::fs::read_to_string(&path).unwrap().replace(
+            crate::agent_tickets::WARNING,
+            "Duplicate agent detected. Its tool call was terminated.",
+        );
+        std::fs::write(&path, &historical).unwrap();
+        let reopened = Arc::new(ChatFile::new(path.clone(), true));
+        let page = reopened.widget_page(None, None).await.unwrap();
+        assert_eq!(page.messages.len(), 1);
+        assert_eq!(page.messages[0].role, "warning");
+        assert_eq!(page.messages[0].markdown, crate::agent_tickets::WARNING);
+        assert!(page.messages[0].created_at_ms.is_some());
+        assert_eq!(std::fs::read_to_string(path).unwrap(), historical);
     }
 }

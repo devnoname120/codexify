@@ -8,6 +8,7 @@ import { chatHtml as html, setupChatHtml } from "./chat-widget-source.mjs";
 const { chromium, webkit } = createRequire(import.meta.url)("playwright");
 const META = "io.github.devnoname120/codexify/markdown-chat";
 const ENABLED = "io.github.devnoname120/codexify/markdown-chat-enabled";
+const DUPLICATE_WARNING = "ChatGPT started a duplicated agent on this same project. This is a ChatGPT bug and it\u2019s problematic because then two agents can fight to do edits and overwrite each other. The duplicated agent was asked to stop in order to let the other agent work without interference";
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 const presenceDetails = vm.runInNewContext("(" + html.slice(html.indexOf("function presenceDetails("), html.indexOf("  function toolCallLabel(")) + ")");
@@ -682,12 +683,12 @@ for (const [engineName, engine] of [["Chromium", chromium], ["WebKit", webkit]])
       await t.test("ticket warnings render between messages without agent bubbles", async () => {
         const backend = new ChatBackend();
         backend.add("user", "Continue.");
-        backend.add("warning", "Duplicate agent detected. Its tool call was terminated.");
+        backend.add("warning", DUPLICATE_WARNING);
         backend.add("agent", "I stopped after the rejection.");
         const { page, frames:[frame], errors } = await mount(browser, backend);
         const alert = frame.locator(".warning-banner[role='alert']");
         await alert.waitFor();
-        assert.equal(await alert.textContent(), "Duplicate agent detected. Its tool call was terminated.");
+        assert.equal(await alert.locator(".markdown").textContent(), DUPLICATE_WARNING);
         assert.equal(await alert.evaluate(node => node.className), "warning-banner");
         assert.equal(await frame.locator(".message.agent").count(), 1);
         assert.equal(await alert.evaluate(node => getComputedStyle(node).backgroundColor), "rgb(255, 243, 196)");
@@ -816,6 +817,38 @@ for (const [engineName, engine] of [["Chromium", chromium], ["WebKit", webkit]])
   test(`${engineName}: timestamp UI`, { timeout:120000 }, async t => {
     const browser = await engine.launch();
     try {
+      for (const [width, theme, combined] of [[390, "light", false], [800, "dark", false], [390, "dark", true], [800, "light", true]]) {
+        await t.test(`warning timestamps stay inside the bottom-right corner (${width}, ${theme}, combined=${combined})`, async () => {
+          const backend = new ChatBackend();
+          const now = Date.parse("2026-09-14T22:05:00Z");
+          const timestamp = Date.parse("2026-09-14T22:03:00Z");
+          backend.add("agent", "Continuing the task.").created_at_ms = timestamp;
+          backend.add("warning", DUPLICATE_WARNING).created_at_ms = timestamp;
+          const { page, frames:[frame], errors } = await mount(browser, backend, { width, theme, combined, timezone:"Europe/Zurich", clock:now });
+          const alert = frame.locator(".warning-banner[role='alert']");
+          await alert.waitFor();
+          const stamp = alert.locator(".receipt > time.message-time");
+          assert.equal(await stamp.count(), 1);
+          assert.equal(await stamp.textContent(), "00:03");
+          assert.equal(await stamp.textContent(), await frame.locator(".message.agent time").textContent());
+          assert.equal(await stamp.getAttribute("datetime"), new Date(timestamp).toISOString());
+          assert.equal(await stamp.getAttribute("title"), await frame.locator(".message.agent time").getAttribute("title"));
+          assert.equal(await alert.locator(".author, .ticks, .retry").count(), 0);
+          const geometry = await alert.evaluate(node => {
+            const box = node.getBoundingClientRect(), time = node.querySelector("time"), bounds = time.getBoundingClientRect();
+            const body = node.querySelector(".markdown").getBoundingClientRect();
+            return { font:getComputedStyle(time).fontSize, inside:bounds.left >= box.left && bounds.right <= box.right && bounds.bottom <= box.bottom,
+              belowText:bounds.top >= body.bottom, atBottom:box.bottom - bounds.bottom < 20, rightAligned:box.right - bounds.right < 20 };
+          });
+          assert.equal(geometry.font, "11px");
+          assert(geometry.inside && geometry.belowText && geometry.atBottom && geometry.rightAligned, JSON.stringify(geometry));
+          assert.equal(await frame.locator("html").evaluate(node => node.scrollWidth > innerWidth), false);
+          mkdirSync(new URL("../target/chat-warning-previews/", import.meta.url), { recursive:true });
+          const name = `${engineName.toLowerCase()}-${width}-${theme}-${combined ? "setup" : "chat"}.png`;
+          await frame.locator("#chat").screenshot({ path:new URL(`../target/chat-warning-previews/${name}`, import.meta.url).pathname });
+          assert.deepEqual(errors, []); await page.close();
+        });
+      }
       for (const [timezone, theme, expected] of [
         ["Europe/Paris", "light", ["2026-09-14 23:58", "00:03", "2026-09-13 22:30", "2026-09-14 01:02"]],
         ["America/Los_Angeles", "dark", ["14:58", "15:03", "2026-09-13 13:30", "2026-09-13 16:02"]],
@@ -864,12 +897,15 @@ for (const [engineName, engine] of [["Chromium", chromium], ["WebKit", webkit]])
         const now = Date.parse("2026-09-14T21:59:00Z");
         backend.add("user", "Just before midnight.").created_at_ms = now - 30000;
         backend.add("agent", "Still working.").created_at_ms = now;
+        backend.add("warning", "Duplicate agent detected.").created_at_ms = now;
         const { page, frames:[frame], errors } = await mount(browser, backend, { combined:true, timezone:"Europe/Paris", clock:now });
         await frame.locator(".message time").first().waitFor();
         assert.deepEqual(await frame.locator(".message time").allTextContents(), ["23:58", "23:59"]);
+        assert.deepEqual(await frame.locator(".warning-banner time").allTextContents(), ["23:59"]);
         backend.failState = true;
         await page.clock.fastForward(120000);
         assert.deepEqual(await frame.locator(".message time").allTextContents(), ["2026-09-14 23:58", "2026-09-14 23:59"]);
+        assert.deepEqual(await frame.locator(".warning-banner time").allTextContents(), ["2026-09-14 23:59"]);
         assert.equal(await frame.locator(".ticks.sent").count(), 1);
         assert.deepEqual(errors, []); await page.close();
       });
@@ -892,10 +928,13 @@ for (const [engineName, engine] of [["Chromium", chromium], ["WebKit", webkit]])
         backend.add("user", "Unknown old user time").created_at_ms = null;
         delete backend.add("agent", "Unknown old agent time").created_at_ms;
         backend.add("agent", "Invalid timestamp").created_at_ms = 8640000000000001;
+        backend.add("warning", "Unknown old warning time").created_at_ms = null;
+        backend.add("warning", "Invalid warning timestamp").created_at_ms = 8640000000000001;
         backend.add("user", "Known epoch").created_at_ms = 0;
         const { page, frames:[frame], errors } = await mount(browser, backend, { timezone:"UTC" });
         await frame.locator(".message time").waitFor();
         assert.deepEqual(await frame.locator(".message time").allTextContents(), ["1970-01-01 00:00"]);
+        assert.equal(await frame.locator(".warning-banner time").count(), 0);
         assert.equal(await frame.getByText("Invalid Date", { exact:true }).count(), 0);
         assert.deepEqual(errors, []); await page.close();
       });

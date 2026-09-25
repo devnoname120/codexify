@@ -30,7 +30,11 @@ pub(crate) const INSTRUCTIONS: &str = concat!(
     "Do not wait for expiry or retry on your own. Only resume after the user asks, or recover by starting a new conversation or disabling experimental.agentTickets."
 );
 pub(crate) const REJECTED: &str = "Ticket rejected; this call did not run. Another or duplicated agent may have claimed or advanced this conversation, or a response was lost. Stop this agent branch now, including chat_write/chat_await. Do not retry, guess, repeat setup, or retrieve tickets from logs or state. Inform the user of this warning without another tool call. Only the user may recover.";
-pub(crate) const WARNING: &str = "Duplicate agent detected. Its tool call was terminated.";
+pub(crate) const WARNING: &str = concat!(
+    "ChatGPT started a duplicated agent on this same project. ",
+    "This is a ChatGPT bug and it\u{2019}s problematic because then two agents can fight to do edits and overwrite each other. ",
+    "The duplicated agent was asked to stop in order to let the other agent work without interference"
+);
 
 pub(crate) struct Ticket {
     value: String,

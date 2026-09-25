@@ -387,7 +387,7 @@ async fn agent_tickets_warn_on_every_rejection_without_consuming_user_messages_o
     let transcript = std::fs::read_to_string(chat.path()).unwrap();
     assert_eq!(
         transcript
-            .matches("Duplicate agent detected. Its tool call was terminated.")
+            .matches(crate::agent_tickets::WARNING)
             .count(),
         3
     );
