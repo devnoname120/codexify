@@ -6,12 +6,23 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.6.2] - 2026-09-25
+
 ### Added
 
 - Agent chat shows a filled red speech bubble and composer cue while awaiting a
   reply. An unanswered timeout preserves the cue for 20 seconds without flicker
   across chat-only calls; replies and non-chat agent tool calls restore
   activity-based presence.
+
+### Fixed
+
+- Setup and live status checks use the complete configuration-aware connector
+  schema marker, eliminating false refresh warnings when agent tickets or
+  multi-project selection is enabled. Genuine connector and conversation schema
+  mismatches remain distinct.
+- The setup card recognizes versioned Markdown-chat markers alongside ticket and
+  workspace suffixes when explaining schema changes.
 
 ## [1.6.1] - 2026-09-24
 
