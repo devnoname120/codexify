@@ -385,12 +385,7 @@ async fn agent_tickets_warn_on_every_rejection_without_consuming_user_messages_o
         );
     }
     let transcript = std::fs::read_to_string(chat.path()).unwrap();
-    assert_eq!(
-        transcript
-            .matches(crate::agent_tickets::WARNING)
-            .count(),
-        3
-    );
+    assert_eq!(transcript.matches(crate::agent_tickets::WARNING).count(), 3);
     let page = chat.widget_page(None, None).await.unwrap();
     assert_eq!(
         page.messages
