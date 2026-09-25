@@ -1129,8 +1129,8 @@ read through `skills_read`. Scope `plugin`.
 
 When conversation authorization is enabled, `setup` accepts the historical
 `ref` argument plus an optional `connectorVersion` echo. The advertised tool
-description embeds the running package version. A freshly refreshed connector
-copies that marker into the call. The echo identifies the conversation's schema;
+description embeds the configuration-aware schema version. A freshly refreshed
+connector copies that marker into the call. The echo identifies the conversation's schema;
 it never changes the server's connector-reload record. A legacy call may omit the
 marker without being rejected.
 
@@ -1180,8 +1180,12 @@ separately and is not guessed from the running version when the marker is absent
 
 The card retains the original `connectorSchema.observedVersion` and sends it as
 `setup_status.conversationVersion`; the server supplies `connectorVersion` from
-the reload record and `advertisedVersion` from the running package. Comparing
-only these strings yields `current`, `stale` (reload differs from server), or
+the reload record and `advertisedVersion` from `connector_schema::schema_version`
+using the full running `AppConfig`. This is the same generator used by discovery
+and setup descriptions, including the Markdown-chat, agent-ticket, and
+multi-project feature markers. The shared setup-result builder accepts the full
+configuration rather than reconstructing the marker from a subset of flags.
+Comparing only these strings yields `current`, `stale` (reload differs from server), or
 `conversation_stale` (reload matches but conversation differs or predates the
 marker). Only `stale` recommends Refresh; `conversation_stale` tells the user to
 start a new conversation. A missing reload record remains internally `unknown`

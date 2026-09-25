@@ -784,8 +784,8 @@ dialog.refresh-popover::backdrop { background:rgb(0 0 0 / .48); }
     const previousSchema = schema.status === "conversation_stale"
       ? schema.observedVersion : (schema.connectorVersion || schema.observedVersion);
     if (previousSchema && schema.advertisedVersion
-      && previousSchema.endsWith("+markdown-chat") !== schema.advertisedVersion.endsWith("+markdown-chat")) {
-      const mode = schema.advertisedVersion.endsWith("+markdown-chat") ? "enabled" : "disabled";
+      && previousSchema.includes("+markdown-chat") !== schema.advertisedVersion.includes("+markdown-chat")) {
+      const mode = schema.advertisedVersion.includes("+markdown-chat") ? "enabled" : "disabled";
       copy.append(el("span", "status-help", `Markdown chat was ${mode}; this changes the tool schema even though the Codexify version may be unchanged.`));
     }
 

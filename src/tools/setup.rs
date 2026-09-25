@@ -18,7 +18,7 @@ use crate::tools::check_for_updates::{
     UpdateCheckOutput, UpdateCheckStatus, output_from_result,
     output_schema_value as update_output_schema_value,
 };
-use crate::types::{AppConfig, ToolResult, WorktreeMode};
+use crate::types::{AppConfig, ToolResult};
 
 // This is an authentication and authorization tool despite its deliberately
 // innocuous ChatGPT-facing name and parameter. ChatGPT can falsely classify a
@@ -261,33 +261,29 @@ fn next_step_for_project(project: &SetupProjectInfo) -> String {
 }
 
 struct SetupResultInput<'a> {
+    config: &'a AppConfig,
     scope_description: Option<&'a str>,
-    worktree_mode: WorktreeMode,
-    markdown_chat_enabled: bool,
     next_step: &'a str,
     project: SetupProjectInfo,
     observed_connector_version: Option<&'a str>,
     reloaded_connector_version: Option<&'a str>,
     update_result: Result<LatestVersionInspection, String>,
-    debug: bool,
     update_check_ms: u64,
 }
 
 fn setup_result(input: SetupResultInput<'_>) -> ToolResult {
     let SetupResultInput {
+        config,
         scope_description,
-        worktree_mode,
-        markdown_chat_enabled,
         next_step,
         project,
         observed_connector_version,
         reloaded_connector_version,
         update_result,
-        debug,
         update_check_ms,
     } = input;
     let advertised_version = env!("CARGO_PKG_VERSION");
-    let schema_version = crate::connector_schema::version_for_markdown_chat(markdown_chat_enabled);
+    let schema_version = crate::connector_schema::schema_version(config);
     let observed_connector_version = observed_connector_version
         .map(str::trim)
         .filter(|version| !version.is_empty());
@@ -320,7 +316,7 @@ fn setup_result(input: SetupResultInput<'_>) -> ToolResult {
         text.push_str(" This conversation's schema or its first observed server configuration differs from the current tool set. Refresh the connector and start a new conversation. No connector reload has been observed for this caller.");
     } else if connector_schema.refresh_recommended {
         text.push_str(
-            " The connector's last recorded schema reload differs from the running server version. Use Refresh in the setup panel to open the connector settings, then click Refresh below the tool list.",
+            " The connector's last recorded schema reload differs from the running tool schema. Use Refresh in the setup panel to open the connector settings, then click Refresh below the tool list.",
         );
     } else if connector_schema.status == ConnectorSchemaStatus::ConversationStale {
         text.push_str(" The connector schema is up to date, but this conversation uses an older schema. Start a new conversation to use the latest schema.");
@@ -329,18 +325,18 @@ fn setup_result(input: SetupResultInput<'_>) -> ToolResult {
     let output = SetupOutput {
         content: text.clone(),
         server_version: advertised_version.to_string(),
-        worktree_mode: worktree_mode.as_str().to_string(),
+        worktree_mode: config.worktrees.mode.as_str().to_string(),
         next_step: next_step.to_string(),
         project,
         update,
         connector_schema,
-        debug: debug.then_some(SetupDebugInfo { update_check_ms }),
+        debug: config.debug.then_some(SetupDebugInfo { update_check_ms }),
     };
     let mut result = ToolResult::text(text)
         .with_structured(serde_json::to_value(output).expect("setup output must serialize"));
     result.meta = Some(
         serde_json::from_value(json!({
-            crate::markdown_chat_ui::CHAT_ENABLED_META: markdown_chat_enabled
+            crate::markdown_chat_ui::CHAT_ENABLED_META: config.markdown_chat.enabled
         }))
         .expect("setup chat metadata"),
     );
@@ -489,9 +485,8 @@ impl ConversationAuthorization {
         let update_check_ms =
             u64::try_from(update_started.elapsed().as_millis()).unwrap_or(u64::MAX);
         setup_result(SetupResultInput {
+            config,
             scope_description: Some(scope.description()),
-            worktree_mode: config.worktrees.mode,
-            markdown_chat_enabled: config.markdown_chat.enabled,
             next_step: &next_step,
             project,
             observed_connector_version: connector_version
@@ -499,7 +494,6 @@ impl ConversationAuthorization {
                 .or(context.conversation_schema_version.as_deref()),
             reloaded_connector_version: context.connector_schema_version.as_deref(),
             update_result,
-            debug: config.debug,
             update_check_ms,
         })
     }
@@ -684,7 +678,7 @@ impl Tool for SetupStatus {
         "setup_status"
     }
     fn description(&self) -> String {
-        "Read current server, workspace, worktree defaults, and update status for the setup card. Compares the last recorded connector reload version with the conversation version and running server version.".into()
+        "Read current server, workspace, worktree defaults, and update status for the setup card. Compares the last recorded connector reload version with the conversation version and configuration-aware tool schema.".into()
     }
     fn behavior(&self) -> ToolBehavior {
         ToolBehavior::new(
@@ -741,9 +735,8 @@ impl Tool for SetupStatus {
         }
         .map_err(|error| format!("{error:#}"));
         setup_result(SetupResultInput {
+            config,
             scope_description: None,
-            worktree_mode: config.worktrees.mode,
-            markdown_chat_enabled: config.markdown_chat.enabled,
             next_step: &next_step,
             project,
             observed_connector_version: args
@@ -752,7 +745,6 @@ impl Tool for SetupStatus {
                 .or(context.conversation_schema_version.as_deref()),
             reloaded_connector_version: context.connector_schema_version.as_deref(),
             update_result,
-            debug: config.debug,
             update_check_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
         })
     }
@@ -769,6 +761,7 @@ mod tests {
     use crate::conversation_auth::ConversationAuthorizationStore;
     use crate::diff::DiffCheckpointManager;
     use crate::project_bindings::{ConversationIdentity, ProjectBindingStore};
+    use crate::types::WorktreeMode;
 
     fn assert_model_facing_setup_vocabulary(text: &str) {
         let text = text.to_ascii_lowercase();
@@ -840,50 +833,75 @@ mod tests {
     }
 
     #[test]
-    fn markdown_chat_toggles_are_stale_even_without_reload_identity() {
-        for enabled in [true, false] {
-            let root = tempfile::tempdir().unwrap();
-            let mut config = default_config(root.path().into());
-            config.markdown_chat.enabled = enabled;
-            let current = crate::connector_schema::schema_version(&config);
-            let previous = crate::connector_schema::version_for_markdown_chat(!enabled);
-            assert!(
-                ConversationAuthorization
-                    .describe(&config)
-                    .contains(&format!("`{current}`"))
-            );
-            assert_eq!(
-                schema_info(&current, None, Some(&previous)).status,
-                ConnectorSchemaStatus::Stale
-            );
-            assert_eq!(
-                schema_info(&current, Some(&current), Some(&previous)).status,
-                ConnectorSchemaStatus::ConversationStale
-            );
-            assert_eq!(
-                schema_info(&current, Some(&current), Some(&current)).status,
-                ConnectorSchemaStatus::Current
-            );
-            let result = setup_result(SetupResultInput {
-                scope_description: None,
-                worktree_mode: WorktreeMode::Never,
-                markdown_chat_enabled: enabled,
-                next_step: "",
-                project: fixture_project_info(),
-                observed_connector_version: Some(&previous),
-                reloaded_connector_version: None,
-                update_result: Err("offline".into()),
-                debug: false,
-                update_check_ms: 0,
-            });
-            let data = result.structured_content.unwrap();
-            assert_eq!(data["serverVersion"], env!("CARGO_PKG_VERSION"));
-            assert_eq!(data["connectorSchema"]["advertisedVersion"], current);
-            assert_eq!(data["connectorSchema"]["refreshRecommended"], true);
-            assert!(jsonschema::is_valid(
-                &ConversationAuthorization::output_schema_value(),
-                &data
-            ));
+    fn feature_toggles_require_reload_then_a_new_conversation() {
+        let validator = jsonschema::options()
+            .build(&ConversationAuthorization::output_schema_value())
+            .unwrap();
+        for markdown_chat in [false, true] {
+            for agent_tickets in [false, true] {
+                for multi_project in [false, true] {
+                    let root = tempfile::tempdir().unwrap();
+                    let mut config = default_config(root.path().into());
+                    config.markdown_chat.enabled = markdown_chat;
+                    config.experimental.agent_tickets = agent_tickets;
+                    config.multi_project = multi_project;
+                    let current = crate::connector_schema::schema_version(&config);
+                    config.worktrees.mode = WorktreeMode::Never;
+                    config.debug = true;
+                    assert_eq!(crate::connector_schema::schema_version(&config), current);
+                    for tool in [&ConversationAuthorization as &dyn Tool, &UnrestrictedSetup] {
+                        assert!(tool.describe(&config).contains(&format!("`{current}`")));
+                    }
+                    let mut previous_configs = [config.clone(), config.clone(), config.clone()];
+                    previous_configs[0].markdown_chat.enabled = !markdown_chat;
+                    previous_configs[1].experimental.agent_tickets = !agent_tickets;
+                    previous_configs[2].multi_project = !multi_project;
+                    for previous_config in previous_configs {
+                        let previous = crate::connector_schema::schema_version(&previous_config);
+                        for (connector, conversation, status) in [
+                            (None, Some(&previous), "stale"),
+                            (Some(&previous), Some(&previous), "stale"),
+                            (Some(&current), Some(&previous), "conversation_stale"),
+                            (Some(&current), Some(&current), "current"),
+                            (Some(&current), None, "conversation_stale"),
+                            (None, Some(&current), "unknown"),
+                            (None, None, "unknown"),
+                        ] {
+                            let result = setup_result(SetupResultInput {
+                                config: &config,
+                                scope_description: None,
+                                next_step: "",
+                                project: fixture_project_info(),
+                                observed_connector_version: conversation.map(String::as_str),
+                                reloaded_connector_version: connector.map(String::as_str),
+                                update_result: Err("offline".into()),
+                                update_check_ms: 17,
+                            });
+                            let data = result.structured_content.as_ref().unwrap();
+                            assert_eq!(data["serverVersion"], env!("CARGO_PKG_VERSION"));
+                            assert_eq!(data["worktreeMode"], "never");
+                            assert_eq!(data["debug"]["updateCheckMs"], 17);
+                            assert_eq!(
+                                result.meta.as_ref().unwrap()
+                                    [crate::markdown_chat_ui::CHAT_ENABLED_META],
+                                markdown_chat
+                            );
+                            assert_eq!(
+                                data["connectorSchema"],
+                                json!({
+                                    "status": status,
+                                    "advertisedVersion": current,
+                                    "observedVersion": conversation,
+                                    "connectorVersion": connector,
+                                    "refreshRecommended": status == "stale",
+                                }),
+                                "{previous} -> {current}"
+                            );
+                            assert!(validator.is_valid(data));
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -914,16 +932,17 @@ mod tests {
             WorktreeMode::Always,
             WorktreeMode::Never,
         ] {
+            let root = tempfile::tempdir().unwrap();
+            let mut config = default_config(root.path().into());
+            config.worktrees.mode = mode;
             let result = setup_result(SetupResultInput {
+                config: &config,
                 scope_description: None,
-                worktree_mode: mode,
-                markdown_chat_enabled: false,
                 next_step: "",
                 project: fixture_project_info(),
                 observed_connector_version: None,
                 reloaded_connector_version: None,
                 update_result: Err("offline".into()),
-                debug: false,
                 update_check_ms: 0,
             });
             let data = result.structured_content.as_ref().unwrap();
@@ -949,10 +968,12 @@ mod tests {
 
     #[test]
     fn setup_result_reports_update_and_connector_schema_status_directly() {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = default_config(root.path().into());
+        config.debug = true;
         let result = setup_result(SetupResultInput {
+            config: &config,
             scope_description: Some("this ChatGPT conversation"),
-            worktree_mode: WorktreeMode::Auto,
-            markdown_chat_enabled: false,
             next_step: "Call `get_agent_brief` before using project tools.",
             project: fixture_project_info(),
             observed_connector_version: Some("1.0.0"),
@@ -963,7 +984,6 @@ mod tests {
                 latest: Version::new(1, 2, 0),
                 source: crate::self_update::LatestVersionSource::GithubCli,
             }),
-            debug: true,
             update_check_ms: 17,
         });
 
@@ -998,16 +1018,16 @@ mod tests {
         .unwrap();
         assert!(args.connector_version.is_none());
 
+        let root = tempfile::tempdir().unwrap();
+        let config = default_config(root.path().into());
         let result = setup_result(SetupResultInput {
+            config: &config,
             scope_description: Some("this MCP transport session"),
-            worktree_mode: WorktreeMode::Auto,
-            markdown_chat_enabled: false,
             next_step: "Call `get_agent_brief` before using project tools.",
             project: fixture_project_info(),
             observed_connector_version: None,
             reloaded_connector_version: None,
             update_result: Err("offline".to_string()),
-            debug: false,
             update_check_ms: 9,
         });
         let structured = result.structured_content.as_ref().unwrap();
@@ -1046,6 +1066,59 @@ mod tests {
             current: Version::parse(env!("CARGO_PKG_VERSION")).unwrap(),
             latest: Version::parse(env!("CARGO_PKG_VERSION")).unwrap(),
             source: crate::self_update::LatestVersionSource::GithubApi,
+        }
+    }
+
+    #[tokio::test]
+    async fn setup_accepts_its_advertised_schema_for_all_feature_combinations() {
+        for markdown_chat in [false, true] {
+            for agent_tickets in [false, true] {
+                for multi_project in [false, true] {
+                    let root = tempfile::tempdir().unwrap();
+                    let mut config = default_config(root.path().into());
+                    config.markdown_chat.enabled = markdown_chat;
+                    config.experimental.agent_tickets = agent_tickets;
+                    config.multi_project = multi_project;
+                    let auth_token = "a".repeat(64);
+                    config.conversation_auth_token = Some(auth_token.clone().into());
+                    let description = ConversationAuthorization.describe(&config);
+                    let version = description
+                        .split("Connector version marker: `")
+                        .nth(1)
+                        .unwrap()
+                        .split('`')
+                        .next()
+                        .unwrap();
+                    let mut request_context = context(
+                        ConversationIdentity::from_openai_session("fresh-schema"),
+                        Arc::new(ConversationAuthorizationStore::new()),
+                        root.path(),
+                    );
+                    request_context.connector_schema_version = Some(version.into());
+                    let result = ConversationAuthorization
+                        .call_with_context_and_update_check(
+                            json!({ "ref": auth_token, "connectorVersion": version }),
+                            &config,
+                            &SessionState::new(),
+                            &request_context,
+                            || async { Ok(current_update()) },
+                        )
+                        .await;
+
+                    assert!(!result.is_error, "{}", result.joined_text());
+                    assert_eq!(
+                        result.structured_content.as_ref().unwrap()["connectorSchema"],
+                        json!({
+                            "status": "current",
+                            "advertisedVersion": version,
+                            "observedVersion": version,
+                            "connectorVersion": version,
+                            "refreshRecommended": false,
+                        }),
+                        "markdown_chat={markdown_chat}, agent_tickets={agent_tickets}, multi_project={multi_project}"
+                    );
+                }
+            }
         }
     }
 

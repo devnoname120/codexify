@@ -173,31 +173,56 @@ test("current connector and conversation need no action", async () => {
   assert.doesNotMatch(card.text(), /Start a new conversation|unverified/);
 });
 
-for (const enabled of [true, false]) {
-  test(`Markdown chat ${enabled ? "enable" : "disable"} warns without a binary update or attributed reload`, async () => {
-    const before = enabled ? "1.2.4" : "1.2.4+markdown-chat";
-    const after = enabled ? "1.2.4+markdown-chat" : "1.2.4";
-    const initial = payload("current", before);
-    initial.connectorSchema.advertisedVersion = before;
-    initial.connectorSchema.connectorVersion = before;
-    const card = harness(initial); await drain();
-    card.state.live = payload("stale", before);
-    Object.assign(card.state.live.connectorSchema, { advertisedVersion: after, connectorVersion: null });
-    await card.tick();
-    assert.equal(card.hasButton("Refresh"), true);
-    assert.match(card.text(), new RegExp(`Markdown chat was ${enabled ? "enabled" : "disabled"}`));
-    assert.doesNotMatch(card.text(), /vunknown|vnull|vundefined/);
-    assert.equal(card.hasButton("Upgrade to v1.2.4"), false);
-    card.state.live.connectorSchema.status = "conversation_stale";
-    card.state.live.connectorSchema.connectorVersion = after;
-    card.state.live.connectorSchema.refreshRecommended = false;
-    await card.tick();
-    assert.equal(card.hasButton("Refresh"), false);
-    assert.match(card.text(), /Start a new conversation/);
-    assert.ok(card.state.calls.filter(call => call.name === "setup_status").every(call => call.args.conversationVersion === before));
-    card.teardown();
-  });
+for (const [chatMarker, suffix] of [
+  ["+markdown-chat", ""],
+  ["+markdown-chat-v5", ""],
+  ["+markdown-chat-v5", "+tickets-v1"],
+  ["+markdown-chat-v5", "+workspace-v1"],
+  ["+markdown-chat-v5", "+tickets-v1+workspace-v1"]
+]) {
+  for (const enabled of [true, false]) {
+    test(`Markdown chat ${enabled ? "enable" : "disable"} (${chatMarker}${suffix}) warns without a binary update or attributed reload`, async () => {
+      const before = `1.2.4${enabled ? "" : chatMarker}${suffix}`;
+      const after = `1.2.4${enabled ? chatMarker : ""}${suffix}`;
+      const initial = payload("current", before);
+      initial.connectorSchema.advertisedVersion = before;
+      initial.connectorSchema.connectorVersion = before;
+      const card = harness(initial); await drain();
+      card.state.live = payload("stale", before);
+      Object.assign(card.state.live.connectorSchema, { advertisedVersion: after, connectorVersion: null });
+      await card.tick();
+      assert.equal(card.hasButton("Refresh"), true);
+      assert.match(card.text(), new RegExp(`Markdown chat was ${enabled ? "enabled" : "disabled"}`));
+      assert.doesNotMatch(card.text(), /vunknown|vnull|vundefined/);
+      assert.equal(card.hasButton("Upgrade to v1.2.4"), false);
+      card.state.live.connectorSchema.status = "conversation_stale";
+      card.state.live.connectorSchema.connectorVersion = after;
+      card.state.live.connectorSchema.refreshRecommended = false;
+      await card.tick();
+      assert.equal(card.hasButton("Refresh"), false);
+      assert.match(card.text(), /Start a new conversation/);
+      assert.ok(card.state.calls.filter(call => call.name === "setup_status").every(call => call.args.conversationVersion === before));
+      card.teardown();
+    });
+  }
 }
+
+test("a corrected live schema check clears the false warning without another reload", async () => {
+  const version = "1.6.1+markdown-chat-v5+tickets-v1+workspace-v1";
+  const old = payload("stale", version);
+  Object.assign(old.connectorSchema, { advertisedVersion: "1.6.1+markdown-chat-v5", connectorVersion: version });
+  const live = structuredClone(old);
+  Object.assign(live.connectorSchema, { status: "current", advertisedVersion: version, refreshRecommended: false });
+  const card = harness(old, live); await drain();
+  assert.ok(card.text().includes(`Connector schema: v${version}`));
+  assert.equal(card.hasButton("Refresh"), false);
+  assert.doesNotMatch(card.text(), /refresh required|Start a new conversation/);
+  card.notify("ui/notifications/tool-result", { structuredContent: old }); await drain();
+  await card.tick();
+  assert.equal(card.hasButton("Refresh"), false);
+  assert.ok(card.state.calls.filter(call => call.name === "setup_status").every(call => call.args.conversationVersion === version));
+  card.teardown();
+});
 
 test("reload elsewhere replaces Refresh with a new-conversation message and clears feedback", async () => {
   const card = harness(payload("stale")); await drain();
@@ -279,7 +304,7 @@ test("periodic status checks preserve workspace controls and explicit worktree c
 
 for (const markdownChat of [false, true]) {
   test(`ticket-enabled setup uses private actions with Markdown chat ${markdownChat ? "enabled" : "disabled"}`, async () => {
-    const version = `1.2.4${markdownChat ? "+markdown-chat" : ""}+tickets-v1`;
+    const version = `1.2.4${markdownChat ? "+markdown-chat-v5" : ""}+tickets-v1+workspace-v1`;
     const initial = payload("current", version);
     Object.assign(initial.connectorSchema, { advertisedVersion: version, connectorVersion: version });
     initial.project = { status: "unselected", selectionAvailable: true };

@@ -368,6 +368,15 @@ the cached older schema. This marker identifies the conversation's schema, not
 the connector's latest reload. This remains backward compatible because
 `connectorVersion` is optional in the running server's validator.
 
+The marker combines the package version with the enabled schema features:
+Markdown chat (`+markdown-chat-v5`), agent tickets (`+tickets-v1`), and
+multi-project selection (`+workspace-v1`). Tool discovery, setup descriptions,
+and initial/live setup status use the same generator with the full server
+configuration. A matching marker remains current with any combination of these
+settings. Changing a schema feature requires a connector refresh; after the
+refresh, an older conversation still needs to be replaced. Worktree policy and
+debug logging do not change this marker.
+
 The setup component places version status above workspace selection and checks for a newer release through `gh api` first, with a
 strict 2-second timeout, and falls back to the unauthenticated GitHub releases API
 with a 2-second timeout. Successful results are cached for 5 minutes and failures

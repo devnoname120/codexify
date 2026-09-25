@@ -12,24 +12,17 @@ use sha2::{Digest, Sha256};
 use crate::types::AppConfig;
 
 pub(crate) fn schema_version(config: &AppConfig) -> String {
-    let mut version = version_for_markdown_chat(config.markdown_chat.enabled);
+    let mut version = env!("CARGO_PKG_VERSION").to_string();
+    if config.markdown_chat.enabled {
+        version.push_str("+markdown-chat-v5");
+    }
     if config.experimental.agent_tickets {
         version.push_str("+tickets-v1");
     }
     if config.multi_project {
-        format!("{version}+workspace-v1")
-    } else {
-        version
+        version.push_str("+workspace-v1");
     }
-}
-
-pub(crate) fn version_for_markdown_chat(enabled: bool) -> String {
-    let version = env!("CARGO_PKG_VERSION");
-    if enabled {
-        format!("{version}+markdown-chat-v5")
-    } else {
-        version.to_string()
-    }
+    version
 }
 
 #[derive(Default)]
@@ -187,12 +180,30 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn markdown_toggle_changes_schema_without_changing_release_version() {
-        assert_ne!(
-            version_for_markdown_chat(false),
-            version_for_markdown_chat(true)
-        );
-        assert_eq!(version_for_markdown_chat(false), env!("CARGO_PKG_VERSION"));
+    fn schema_markers_cover_all_feature_combinations_without_changing_release_version() {
+        for (markdown_chat, agent_tickets, multi_project, suffix) in [
+            (false, false, false, ""),
+            (false, false, true, "+workspace-v1"),
+            (false, true, false, "+tickets-v1"),
+            (false, true, true, "+tickets-v1+workspace-v1"),
+            (true, false, false, "+markdown-chat-v5"),
+            (true, false, true, "+markdown-chat-v5+workspace-v1"),
+            (true, true, false, "+markdown-chat-v5+tickets-v1"),
+            (
+                true,
+                true,
+                true,
+                "+markdown-chat-v5+tickets-v1+workspace-v1",
+            ),
+        ] {
+            let mut config = crate::config::default_config(PathBuf::from("/tmp/project"));
+            config.markdown_chat.enabled = markdown_chat;
+            config.experimental.agent_tickets = agent_tickets;
+            config.multi_project = multi_project;
+            let version = schema_version(&config);
+            assert_eq!(version, format!("{}{suffix}", env!("CARGO_PKG_VERSION")));
+            assert!(version.len() <= 64);
+        }
     }
 
     #[test]
