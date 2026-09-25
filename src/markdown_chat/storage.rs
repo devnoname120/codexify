@@ -81,6 +81,7 @@ pub struct ChatFile {
     cursor_path: Option<PathBuf>,
     cursor: Mutex<Option<Cursor>>,
     owner_summary_cache: Mutex<Option<OwnerSummaryCache>>,
+    pub(super) waiting: Mutex<super::wait::AgentWaiting>,
 }
 
 #[derive(Clone)]
@@ -100,6 +101,7 @@ impl ChatFile {
             cursor_path,
             cursor: Mutex::new(None),
             owner_summary_cache: Mutex::new(None),
+            waiting: Mutex::new(super::wait::AgentWaiting::default()),
         }
     }
 
@@ -140,6 +142,9 @@ impl ChatFile {
                     );
                 }
                 let snapshot = snapshot(file, cursor)?;
+                if !snapshot.text.is_empty() {
+                    chat.clear_agent_waiting();
+                }
                 if consume && snapshot.end != cursor.offset {
                     if cancellation.is_cancelled() {
                         return Err(
@@ -366,6 +371,9 @@ impl ChatFile {
             let gap = read_range(file, before.end, start, MAX_UNREAD_BYTES.saturating_sub(before.text.len()))?;
             let gap = String::from_utf8(gap).map_err(|_| "CHAT.md contains incomplete UTF-8; finish saving before retrying")?;
             let user_text = before.text + &user_text(&gap)?;
+            if !user_text.is_empty() {
+                self.clear_agent_waiting();
+            }
             let mut next = advanced_cursor(file, cursor.clone(), end)?;
             next.last_agent_end = Some(end);
             next.notification = NotificationState::NotConfigured;

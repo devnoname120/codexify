@@ -552,6 +552,100 @@ async fn widget_read_receipt_advances_only_when_a_chat_tool_consumes_the_message
 }
 
 #[tokio::test]
+async fn unanswered_await_exposes_a_fixed_grace_without_changing_presence_or_history() {
+    let (_root, config, session, context) = fixture();
+    let chat = context
+        .markdown_chat
+        .chat(&config, context.conversation.as_ref(), &session)
+        .unwrap();
+    chat.ensure().await.unwrap();
+    chat.record_agent_call(1000).await.unwrap();
+    let initial = chat.widget_page(None, None).await.unwrap();
+    assert!(matches!(
+        chat.wait(Duration::from_millis(1), CancellationToken::new())
+            .await
+            .unwrap(),
+        WaitOutcome::TimedOut(_)
+    ));
+    let page = serde_json::to_value(
+        chat.widget_page(None, Some(initial.revision))
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let deadline = page["agent_waiting_until_ms"]
+        .as_u64()
+        .expect("timeout must expose its grace deadline");
+    assert!(deadline > page["server_time_ms"].as_u64().unwrap());
+    assert!(deadline <= page["server_time_ms"].as_u64().unwrap() + 20_000);
+    assert_eq!(page["last_agent_call_at_ms"], 1000);
+    assert_eq!(page["unchanged"], true);
+    let tools = load_tools_for_config(&config);
+    for (name, args) in [
+        ("chat_read", json!({})),
+        ("chat_write", json!({"message":"Still waiting."})),
+        ("chat_read", json!({})),
+    ] {
+        let tool = tools.iter().find(|tool| tool.name() == name).unwrap();
+        let result = tool
+            .call_with_context(args, &config, &session, &context)
+            .await;
+        assert!(!result.is_error, "{}", result.joined_text());
+        let page = serde_json::to_value(chat.widget_page(None, None).await.unwrap()).unwrap();
+        assert_eq!(
+            page["agent_waiting_until_ms"], deadline,
+            "{name} must not renew grace"
+        );
+    }
+    let summary = serde_json::to_value(chat.owner_summary().await.unwrap()).unwrap();
+    assert_eq!(summary["agent_waiting_until_ms"], deadline);
+    let reopened = MarkdownChatStore::default()
+        .chat(&config, context.conversation.as_ref(), &session)
+        .unwrap();
+    let page = serde_json::to_value(reopened.widget_page(None, None).await.unwrap()).unwrap();
+    assert!(
+        page["agent_waiting_until_ms"].is_null(),
+        "a restarted server cannot still be awaiting"
+    );
+    chat.append_user("late-reply".into(), "Continue".into())
+        .await
+        .unwrap();
+    let page = serde_json::to_value(chat.widget_page(None, None).await.unwrap()).unwrap();
+    assert!(page["agent_waiting_until_ms"].is_null());
+}
+
+#[tokio::test]
+async fn cancelled_await_does_not_leave_a_previous_timeout_grace_active() {
+    let (_root, config, session, context) = fixture();
+    let chat = context
+        .markdown_chat
+        .chat(&config, context.conversation.as_ref(), &session)
+        .unwrap();
+    chat.ensure().await.unwrap();
+    assert!(matches!(
+        chat.wait(Duration::from_millis(1), CancellationToken::new())
+            .await
+            .unwrap(),
+        WaitOutcome::TimedOut(_)
+    ));
+    let cancellation = CancellationToken::new();
+    cancellation.cancel();
+    assert!(matches!(
+        chat.wait(Duration::from_secs(30), cancellation)
+            .await
+            .unwrap(),
+        WaitOutcome::Cancelled
+    ));
+    assert!(
+        chat.widget_page(None, None)
+            .await
+            .unwrap()
+            .agent_waiting_until_ms
+            .is_none()
+    );
+}
+
+#[tokio::test]
 async fn activity_survives_restart_without_consuming_messages_or_reloading_history() {
     let (_root, config, session, context) = fixture();
     let chat = context

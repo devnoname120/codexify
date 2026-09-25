@@ -24,6 +24,7 @@ pub struct WidgetPage {
     pub delivered_through: u64,
     pub read_through: u64,
     pub last_agent_call_at_ms: Option<u64>,
+    pub agent_waiting_until_ms: Option<u64>,
     pub total_tool_calls: u64,
     pub server_time_ms: u64,
     pub messages: Vec<WidgetMessage>,
@@ -46,6 +47,7 @@ pub struct OwnerChatSummary {
     pub last_entry_end: u64,
     pub last_entry_at_ms: u64,
     pub last_agent_call_at_ms: Option<u64>,
+    pub agent_waiting_until_ms: Option<u64>,
     pub total_tool_calls: u64,
 }
 
@@ -215,6 +217,7 @@ impl ChatFile {
                         last_entry_end: cached.last_entry_end,
                         last_entry_at_ms: cached.last_entry_at_ms,
                         last_agent_call_at_ms: cursor.last_agent_call_at_ms,
+                        agent_waiting_until_ms: chat.agent_waiting_until_ms(),
                         total_tool_calls: cursor.total_tool_calls,
                     });
                 }
@@ -249,6 +252,7 @@ impl ChatFile {
                         .and_then(|span| span.created_at_ms)
                         .unwrap_or(modified_ms),
                     last_agent_call_at_ms: cursor.last_agent_call_at_ms,
+                    agent_waiting_until_ms: chat.agent_waiting_until_ms(),
                     total_tool_calls: cursor.total_tool_calls,
                 };
                 *cache = Some(OwnerSummaryCache {
@@ -321,6 +325,7 @@ impl ChatFile {
                     delivered_through: cursor.delivered_through,
                     read_through: cursor.offset,
                     last_agent_call_at_ms: cursor.last_agent_call_at_ms,
+                    agent_waiting_until_ms: chat.agent_waiting_until_ms(),
                     total_tool_calls: cursor.total_tool_calls,
                     server_time_ms: super::super::now_ms(),
                     messages: Vec::new(),
@@ -403,6 +408,7 @@ impl ChatFile {
                     if read_range(file, span.body_start, span.body_end, MAX_UNREAD_BYTES)? != message.as_bytes() {
                         return Err("This request ID already belongs to a different message.".into());
                     }
+                    if span.end > cursor.offset { chat.clear_agent_waiting(); }
                     return Ok(UserSendReceipt { id, end: span.end, created_at_ms: span.created_at_ms, tool_call_count: span.tool_call_count });
                 }
             }
@@ -416,6 +422,7 @@ impl ChatFile {
                 .and_then(|handle| same_file::Handle::from_path(&chat.path).map(|current| current == handle))
                 .map_err(io_error)?;
             if !same { return Err("CHAT.md changed during send; reload and retry with the same request ID.".into()); }
+            chat.clear_agent_waiting();
             Ok(UserSendReceipt { id, end, created_at_ms: Some(created_at_ms), tool_call_count: Some(tool_call_count) })
         })).await
     }

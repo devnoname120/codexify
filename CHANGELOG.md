@@ -6,6 +6,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Agent chat shows a filled red speech bubble and composer cue while awaiting a
+  reply. An unanswered timeout preserves the cue for 20 seconds without flicker
+  across chat-only calls; replies and non-chat agent tool calls restore
+  activity-based presence.
+
 ## [1.6.1] - 2026-09-24
 
 ### Changed

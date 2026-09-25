@@ -207,6 +207,7 @@ struct ChatListing {
     last_entry_end: u64,
     last_entry_at_ms: u64,
     last_agent_call_at_ms: Option<u64>,
+    agent_waiting_until_ms: Option<u64>,
     total_tool_calls: u64,
 }
 
@@ -222,6 +223,7 @@ async fn list_chats(State(state): State<OwnerState>) -> ApiResult {
             last_entry_end,
             last_entry_at_ms,
             last_agent_call_at_ms,
+            agent_waiting_until_ms,
             total_tool_calls,
         } = match chat.owner_summary().await {
             Ok(summary) => summary,
@@ -238,6 +240,7 @@ async fn list_chats(State(state): State<OwnerState>) -> ApiResult {
                         .map(|duration| duration.as_millis() as u64)
                         .unwrap_or_default(),
                     last_agent_call_at_ms: None,
+                    agent_waiting_until_ms: None,
                     total_tool_calls: 0,
                 }
             }
@@ -249,6 +252,7 @@ async fn list_chats(State(state): State<OwnerState>) -> ApiResult {
             last_entry_end,
             last_entry_at_ms,
             last_agent_call_at_ms,
+            agent_waiting_until_ms,
             total_tool_calls,
         });
     }

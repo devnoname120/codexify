@@ -5,9 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Markdown chat</title>
 <style>
-:root { color-scheme: light dark; --bg:#fff; --surface:#f6f7f8; --ink:#202427; --muted:#697177; --border:#dbe0e3; --user:#e4f3ed; --agent:#f0f2f4; --accent:#136f50; --tick:#6e777d; --read:#0078bc; --error:#ad2d30; }
-@media (prefers-color-scheme:dark) { :root:not([data-theme="light"]) { --bg:#181b1b; --surface:#232727; --ink:#eef1f1; --muted:#adb7b6; --border:#3a4241; --user:#174c3e; --agent:#2b3130; --accent:#82d9b1; --tick:#b5c0bd; --read:#59c9f6; --error:#ffadae; } }
-:root[data-theme="dark"] { --bg:#181b1b; --surface:#232727; --ink:#eef1f1; --muted:#adb7b6; --border:#3a4241; --user:#174c3e; --agent:#2b3130; --accent:#82d9b1; --tick:#b5c0bd; --read:#59c9f6; --error:#ffadae; }
+:root { color-scheme: light dark; --bg:#fff; --surface:#f6f7f8; --ink:#202427; --muted:#697177; --border:#dbe0e3; --user:#e4f3ed; --agent:#f0f2f4; --accent:#136f50; --tick:#6e777d; --read:#0078bc; --error:#ad2d30; --waiting:#c4313b; }
+@media (prefers-color-scheme:dark) { :root:not([data-theme="light"]) { --bg:#181b1b; --surface:#232727; --ink:#eef1f1; --muted:#adb7b6; --border:#3a4241; --user:#174c3e; --agent:#2b3130; --accent:#82d9b1; --tick:#b5c0bd; --read:#59c9f6; --error:#ffadae; --waiting:#ff858e; } }
+:root[data-theme="dark"] { --bg:#181b1b; --surface:#232727; --ink:#eef1f1; --muted:#adb7b6; --border:#3a4241; --user:#174c3e; --agent:#2b3130; --accent:#82d9b1; --tick:#b5c0bd; --read:#59c9f6; --error:#ffadae; --waiting:#ff858e; }
 * { box-sizing:border-box; }
 body { margin:0; color:var(--ink); background:transparent; font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
 button,textarea { font:inherit; }
@@ -22,6 +22,7 @@ button:focus-visible,textarea:focus-visible,a:focus-visible { outline:2px solid 
 h1 { display:flex; align-items:center; flex-wrap:wrap; gap:9px; font-size:15px; font-weight:650; margin:0; }
 #presence { display:inline-flex; align-items:center; gap:4px; color:var(--muted); font-size:11px; font-weight:400; }
 .presence-symbol { width:14px; height:14px; flex:none; }
+#presence[data-state="waiting"] { color:var(--waiting); }
 #tool-total { color:var(--muted); font-size:11px; font-weight:400; white-space:nowrap; font-variant-numeric:tabular-nums; }
 .subtitle { font-size:12px; color:var(--muted); }
 #workspace-label { font-size:11px; color:var(--muted); overflow-wrap:anywhere; }
@@ -67,6 +68,9 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
 #retained-sends p { margin:6px 0; white-space:pre-wrap; overflow-wrap:anywhere; }
 #composer { display:flex; gap:8px; align-items:flex-end; }
 #draft { flex:1; width:0; min-width:0; max-height:150px; resize:none; border:1px solid var(--border); border-radius:19px; background:var(--bg); color:var(--ink); padding:9px 13px; line-height:1.4; }
+#chat[data-awaiting="true"] #draft { border-color:var(--waiting); box-shadow:0 0 0 1px var(--waiting); }
+#chat[data-awaiting="true"] #draft:focus-visible { outline-color:var(--waiting); }
+#awaiting-hint { margin:0 4px 8px; color:var(--waiting); font-size:12px; font-weight:500; }
 #send { flex:0 0 38px; width:38px; height:38px; border:0; border-radius:50%; background:var(--accent); color:var(--bg); padding:9px; }
 #status { display:flex; align-items:center; gap:6px; color:var(--muted); font-size:11px; margin:7px 4px 0; }
 #status.error { color:var(--error); }
@@ -87,6 +91,7 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
     </div>
     <div class="footer">
       <details id="retained-sends" hidden><summary id="retained-summary"></summary><div id="retained-messages"></div></details>
+      <p id="awaiting-hint" hidden>The agent is waiting for your message.</p>
       <form id="composer">
         <textarea id="draft" rows="1" aria-label="Message the agent" placeholder="Message the agent..." spellcheck="true"></textarea>
         <button id="send" type="submit" aria-label="Send message" title="Send message" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5m-6 6 6-6 6 6"/></svg></button>
@@ -109,6 +114,7 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
   let refreshing = false, sending = false, loadingOlder = false, visible = true, collapsed = false;
   let revision = null, before = null, hasMore = false, delivered = 0, readThrough = 0, chatFile = null, failures = 0, snapshotEnd = 0;
   let lastAgentCall = null, totalToolCalls = null, clockOffset = 0, presenceTimer = null;
+  let agentWaitingUntil = null, waitingReplyEnd = 0;
   let messageClockTimer = null;
   let hostCapabilities = {};
   let statusKind = "normal";
@@ -216,7 +222,8 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
   function theme(context) {
     if (context?.theme === "dark" || context?.theme === "light") (scope.host || document.documentElement).dataset.theme = context.theme;
   }
-  function presenceDetails(lastCall, now) {
+  function presenceDetails(lastCall, now, waitingUntil = null) {
+    if (Number.isSafeInteger(waitingUntil) && now < waitingUntil) return { state:"waiting", label:"awaiting your reply", delay:waitingUntil - now };
     if (!Number.isFinite(lastCall)) return { state:"offline", label:"offline", delay:null };
     const age = Math.max(0, now - lastCall);
     if (age < 180000) return { state:"online", label:"online", delay:180000 - age };
@@ -244,20 +251,35 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
   }
   function updatePresence() {
     clearTimeout(presenceTimer);
-    const { state, label, delay } = presenceDetails(lastAgentCall, Date.now() + clockOffset);
+    const { state, label, delay } = presenceDetails(lastAgentCall, Date.now() + clockOffset, agentWaitingUntil);
     const node = el("presence");
-    if (node.dataset.state !== state) {
-      const svg = icon(state === "online" ? ["m6.5 12 3.5 3.5 7.5-8"] : state === "away" ? ["M12 5.5V12l5.6 3.2"] : ["m8 8 8 8", "m8 16 8-8"], "presence-symbol");
+    const changed = node.dataset.state !== state, waiting = state === "waiting";
+    if (changed) {
+      const svg = icon(waiting ? ["M20 16a9.5 9.5 0 1 0-4 4l6 2-2-6Z"] : state === "online" ? ["m6.5 12 3.5 3.5 7.5-8"] : state === "away" ? ["M12 5.5V12l5.6 3.2"] : ["m8 8 8 8", "m8 16 8-8"], "presence-symbol");
       svg.setAttribute("viewBox", "0 0 24 24");
-      svg.setAttribute("style", `stroke:${state === "offline" ? "#85898d" : "#fff"};stroke-width:3`);
-      const circle = document.createElementNS("http://www.w3.org/2000/svg", "circle");
-      for (const [key, value] of Object.entries({ cx:12, cy:12, r:10.5, fill:state === "online" ? "#159b27" : state === "away" ? "#eba916" : "#fff", stroke:state === "offline" ? "#85898d" : "none" })) circle.setAttribute(key, String(value));
-      svg.prepend(circle);
+      svg.setAttribute("style", `stroke:${waiting ? "var(--waiting)" : state === "offline" ? "#85898d" : "#fff"};stroke-width:${waiting ? 2 : 3}`);
+      if (waiting) {
+        svg.querySelector("path").setAttribute("fill", "currentColor");
+        for (const cx of [7, 12, 17]) {
+          const dot = document.createElementNS(svg.namespaceURI, "circle");
+          for (const [key, value] of Object.entries({ cx, cy:11.5, r:1.3, fill:"var(--bg)", stroke:"none" })) dot.setAttribute(key, String(value));
+          svg.append(dot);
+        }
+      } else {
+        const circle = document.createElementNS(svg.namespaceURI, "circle");
+        for (const [key, value] of Object.entries({ cx:12, cy:12, r:10.5, fill:state === "online" ? "#159b27" : state === "away" ? "#eba916" : "#fff", stroke:state === "offline" ? "#85898d" : "none" })) circle.setAttribute(key, String(value));
+        svg.prepend(circle);
+      }
       node.replaceChildren(svg, make("span", "presence-label"));
       node.dataset.state = state;
+      el("chat").dataset.awaiting = String(waiting);
+      el("awaiting-hint").hidden = !waiting;
+      if (waiting) input.setAttribute("aria-describedby", "awaiting-hint");
+      else input.removeAttribute("aria-describedby");
+      resizeInput();
     }
     node.querySelector(".presence-label").textContent = label;
-    node.title = lastAgentCall === null ? "No agent tool call recorded for this conversation." : "Based on this conversation's last agent tool call, not a live connection or proof of ongoing work.";
+    node.title = waiting ? "The agent is waiting for your message. Kept briefly between unanswered waits." : lastAgentCall === null ? "No agent tool call recorded for this conversation." : "Based on this conversation's last agent tool call, not a live connection or proof of ongoing work.";
     if (!tornDown && !document.hidden && delay !== null) presenceTimer = setTimeout(updatePresence, Math.max(1, delay));
   }
   function markdown(container, text) {
@@ -406,6 +428,7 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
     if (Number.isSafeInteger(page.read_through)) readThrough = Math.max(readThrough, page.read_through);
     if (!history) {
       lastAgentCall = Number.isSafeInteger(page.last_agent_call_at_ms) ? page.last_agent_call_at_ms : null;
+      agentWaitingUntil = Number.isSafeInteger(page.agent_waiting_until_ms) && page.read_through >= waitingReplyEnd ? page.agent_waiting_until_ms : null;
       if (!Number.isSafeInteger(page.total_tool_calls) || page.total_tool_calls < 0) throw new Error("Invalid tool-call count from connector.");
       totalToolCalls = page.total_tool_calls;
       updateToolTotal();
@@ -457,6 +480,7 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
     generation++;
     available = value; refreshing = false; sending = false; loadingOlder = false;
     clearTimeout(pollTimer); clearTimeout(messageClockTimer); clearTimeout(presenceTimer);
+    if (!value) { agentWaitingUntil = null; updatePresence(); }
     resizeInput();
     if (value) { revision = null; void refresh(); }
   }
@@ -469,6 +493,7 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
     refreshing = false; sending = false; loadingOlder = false;
     chatFile = null; revision = null; before = null; hasMore = false; failures = 0; snapshotEnd = 0;
     delivered = 0; readThrough = 0; lastAgentCall = null; totalToolCalls = null; clockOffset = 0;
+    agentWaitingUntil = null; waitingReplyEnd = 0;
     records.clear();
     for (const node of nodes.values()) node.remove();
     for (const node of markerNodes.values()) node.remove();
@@ -509,6 +534,11 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
       if (payload.sent?.id !== message.id || !Number.isSafeInteger(payload.sent.end)) throw new Error("The send receipt was incomplete. Retry uses the same message ID.");
       pendingSends.delete(message.id);
       if (!currentGeneration(origin)) return;
+      if (payload.sent.end > readThrough) {
+        waitingReplyEnd = Math.max(waitingReplyEnd, payload.sent.end);
+        agentWaitingUntil = null;
+        updatePresence();
+      }
       if (!records.has(message.id)) records.set(message.id, { ...message, pending:false, failed:false, start:payload.sent.end - 1, end:payload.sent.end, created_at_ms:payload.sent.created_at_ms, tool_call_count:payload.sent.tool_call_count ?? null });
       status("Saved to CHAT.md. The agent receives it on a tool response."); revision = null;
       void refresh();

@@ -157,12 +157,17 @@ impl CodexHandler {
         &self,
         conversation: Option<&ConversationIdentity>,
         at_ms: u64,
+        tool_name: &str,
     ) -> Option<crate::markdown_chat::AgentActivity> {
         let activity = self
             .markdown_chat
             .record_agent_call(conversation, &self.session, at_ms)?;
-        self.persist_chat_activity(conversation, activity.clone())
-            .await;
+        self.persist_chat_activity(
+            conversation,
+            activity.clone(),
+            !tool_name.starts_with("chat_"),
+        )
+        .await;
         Some(activity)
     }
 
@@ -170,6 +175,7 @@ impl CodexHandler {
         &self,
         conversation: Option<&ConversationIdentity>,
         activity: crate::markdown_chat::AgentActivity,
+        clear_waiting: bool,
     ) {
         if let Some(root) = self.selected_project_root(conversation) {
             let mut effective = self.config.as_ref().clone();
@@ -178,6 +184,9 @@ impl CodexHandler {
                 .markdown_chat
                 .chat(&effective, conversation, &self.session)
             {
+                if clear_waiting {
+                    chat.clear_agent_waiting();
+                }
                 if let Err(error) = chat.sync_agent_activity(activity).await {
                     tracing::warn!(%error, "could not persist Markdown chat agent activity");
                 } else {
@@ -750,7 +759,7 @@ impl ServerHandler for CodexHandler {
             Ok((None, None))
         };
         let activity = if agent_call && authorized_before {
-            self.record_chat_activity(conversation.as_ref(), called_at_ms)
+            self.record_chat_activity(conversation.as_ref(), called_at_ms, &name)
                 .await
         } else {
             None
@@ -986,12 +995,12 @@ impl ServerHandler for CodexHandler {
                 .is_none()
         {
             if !authorized_before {
-                self.record_chat_activity(conversation.as_ref(), called_at_ms)
+                self.record_chat_activity(conversation.as_ref(), called_at_ms, &name)
                     .await;
             } else if name == SetProjectRoot::NAME
                 && let Some(activity) = activity
             {
-                self.persist_chat_activity(conversation.as_ref(), activity)
+                self.persist_chat_activity(conversation.as_ref(), activity, true)
                     .await;
             }
         }

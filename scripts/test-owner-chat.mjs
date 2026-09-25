@@ -33,6 +33,7 @@ test(`${engineName}: standalone owner view restores its URL selection`, { timeou
     ];
     const messages = new Map(chats.map(chat => [chat.id, []]));
     const seenRequests = [];
+    let failPolling = false;
     await page.route("http://127.0.0.1:43210/**", async route => {
       const request = route.request();
       const url = new URL(request.url());
@@ -40,11 +41,13 @@ test(`${engineName}: standalone owner view restores its URL selection`, { timeou
         "content-security-policy":"default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src blob: data:; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
       } });
       seenRequests.push(request.headers().authorization);
+      if (failPolling) return route.fulfill({ status:503, body:"Preview connection unavailable" });
       if (url.pathname === "/api/chats") return route.fulfill({ json:{ chats, serverTimeMs:Date.now() } });
       const id = url.pathname.split("/")[3];
       if (url.pathname.endsWith("/send")) {
         const body = request.postDataJSON();
         const end = chats.find(chat => chat.id === id).lastEntryEnd += 100;
+        chats.find(chat => chat.id === id).agentWaitingUntilMs = null;
         const tool_call_count = chats.find(chat => chat.id === id).totalToolCalls;
         messages.get(id).push({ id:body.request_id, role:"user", markdown:body.message, start:end - 100, end, created_at_ms:Date.now(), tool_call_count });
         return route.fulfill({ json:{ _meta:{ [META]:{ sent:{ id:body.request_id, end, created_at_ms:Date.now(), tool_call_count } } } } });
@@ -54,6 +57,7 @@ test(`${engineName}: standalone owner view restores its URL selection`, { timeou
         return route.fulfill({ json:{ _meta:{ [META]:{
           chat_file:`/private/${id}/CHAT.md`, revision:String(chats.find(chat => chat.id === id).lastEntryEnd),
           delivered_through:0, read_through:0, last_agent_call_at_ms:chats.find(chat => chat.id === id).lastAgentCallAtMs,
+          agent_waiting_until_ms:chats.find(chat => chat.id === id).agentWaitingUntilMs ?? null,
           total_tool_calls:chats.find(chat => chat.id === id).totalToolCalls, server_time_ms:Date.now(),
           messages:rows, has_more:false, before:rows[0]?.start ?? null, unchanged:false
         } } } });
@@ -69,6 +73,11 @@ test(`${engineName}: standalone owner view restores its URL selection`, { timeou
     for (const size of await page.locator(".presence").evaluateAll(nodes => nodes.map(node => node.getBoundingClientRect().width))) assert(size <= 14);
     assert(!((await page.locator(".conversation-detail").allTextContents()).some(text => text.includes("No messages"))));
     await page.getByRole("button", { name:/Fix tests/ }).click();
+    chats[0].agentWaitingUntilMs = Date.now() + 120000;
+    await page.locator(".conversation:first-child .presence.waiting").waitFor();
+    await page.locator('#chat-host #presence[data-state="waiting"]').waitFor();
+    assert.equal(await page.locator(".conversation:first-child .presence circle").count(), 3);
+    assert.equal(await page.locator(".conversation:first-child .presence path").getAttribute("fill"), "currentColor");
     assert.equal(new URL(page.url()).searchParams.get("chat"), chats[0].id);
     assert.equal(new URL(page.url()).hash, "#test-token");
     const chat = page.locator("#chat-host").locator("div").first().locator("#draft");
@@ -76,6 +85,8 @@ test(`${engineName}: standalone owner view restores its URL selection`, { timeou
     await page.locator("#chat-host #send:enabled").waitFor();
     await chat.press("Enter");
     await page.locator("#chat-host").getByText("Please run the test suite").waitFor();
+    await page.locator('#chat-host #presence[data-state="online"]').waitFor();
+    await page.locator(".conversation:first-child .presence.online").waitFor();
     if (process.env.CODEXIFY_WORKSPACE_SCREENSHOTS) {
       mkdirSync(process.env.CODEXIFY_WORKSPACE_SCREENSHOTS, { recursive:true });
       await page.screenshot({ path:`${process.env.CODEXIFY_WORKSPACE_SCREENSHOTS}/${engineName.toLowerCase()}-sidebar.png`, fullPage:true });
@@ -104,6 +115,14 @@ test(`${engineName}: standalone owner view restores its URL selection`, { timeou
     assert.equal(new URL(page.url()).searchParams.get("chat"), chats[0].id);
     assert.equal(new URL(page.url()).hash, "#test-token");
     assert(seenRequests.length > 0 && seenRequests.every(value => value === "Bearer test-token"));
+    const clock = Date.now();
+    await page.clock.install({ time:clock });
+    chats[1].agentWaitingUntilMs = clock + 20000;
+    await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+    await page.locator(".conversation:nth-child(2) .presence.waiting").waitFor();
+    failPolling = true;
+    await page.clock.fastForward(20000);
+    await page.locator(".conversation:nth-child(2) .presence.away").waitFor();
     assert.deepEqual(errors, []);
   } finally { await browser.close(); }
 });

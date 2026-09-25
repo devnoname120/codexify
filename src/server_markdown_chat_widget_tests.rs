@@ -167,6 +167,7 @@ async fn markdown_chat_widget_send_poll_and_agent_delivery_are_separate() {
                 .unwrap();
             let started = payload(&during)["last_agent_call_at_ms"].as_u64().unwrap();
             assert_eq!(payload(&during)["total_tool_calls"], 3);
+            assert!(payload(&during)["agent_waiting_until_ms"].as_u64().unwrap() > started);
             assert!(
                 started > previous_call,
                 "a pending wait counts at invocation, not completion"
@@ -206,6 +207,7 @@ async fn markdown_chat_widget_send_poll_and_agent_delivery_are_separate() {
         "completion must not reset the activity clock"
     );
     assert_eq!(payload(&state)["total_tool_calls"], 3);
+    assert!(payload(&state)["agent_waiting_until_ms"].is_null());
     assert!(chat.read(false).await.unwrap().text.is_empty());
     for (number, (name, args)) in [
         ("chat_read", json!({})),
@@ -257,6 +259,65 @@ async fn markdown_chat_widget_send_poll_and_agent_delivery_are_separate() {
             assert!(payload(&state)["read_through"].as_u64().unwrap() >= end);
         }
     }
+    chat.read(true).await.unwrap();
+    assert!(matches!(
+        chat.wait(
+            Duration::from_millis(1),
+            tokio_util::sync::CancellationToken::new()
+        )
+        .await
+        .unwrap(),
+        crate::markdown_chat::WaitOutcome::TimedOut(_)
+    ));
+    let grace = chat
+        .widget_page(None, None)
+        .await
+        .unwrap()
+        .agent_waiting_until_ms
+        .unwrap();
+    for (name, args) in [
+        ("chat_read", json!({})),
+        ("chat_write", json!({"message":"Still awaiting input"})),
+        ("chat_ui_state", json!({})),
+    ] {
+        client
+            .call_tool(request(name, args, "widget-owner"))
+            .await
+            .unwrap();
+        assert_eq!(
+            chat.widget_page(None, None)
+                .await
+                .unwrap()
+                .agent_waiting_until_ms,
+            Some(grace)
+        );
+    }
+    client
+        .call_tool(request(
+            "get_environment",
+            json!({}),
+            "different-conversation",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        chat.widget_page(None, None)
+            .await
+            .unwrap()
+            .agent_waiting_until_ms,
+        Some(grace)
+    );
+    client
+        .call_tool(request("get_environment", json!({}), "widget-owner"))
+        .await
+        .unwrap();
+    assert!(
+        chat.widget_page(None, None)
+            .await
+            .unwrap()
+            .agent_waiting_until_ms
+            .is_none()
+    );
     let forged = client
         .call_tool(request(
             "chat_ui_send",

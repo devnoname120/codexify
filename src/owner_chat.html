@@ -25,6 +25,8 @@ aside p { margin:5px 0 0; font-size:12px; color:var(--muted); }
 .presence.online { background:#159b27; border-color:#159b27; color:white; }
 .presence.away { background:#eba916; border-color:#eba916; color:white; }
 .presence.offline { color:#85898d; background:#fff; }
+.presence.waiting { color:#c4313b; }
+@media(prefers-color-scheme:dark) { .presence.waiting { color:#ff858e; } }
 .conversation-main { min-width:0; }
 .conversation-title { display:block; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; font-weight:600; }
 .conversation-detail { display:block; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; font-size:11px; color:var(--muted); margin-top:3px; }
@@ -70,7 +72,8 @@ main { min-width:0; min-height:0; display:flex; justify-content:center; padding:
     try { localStorage.setItem("owner-chat-seen-v1", JSON.stringify(seen)); } catch {}
     renderList();
   }
-  function presence(lastCall, now) {
+  function presence(lastCall, now, waitingUntil = null) {
+    if (Number.isSafeInteger(waitingUntil) && now < waitingUntil) return "waiting";
     if (!Number.isFinite(lastCall) || now - lastCall >= 300000) return "offline";
     if (now - lastCall >= 180000) return "away";
     return "online";
@@ -78,6 +81,17 @@ main { min-width:0; min-height:0; display:flex; justify-content:center; padding:
   function presenceIcon(state) {
     const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
     svg.setAttribute("viewBox", "0 0 24 24"); svg.setAttribute("aria-hidden", "true");
+    if (state === "waiting") {
+      const path = document.createElementNS(svg.namespaceURI, "path");
+      for (const [key, value] of Object.entries({ d:"M20 16a9.5 9.5 0 1 0-4 4l6 2-2-6Z", fill:"currentColor", stroke:"currentColor", "stroke-width":2, "stroke-linejoin":"round" })) path.setAttribute(key, String(value));
+      svg.append(path);
+      for (const cx of [7, 12, 17]) {
+        const dot = document.createElementNS(svg.namespaceURI, "circle");
+        for (const [key, value] of Object.entries({ cx, cy:11.5, r:1.3, fill:"var(--panel)" })) dot.setAttribute(key, String(value));
+        svg.append(dot);
+      }
+      return svg;
+    }
     const circle = document.createElementNS(svg.namespaceURI, "circle");
     for (const [key,value] of Object.entries({cx:12,cy:12,r:10.5,fill:state === "offline" ? "#fff" : "currentColor",stroke:"currentColor","stroke-width":2.5})) circle.setAttribute(key,String(value));
     circle.style.color = state === "online" ? "#159b27" : state === "away" ? "#eba916" : "#85898d";
@@ -101,7 +115,7 @@ main { min-width:0; min-height:0; display:flex; justify-content:center; padding:
   function renderList() {
     const now = Date.now() + clockOffset;
     clearTimeout(presenceTimer);
-    const next = chats.flatMap(chat => [180000,300000].map(age => chat.lastAgentCallAtMs + age - now)).filter(delay => Number.isFinite(delay) && delay > 0);
+    const next = chats.flatMap(chat => [chat.agentWaitingUntilMs, ...[180000,300000].map(age => chat.lastAgentCallAtMs + age)].map(deadline => deadline - now)).filter(delay => Number.isFinite(delay) && delay > 0);
     if (!document.hidden && next.length) presenceTimer = setTimeout(renderList, Math.max(1, Math.min(...next)));
     list.replaceChildren();
     if (!chats.length) {
@@ -114,10 +128,11 @@ main { min-width:0; min-height:0; display:flex; justify-content:center; padding:
       button.setAttribute("aria-current", String(chat.id === selected));
       button.title = `${chat.title} · ${chat.workspace}`;
       button.addEventListener("click", () => select(chat.id));
-      const state = presence(chat.lastAgentCallAtMs, now);
+      const state = presence(chat.lastAgentCallAtMs, now, chat.agentWaitingUntilMs);
       const icon = textNode("span", `presence ${state}`, "");
       icon.append(presenceIcon(state));
-      icon.title = `Agent ${state} (based on last tool call)`;
+      icon.title = state === "waiting" ? "Agent is waiting for your message" : `Agent ${state} (based on last tool call)`;
+      icon.setAttribute("role", "img"); icon.setAttribute("aria-label", icon.title);
       const content = textNode("span", "conversation-main", "");
       content.append(textNode("span", "conversation-title", chat.title));
       const date = chat.lastEntryAtMs ? new Date(chat.lastEntryAtMs).toLocaleString() : "No messages";

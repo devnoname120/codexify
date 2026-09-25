@@ -1746,7 +1746,7 @@ Do not share the URL or that file. It changes when the service restarts. The
 interface is not served by the MCP tunnel, and its APIs require the token.
 
 The left pane lists persisted conversations sorted by the timestamp of their
-latest chat entry. It shows the same online/away/offline tool-activity state as
+latest chat entry. It shows the same waiting/online/away/offline state as
 the embedded widget, plus a blue dot for a new entry not yet viewed in that
 browser. Seen positions and unfinished drafts are stored locally in the
 browser; chat messages, delivery receipts, activity, and counters come from the
@@ -1857,6 +1857,17 @@ private project/update actions do not count. The panel accounts for the server's
 clock and ages the indicator locally even when history is unchanged or a poll
 fails. These labels describe recent tool activity, not a live connection or a
 guarantee that the agent is currently working.
+
+While `chat_await` is waiting for input, a filled red speech bubble replaces the normal
+presence icon in both the header and conversation list. The composer has a red
+outline and an explicit waiting hint above it; the ordinary grey "Message the
+agent..." placeholder stays unchanged. An unanswered timeout preserves the waiting state for 20 seconds
+from the actual timeout; empty `chat_read` and `chat_write` calls do not reset or
+extend that deadline. A new await continues the waiting state. A user message,
+a non-`chat_*` agent tool, cancellation, or a dropped wait clears it. When the
+grace expires, the ordinary invocation-age rules above apply, rather than
+forcing online. Wait state is live and conversation-scoped, not persisted across
+server restarts. The UI also expires stale wait metadata locally if polling fails.
 
 When `agentChat.notifications` is configured, a server-side timer uses the same
 5-minute threshold to attempt one offline alert for each period without an

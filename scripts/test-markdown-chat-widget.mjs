@@ -26,6 +26,19 @@ test("presence: exact three/five-minute boundaries, unknown activity, and clock 
   for (const missing of [null, undefined, NaN]) assert.equal(presenceDetails(missing, 1000000).state, "offline");
 });
 
+test("presence: waiting overrides age only until its deadline, then uses ordinary presence", () => {
+  const now = 1000000;
+  for (const [lastCall, fallback] of [[now, "online"], [now - 240000, "away"], [now - 360000, "offline"], [null, "offline"]]) {
+    assert.equal(presenceDetails(lastCall, now, now + 20000).state, "waiting");
+    assert.equal(presenceDetails(lastCall, now, now + 20000).delay, 20000);
+    assert.equal(presenceDetails(lastCall, now + 19999, now + 20000).state, "waiting");
+    assert.equal(presenceDetails(lastCall, now + 20000, now + 20000).state, fallback);
+    for (const invalid of [null, undefined, NaN, Infinity, -1]) {
+      assert.equal(presenceDetails(lastCall, now, invalid).state, fallback);
+    }
+  }
+});
+
 function setupPayload(selected = true) {
   return {
     serverVersion:"1.4.0", worktreeMode:"never",
@@ -41,6 +54,7 @@ class ChatBackend {
   delivered = 0;
   read = 0;
   lastAgentCall = null;
+  agentWaitingUntil = null;
   totalToolCalls = 0;
   serverTime = null;
   revision = 0;
@@ -76,7 +90,7 @@ class ChatBackend {
       if (this.failSends-- > 0) throw new Error("Temporary send failure");
       let message = this.messages.find(message => message.id === args.request_id);
       if (message) assert.equal(message.markdown, args.message);
-      else message = this.add("user", args.message, args.request_id);
+      else { message = this.add("user", args.message, args.request_id); this.agentWaitingUntil = null; }
       if (this.failAfterSave) { this.failAfterSave = false; throw new Error("Response lost after save"); }
       return { content:[{ type:"text", text:"Message saved." }], _meta:{ [META]:{ sent:{ id:message.id, end:message.end, created_at_ms:message.created_at_ms, tool_call_count:message.tool_call_count } } } };
     }
@@ -91,7 +105,7 @@ class ChatBackend {
       _meta:{ [META]:{
         chat_file:"/private/project/chats/conversation/CHAT.md", revision,
         delivered_through:this.delivered, read_through:this.read,
-        last_agent_call_at_ms:this.lastAgentCall, total_tool_calls:this.totalToolCalls, server_time_ms:this.serverTime ?? Date.now(), messages,
+        last_agent_call_at_ms:this.lastAgentCall, agent_waiting_until_ms:this.agentWaitingUntil, total_tool_calls:this.totalToolCalls, server_time_ms:this.serverTime ?? Date.now(), messages,
         has_more:all.length > messages.length && !unchanged,
         before:messages[0]?.start ?? null, unchanged
       } }
@@ -173,6 +187,69 @@ async function expectTimeline(frame, expected) {
 }
 
 for (const [engineName, engine] of [["Chromium", chromium], ["WebKit", webkit]]) {
+  test(`${engineName}: awaiting UI`, { timeout:120000 }, async t => {
+    const browser = await engine.launch();
+    try {
+      for (const theme of ["light", "dark"]) for (const combined of [false, true]) {
+        await t.test(`waiting bubble, draft cue and offline fallback (${theme}, ${combined ? "setup" : "standalone"})`, async () => {
+          const now = Date.UTC(2026, 8, 25, 12);
+          const backend = new ChatBackend();
+          backend.serverTime = now; backend.lastAgentCall = now - 360000;
+          backend.add("agent", "The implementation is ready. What would you like changed?");
+          backend.agentWaitingUntil = now + 20000;
+          const { page, frames:[frame], errors } = await mount(browser, backend, { clock:now, combined, theme, width:390 });
+          await frame.locator('#presence[data-state="waiting"]').waitFor();
+          assert.equal(await frame.locator(".presence-symbol circle").count(), 3);
+          assert.equal(await frame.locator(".presence-symbol path").getAttribute("fill"), "currentColor");
+          assert.deepEqual(await frame.locator(".presence-symbol circle").evaluateAll(nodes => nodes.map(node => node.getAttribute("fill"))), ["var(--bg)", "var(--bg)", "var(--bg)"]);
+          assert.equal(await frame.locator("#draft").getAttribute("placeholder"), "Message the agent...");
+          assert.equal(await frame.locator("#draft").getAttribute("aria-describedby"), "awaiting-hint");
+          await frame.locator("#awaiting-hint").waitFor();
+          const border = await frame.locator("#draft").evaluate(node => getComputedStyle(node).borderColor);
+          assert.equal(border, theme === "dark" ? "rgb(255, 133, 142)" : "rgb(196, 49, 59)");
+          assert.notEqual(await frame.locator("#draft").evaluate(node => getComputedStyle(node, "::placeholder").color), border);
+          assert.equal(await frame.locator("html").evaluate(node => node.scrollWidth > innerWidth), false);
+          mkdirSync(new URL("../target/awaiting-previews/", import.meta.url), { recursive:true });
+          await frame.locator("#chat").screenshot({ path:new URL(`../target/awaiting-previews/${engineName.toLowerCase()}-${theme}-${combined ? "setup" : "chat"}.png`, import.meta.url).pathname });
+          await frame.getByRole("textbox").fill("Keep this unsent draft");
+          await frame.locator("#awaiting-hint").waitFor();
+          backend.failState = true;
+          await page.clock.fastForward(20000);
+          await frame.locator('#presence[data-state="offline"]').waitFor();
+          assert.equal(await frame.locator("#awaiting-hint").isVisible(), false);
+          assert.equal(await frame.getByRole("textbox").inputValue(), "Keep this unsent draft");
+          assert.equal(await frame.locator("#draft").getAttribute("placeholder"), "Message the agent...");
+          assert.equal(await frame.locator("#draft").getAttribute("aria-describedby"), null);
+          assert.deepEqual(errors, []); await page.close();
+        });
+      }
+      await t.test("successful reply clears waiting despite stale polling; a new await restores it", async () => {
+        const backend = new ChatBackend();
+        backend.lastAgentCall = Date.now(); backend.agentWaitingUntil = Date.now() + 120000;
+        const { page, frames:[frame], errors } = await mount(browser, backend);
+        await frame.locator('#presence[data-state="waiting"]').waitFor();
+        backend.failState = true;
+        await frame.getByRole("textbox").fill("Please continue");
+        await frame.getByRole("textbox").press("Enter");
+        await frame.locator('#presence[data-state="online"]').waitFor();
+        await frame.locator("#refresh").waitFor();
+        backend.failState = false; backend.agentWaitingUntil = Date.now() + 120000;
+        backend.totalToolCalls = 1;
+        await frame.locator("#refresh").click();
+        await frame.locator("#tool-total").getByText("1 tool call", { exact:true }).waitFor();
+        assert.equal(await frame.locator("#presence").getAttribute("data-state"), "online", "a pre-reply poll must not resurrect the bubble");
+        backend.read = backend.messages[0].end; backend.totalToolCalls = 2;
+        await page.evaluate(() => document.querySelector("iframe").contentWindow.dispatchEvent(new Event("focus")));
+        await frame.locator('#presence[data-state="waiting"]').waitFor();
+        backend.failSends = 1;
+        await frame.getByRole("textbox").fill("Another message");
+        await frame.getByRole("textbox").press("Enter");
+        await frame.getByRole("button", { name:"Retry", exact:true }).waitFor();
+        assert.equal(await frame.locator("#presence").getAttribute("data-state"), "waiting", "a failed send must retain waiting");
+        assert.deepEqual(errors, []); await page.close();
+      });
+    } finally { await browser.close(); }
+  });
   test(`${engineName}: composer sizing`, { timeout:180000 }, async t => {
     const browser = await engine.launch();
     try {
