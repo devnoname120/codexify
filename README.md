@@ -90,9 +90,11 @@ Rust toolchain is needed. Open a new terminal after installation so the
 `codexify` command is available.
 
 macOS release binaries use the stable Developer ID identity `dev.codexify` and
-are published only after Apple accepts both Intel and Apple-silicon
-notarizations. The first signed update from an older ad-hoc build may require one
-final macOS privacy reapproval; later signed updates retain the same identity.
+remain signature-verified. Notarization is temporarily disabled while Apple
+resolves the team's enrollment rejection (status 7000); current macOS releases
+are signed but not notarized. The first signed update from an older ad-hoc build
+may require one final macOS privacy reapproval; later signed updates retain the
+same identity.
 
 Prefer a manual install? Get a [prebuilt binary](https://github.com/devnoname120/codexify/releases/latest)
 or read the [installation guide](https://github.com/devnoname120/codexify/wiki/Installation).

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import importlib
+import contextlib
 import hashlib
 import json
 import os
@@ -8,6 +9,7 @@ import stat
 import subprocess
 import tarfile
 import tempfile
+import textwrap
 import unittest
 import zipfile
 from pathlib import Path
@@ -357,7 +359,7 @@ class StageTests(unittest.TestCase):
 
 
 class ReleaseWorkflowTests(unittest.TestCase):
-    def test_release_workflow_signs_mac_binaries_and_stages_a_draft_on_macos(self) -> None:
+    def test_release_workflow_preserves_signing_and_restorable_notarization_steps(self) -> None:
         workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text()
         self.assertIn("MACOS_DEVELOPER_ID_P12_BASE64", workflow)
         self.assertIn("CODE_SIGN_KEYCHAIN", workflow)
@@ -369,6 +371,92 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertIn("runs-on: macos-14", workflow)
         self.assertNotIn("softprops/action-gh-release", workflow)
         self.assertLess(workflow.index("scripts/sign-macos-release.sh"), workflow.index("Stage artifacts"))
+        active = "\n".join(line for line in workflow.splitlines() if not line.lstrip().startswith("#"))
+        self.assertIn("needs: [check, build, deploy-installers]", active)
+        temporary = "Publish signed release without notarization" in active
+        notarized = "scripts/release_notarization.py stage" in active
+        self.assertNotEqual(temporary, notarized, "exactly one publication path must be active")
+        if temporary:
+            self.assertNotIn("APPLE_NOTARY_KEY", active)
+
+
+class TemporaryPublicationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.artifacts = self.root / "artifacts"
+        self.artifacts.mkdir()
+        StageTests._create_archives(self)
+        (self.root / "CHANGELOG.md").write_text(
+            f"## [Unreleased]\n\n## [{TAG[1:]}] - 2026-09-25\n\n### Fixed\n\n- Warning timestamps.\n\n## [1.0.0]\nOlder changes.\n"
+        )
+        self.module = release_module()
+        self.services = mock.create_autospec(self.module.CliServices, instance=True)
+        self.services.resolve_tag_commit.return_value = COMMIT
+        self.services.list_releases.return_value = []
+        self.publish = mock.Mock()
+        self.notes = ""
+
+    def run_publication(self) -> None:
+        workflow = (ROOT / ".github/workflows/release.yml").read_text()
+        marker = "      - name: Publish signed release without notarization\n"
+        if marker not in workflow:
+            self.skipTest("Temporary publication path has been removed")
+        self.assertIn(marker, workflow)
+        step = workflow.split(marker, 1)[1]
+        code = textwrap.dedent(step.split("          python3 - <<'PY'\n", 1)[1].split("          PY\n", 1)[0])
+
+        def publish(args, **kwargs):
+            self.notes = Path(args[args.index("--notes-file") + 1]).read_text()
+            return self.publish(args, **kwargs)
+
+        with contextlib.chdir(self.root), mock.patch.dict(os.environ, {
+            "GITHUB_REPOSITORY": "devnoname120/codexify", "GITHUB_REF_NAME": TAG,
+            "GITHUB_SHA": COMMIT, "APPLE_TEAM_ID": TEAM_ID,
+        }), mock.patch.object(self.module, "CliServices", return_value=self.services), mock.patch("subprocess.run", side_effect=publish):
+            exec(compile(code, "release.yml:temporary-publication", "exec"), {})
+
+    def test_publishes_exact_assets_after_signature_checks_without_notarization(self) -> None:
+        self.run_publication()
+        self.assertEqual(self.services.verify_signed_binary.call_count, 2)
+        self.services.submit_notarization.assert_not_called()
+        self.services.notarization_status.assert_not_called()
+        args = self.publish.call_args.args[0]
+        self.assertEqual(args[:4], ["gh", "release", "create", TAG])
+        self.assertNotIn("--draft", args)
+        self.assertIn("--verify-tag", args)
+        self.assertIn("--latest=true", args)
+        self.assertEqual({Path(value).name for value in args[4:10]}, set(self.module.expected_public_asset_names(TAG)))
+        checksums = self.module.parse_checksums(self.artifacts / "checksums.txt", set(self.module.expected_archive_names(TAG)))
+        for name, digest in checksums.items():
+            self.assertEqual(digest, self.module.sha256_file(self.artifacts / name))
+        self.assertIn("Warning timestamps.", self.notes)
+        self.assertIn("not notarized", self.notes)
+        self.assertNotIn("Older changes.", self.notes)
+
+    def test_missing_archive_prevents_publication(self) -> None:
+        (self.artifacts / f"codexify-{TAG}-linux-x64.tar.gz").unlink()
+        with self.assertRaisesRegex(RuntimeError, "archive set"):
+            self.run_publication()
+        self.publish.assert_not_called()
+
+    def test_wrong_tag_commit_prevents_publication(self) -> None:
+        self.services.resolve_tag_commit.return_value = "b" * 40
+        with self.assertRaisesRegex(RuntimeError, "commit"):
+            self.run_publication()
+        self.publish.assert_not_called()
+
+    def test_bad_signature_prevents_publication(self) -> None:
+        self.services.verify_signed_binary.side_effect = RuntimeError("invalid signature")
+        with self.assertRaisesRegex(RuntimeError, "invalid signature"):
+            self.run_publication()
+        self.publish.assert_not_called()
+
+    def test_older_release_does_not_replace_a_newer_latest_release(self) -> None:
+        self.services.list_releases.return_value = [{"tag_name": "v10.0.0", "draft": False, "prerelease": False}]
+        self.run_publication()
+        self.assertIn("--latest=false", self.publish.call_args.args[0])
 
 
 class FakeFinalizeServices:
