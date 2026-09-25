@@ -6,6 +6,24 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.6.3] - 2026-09-25
+
+### Changed
+
+- Temporarily publish releases without waiting for Apple notarization while the
+  team's enrollment rejection (status 7000) is unresolved. The notarization steps
+  remain commented in CI for restoration; Developer ID signature verification,
+  archive checksums, and build/test checks remain required.
+
+### Fixed
+
+- Duplicate-agent warnings show their timestamp at the bottom right inside the
+  yellow banner, using the same local-time formatting as normal chat bubbles in
+  both embedded and standalone agent chat. Missing historical timestamps remain
+  omitted, and date labels update at local midnight.
+- Duplicate-agent warnings explain the competing-agent problem and the request
+  for the duplicate to stop so the other agent can continue without interference.
+
 ## [1.6.2] - 2026-09-25
 
 ### Added
@@ -536,7 +554,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   drained through bounded head/tail buffers, while component-only `_meta` remains
   outside the model-visible limit.
 
-[Unreleased]: https://github.com/devnoname120/codexify/compare/v1.5.3...HEAD
+[Unreleased]: https://github.com/devnoname120/codexify/compare/v1.6.3...HEAD
+[1.6.3]: https://github.com/devnoname120/codexify/compare/v1.6.2...v1.6.3
+[1.6.2]: https://github.com/devnoname120/codexify/compare/v1.6.1...v1.6.2
+[1.6.1]: https://github.com/devnoname120/codexify/compare/v1.6.0...v1.6.1
+[1.6.0]: https://github.com/devnoname120/codexify/compare/v1.5.3...v1.6.0
 [1.5.3]: https://github.com/devnoname120/codexify/compare/v1.5.2...v1.5.3
 [1.5.2]: https://github.com/devnoname120/codexify/compare/v1.5.1...v1.5.2
 [1.5.1]: https://github.com/devnoname120/codexify/compare/v1.5.0...v1.5.1
