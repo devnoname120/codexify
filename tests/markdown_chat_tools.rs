@@ -104,6 +104,35 @@ fn chat_tool_descriptions_define_a_non_terminal_state_machine() {
 }
 
 #[tokio::test]
+async fn chat_await_honors_configured_timeout_with_and_without_a_workspace() {
+    for unselected in [false, true] {
+        for max_wait_ms in [1_000, 1_500] {
+            let (_root, mut config, session, context) = fixture();
+            config.multi_project = unselected;
+            config.markdown_chat.max_wait_ms = max_wait_ms;
+            let tools = load_tools_for_config(&config);
+            let waiter = tools
+                .iter()
+                .find(|tool| tool.name() == "chat_await")
+                .unwrap();
+            let started = std::time::Instant::now();
+            let result = tokio::time::timeout(
+                Duration::from_secs(10),
+                waiter.call_with_context(json!({}), &config, &session, &context),
+            )
+            .await
+            .expect("chat_await ignored the configured timeout");
+            assert!(!result.is_error, "{}", result.joined_text());
+            assert_eq!(
+                result.structured_content.as_ref().unwrap()["status"],
+                "timeout"
+            );
+            assert!(started.elapsed() >= Duration::from_millis(max_wait_ms));
+        }
+    }
+}
+
+#[tokio::test]
 async fn chat_tool_results_expose_the_required_next_action() {
     let (_root, mut config, session, context) = fixture();
     config.markdown_chat.max_wait_ms = 1;

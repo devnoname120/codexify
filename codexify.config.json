@@ -11,7 +11,7 @@
   "agentChat": {
     "enabled": false,
     "port": 3120,
-    "maxWaitMs": 270000,
+    "maxWaitMs": 55000,
     "notifications": null
   },
   "apiKey": null,

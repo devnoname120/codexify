@@ -6,6 +6,15 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.6.5] - 2026-09-26
+
+### Changed
+
+- `chat_await` now defaults to 55 seconds instead of 115 seconds. Its existing
+  `agentChat.maxWaitMs` setting remains configurable from 1000 to 300000 ms,
+  including waits before workspace selection. Bundled configuration files and
+  documentation use the new default; existing explicit overrides are preserved.
+
 ## [1.6.4] - 2026-09-26
 
 ### Fixed

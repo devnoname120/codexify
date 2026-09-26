@@ -916,7 +916,7 @@ names.
   "agentChat": {
     "enabled": false,
     "port": 3120,
-    "maxWaitMs": 115000,
+    "maxWaitMs": 55000,
     "notifications": null
   },
   "multiProject": false,
@@ -1622,7 +1622,7 @@ guarantee quota savings, or keep a host-terminated turn alive.
   "agentChat": {
     "enabled": true,
     "port": 3120,
-    "maxWaitMs": 115000,
+    "maxWaitMs": 55000,
     "notifications": {
       "urls": ["ntfys://ntfy.example/codexify?image=no"],
       "pythonPath": "/absolute/path/to/notifications-venv/bin/python",
@@ -1636,8 +1636,11 @@ guarantee quota savings, or keep a host-terminated turn alive.
 standalone-chat listener. Set `port` to another integer from 1 to 65535, or to
 `null` to ask the OS for an available localhost port whenever the service
 starts. It cannot equal the main top-level `port` while agent chat is enabled.
-`maxWaitMs` defaults to **115000 ms (1 min 55 s)**
-and must be between 1000 and 300000. The tools do not accept a timeout override.
+`maxWaitMs` controls the `chat_await` timeout and defaults to **55000 ms (55 s)**.
+It must be between 1000 and 300000, including both limits. The setting applies
+both while waiting for a chat message and before a workspace has been selected.
+The tools do not accept a timeout override. Existing explicitly configured
+values remain unchanged by upgrades; omit the field to use the default.
 Omit `notifications`, or set it to `null`,
 for file-only communication. Configure only one notification backend. Credentials
 can be stored directly in the JSON configuration; keep the config and private
@@ -1645,6 +1648,7 @@ service URLs out of source control. See the installation steps and URL examples
 in [Waiting and notifications](#waiting-and-notifications).
 
 For example, `codexify config set agentChat.enabled true` enables the setting.
+Use `codexify config set agentChat.maxWaitMs 55000` to set a 55-second timeout.
 Configuration is loaded when the service starts: restart the service after a
 change. Enabling or disabling this feature changes the advertised tools and
 output schemas, so also refresh the connector in ChatGPT Settings and start a
@@ -1944,7 +1948,7 @@ missed wake-up. No background polling continues after the tool returns.
 The offline-alert timer is separate from `chat_await` and runs in the server
 when notifications are configured.
 
-The 115-second default is a configurable choice, **not a documented ChatGPT
+The 55-second default is a configurable choice, **not a documented ChatGPT
 maximum**. A [first-hand report](https://community.openai.com/t/agentsdk-and-chatgpt-ui-fails-running-time-consuming-mcp-tool-with-typeerror-fetch-failed/1366562)
 describes approximately five-minute and later shorter timeouts; [OpenAI Support](https://community.openai.com/t/progress-notifications-not-working-in-chatgpt-mcp-ts-sdk-1-20-0/1367559/5)
 states that no fixed ChatGPT web MCP timeout is documented. Reduce `maxWaitMs`

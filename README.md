@@ -155,7 +155,7 @@ sending another ChatGPT message. Enable the feature in your Codexify config:
   "agentChat": {
     "enabled": true,
     "port": 3120,
-    "maxWaitMs": 115000
+    "maxWaitMs": 55000
   }
 }
 ```
@@ -163,6 +163,10 @@ sending another ChatGPT message. Enable the feature in your Codexify config:
 `agentChat.port` defaults the separate standalone chat listener to localhost
 port `3120`. Set it to `null` to use an OS-assigned port instead. It must differ
 from the main top-level `port` when agent chat is enabled.
+
+`agentChat.maxWaitMs` controls the server-side `chat_await` timeout in milliseconds.
+It defaults to `55000` (55 seconds) and accepts values from `1000` to `300000`.
+Existing explicit values remain in effect; omit the setting to use the default.
 
 Restart Codexify, refresh the connector's tools in ChatGPT Settings, and start a
 new conversation. `get_agent_brief` reports that conversation's `CHAT.md` path,

@@ -26,7 +26,7 @@ fn markdown_chat_defaults_and_validation() {
     let config: MarkdownChatConfig = serde_json::from_str("{}").unwrap();
     assert!(!config.enabled);
     assert_eq!(config.port, Some(DEFAULT_OWNER_CHAT_PORT));
-    assert_eq!(config.max_wait_ms, 115_000);
+    assert_eq!(config.max_wait_ms, 55_000);
     assert!(config.notifications.is_none());
     assert!(config.validate().is_ok());
     for wait in [0, 999, 300_001, u64::MAX] {
@@ -49,6 +49,48 @@ fn markdown_chat_defaults_and_validation() {
     .unwrap();
     assert!(config.validate().is_ok());
     assert!(!format!("{config:?}").contains("private-test-token"));
+}
+
+#[test]
+fn agent_chat_timeout_defaults_and_overrides_survive_config_loading() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("config.json");
+    for (agent_chat, expected) in [
+        (None, 55_000),
+        (Some(serde_json::json!({})), 55_000),
+        (Some(serde_json::json!({"enabled": true})), 55_000),
+        (Some(serde_json::json!({"maxWaitMs": 1000})), 1_000),
+        (Some(serde_json::json!({"maxWaitMs": 115000})), 115_000),
+        (Some(serde_json::json!({"maxWaitMs": 300000})), 300_000),
+    ] {
+        let mut settings = serde_json::json!({
+            "schemaVersion": 1,
+            "workDir": root.path(),
+            "codexMcp": {"enabled": false}
+        });
+        if let Some(agent_chat) = agent_chat {
+            settings["agentChat"] = agent_chat;
+        }
+        std::fs::write(&path, settings.to_string()).unwrap();
+        let cli = Cli::try_parse_from(["codexify", "--config", path.to_str().unwrap()]).unwrap();
+        let config = load_config_quiet(cli).unwrap();
+        assert_eq!(config.markdown_chat.max_wait_ms, expected, "{settings}");
+        assert_eq!(
+            serde_json::to_value(&config.markdown_chat).unwrap()["maxWaitMs"],
+            expected
+        );
+    }
+}
+
+#[test]
+fn bundled_agent_chat_timeouts_match_the_default() {
+    for text in [
+        include_str!("../codexify.config.json"),
+        include_str!("../codexify.config.example.json"),
+    ] {
+        let config: serde_json::Value = serde_json::from_str(text).unwrap();
+        assert_eq!(config["agentChat"]["maxWaitMs"], 55_000);
+    }
 }
 
 #[test]
@@ -109,6 +151,7 @@ fn legacy_markdown_chat_key_migrates_without_a_runtime_alias() {
 
     assert!(config.markdown_chat.enabled);
     assert_eq!(config.markdown_chat.port, Some(DEFAULT_OWNER_CHAT_PORT));
+    assert_eq!(config.markdown_chat.max_wait_ms, 55_000);
     let migrated: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
     assert_eq!(migrated["schemaVersion"], 1);

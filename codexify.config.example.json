@@ -93,7 +93,7 @@
   "agentChat": {
     "enabled": false,
     "port": 3120,
-    "maxWaitMs": 270000,
+    "maxWaitMs": 55000,
     "notifications": {
       "urls": ["ntfys://ntfy.example/codexify?image=no"],
       "pythonPath": "python3",
