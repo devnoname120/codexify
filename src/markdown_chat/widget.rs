@@ -414,7 +414,9 @@ impl ChatFile {
                         .saturating_add(section.len())
                         .saturating_add(usize::from(!sections.is_empty()) * 2);
                     if total > MAX_CLEAN_TRANSCRIPT_BYTES {
-                        return Err("Clean Markdown transcript exceeds the 64 MiB safety ceiling.".into());
+                        return Err(
+                            "Clean Markdown transcript exceeds the 64 MiB safety ceiling.".into(),
+                        );
                     }
                     sections.push(section);
                 }

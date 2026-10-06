@@ -23,15 +23,32 @@ test(`${engineName}: standalone owner view restores its URL selection`, { timeou
   const browser = await engine.launch();
   try {
     const page = await browser.newPage();
+    page.setDefaultTimeout(5000);
     const errors = [];
+    const copied = [];
+    const markdownRequests = [];
+    await page.exposeFunction("recordClipboard", text => copied.push(text));
+    await page.addInitScript(() => {
+      window.__writeTestClipboard = async text => {
+        await window.recordClipboard(text);
+        window.__lastCopied = text;
+      };
+      Object.defineProperty(navigator, "clipboard", {
+        configurable:true,
+        value:{ writeText:text => window.__writeTestClipboard(text) }
+      });
+    });
     page.on("pageerror", error => errors.push(error.message));
     const now = Date.now();
+    const rawSource = "**Rendered**  \n\n```js\nconst x = 1;\n```";
+    const wholeTranscript = `## Agent\n\nOlder server-only entry\n\n## Agent\n\n${rawSource}`;
     const chats = [
       { id:"a".repeat(64), title:"Fix tests", workspace:"project-a", lastEntryEnd:200, lastEntryAtMs:now, lastAgentCallAtMs:now, totalToolCalls:3 },
       { id:"b".repeat(64), title:"Review files", workspace:"project-b", lastEntryEnd:100, lastEntryAtMs:now - 60000, lastAgentCallAtMs:now - 240000, totalToolCalls:1 },
       { id:"c".repeat(64), title:"Old task", workspace:"project-c", lastEntryEnd:75, lastEntryAtMs:now - 120000, lastAgentCallAtMs:null, totalToolCalls:0 }
     ];
     const messages = new Map(chats.map(chat => [chat.id, []]));
+    messages.get(chats[0].id).push({ id:"raw-one", role:"agent", markdown:rawSource, start:1, end:100, created_at_ms:now, tool_call_count:3 });
     const seenRequests = [];
     let failPolling = false;
     await page.route("http://127.0.0.1:43210/**", async route => {
@@ -44,6 +61,10 @@ test(`${engineName}: standalone owner view restores its URL selection`, { timeou
       if (failPolling) return route.fulfill({ status:503, body:"Preview connection unavailable" });
       if (url.pathname === "/api/chats") return route.fulfill({ json:{ chats, serverTimeMs:Date.now() } });
       const id = url.pathname.split("/")[3];
+      if (url.pathname.endsWith("/markdown")) {
+        markdownRequests.push(url.pathname);
+        return route.fulfill({ contentType:"text/markdown; charset=utf-8", body:wholeTranscript });
+      }
       if (url.pathname.endsWith("/send")) {
         const body = request.postDataJSON();
         const end = chats.find(chat => chat.id === id).lastEntryEnd += 100;
@@ -80,6 +101,22 @@ test(`${engineName}: standalone owner view restores its URL selection`, { timeou
     assert.equal(await page.locator(".conversation:first-child .presence path").getAttribute("fill"), "currentColor");
     assert.equal(new URL(page.url()).searchParams.get("chat"), chats[0].id);
     assert.equal(new URL(page.url()).hash, "#test-token");
+    const chatHost = page.locator("#chat-host");
+    await chatHost.getByRole("button", { name:"Copy message Markdown", exact:true }).first().click();
+    await page.waitForFunction(expected => window.__lastCopied === expected, rawSource);
+    assert.equal(copied.at(-1), rawSource);
+    await chatHost.getByRole("button", { name:"Copy whole chat as Markdown", exact:true }).click();
+    await page.waitForFunction(expected => window.__lastCopied === expected, wholeTranscript);
+    assert.equal(markdownRequests.at(-1), `/api/chats/${chats[0].id}/markdown`);
+    assert.equal(copied.at(-1), wholeTranscript);
+    await page.evaluate(() => {
+      navigator.clipboard.writeText = async () => { throw new Error("Clipboard denied"); };
+    });
+    await chatHost.getByRole("button", { name:"Copy message Markdown", exact:true }).first().click();
+    await chatHost.getByText("Could not copy message Markdown.", { exact:true }).waitFor();
+    await page.evaluate(() => {
+      navigator.clipboard.writeText = text => window.__writeTestClipboard(text);
+    });
     const chat = page.locator("#chat-host").locator("div").first().locator("#draft");
     await chat.fill("Please run the test suite");
     await page.locator("#chat-host #send:enabled").waitFor();

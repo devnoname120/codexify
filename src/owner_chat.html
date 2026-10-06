@@ -208,6 +208,15 @@ main { min-width:0; min-height:0; display:flex; justify-content:center; padding:
         const url = new URL(href, location.href);
         if (!["https:", "http:", "mailto:"].includes(url.protocol)) throw new Error("Unsupported link");
         window.open(url.href, "_blank", "noopener,noreferrer");
+      },
+      async copyMessage(markdown) {
+        if (!navigator.clipboard?.writeText) throw new Error("Clipboard unavailable");
+        await navigator.clipboard.writeText(markdown);
+      },
+      async copyChat() {
+        if (!navigator.clipboard?.writeText) throw new Error("Clipboard unavailable");
+        const response = await api(`/api/chats/${id}/markdown`);
+        await navigator.clipboard.writeText(await response.text());
       }
     };
     controller = window.mountCodexifyChat(scope, bridge);

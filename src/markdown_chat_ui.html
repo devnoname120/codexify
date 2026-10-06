@@ -19,6 +19,7 @@ button:focus-visible,textarea:focus-visible,a:focus-visible { outline:2px solid 
 #chat { max-width:640px; margin:auto; overflow:hidden; border:1px solid var(--border); border-radius:18px; background:var(--bg); }
 .header { display:flex; align-items:center; gap:12px; padding:13px 16px; border-bottom:1px solid var(--border); }
 .heading { flex:1; min-width:0; }
+.header-actions { display:flex; align-items:center; gap:2px; }
 h1 { display:flex; align-items:center; flex-wrap:wrap; gap:9px; font-size:15px; font-weight:650; margin:0; }
 #presence { display:inline-flex; align-items:center; gap:4px; color:var(--muted); font-size:11px; font-weight:400; }
 .presence-symbol { width:14px; height:14px; flex:none; }
@@ -35,6 +36,12 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
 .message.user { align-self:flex-end; background:var(--user); border-bottom-right-radius:4px; }
 .message.agent { border-bottom-left-radius:4px; }
 .warning-banner { align-self:stretch; min-width:0; background:#fff3c4; color:#694b00; border:1px solid #e8c75c; padding:9px 12px; border-radius:8px; }
+.message.copy-enabled,.warning-banner.copy-enabled { position:relative; padding-right:42px; }
+.message-tools { position:absolute; top:5px; right:6px; opacity:0; transition:opacity .12s ease; }
+.copy-enabled:hover .message-tools,.copy-enabled:focus-within .message-tools { opacity:1; }
+.message-copy { width:26px; height:26px; padding:5px; border:1px solid var(--border); border-radius:50%; background:var(--bg); color:var(--muted); }
+.message-copy:hover { color:var(--accent); }
+@media(hover:none) { .message-tools { opacity:1; } }
 :root[data-theme="dark"] .warning-banner { background:#473a19; color:#ffe6a0; border-color:#96742b; }
 @media (prefers-color-scheme:dark) { :root:not([data-theme="light"]) .warning-banner { background:#473a19; color:#ffe6a0; border-color:#96742b; } }
 .warning-banner .markdown p { margin:0; }
@@ -83,7 +90,10 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
 <section id="chat" aria-label="Markdown chat for this conversation">
   <header class="header">
     <div class="heading"><h1>Agent <span id="presence" role="status"></span><span id="tool-total" hidden></span></h1><div class="subtitle">Markdown chat · This Codexify task</div><div id="workspace-label" hidden></div></div>
-    <button id="collapse" class="icon-button" aria-label="Collapse chat" aria-expanded="true" title="Collapse chat"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 14 6-6 6 6"/></svg></button>
+    <div class="header-actions">
+      <button id="copy-chat" class="icon-button" aria-label="Copy whole chat as Markdown" title="Copy whole chat as Markdown" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 7h11v13H8z"/><path d="M5 17H3V4h12v2"/></svg></button>
+      <button id="collapse" class="icon-button" aria-label="Collapse chat" aria-expanded="true" title="Collapse chat"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 14 6-6 6 6"/></svg></button>
+    </div>
   </header>
   <div id="panel">
     <div id="messages" role="log" aria-label="Chat messages" aria-live="polite" aria-relevant="additions">
@@ -111,6 +121,8 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
   const META = "io.github.devnoname120/codexify/markdown-chat";
   const el = id => scope.getElementById(id);
   const list = el("messages"), input = el("draft"), send = el("send"), older = el("older");
+  const canCopyMessage = typeof bridge?.copyMessage === "function";
+  const canCopyChat = typeof bridge?.copyChat === "function";
   const records = new Map(), nodes = new Map(), markerNodes = new Map(), pendingSends = new Map(), rpcPending = new Map();
   let rpcId = 1, initialized = false, tornDown = false, pollTimer = null, saveTimer = null;
   let refreshing = false, sending = false, loadingOlder = false, visible = true, collapsed = false;
@@ -204,11 +216,11 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
       else Promise.resolve(window.openai?.setWidgetState?.(state)).catch(() => {});
     } catch {}
   }
-  function status(text, error = false, kind = "action") {
+  function status(text, error = false, kind = "action", retry = error) {
     statusKind = kind;
     el("status-text").textContent = text;
     el("status").classList.toggle("error", error);
-    el("refresh").hidden = !error;
+    el("refresh").hidden = !retry;
   }
   function isReadOnly() { return externalReadOnly || pageRetired; }
   function syncInputDescription(waiting = el("chat").dataset.awaiting === "true") {
@@ -371,6 +383,32 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
     mark.title = state === "read" ? "Acknowledged through chat_read, chat_write, or chat_await. This does not prove comprehension." : state === "delivered" ? "Returned in a tool response, but not yet acknowledged by a chat tool." : "Saved. Not yet returned to the agent.";
     mark.append(icon(state !== "sent" ? ["m1 9 4 4L16 2", "m10 12 2 2L23 3"] : ["m5 9 4 4L20 2"])); node.append(mark);
   }
+  async function copyMessageMarkdown(id) {
+    if (!canCopyMessage || tornDown) return;
+    const origin = generation;
+    const message = records.get(id) || pendingSends.get(id);
+    if (!message || typeof message.markdown !== "string") return;
+    try {
+      await bridge.copyMessage(message.markdown);
+      if (currentGeneration(origin)) status("Message Markdown copied.");
+    } catch {
+      if (currentGeneration(origin)) status("Could not copy message Markdown.", true, "action", false);
+    }
+  }
+  async function copyWholeChat() {
+    if (!canCopyChat || tornDown) return;
+    const origin = generation;
+    const button = el("copy-chat");
+    button.disabled = true;
+    try {
+      await bridge.copyChat();
+      if (currentGeneration(origin)) status("Whole chat Markdown copied.");
+    } catch {
+      if (currentGeneration(origin)) status("Could not copy whole chat Markdown.", true, "action", false);
+    } finally {
+      if (currentGeneration(origin)) button.disabled = false;
+    }
+  }
   function render() {
     if (tornDown) return;
     const atBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 50;
@@ -403,6 +441,18 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
           node.append(make("div", "markdown"), make("div", "receipt"));
         } else {
           node.append(make("div", "author", message.role === "user" ? "You" : "Agent"), make("div", "markdown"), make("div", "receipt"));
+        }
+        if (canCopyMessage) {
+          node.classList.add("copy-enabled");
+          const tools = make("div", "message-tools");
+          const copy = make("button", "message-copy");
+          copy.type = "button";
+          copy.setAttribute("aria-label", "Copy message Markdown");
+          copy.title = "Copy message Markdown";
+          copy.append(icon(["M8 3h10v12H8z", "M6 6H4v10h10"]));
+          copy.addEventListener("click", () => { void copyMessageMarkdown(message.id); });
+          tools.append(copy);
+          node.append(tools);
         }
         nodes.set(message.id, node);
       }
@@ -609,6 +659,8 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
     save(); schedule(); size();
   }
   el("collapse").addEventListener("click", () => { collapsed = !collapsed; setCollapsed(); if (!collapsed) { render(); void refresh(); } });
+  el("copy-chat").hidden = !canCopyChat;
+  if (canCopyChat) el("copy-chat").addEventListener("click", () => { void copyWholeChat(); });
   el("refresh").addEventListener("click", () => { revision = null; void refresh(); });
   function teardown() {
     tornDown = true; clearTimeout(pollTimer); clearTimeout(saveTimer); clearTimeout(presenceTimer); clearTimeout(messageClockTimer);

@@ -408,6 +408,15 @@ for (const [engineName, engine] of [["Chromium", chromium], ["WebKit", webkit]])
   test(`${engineName}: Markdown chat composer, synchronization and receipts`, { timeout:180000 }, async t => {
     const browser = await engine.launch();
     try {
+      await t.test("embedded widgets do not expose standalone clipboard controls", async () => {
+        const backend = new ChatBackend();
+        backend.add("agent", "Raw **Markdown** source");
+        const { page, frames:[frame], errors } = await mount(browser, backend);
+        assert.equal(await frame.getByRole("button", { name:"Copy message Markdown", exact:true }).count(), 0);
+        assert.equal(await frame.getByRole("button", { name:"Copy whole chat as Markdown", exact:true }).count(), 0);
+        assert.deepEqual(errors, []);
+        await page.close();
+      });
       await t.test("chat history is taller without moving the composer into its scroller", async () => {
         for (const [width, expected] of [[390, 420], [640, 480]]) {
           const backend = new ChatBackend();

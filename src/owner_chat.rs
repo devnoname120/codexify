@@ -930,9 +930,7 @@ mod tests {
             "text/markdown; charset=utf-8"
         );
         let copied = copied.text().await.unwrap();
-        assert!(copied.starts_with(
-            "## You\n\nCheck the build\n\n## Agent\n\nAgent answer 0"
-        ));
+        assert!(copied.starts_with("## You\n\nCheck the build\n\n## Agent\n\nAgent answer 0"));
         assert!(copied.ends_with("## Agent\n\nAgent answer 54"));
         assert_eq!(copied.matches("## Agent\n\n").count(), 55);
         chat.record_agent_call(crate::markdown_chat::now_ms())
