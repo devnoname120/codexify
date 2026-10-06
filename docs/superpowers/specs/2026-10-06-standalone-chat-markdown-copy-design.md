@@ -66,6 +66,8 @@ The owner-chat server adds an authenticated endpoint for one selected conversati
 
 Generating the transcript server-side avoids coupling copy behavior to UI pagination and guarantees that older, currently unloaded messages are included. The endpoint returns UTF-8 plain text with a Markdown content type and the same bearer-token protection as existing owner-chat routes.
 
+Because the browser clipboard API requires one complete string, Codexify applies a 64 MiB transcript ceiling before allocating the result. Larger chats fail with a clear error and are not partially copied.
+
 ### Message-source preservation
 
 Per-message copy uses the already-returned `WidgetMessage.markdown` value. Whole-chat generation uses the same message parser and body ranges as widget pagination, so both paths preserve the source body and classify user, agent, and warning records consistently.
@@ -77,6 +79,7 @@ Manual text outside reserved message blocks retains the parser's current user-me
 - Missing or invalid owner-chat credentials continue to fail through the existing authentication middleware.
 - A missing conversation returns the existing not-found behavior.
 - An incomplete or invalid chat file returns a bounded server error and copies nothing.
+- A clean transcript above 64 MiB is rejected before the complete string is allocated.
 - Clipboard rejection or absence is reported inside the selected chat without changing server state.
 - Repeated clicks are safe and do not affect read or delivery cursors.
 
