@@ -5,6 +5,7 @@ use super::*;
 const USER_START: &str = "\n\n<!-- codexify-user-message:v1:start id=\"";
 const PAGE_MESSAGES: usize = 50;
 const PAGE_BYTES: usize = 512 * 1024;
+const MAX_CLEAN_TRANSCRIPT_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Debug, Serialize)]
 pub struct WidgetMessage {
@@ -196,6 +197,32 @@ fn spans(file: &mut File) -> Result<Vec<Span>, String> {
     Ok(result)
 }
 
+fn widget_message(file: &mut File, span: Span) -> Result<Option<WidgetMessage>, String> {
+    let text = read_range(file, span.body_start, span.body_end, MAX_UNREAD_BYTES)?;
+    let markdown = String::from_utf8(text).map_err(|_| "CHAT.md contains incomplete UTF-8")?;
+    if markdown.trim().is_empty() {
+        return Ok(None);
+    }
+    let legacy_warning = (span.role == "agent"
+        && markdown.starts_with("**Possible duplicate agent detected and blocked.**"))
+        || (span.role == "warning"
+            && markdown.trim() == "Duplicate agent detected. Its tool call was terminated.");
+    let (role, markdown) = if legacy_warning {
+        ("warning", crate::agent_tickets::WARNING.to_string())
+    } else {
+        (span.role, markdown)
+    };
+    Ok(Some(WidgetMessage {
+        id: span.id,
+        role: role.into(),
+        markdown,
+        start: span.start,
+        end: span.end,
+        created_at_ms: span.created_at_ms,
+        tool_call_count: span.tool_call_count,
+    }))
+}
+
 impl ChatFile {
     /// A compact owner-view listing, without advancing the agent's read cursor.
     pub async fn owner_summary(self: &Arc<Self>) -> Result<OwnerChatSummary, String> {
@@ -352,37 +379,46 @@ impl ChatFile {
                         page.has_more = true;
                         break;
                     }
-                    let text = read_range(file, span.body_start, span.body_end, MAX_UNREAD_BYTES)?;
-                    let markdown =
-                        String::from_utf8(text).map_err(|_| "CHAT.md contains incomplete UTF-8")?;
-                    if markdown.trim().is_empty() {
+                    let Some(message) = widget_message(file, span)? else {
                         continue;
-                    }
-                    let legacy_warning = (span.role == "agent"
-                        && markdown
-                            .starts_with("**Possible duplicate agent detected and blocked.**"))
-                        || (span.role == "warning"
-                            && markdown.trim()
-                                == "Duplicate agent detected. Its tool call was terminated.");
-                    let (role, markdown) = if legacy_warning {
-                        ("warning", crate::agent_tickets::WARNING.to_string())
-                    } else {
-                        (span.role, markdown)
                     };
-                    bytes += markdown.len();
-                    page.before = Some(span.start);
-                    page.messages.push(WidgetMessage {
-                        id: span.id,
-                        role: role.into(),
-                        markdown,
-                        start: span.start,
-                        end: span.end,
-                        created_at_ms: span.created_at_ms,
-                        tool_call_count: span.tool_call_count,
-                    });
+                    bytes += message.markdown.len();
+                    page.before = Some(message.start);
+                    page.messages.push(message);
                 }
                 page.messages.reverse();
                 Ok(page)
+            })
+        })
+        .await
+    }
+
+    pub async fn clean_markdown_transcript(self: &Arc<Self>) -> Result<String, String> {
+        self.run(|chat| {
+            chat.with_cursor(|cursor, file| {
+                check_cursor(file, cursor)?;
+                let mut sections = Vec::new();
+                let mut total = 0usize;
+                for span in spans(file)? {
+                    let Some(message) = widget_message(file, span)? else {
+                        continue;
+                    };
+                    let label = match message.role.as_str() {
+                        "user" => "You",
+                        "agent" => "Agent",
+                        "warning" => "Warning",
+                        _ => return Err("CHAT.md contains an unsupported message role".into()),
+                    };
+                    let section = format!("## {label}\n\n{}", message.markdown);
+                    total = total
+                        .saturating_add(section.len())
+                        .saturating_add(usize::from(!sections.is_empty()) * 2);
+                    if total > MAX_CLEAN_TRANSCRIPT_BYTES {
+                        return Err("Clean Markdown transcript exceeds the 64 MiB safety ceiling.".into());
+                    }
+                    sections.push(section);
+                }
+                Ok(sections.join("\n\n"))
             })
         })
         .await
@@ -599,5 +635,41 @@ mod tests {
         assert_eq!(page.messages[0].markdown, crate::agent_tickets::WARNING);
         assert!(page.messages[0].created_at_ms.is_some());
         assert_eq!(std::fs::read_to_string(path).unwrap(), historical);
+    }
+
+    #[tokio::test]
+    async fn clean_markdown_transcript_preserves_source_and_removes_storage_markers() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("CHAT.md");
+        let chat = Arc::new(ChatFile::new(path.clone(), true));
+        chat.ensure().await.unwrap();
+        chat.append_user(
+            "source-user".into(),
+            "Paragraph  \n\n```rust\nlet x = 1;\n```".into(),
+        )
+        .await
+        .unwrap();
+        chat.append("Agent *source*".into()).await.unwrap();
+        chat.warn_ticket_rejection().await.unwrap();
+
+        let transcript = chat.clean_markdown_transcript().await.unwrap();
+        assert_eq!(
+            transcript,
+            format!(
+                "## You\n\nParagraph  \n\n```rust\nlet x = 1;\n```\n\n## Agent\n\nAgent *source*\n\n## Warning\n\n{}",
+                crate::agent_tickets::WARNING
+            )
+        );
+        assert!(!transcript.contains("codexify-user-message"));
+        assert!(!transcript.contains("# Codexify Chat"));
+    }
+
+    #[tokio::test]
+    async fn empty_clean_markdown_transcript_is_empty() {
+        let directory = tempfile::tempdir().unwrap();
+        let chat = Arc::new(ChatFile::new(directory.path().join("CHAT.md"), true));
+        chat.ensure().await.unwrap();
+
+        assert_eq!(chat.clean_markdown_transcript().await.unwrap(), "");
     }
 }

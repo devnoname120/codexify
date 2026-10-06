@@ -395,6 +395,27 @@ async fn chat_state(
     Ok(wrap(serde_json::to_value(page).expect("chat page")))
 }
 
+async fn chat_markdown(
+    State(state): State<OwnerState>,
+    Path(id): Path<String>,
+) -> Result<Response, (StatusCode, String)> {
+    let located = selected(&state.config, &id)?;
+    let chat = state
+        .chats
+        .chat_at_path(located.path, true)
+        .map_err(internal_error)?;
+    let transcript = chat
+        .clean_markdown_transcript()
+        .await
+        .map_err(internal_error)?;
+    let mut response = transcript.into_response();
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        header::HeaderValue::from_static("text/markdown; charset=utf-8"),
+    );
+    Ok(response)
+}
+
 #[derive(Deserialize)]
 struct SendBody {
     request_id: String,
@@ -607,6 +628,7 @@ fn router(state: OwnerState) -> Router {
         .route("/", get(page))
         .route("/api/chats", get(list_chats))
         .route("/api/chats/{id}", get(chat_state))
+        .route("/api/chats/{id}/markdown", get(chat_markdown))
         .route("/api/chats/{id}/send", post(chat_send))
         .route("/api/chats/{id}/file", get(chat_file))
         .route("/api/files", get(download))
@@ -887,6 +909,32 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(renamed["chats"][0]["title"], "Check the build");
+        for index in 0..55 {
+            chat.append(format!("Agent answer {index}")).await.unwrap();
+        }
+        let unauthorized_markdown = client
+            .get(format!("{base}/api/chats/{id}/markdown"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(unauthorized_markdown.status(), StatusCode::UNAUTHORIZED);
+        let copied = client
+            .get(format!("{base}/api/chats/{id}/markdown"))
+            .bearer_auth("test-token")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(copied.status(), StatusCode::OK);
+        assert_eq!(
+            copied.headers()[header::CONTENT_TYPE],
+            "text/markdown; charset=utf-8"
+        );
+        let copied = copied.text().await.unwrap();
+        assert!(copied.starts_with(
+            "## You\n\nCheck the build\n\n## Agent\n\nAgent answer 0"
+        ));
+        assert!(copied.ends_with("## Agent\n\nAgent answer 54"));
+        assert_eq!(copied.matches("## Agent\n\n").count(), 55);
         chat.record_agent_call(crate::markdown_chat::now_ms())
             .await
             .unwrap();
