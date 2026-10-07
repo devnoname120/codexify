@@ -16,6 +16,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   read-only after the claim. Tokens are random, digest-only on disk, single-use,
   restart-safe, and safe to retry after a lost successful response; claims fail
   while the old owner has a model call in flight.
+- The standalone owner-chat page can copy an individual message's original
+  Markdown or the complete clean conversation transcript. Whole-chat copy
+  includes unloaded history and omits internal markers, timestamps, receipts,
+  and tool-call counters. Clipboard controls remain absent from the embedded
+  ChatGPT widget.
 
 ### Changed
 

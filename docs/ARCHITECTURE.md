@@ -591,6 +591,16 @@ existing artifact-egress store and workspace binding validation. This listener
 is not a security boundary against MCP clients that can execute unrestricted
 commands as the same OS user.
 
+`ChatFile::clean_markdown_transcript` reuses the same span parser and legacy
+warning normalization as paged widget history. The authenticated
+`/api/chats/{id}/markdown` route renders every stored entry in chronological
+`## You`, `## Agent`, or `## Warning` sections, independent of pagination, and
+rejects output above 64 MiB. The owner-page bridge supplies optional
+`copyMessage` and `copyChat` callbacks to the shared component. Copy controls
+are rendered only when those callbacks exist, so the embedded ChatGPT widget
+does not request clipboard access. Copying is read-only and does not advance
+chat, delivery, or seen cursors.
+
 The widget embeds markdown-it and converts its tokens to allowlisted DOM nodes,
 not raw HTML. A private file-link resolver reuses the artifact egress store and
 workspace checks. Explicit `chatLink` capabilities select exact exports; legacy
