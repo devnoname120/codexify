@@ -6,6 +6,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-10-07
+
 ### Added
 
 - Setup-card continuation prompts now transfer one complete Codexify task to a
@@ -608,7 +610,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   drained through bounded head/tail buffers, while component-only `_meta` remains
   outside the model-visible limit.
 
-[Unreleased]: https://github.com/devnoname120/codexify/compare/v1.6.6...HEAD
+[Unreleased]: https://github.com/devnoname120/codexify/compare/v1.7.0...HEAD
+[1.7.0]: https://github.com/devnoname120/codexify/compare/v1.6.6...v1.7.0
 [1.6.6]: https://github.com/devnoname120/codexify/compare/v1.6.5...v1.6.6
 [1.6.5]: https://github.com/devnoname120/codexify/compare/v1.6.4...v1.6.5
 [1.6.4]: https://github.com/devnoname120/codexify/compare/v1.6.3...v1.6.4
