@@ -40,6 +40,12 @@ pub fn load_tools_for_config(config: &AppConfig) -> Vec<Box<dyn Tool>> {
         config.markdown_chat.enabled,
         config.artifact_ingress.max_concurrent_downloads,
     );
+    if config.ui_widgets
+        && !config.conversation_auth_token.is_some()
+        && !config.markdown_chat.enabled
+    {
+        tools.push(Box::new(tools::setup::UnrestrictedSetup));
+    }
     if config.markdown_chat.enabled && config.ui_widgets {
         tools.push(Box::new(tools::markdown_chat_ui::ChatUiTool::Send));
         tools.push(Box::new(tools::markdown_chat_ui::ChatUiTool::State));
@@ -156,4 +162,46 @@ fn load_tools_with_options(
         }
     }
     all
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn setup_widget_is_available_without_markdown_agent() {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = crate::config::default_config(root.path().into());
+        config.multi_project = true;
+        config.ui_widgets = true;
+        config.markdown_chat.enabled = false;
+
+        let tools = load_tools_for_config(&config);
+        let setup = tools
+            .iter()
+            .find(|tool| tool.name() == "setup")
+            .expect("plain setup widget is available without Markdown Agent");
+        let meta = setup.meta().expect("setup metadata");
+        assert_eq!(
+            meta.get("ui").and_then(|ui| ui.get("resourceUri")),
+            Some(&json!(crate::setup_ui::SETUP_UI_URI))
+        );
+        for name in [
+            "chat_read",
+            "chat_write",
+            "chat_await",
+            "chat_attachments_list",
+            "chat_attachments_search",
+            "chat_attachments_get",
+            "chat_ui_send",
+            "chat_ui_state",
+            "chat_ui_file",
+        ] {
+            assert!(
+                !tools.iter().any(|tool| tool.name() == name),
+                "{name} must remain disabled without Markdown Agent"
+            );
+        }
+    }
 }
