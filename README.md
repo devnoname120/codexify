@@ -110,6 +110,14 @@ The wizard defaults to multi-project mode, asks for the matching projects root o
 single project directory, then guides you through creating a tunnel, its runtime
 API key, and the `Codexify` connector in ChatGPT. It prints the links and exact
 settings to use, saves your configuration, and starts the connection.
+
+The ChatGPT connector name is persisted as `instanceName` and advertised as the
+MCP server's human-readable title while the programmatic implementation name stays
+`codexify`. Give separate installations distinct names such as `Workstation` and
+`HomeServer` so clients can distinguish the machines without creating different
+Codexify binaries. You can change it later with
+`codexify config set instanceName Workstation`.
+
 Keep Codexify running while you use it; the background service handles that for a
 standard installation.
 

@@ -9,6 +9,7 @@ use serde_json::{Map, Value};
 use tempfile::NamedTempFile;
 use zeroize::Zeroizing;
 
+use crate::config::{DEFAULT_INSTANCE_NAME, normalize_instance_name};
 use crate::conversation_auth::{conversation_auth_prompt, validate_conversation_auth_token};
 use crate::openai_tunnel::{validate_runtime_api_key, validate_tunnel_id};
 use crate::terminal::{ACCENT, EMPHASIS, FAILURE, HEADING, MUTED, SUCCESS, VALUE, WARNING, paint};
@@ -250,8 +251,12 @@ where
         multi_project,
     )?;
 
-    let default_connector_name = connector_name_default();
+    let default_connector_name = configured_instance_name(&file_config)?;
     let connector_name = prompt_connector_name(&mut wizard, &default_connector_name)?;
+    file_config.insert(
+        "instanceName".to_string(),
+        Value::String(connector_name.clone()),
+    );
     let conversation_auth_token = configured_conversation_auth_token(&file_config)?;
 
     if file_config
@@ -547,15 +552,13 @@ where
 {
     loop {
         let name = wizard.prompt("ChatGPT connector name", Some(default))?;
-        if name.chars().any(char::is_control) {
-            let error = wizard.decorate(
-                FAILURE,
-                "The connector name cannot contain control characters.",
-            );
-            writeln!(wizard.output, "{error}")?;
-            continue;
+        match normalize_instance_name(&name) {
+            Ok(name) => return Ok(name),
+            Err(message) => {
+                let error = wizard.decorate(FAILURE, message);
+                writeln!(wizard.output, "{error}")?;
+            }
         }
-        return Ok(name);
     }
 }
 
@@ -769,8 +772,12 @@ where
     Ok(())
 }
 
-fn connector_name_default() -> String {
-    "Codexify".to_string()
+fn configured_instance_name(config: &Map<String, Value>) -> anyhow::Result<String> {
+    match config.get("instanceName") {
+        None | Some(Value::Null) => Ok(DEFAULT_INSTANCE_NAME.to_string()),
+        Some(Value::String(value)) => normalize_instance_name(value).map_err(anyhow::Error::msg),
+        Some(_) => bail!("instanceName in the existing config must be a string"),
+    }
 }
 
 fn configured_tunnel_id(config: &Map<String, Value>) -> Option<String> {
@@ -1288,6 +1295,7 @@ mod tests {
         let config: Value =
             serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
         assert_eq!(config["schemaVersion"], json!(1));
+        assert_eq!(config["instanceName"], json!("Codexify"));
         assert_eq!(
             config["workDir"],
             json!(fs::canonicalize(&project).unwrap())

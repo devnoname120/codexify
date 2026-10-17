@@ -888,6 +888,10 @@ pub struct AppConfig {
     pub work_dir: std::path::PathBuf,
     /// Internal anchor preserving task history when its owner changes workspace.
     pub task_state_root: Option<std::path::PathBuf>,
+    /// Human-readable identity for this Codexify installation. The MCP
+    /// implementation name stays stable as `codexify`; clients may display
+    /// this value to distinguish separate machines or service instances.
+    pub instance_name: String,
     /// Expose bounded operational timing metadata to MCP App widgets.
     pub debug: bool,
     /// Advertise and serve Codexify's built-in MCP App widgets.

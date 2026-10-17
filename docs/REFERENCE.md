@@ -224,12 +224,19 @@ The runtime key is entered without terminal echo and stored in a dedicated
 per-tunnel file under `~/.codexify/openai-tunnel/credentials/`. On Unix, the
 wizard restricts the credential directory and file to the current user.
 The wizard writes `~/.codexify/codexify.config.json` by default; that file receives
-the absolute `workDir`, a `file:` reference to the runtime key, and the selected
-project mode; unrelated JSON settings are preserved. When the background service
-is installed, quickstart updates its definition and restarts it with this config.
-Otherwise, the wizard first offers to install and start the background service;
-declining that retains the foreground-server option. Human-facing prompts,
-headings, paths, warnings, and completion messages use adaptive terminal colors.
+the absolute `workDir`, a `file:` reference to the runtime key, the selected
+project mode, and the chosen ChatGPT connector name as `instanceName`; unrelated
+JSON settings are preserved. When the background service is installed, quickstart
+updates its definition and restarts it with this config. Otherwise, the wizard
+first offers to install and start the background service; declining that retains
+the foreground-server option. Human-facing prompts, headings, paths, warnings, and
+completion messages use adaptive terminal colors.
+
+`instanceName` is the human-readable identity of this installation. Codexify
+advertises it as MCP `serverInfo.title` while keeping `serverInfo.name` stable as
+`codexify`. Use distinct values for separate machines or services that connect to
+the same ChatGPT account; this separates installation identity from product,
+tunnel, and ChatGPT plugin identity.
 
 When an existing config already contains `conversationAuthToken`, quickstart
 preserves it, restricts the config file to the current user on Unix, and prints the
@@ -254,6 +261,7 @@ the runtime API key at the hidden-input prompt.
 
    ```json
    {
+     "instanceName": "Workstation",
      "workDir": "/absolute/path/to/your/project",
      "openaiTunnel": {
        "tunnelId": "tunnel_0123456789abcdef0123456789abcdef",

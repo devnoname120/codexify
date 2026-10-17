@@ -96,6 +96,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Codexify installations now have a persistent `instanceName`. Quickstart stores
+  the chosen ChatGPT connector name there, and MCP initialization advertises it as
+  the human-readable `serverInfo.title` while retaining the stable implementation
+  name `codexify`. This lets clients distinguish installations such as Workstation
+  and HomeServer without per-machine binaries.
 - Setup-card continuation prompts now transfer one complete Codexify task to a
   replacement ChatGPT conversation through a one-time `continue_task` token.
   Workspace and Git state, agent-chat transcript/cursor, saved plan and memory,

@@ -579,8 +579,10 @@ impl ServerHandler for CodexHandler {
             );
             capabilities.extensions = Some(extensions);
         }
+        let server_info = Implementation::new("codexify", env!("CARGO_PKG_VERSION"))
+            .with_title(self.config.instance_name.clone());
         InitializeResult::new(capabilities)
-            .with_server_info(Implementation::new("codexify", env!("CARGO_PKG_VERSION")))
+            .with_server_info(server_info)
             .with_instructions(build_initial_instructions(&self.config))
     }
 
@@ -3670,8 +3672,10 @@ mod tests {
     #[test]
     fn advertises_all_mcp_apps_resources_and_extension() {
         let root = tempfile::tempdir().unwrap();
+        let mut config = crate::config::default_config(root.path().to_path_buf());
+        config.instance_name = "Workstation".to_string();
         let handler = CodexHandler {
-            config: Arc::new(crate::config::default_config(root.path().to_path_buf())),
+            config: Arc::new(config),
             tools: Arc::new(crate::registry::load_tools()),
             connector_schemas: Arc::new(crate::connector_schema::ConnectorSchemaStore::default()),
             markdown_chat: Arc::new(crate::markdown_chat::MarkdownChatStore::default()),
@@ -3698,6 +3702,8 @@ mod tests {
         };
 
         let info = handler.get_info();
+        assert_eq!(info.server_info.name, "codexify");
+        assert_eq!(info.server_info.title.as_deref(), Some("Workstation"));
         assert!(info.capabilities.resources.is_some());
         assert!(
             info.capabilities
