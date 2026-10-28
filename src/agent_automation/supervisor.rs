@@ -20,7 +20,7 @@ use super::{
     CompanionEvent, CompanionEventKind, CompanionSessionStatus, CompanionUnreadMessage,
     ExecuteActionRequest, GoalStatus,
 };
-use crate::markdown_chat::{AUTOMATION_OFFLINE_AFTER_MS, AgentAutomationConfig, ChatFile};
+use crate::markdown_chat::{AgentAutomationConfig, ChatFile};
 use crate::project_bindings::ConversationIdentity;
 
 #[derive(Clone)]
@@ -1517,7 +1517,7 @@ impl AgentAutomationSupervisor {
                 state = task.store.load(&task.task)?;
             }
             if let Some(until) = state.browser_cooldown_until_ms() {
-                let online = activity.is_online(now_ms, AUTOMATION_OFFLINE_AFTER_MS);
+                let online = activity.is_online(now_ms, task.store.offline_after_ms());
                 let queued = self
                     .queue
                     .lock()
@@ -1654,7 +1654,7 @@ impl AgentAutomationSupervisor {
                             .goal
                             .as_ref()
                             .is_some_and(|g| g.status == GoalStatus::Active)
-                        && !activity.is_online(now_ms, AUTOMATION_OFFLINE_AFTER_MS)
+                        && !activity.is_online(now_ms, task.store.offline_after_ms())
                         && matches!(
                             state.action.status,
                             AutomationActionStatus::Failed
@@ -1767,7 +1767,7 @@ impl AgentAutomationSupervisor {
             }
             if !activity.agent_stop_requested
                 && state.action.kind == Some(AutomationActionKind::OfflineGoal)
-                && activity.is_online(now_ms, AUTOMATION_OFFLINE_AFTER_MS)
+                && activity.is_online(now_ms, task.store.offline_after_ms())
             {
                 // Preserve the proven-delivery reconciliation above. A queued
                 // retry is retired only while the worker cannot start its Send.
@@ -1811,7 +1811,7 @@ impl AgentAutomationSupervisor {
                 || state.pairing.resume_task;
             if activity.agent_stop_requested
                 || !renewing
-                    && (activity.is_online(now_ms, AUTOMATION_OFFLINE_AFTER_MS)
+                    && (activity.is_online(now_ms, task.store.offline_after_ms())
                         || activity
                             .agent_waiting_until_ms
                             .is_some_and(|until| now_ms < until))
@@ -2483,7 +2483,7 @@ impl AgentAutomationSupervisor {
                     let activity = task.chat.offline_activity().await?;
                     if state.action.id.as_deref() == Some(execution.request.action_id.as_str())
                         && !activity.agent_stop_requested
-                        && activity.is_online(now_ms, AUTOMATION_OFFLINE_AFTER_MS)
+                        && activity.is_online(now_ms, task.store.offline_after_ms())
                         && task.store.reconcile_resumed_goal_retry(
                             &task.task,
                             &state,
@@ -2854,7 +2854,7 @@ impl AgentAutomationSupervisor {
                         )?;
                         let _ = task
                             .chat
-                            .claim_offline_automation_goal(now_ms, AUTOMATION_OFFLINE_AFTER_MS)
+                            .claim_offline_automation_goal(now_ms, task.store.offline_after_ms())
                             .await?;
                     }
                 }
@@ -2971,7 +2971,7 @@ impl AgentAutomationSupervisor {
             )?;
             let _ = task
                 .chat
-                .claim_offline_automation_goal(now_ms, AUTOMATION_OFFLINE_AFTER_MS)
+                .claim_offline_automation_goal(now_ms, task.store.offline_after_ms())
                 .await?;
         }
         if !pair_verification
@@ -3799,7 +3799,7 @@ async fn execution_matches(
         };
     if activity.agent_stop_requested
         || !renewing
-            && (activity.is_online(now_ms, AUTOMATION_OFFLINE_AFTER_MS)
+            && (activity.is_online(now_ms, task.store.offline_after_ms())
                 || activity
                     .agent_waiting_until_ms
                     .is_some_and(|until| now_ms < until))

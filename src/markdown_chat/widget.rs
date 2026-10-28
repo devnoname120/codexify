@@ -55,6 +55,7 @@ pub struct WidgetMessage {
 
 #[derive(Debug, Serialize)]
 pub struct WidgetPage {
+    pub offline_after_ms: u64,
     pub chat_file: String,
     pub revision: String,
     pub delivered_through: u64,
@@ -642,6 +643,7 @@ impl ChatFile {
                 );
                 let unchanged = before.is_none() && known_revision.as_deref() == Some(&revision);
                 let mut page = WidgetPage {
+                    offline_after_ms: chat.offline_after_ms(),
                     chat_file: chat.path.display().to_string(),
                     revision,
                     delivered_through: cursor.delivered_through,

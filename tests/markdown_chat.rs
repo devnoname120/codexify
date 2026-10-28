@@ -399,3 +399,38 @@ async fn transcript_is_private_and_symlinks_are_rejected() {
     assert!(channel.append("no".into()).await.is_err());
     assert_eq!(std::fs::read_to_string(unrelated).unwrap(), "unrelated");
 }
+
+#[test]
+fn offline_timeout_loads_whole_minutes_and_rejects_invalid_values() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("offline-settings.json");
+    for value in [
+        serde_json::Value::Null,
+        serde_json::json!(1),
+        serde_json::json!(5),
+        serde_json::json!(10),
+        serde_json::json!(1440),
+        serde_json::json!(0),
+        serde_json::json!(1441),
+        serde_json::json!(-1),
+        serde_json::json!(1.5),
+        serde_json::json!("10"),
+    ] {
+        let mut document =
+            serde_json::json!({"workDir":root.path(),"codexMcp":{"enabled":false},"agentChat":{}});
+        if !value.is_null() {
+            document["agentChat"]["offlineTimeoutMinutes"] = value.clone();
+        }
+        std::fs::write(&path, document.to_string()).unwrap();
+        let cli = Cli::try_parse_from(["app", "--config", path.to_str().unwrap()]).unwrap();
+        let loaded = load_config_quiet(cli);
+        let minutes = value.as_u64().filter(|v| (1..=1440).contains(v));
+        if value.is_null() || minutes.is_some() {
+            let chat = loaded.unwrap().markdown_chat;
+            assert_eq!(chat.offline_timeout_minutes, minutes.unwrap_or(5));
+            assert_eq!(chat.offline_after_ms(), minutes.unwrap_or(5) * 60_000);
+        } else {
+            assert!(loaded.is_err(), "{value}");
+        }
+    }
+}

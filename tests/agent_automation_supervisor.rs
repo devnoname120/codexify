@@ -880,12 +880,20 @@ async fn queued_chat_run_now_prioritizes_one_unsent_request_without_creating_a_g
 }
 
 async fn fixture_with_queue_limit(max_queued_actions: usize) -> Fixture {
+    fixture_with_offline_timeout(max_queued_actions, 5).await
+}
+
+async fn fixture_with_offline_timeout(
+    max_queued_actions: usize,
+    offline_timeout_minutes: u64,
+) -> Fixture {
     let root = tempfile::tempdir().unwrap();
     let project = root.path().join("project");
     std::fs::create_dir_all(&project).unwrap();
     let mut config = default_config(project);
     config.memory.dir = Some(root.path().join("state").display().to_string());
     config.markdown_chat.enabled = true;
+    config.markdown_chat.offline_timeout_minutes = offline_timeout_minutes;
     config.markdown_chat.automation.enabled = true;
     config.markdown_chat.automation.connector_name = "Codexify".into();
     config.markdown_chat.automation.max_queued_actions = max_queued_actions;
@@ -1018,9 +1026,9 @@ fn authorized(headers: &HeaderMap) -> bool {
 }
 
 #[tokio::test]
-async fn unread_messages_wait_until_four_minutes_while_public_offline_remains_five_minutes() {
+async fn unread_messages_wait_until_the_same_five_minute_threshold_as_public_presence() {
     assert_eq!(codexify::markdown_chat::AWAY_AFTER_MS, 180_000);
-    assert_eq!(AUTOMATION_OFFLINE_AFTER_MS, 240_000);
+    assert_eq!(AUTOMATION_OFFLINE_AFTER_MS, 300_000);
     assert_eq!(codexify::markdown_chat::OFFLINE_AFTER_MS, 300_000);
     let fixture = fixture().await;
     fixture.chat.record_agent_call(1_000).await.unwrap();
@@ -6497,7 +6505,9 @@ async fn completed_goal_receipt_after_restart_unblocks_the_next_turn_without_rep
         queued.goal.as_ref().unwrap().updated_at_ms,
         before.updated_at_ms
     );
-    assert_eq!(queued.goal.as_ref().unwrap().active_since_ms, Some(3000));
+    // Presence and wake-up now share the same boundary: the old active
+    // interval is paused before the queued replacement has made a tool call.
+    assert_eq!(queued.goal.as_ref().unwrap().active_since_ms, None);
     assert_eq!(
         f.chat.clean_markdown_transcript().await.unwrap(),
         transcript
@@ -10357,4 +10367,50 @@ async fn first_real_failure_after_initial_cooldown_starts_at_the_first_retry_del
         failed.automatic_retry_at_ms(),
         Some(failed.action.updated_at_ms.unwrap() + 180_000)
     );
+}
+
+#[tokio::test]
+async fn configured_offline_timeout_prevents_premature_chat_and_goal_followups() {
+    for goal in [false, true] {
+        let f = fixture_with_offline_timeout(64, 10).await;
+        f.chat.record_agent_call(1_000).await.unwrap();
+        if goal {
+            let configured = f
+                .store
+                .set_goal(
+                    &f.task,
+                    "Continue only after the configured silence interval",
+                    100,
+                )
+                .unwrap();
+            f.store.run_goal(&f.task, configured.revision, 101).unwrap();
+        } else {
+            f.chat
+                .append_user(
+                    "slow-agent-message".into(),
+                    "Continue when the agent is offline".into(),
+                )
+                .await
+                .unwrap();
+        }
+        for elapsed in [240_000, 300_000, 599_999] {
+            f.supervisor.scan_once(1_000 + elapsed).await.unwrap();
+            assert_eq!(
+                f.supervisor.queued_count().await,
+                0,
+                "goal={goal}, elapsed={elapsed}"
+            );
+            assert_eq!(f.executor.calls.load(Ordering::SeqCst), 0);
+        }
+        // New activity resets the full configured interval, rather than merely
+        // extending the old fixed five-minute deadline.
+        f.chat.record_agent_call(590_000).await.unwrap();
+        f.supervisor.scan_once(1_000 + 600_000).await.unwrap();
+        assert_eq!(f.supervisor.queued_count().await, 0);
+        f.supervisor.scan_once(590_000 + 600_000 - 1).await.unwrap();
+        assert_eq!(f.supervisor.queued_count().await, 0);
+        f.supervisor.scan_once(590_000 + 600_000).await.unwrap();
+        assert_eq!(f.supervisor.queued_count().await, 1, "goal={goal}");
+        assert_eq!(f.executor.calls.load(Ordering::SeqCst), 0);
+    }
 }

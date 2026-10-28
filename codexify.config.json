@@ -16,6 +16,7 @@
     "enabled": true,
     "port": 3120,
     "maxWaitMs": 55000,
+    "offlineTimeoutMinutes": 5,
     "defaultMessageMode": "queue",
     "rolloutReminderInterval": 25,
     "notifications": null,

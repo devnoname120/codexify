@@ -6,6 +6,19 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.3.21] - 2026-10-28
+
+### Added
+
+- Configure the offline timeout in Chats & goals with `agentChat.offlineTimeoutMinutes`
+  (1–1440 minutes, default 5; restart to apply). Use the same threshold for presence,
+  queued delivery, goal activity, offline notifications, and automatic offline wake-ups.
+
+### Fixed
+
+- Stop automatic offline wake-ups from using a shorter timeout than the one
+  displayed in the chat interface.
+
 ## [2.3.20] - 2026-10-28
 
 ### Added

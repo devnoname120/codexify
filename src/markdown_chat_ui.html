@@ -200,7 +200,7 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
   let rpcId = 1, initialized = false, tornDown = false, pollTimer = null, saveTimer = null;
   let refreshing = false, sending = false, loadingOlder = false, visible = true;
   let revision = null, before = null, hasMore = false, delivered = 0, readThrough = 0, chatFile = null, failures = 0, snapshotEnd = 0;
-  let lastAgentCall = null, totalToolCalls = null, clockOffset = 0, presenceTimer = null;
+  let lastAgentCall = null, totalToolCalls = null, clockOffset = 0, presenceTimer = null, offlineAfterMs = 300000;
   let waitingForPresenceRefresh = false;
   let wakeStatus = null, wakeVersion = 0;
   let agentWaitingUntil = null, agentPresenceUntil = null, waitingReplyEnd = 0, inputRequired = false;
@@ -455,8 +455,8 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
       : { state:"offline", label:"offline", delay:null };
     if (!Number.isFinite(lastCall)) return { state:"offline", label:"offline", delay:null };
     const age = Math.max(0, now - lastCall);
-    if (age < 180000) return { state:"online", label:"online", delay:180000 - age };
-    if (age < 300000) return { state:"away", label:`last seen ${Math.floor(age / 60000)} mins ago`, delay:60000 - age % 60000 };
+    if (age < Math.min(180000, offlineAfterMs)) return { state:"online", label:"online", delay:Math.min(180000, offlineAfterMs) - age };
+    if (age < offlineAfterMs) return { state:"away", label:`last seen ${Math.floor(age / 60000)} mins ago`, delay:60000 - age % 60000 };
     return { state:"offline", label:"offline", delay:null };
   }
   function toolCallLabel(count) { return `${count} tool call${count === 1 ? "" : "s"}`; }
@@ -747,6 +747,7 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
     if (Number.isSafeInteger(page.read_through)) readThrough = Math.max(readThrough, page.read_through);
     if (!history) {
       if (expectedWakeVersion === wakeVersion && !sending && Object.hasOwn(page,"wake_status")) wakeStatus = page.wake_status;
+      if (Number.isSafeInteger(page.offline_after_ms) && page.offline_after_ms > 0) offlineAfterMs = page.offline_after_ms;
       lastAgentCall = Number.isSafeInteger(page.last_agent_call_at_ms) ? page.last_agent_call_at_ms : null;
       agentStopped = page.agent_stop_requested === true;
       agentPresenceUntil = Number.isSafeInteger(page.agent_presence_until_ms) ? page.agent_presence_until_ms : null;

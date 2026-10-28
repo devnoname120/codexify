@@ -72,3 +72,34 @@ for(const [name,engine] of [['Chromium',chromium],['WebKit',webkit]])for(const m
   } finally {await browser.close();}
  });
 }
+
+for(const [name,engine] of [['Chromium',chromium],['WebKit',webkit]])test(`${name}: configured offline timeout agrees in the sidebar and conversation header`,{timeout:20000},async()=>{
+ const browser=await engine.launch();
+ try {
+  const page=await browser.newPage();page.setDefaultTimeout(5000);
+  let now=Date.now(),lastCall=now-6*60000,offlineAfter=600000;const errors=[],sends=[];
+  await page.clock.install({time:now});page.on('pageerror',error=>errors.push(error.message));
+  await routeOwner(page,origin+'/**',route=>{
+   const request=route.request(),path=new URL(request.url()).pathname;
+   if(path==='/')return route.fulfill({contentType:'text/html',body:ownerHtml});
+   if(path==='/api/global')return route.fulfill({json:{version:'fixture',settingsAvailable:false}});
+   if(path==='/api/analytics/extras')return route.fulfill({status:503});
+   if(path==='/api/chats')return route.fulfill({json:{chats:[{id,title:'Slow agent',workspace:'repo',lastEntryAtMs:now,lastAgentCallAtMs:lastCall,totalToolCalls:1}],offlineAfterMs:offlineAfter,automationEnabled:false,serverTimeMs:now}});
+   if(path==='/api/chats/'+id)return route.fulfill({json:{_meta:{[META]:{chat_file:'/fixture/CHAT.md',revision:'1',delivered_through:0,read_through:0,total_tool_calls:1,last_agent_call_at_ms:lastCall,offline_after_ms:offlineAfter,server_time_ms:now,messages:[],queued_messages:[],has_more:false}}}});
+   if(path.endsWith('/send'))sends.push(request.postDataJSON());
+   return route.fulfill({json:{enabled:false,ownerReadThrough:0}});
+  });
+  await page.goto(`${origin}/?chat=${id}#test-token`);
+  const header=page.locator('#chat-host #presence .presence-label'),sidebar=page.locator('#conversations .presence');
+  await header.filter({hasText:'last seen 6 mins ago'}).waitFor();assert(await sidebar.evaluate(node=>node.classList.contains('away')));
+  now+=239999;await page.clock.fastForward(239999);
+  await header.filter({hasText:'last seen 9 mins ago'}).waitFor();assert(await sidebar.evaluate(node=>node.classList.contains('away')));
+  now+=1;await page.clock.fastForward(1);
+  await header.filter({hasText:/^offline$/}).waitFor();assert(await sidebar.evaluate(node=>node.classList.contains('offline')));
+  // Timeouts shorter than the normal three-minute "online" period must still
+  // go offline at their configured boundary, rather than waiting three minutes.
+  offlineAfter=60000;lastCall=now-60000;
+  await page.reload();await header.filter({hasText:/^offline$/}).waitFor();assert(await sidebar.evaluate(node=>node.classList.contains('offline')));
+  assert.deepEqual(errors,[]);assert.deepEqual(sends,[]);
+ }finally{await browser.close();}
+});

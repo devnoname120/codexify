@@ -1328,7 +1328,8 @@ corrupt ticket state refuses execution rather than resetting it. A persistence
 failure at handoff can occur after tool side effects; it returns no successor
 and requires user recovery.
 
-**Offline recovery.** The guard reuses the chat's five-minute offline interval,
+**Offline recovery.** The ticket guard uses its own fixed five-minute lease,
+independent of `agentChat.offlineTimeoutMinutes`,
 measured conservatively from the last completed ticket handoff. When that interval
 has elapsed and no ticketed call is in flight, the next call may omit its ticket
 or supply an older or otherwise wrong string ticket. That call claims a new chain; competing
@@ -1943,8 +1944,14 @@ and `retryTimings.jitterPercent`) allows the first tool call to arrive; fresh ag
 wait immediately. Browser restart does not reset the wait. Approval alone does not
 mark pending user messages delivered or count a new goal turn. It does not enable file materialization
 in Codexify when that feature is disabled.
-The first release reuses agent chat's existing five-minute offline threshold and
-always uses one shared window rather than a configurable tab count.
+`agentChat.offlineTimeoutMinutes` sets the inactivity timeout for offline status,
+queued-message delivery, and automatic recovery prompts. It defaults to `5` and
+accepts whole minutes from `1` to `1440`; set it to `10` to allow ten minutes
+between tool calls. Change it under **Chats & goals → Offline timeout (minutes)**,
+then restart Codexify. New tool activity resets the interval. Active tool calls
+and explicit waits continue to suppress premature recovery. The separately
+configured retry schedules are preserved. The browser always uses one shared
+window rather than a configurable tab count.
 
 `agentChat.automation.requestBlockList` is an optional array of case-sensitive
 RE2 regular expressions matched against complete browser request URLs. It defaults
@@ -2155,9 +2162,10 @@ also restore the original settings; settings changed externally are preserved.
 
 Messages posted while the agent appears online remain pending in `CHAT.md` until
 a chat tool acknowledges them. Preparing an opportunistic tool response does not
-consume the pending message. If the turn ends first, four minutes without genuine
-tool activity lets a verified pairing forward the unread message through ChatGPT,
-even without a goal; the interface's five-minute offline threshold is unchanged.
+consume the pending message. If the turn ends first, the configured offline
+interval without genuine tool activity lets a verified pairing forward the unread
+message through ChatGPT, even without a goal. The interface and automation use
+the same `agentChat.offlineTimeoutMinutes` threshold (five minutes by default).
 The queued action checks again that the message is still unread before execution.
 Once ChatGPT accepts the send, a persisted message-ID fence prevents another
 automatic browser send, including after a restart or another burst of activity.

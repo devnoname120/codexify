@@ -147,6 +147,7 @@ impl OfflineClaim {
 }
 
 pub struct ChatFile {
+    offline_after_ms: AtomicU64,
     path: PathBuf,
     cursor_path: Option<PathBuf>,
     cursor: Mutex<Option<Cursor>>,
@@ -172,6 +173,7 @@ impl ChatFile {
         let cursor_path = persistent.then(|| path.with_file_name("cursor.json"));
         Self {
             path,
+            offline_after_ms: AtomicU64::new(super::OFFLINE_AFTER_MS),
             cursor_path,
             cursor: Mutex::new(None),
             owner_summary_cache: Mutex::new(None),
@@ -182,6 +184,15 @@ impl ChatFile {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    pub(crate) fn set_offline_timeout(&self, offline_after_ms: u64) {
+        self.offline_after_ms
+            .store(offline_after_ms, Ordering::Relaxed);
+    }
+
+    pub(crate) fn offline_after_ms(&self) -> u64 {
+        self.offline_after_ms.load(Ordering::Relaxed)
     }
 
     pub async fn set_owner_title(self: &Arc<Self>, title: String) -> Result<(), String> {

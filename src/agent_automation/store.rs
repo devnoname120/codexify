@@ -828,6 +828,7 @@ fn action_retry_mode(state: &AutomationTaskState) -> Option<&'static str> {
 
 #[derive(Debug, Clone)]
 pub struct AgentAutomationStore {
+    offline_after_ms: u64,
     root: PathBuf,
     pairing_index_root: PathBuf,
     notifications: Option<crate::markdown_chat::NotificationsConfig>,
@@ -889,6 +890,7 @@ impl AgentAutomationStore {
         }
         Ok(Self {
             root,
+            offline_after_ms: crate::markdown_chat::OFFLINE_AFTER_MS,
             pairing_index_root,
             notifications: None,
             notification_workspace: "Agent chat".into(),
@@ -901,6 +903,7 @@ impl AgentAutomationStore {
     }
 
     fn with_notifications(mut self, config: &AppConfig) -> Self {
+        self.offline_after_ms = config.markdown_chat.offline_after_ms();
         self.notifications = config.markdown_chat.notifications.clone();
         self.renewal_config = config.markdown_chat.turn_renewal.clone();
         self.settings_path = config.loaded_config_path.clone();
@@ -965,6 +968,10 @@ impl AgentAutomationStore {
         })
     }
 
+    pub(crate) fn offline_after_ms(&self) -> u64 {
+        self.offline_after_ms
+    }
+
     pub fn sync_goal_presence(
         &self,
         task: &ConversationIdentity,
@@ -986,7 +993,7 @@ impl AgentAutomationStore {
             let until = (!stopped)
                 .then(|| {
                     last_call_at_ms
-                        .map(|last| last.saturating_add(crate::markdown_chat::OFFLINE_AFTER_MS))
+                        .map(|last| last.saturating_add(self.offline_after_ms()))
                         .into_iter()
                         .chain(waiting_until_ms)
                         .max()

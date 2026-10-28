@@ -2050,7 +2050,11 @@ pub async fn start_http_server(mut config: AppConfig) -> anyhow::Result<()> {
     }
 
     crate::owner_chat::start_schema_refresh(config.clone(), agent_automation.clone());
-    let owner_chat_store = Arc::new(crate::markdown_chat::MarkdownChatStore::default());
+    let owner_chat_store = Arc::new(
+        crate::markdown_chat::MarkdownChatStore::with_offline_timeout(
+            config.markdown_chat.offline_after_ms(),
+        ),
+    );
     let make_service = |factory_connector_schemas: Arc<
         crate::connector_schema::ConnectorSchemaStore,
     >| {

@@ -34,8 +34,9 @@ pub const DEFAULT_OWNER_CHAT_PORT: u16 = 3120;
 pub const MAX_UNREAD_BYTES: usize = 16 * 1024 * 1024;
 pub const USER_MESSAGE_FIELD: &str = "new_chat_message_from_user";
 pub const AWAY_AFTER_MS: u64 = 180_000;
-pub const OFFLINE_AFTER_MS: u64 = 300_000;
-pub const AUTOMATION_OFFLINE_AFTER_MS: u64 = OFFLINE_AFTER_MS - 60_000;
+pub const DEFAULT_OFFLINE_TIMEOUT_MINUTES: u64 = 5;
+pub const OFFLINE_AFTER_MS: u64 = DEFAULT_OFFLINE_TIMEOUT_MINUTES * 60_000;
+pub const AUTOMATION_OFFLINE_AFTER_MS: u64 = OFFLINE_AFTER_MS;
 pub const PAIRING_PRESENCE_GRACE_MS: u64 = 5_000;
 pub const DEFAULT_AUTOMATION_DESCRIPTOR_PATH: &str = "~/.codexify/browser/descriptor.json";
 pub const DEFAULT_AUTOMATION_CONNECTOR_NAME: &str = "";
@@ -272,6 +273,7 @@ pub struct MarkdownChatConfig {
     pub enabled: bool,
     pub port: Option<u16>,
     pub max_wait_ms: u64,
+    pub offline_timeout_minutes: u64,
     pub default_message_mode: MessageMode,
     pub rollout_reminder_interval: u64,
     pub rollout_enabled: bool,
@@ -290,6 +292,7 @@ impl Default for MarkdownChatConfig {
             enabled: true,
             port: Some(DEFAULT_OWNER_CHAT_PORT),
             max_wait_ms: DEFAULT_MAX_WAIT_MS,
+            offline_timeout_minutes: DEFAULT_OFFLINE_TIMEOUT_MINUTES,
             default_message_mode: MessageMode::Queue,
             rollout_reminder_interval: rollout::DEFAULT_REMINDER_INTERVAL,
             rollout_enabled: true,
@@ -407,7 +410,16 @@ impl NotificationsConfig {
 }
 
 impl MarkdownChatConfig {
+    pub fn offline_after_ms(&self) -> u64 {
+        self.offline_timeout_minutes.saturating_mul(60_000)
+    }
+
     pub fn validate(&self) -> Result<(), String> {
+        if !(1..=1440).contains(&self.offline_timeout_minutes) {
+            return Err(
+                "agentChat.offlineTimeoutMinutes must be a whole number between 1 and 1440".into(),
+            );
+        }
         if self.port == Some(0) {
             return Err("agentChat.port must be between 1 and 65535, or null".into());
         }
@@ -427,6 +439,7 @@ impl MarkdownChatConfig {
 }
 
 pub struct MarkdownChatStore {
+    offline_after_ms: u64,
     channels: Mutex<HashMap<PathBuf, Arc<ChatFile>>>,
     activity: Mutex<HashMap<String, AgentActivityState>>,
     offline_monitors: Mutex<HashMap<PathBuf, Arc<tokio::sync::Notify>>>,
@@ -454,6 +467,7 @@ impl Default for MarkdownChatStore {
             .as_nanos();
         Self {
             channels: Mutex::new(HashMap::new()),
+            offline_after_ms: OFFLINE_AFTER_MS,
             activity: Mutex::new(HashMap::new()),
             offline_monitors: Mutex::new(HashMap::new()),
             transport_namespace: format!("{}-{timestamp}", std::process::id()),
@@ -462,6 +476,13 @@ impl Default for MarkdownChatStore {
 }
 
 impl MarkdownChatStore {
+    pub(crate) fn with_offline_timeout(offline_after_ms: u64) -> Self {
+        Self {
+            offline_after_ms,
+            ..Self::default()
+        }
+    }
+
     fn owner(&self, conversation: Option<&ConversationIdentity>, session: &SessionState) -> String {
         match conversation {
             Some(identity) => identity.stable_key().to_string(),
@@ -527,7 +548,11 @@ impl MarkdownChatStore {
                 .map_err(|_| "Cannot resolve the Markdown chat directory")?
                 .join(path)
         };
-        self.chat_at_path(path, conversation.is_some())
+        self.chat_at_path_with_timeout(
+            path,
+            conversation.is_some(),
+            config.markdown_chat.offline_after_ms(),
+        )
     }
 
     pub(crate) fn chat_at_path(
@@ -535,14 +560,29 @@ impl MarkdownChatStore {
         path: PathBuf,
         persistent: bool,
     ) -> Result<Arc<ChatFile>, String> {
+        self.chat_at_path_with_timeout(path, persistent, self.offline_after_ms)
+    }
+
+    fn chat_at_path_with_timeout(
+        &self,
+        path: PathBuf,
+        persistent: bool,
+        offline_after_ms: u64,
+    ) -> Result<Arc<ChatFile>, String> {
         let mut channels = self
             .channels
             .lock()
             .map_err(|_| "Markdown chat store is unavailable")?;
         let chat = channels
             .entry(path.clone())
-            .or_insert_with(|| Arc::new(ChatFile::new(path, persistent)))
+            .or_insert_with(|| {
+                let chat = ChatFile::new(path, persistent);
+                chat.set_offline_timeout(offline_after_ms);
+                Arc::new(chat)
+            })
             .clone();
+        // Configure existing channels too, before any new queue monitor can run.
+        chat.set_offline_timeout(offline_after_ms);
         drop(channels);
         chat.start_queue_monitor();
         Ok(chat)
@@ -568,7 +608,8 @@ impl MarkdownChatStore {
                 let config = config.clone();
                 let monitor_wake = wake.clone();
                 tokio::spawn(async move {
-                    offline::monitor(chat, monitor_wake, OFFLINE_AFTER_MS, move || {
+                    let offline_after_ms = config.offline_after_ms();
+                    offline::monitor(chat, monitor_wake, offline_after_ms, move || {
                         let config = config.clone();
                         let workspace = workspace.clone();
                         async move {
@@ -576,7 +617,7 @@ impl MarkdownChatStore {
                                 &config,
                                 notification::NotificationEvent::Offline,
                                 &workspace,
-                                offline::MESSAGE.to_string(),
+                                offline::message(offline_after_ms),
                                 &tokio_util::sync::CancellationToken::new(),
                             )
                             .await

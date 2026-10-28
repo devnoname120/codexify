@@ -429,11 +429,12 @@ dialog:modal{box-sizing:border-box;block-size:fit-content;margin:auto;inset-bloc
       if (saved && (readPositions.get(id) || 0) > through) void remember(id, readPositions.get(id));
     }
   }
+  let offlineAfterMs = 300000;
   function presence(lastCall, now, waitingUntil = null, presenceUntil = null, idleUntil = null) {
     if (Number.isSafeInteger(waitingUntil) && now < waitingUntil) return "waiting";
     if (Number.isSafeInteger(idleUntil) && now < idleUntil) return "waiting";
     if (Number.isSafeInteger(presenceUntil)) return now < presenceUntil ? "online" : "offline";
-    if (!Number.isFinite(lastCall) || now - lastCall >= 300000) return "offline";
+    if (!Number.isFinite(lastCall) || now - lastCall >= offlineAfterMs) return "offline";
     if (now - lastCall >= 180000) return "away";
     return "online";
   }
@@ -1203,7 +1204,7 @@ dialog:modal{box-sizing:border-box;block-size:fit-content;margin:auto;inset-bloc
     if (document.hidden) return;
     updateSelectedHeader();
     const now = Date.now() + clockOffset;
-    const next = chats.flatMap(chat => [chat.agentWaitingUntilMs, chat.agentIdleUntilMs, chat.agentPresenceUntilMs, ...[180000,300000].map(age => chat.lastAgentCallAtMs + age)].map(deadline => deadline - now)).filter(delay => Number.isFinite(delay) && delay > 0);
+    const next = chats.flatMap(chat => [chat.agentWaitingUntilMs, chat.agentIdleUntilMs, chat.agentPresenceUntilMs, ...[Math.min(180000, offlineAfterMs),offlineAfterMs].map(age => chat.lastAgentCallAtMs + age)].map(deadline => deadline - now)).filter(delay => Number.isFinite(delay) && delay > 0);
     if (!document.hidden && next.length) presenceTimer = setTimeout(renderList, Math.max(1, Math.min(...next)));
     const focused = document.activeElement;
     const focusedChat = focused?.closest(".conversation-row")?.dataset.chatId;
@@ -1473,6 +1474,7 @@ dialog:modal{box-sizing:border-box;block-size:fit-content;margin:auto;inset-bloc
       }
       if (typeof payload.automationEnabled === "boolean") automationEnabled = payload.automationEnabled;
       matchedQuery = query; matchedIds = new Set(payload.matchedChatIds || []);
+      if (Number.isSafeInteger(payload.offlineAfterMs) && payload.offlineAfterMs > 0) offlineAfterMs = payload.offlineAfterMs;
       if (Number.isSafeInteger(payload.serverTimeMs)) clockOffset = payload.serverTimeMs - Date.now();
       waitingForPresenceRefresh = false;
       showError("");

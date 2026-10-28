@@ -19,7 +19,7 @@ const MAX_BYTES: u64 = 1024 * 1024;
 pub(crate) const MAX_DURATION_MS: u64 = 5 * 60 * 60 * 1000;
 const MAX_SAMPLES: usize = 256;
 const MAX_GAP_MS: u64 = 90_000;
-const OFFLINE_MS: u64 = crate::markdown_chat::AUTOMATION_OFFLINE_AFTER_MS;
+const OFFLINE_MS: u64 = 240_000; // Statistical observation window, independent of presence settings.
 
 #[derive(Default)]
 struct ToolCounter {

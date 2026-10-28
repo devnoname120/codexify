@@ -680,3 +680,46 @@ for(const [name,engine]of [['Chromium',chromium],['WebKit',webkit]])test(`${name
   assert.deepEqual(errors,[]);
  }finally{await browser.close();}
 });
+
+for(const [engineName,engine] of [['Chromium',chromium],['WebKit',webkit]])test(`${engineName}: offline timeout saves whole minutes, validates bounds and resets to the default`,{timeout:20000},async()=>{
+ const browser=await engine.launch();
+ try {
+  const page=await browser.newPage();page.setDefaultTimeout(5000);await page.clock.install();
+  let document={},revision=1;const writes=[];
+  const snapshot=()=>({document,defaults:{agentChat:{offlineTimeoutMinutes:5}},fieldSchema:{agentChat:{offlineTimeoutMinutes:5}},raw:JSON.stringify(document),revision:String(revision),restartRequired:revision>1});
+  await routeOwner(page,'http://127.0.0.1:43279/**',route=>{
+   const r=route.request(),path=new URL(r.url()).pathname;
+   if(path==='/')return route.fulfill({contentType:'text/html',body:ownerHtml});
+   if(path==='/api/global')return route.fulfill({json:{version:'fixture',settingsAvailable:true}});
+   if(path==='/api/chats')return route.fulfill({json:{chats:[],serverTimeMs:Date.now()}});
+   if(path==='/api/settings'&&r.method()==='GET')return route.fulfill({json:snapshot()});
+   if(path==='/api/settings'){
+    const body=r.postDataJSON();writes.push(body);
+    if(body.raw!=null)document=JSON.parse(body.raw);
+    else for(const [key,value]of Object.entries(body.changes||{})){
+     assert.equal(key,'agentChat.offlineTimeoutMinutes');document.agentChat??={};
+     if(value==null)delete document.agentChat.offlineTimeoutMinutes;else document.agentChat.offlineTimeoutMinutes=value;
+    }
+    revision++;return route.fulfill({json:snapshot()});
+   }
+   return route.fulfill({status:404});
+  });
+  await page.goto('http://127.0.0.1:43279/#test-token');
+  await page.getByRole('button',{name:'Codexify settings',exact:true}).click();
+  const dialog=page.getByRole('dialog',{name:'Codexify settings'});
+  await dialog.getByRole('button',{name:'Chats & goals',exact:true}).click();
+  const input=dialog.getByLabel('agentChat.offlineTimeoutMinutes',{exact:true});
+  assert.equal(await input.getAttribute('placeholder'),'5 (default)');
+  assert.match(await dialog.locator('[data-setting-row="agentChat.offlineTimeoutMinutes"]').textContent(),/Restart to apply/);
+  for(const value of ['0','1.5','1441']){
+   await input.fill(value);await page.clock.fastForward(700);
+   assert.equal(await input.getAttribute('aria-invalid'),'true');assert.equal(writes.length,0);
+  }
+  await input.fill('10');await page.clock.fastForward(700);
+  await dialog.getByText('Saved. Restart Codexify to apply changes.',{exact:true}).waitFor();
+  assert.equal(document.agentChat.offlineTimeoutMinutes,10);
+  await input.fill('');await page.clock.fastForward(700);
+  await dialog.getByText('Saved. Restart Codexify to apply changes.',{exact:true}).waitFor();
+  assert.equal(document.agentChat?.offlineTimeoutMinutes,undefined);
+ }finally{await browser.close();}
+});

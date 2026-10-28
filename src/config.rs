@@ -2617,6 +2617,7 @@ mod tests {
                     "defaultMessageMode",
                     "enabled",
                     "maxWaitMs",
+                    "offlineTimeoutMinutes",
                     "rolloutReminderInterval",
                     "rolloutEnabled",
                     "turnRenewal",

@@ -1,6 +1,6 @@
 //! Private, durable user messages. Only a released message enters CHAT.md.
 use super::*;
-use crate::markdown_chat::{MessageMode, OFFLINE_AFTER_MS, attachments::Attachment};
+use crate::markdown_chat::{MessageMode, attachments::Attachment};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::time::Duration;
@@ -261,12 +261,12 @@ fn repair_pending(
     repair_pending_at(chat, state, None)
 }
 
-fn queue_offline(cursor: &Cursor, now_ms: u64) -> bool {
+fn queue_offline(cursor: &Cursor, now_ms: u64, offline_after_ms: u64) -> bool {
     cursor.agent_presence_until_ms.map_or_else(
         || {
             cursor
                 .last_agent_call_at_ms
-                .is_none_or(|last| now_ms.saturating_sub(last) >= OFFLINE_AFTER_MS)
+                .is_none_or(|last| now_ms.saturating_sub(last) >= offline_after_ms)
         },
         |until| now_ms >= until,
     )
@@ -294,7 +294,7 @@ fn repair_pending_at(
             && (state.input_waiting
                 || goal_holds_queue_for_release(
                     chat,
-                    now_ms.is_some_and(|now| queue_offline(cursor, now)),
+                    now_ms.is_some_and(|now| queue_offline(cursor, now, chat.offline_after_ms())),
                     state.blocked_goal_submissions.get(&entry.id),
                 )?
                 || cursor.agent_stop_requested
@@ -702,7 +702,7 @@ impl ChatFile {
                     return Ok(None);
                 }
                 let next = chat.with_cursor(|cursor, file| {
-                    let offline = queue_offline(cursor, now_ms);
+                    let offline = queue_offline(cursor, now_ms, chat.offline_after_ms());
                     if cursor.agent_stop_requested || !snapshot(chat, file, cursor)?.text.is_empty()
                     {
                         return Ok(None);
@@ -785,6 +785,7 @@ impl ChatFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::markdown_chat::OFFLINE_AFTER_MS;
     use crate::markdown_chat::attachments::AttachmentStore;
     use tokio_util::sync::CancellationToken;
 
@@ -1276,6 +1277,41 @@ mod tests {
                 .is_some()
         );
     }
+    #[tokio::test]
+    async fn queued_delivery_respects_the_configured_offline_timeout() {
+        let (_root, chat) = fixture().await;
+        chat.set_offline_timeout(600_000);
+        enqueue(&chat, "slow-turn").await;
+        let last = chat
+            .owner_summary()
+            .await
+            .unwrap()
+            .last_agent_call_at_ms
+            .unwrap();
+        assert!(
+            chat.release_queued_message(last + 300_000)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            chat.release_queued_message(last + 600_000 - 1)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            chat.widget_page(None, None).await.unwrap().offline_after_ms,
+            600_000
+        );
+        assert!(
+            chat.release_queued_message(last + 600_000)
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+
     #[tokio::test]
     async fn offline_threshold_stop_and_input_wait_are_distinct() {
         let (_root, chat) = fixture().await;

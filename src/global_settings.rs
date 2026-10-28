@@ -641,6 +641,50 @@ pub fn write_refresh_intent(value: &Value) -> Result<(), String> {
 mod tests {
     use super::*;
     #[test]
+    fn offline_timeout_is_validated_saved_and_requires_restart() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("config.json");
+        let mut config = crate::config::default_config(root.path().into());
+        config.loaded_config_path = Some(path.clone());
+        std::fs::write(
+            &path,
+            json!({"workDir":root.path(),"codexMcp":{"enabled":false}}).to_string(),
+        )
+        .unwrap();
+        let before = snapshot(&config).unwrap();
+        assert_eq!(before["defaults"]["agentChat"]["offlineTimeoutMinutes"], 5);
+        let saved = save(
+            &config,
+            before["revision"].as_str().unwrap(),
+            None,
+            Some(Map::from_iter([(
+                "agentChat.offlineTimeoutMinutes".into(),
+                json!(10),
+            )])),
+        )
+        .unwrap();
+        assert_eq!(saved["document"]["agentChat"]["offlineTimeoutMinutes"], 10);
+        assert_eq!(saved["restartRequired"], true);
+        assert_eq!(saved["schemaRestartRequired"], false);
+        let persisted = std::fs::read(&path).unwrap();
+        for value in [json!(0), json!(1441), json!(1.5), json!("10")] {
+            assert!(
+                save(
+                    &config,
+                    saved["revision"].as_str().unwrap(),
+                    None,
+                    Some(Map::from_iter([(
+                        "agentChat.offlineTimeoutMinutes".into(),
+                        value
+                    )]))
+                )
+                .is_err()
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), persisted);
+        }
+    }
+
+    #[test]
     fn optional_instance_name_can_be_saved_reset_and_kept_during_other_edits() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("config.json");

@@ -251,10 +251,11 @@ impl AgentAutomationStore {
                     saved.effort = send.effort;
                 }
             } else {
-                let resume_wait_until_ms = state.turn_renewal.handoff.as_ref().map(|_| {
-                    send.at_ms
-                        .saturating_add(crate::markdown_chat::OFFLINE_AFTER_MS)
-                });
+                let resume_wait_until_ms = state
+                    .turn_renewal
+                    .handoff
+                    .as_ref()
+                    .map(|_| send.at_ms.saturating_add(self.offline_after_ms()));
                 state.turn_renewal = TurnRenewalState {
                     send: Some(send),
                     handoff: None,

@@ -812,7 +812,8 @@ async fn list_chats(State(state): State<OwnerState>, Query(query): Query<ListQue
                 }
             }
         };
-        let wake_activity = wake::Activity::from(&summary);
+        let wake_activity = wake::Activity::from(&summary)
+            .with_offline_timeout(state.config.markdown_chat.offline_after_ms());
         let OwnerChatSummary {
             title,
             custom_title,
@@ -948,7 +949,7 @@ async fn list_chats(State(state): State<OwnerState>, Query(query): Query<ListQue
             .then_with(|| a.id.cmp(&b.id))
     });
     Ok(Json(
-        json!({"chats": list, "matchedChatIds": matched, "automationEnabled":state.config.markdown_chat.automation.enabled, "serverTimeMs": crate::markdown_chat::now_ms()}),
+        json!({"chats": list, "matchedChatIds": matched, "automationEnabled":state.config.markdown_chat.automation.enabled, "offlineAfterMs":state.config.markdown_chat.offline_after_ms(), "serverTimeMs": crate::markdown_chat::now_ms()}),
     ))
 }
 
@@ -1127,7 +1128,8 @@ async fn chat_state(
     let summary = chat.owner_summary().await.map_err(internal_error)?;
     page["wake_status"] = json!(wake::status(
         &automation,
-        &wake::Activity::from(&summary),
+        &wake::Activity::from(&summary)
+            .with_offline_timeout(state.config.markdown_chat.offline_after_ms()),
         chat.has_wakeable_queued_messages()
             .await
             .map_err(internal_error)?,
@@ -1267,7 +1269,8 @@ async fn automation_state(State(state): State<OwnerState>, Path(id): Path<String
     let (companion, catalog) = browser_snapshot(&state).await;
     let wake = wake::status(
         &automation,
-        &wake::Activity::from(&summary),
+        &wake::Activity::from(&summary)
+            .with_offline_timeout(state.config.markdown_chat.offline_after_ms()),
         context
             .chat
             .has_wakeable_queued_messages()
@@ -1964,7 +1967,8 @@ async fn wake_status_for_chat(
     let queued = chat.has_wakeable_queued_messages().await.ok()?;
     wake::status(
         &automation,
-        &wake::Activity::from(&summary),
+        &wake::Activity::from(&summary)
+            .with_offline_timeout(state.config.markdown_chat.offline_after_ms()),
         queued,
         true,
         crate::markdown_chat::now_ms(),
