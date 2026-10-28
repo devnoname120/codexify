@@ -77,8 +77,8 @@ for(const [name,engine] of [['Chromium',chromium],['WebKit',webkit]])test(`${nam
  const browser=await engine.launch();
  try {
   const page=await browser.newPage();page.setDefaultTimeout(5000);
-  let now=Date.now(),lastCall=now-6*60000,offlineAfter=600000;const errors=[],sends=[];
-  await page.clock.install({time:now});page.on('pageerror',error=>errors.push(error.message));
+  let now=Date.now()+60000,lastCall=now-6*60000,offlineAfter=600000;const errors=[],sends=[];
+  await page.clock.install({time:now-60000});await page.clock.pauseAt(now);page.on('pageerror',error=>errors.push(error.message));
   await routeOwner(page,origin+'/**',route=>{
    const request=route.request(),path=new URL(request.url()).pathname;
    if(path==='/')return route.fulfill({contentType:'text/html',body:ownerHtml});
@@ -90,16 +90,16 @@ for(const [name,engine] of [['Chromium',chromium],['WebKit',webkit]])test(`${nam
    return route.fulfill({json:{enabled:false,ownerReadThrough:0}});
   });
   await page.goto(`${origin}/?chat=${id}#test-token`);
-  const header=page.locator('#chat-host #presence .presence-label'),sidebar=page.locator('#conversations .presence');
-  await header.filter({hasText:'last seen 6 mins ago'}).waitFor();assert(await sidebar.evaluate(node=>node.classList.contains('away')));
+  const header=page.locator('#chat-host #presence .presence-label');
+  await header.filter({hasText:'last seen 6 mins ago'}).waitFor();await page.locator('#conversations .presence.away').waitFor({state:'attached'});
   now+=239999;await page.clock.fastForward(239999);
-  await header.filter({hasText:'last seen 9 mins ago'}).waitFor();assert(await sidebar.evaluate(node=>node.classList.contains('away')));
+  await header.filter({hasText:'last seen 9 mins ago'}).waitFor();await page.locator('#conversations .presence.away').waitFor({state:'attached'});
   now+=1;await page.clock.fastForward(1);
-  await header.filter({hasText:/^offline$/}).waitFor();assert(await sidebar.evaluate(node=>node.classList.contains('offline')));
+  await header.filter({hasText:/^offline$/}).waitFor();await page.locator('#conversations .presence.offline').waitFor({state:'attached'});
   // Timeouts shorter than the normal three-minute "online" period must still
   // go offline at their configured boundary, rather than waiting three minutes.
   offlineAfter=60000;lastCall=now-60000;
-  await page.reload();await header.filter({hasText:/^offline$/}).waitFor();assert(await sidebar.evaluate(node=>node.classList.contains('offline')));
+  await page.reload();await header.filter({hasText:/^offline$/}).waitFor();await page.locator('#conversations .presence.offline').waitFor({state:'attached'});
   assert.deepEqual(errors,[]);assert.deepEqual(sends,[]);
  }finally{await browser.close();}
 });
