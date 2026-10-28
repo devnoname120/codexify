@@ -6,6 +6,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.3.22] - 2026-10-29
+
+### Fixed
+
+- Keep the dedicated browser in Chat mode by opting out of ChatGPT's client-side
+  Work rollout, avoiding unsupported Work-mode submissions in projects.
+
 ## [2.3.21] - 2026-10-28
 
 ### Added
@@ -1214,7 +1221,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   drained through bounded head/tail buffers, while component-only `_meta` remains
   outside the model-visible limit.
 
-[Unreleased]: https://github.com/devnoname120/codexify/compare/v2.3.14...HEAD
+[Unreleased]: https://github.com/devnoname120/codexify/compare/v2.3.22...HEAD
+[2.3.22]: https://github.com/devnoname120/codexify/compare/v2.3.21...v2.3.22
 [2.3.14]: https://github.com/devnoname120/codexify/compare/v2.3.13...v2.3.14
 [2.3.13]: https://github.com/devnoname120/codexify/compare/v2.3.12...v2.3.13
 [2.3.12]: https://github.com/devnoname120/codexify/compare/v2.3.11...v2.3.12

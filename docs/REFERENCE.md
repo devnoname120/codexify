@@ -1953,6 +1953,13 @@ and explicit waits continue to suppress premature recovery. The separately
 configured retry schedules are preserved. The browser always uses one shared
 window rather than a configurable tab count.
 
+The dedicated browser opts out of ChatGPT's client-side Work rollout, keeping
+its automation in Chat mode and preventing the merged model picker from silently
+routing project messages into unsupported Work mode. Codexify only supports Chat;
+it does not offer a Work selector. The override applies only to the companion's
+top-level `chatgpt.com` page; account/workspace access controls and the user's
+regular browser are unchanged.
+
 `agentChat.automation.requestBlockList` is an optional array of case-sensitive
 RE2 regular expressions matched against complete browser request URLs. It defaults
 to the five patterns shown below. `requestBlockingEnabled` defaults to `false`;

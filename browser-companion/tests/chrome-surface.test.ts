@@ -30,6 +30,7 @@ class FakePage extends EventEmitter {
     this.currentUrl=url;
   }
   async waitForLoadState() {}
+  async evaluate() {}
   async bringToFront() { this.revealed = true; }
   async close() { this.closed = true; this.emit("close"); }
 }
@@ -38,6 +39,8 @@ class FakeContext extends EventEmitter {
   closed = false;
   windowState = "normal";
   createdTargets: unknown[] = [];
+  initScripts: unknown[] = [];
+  async addInitScript(script: unknown) { this.initScripts.push(script); }
   constructor(readonly tabs = [new FakePage()]) { super();for(const page of tabs)page.owner=this; }
   pages() { return this.tabs.filter(page => !page.isClosed()) as unknown as Page[]; }
   async newPage() {

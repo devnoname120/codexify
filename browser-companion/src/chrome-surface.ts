@@ -8,6 +8,7 @@ import { BrowserCompanionError } from "./errors";
 import { backgroundChromeArgs } from "./background-chrome";
 import {prepareRequestBlockList,requestBlockListArgs,verifyRequestBlockList} from "./request-block-list";
 import {isChatGptPage,navigatePage} from "./navigation";
+import {installChatModeCompatibility} from "./chat-mode";
 
 const CHATGPT_HOME = "https://chatgpt.com/";
 
@@ -50,6 +51,7 @@ export class ChromeSingleWindowSurface implements SingleBrowserSurface {
       // Keep Chrome's own browser headers and user agent.
     });
     try {
+      await context.addInitScript(installChatModeCompatibility);
       await verifyRequestBlockList(context,policy);
       let page = context.pages()[0];
       if (!page) {
@@ -72,6 +74,7 @@ export class ChromeSingleWindowSurface implements SingleBrowserSurface {
       }
       const surface = new ChromeSingleWindowSurface(context, page);
       if(!isChatGptPage(page.url()))await surface.navigate(CHATGPT_HOME);
+      else await page.evaluate(installChatModeCompatibility, undefined, undefined, false);
       return surface;
     } catch (error) {
       await context.close().catch(() => {});
