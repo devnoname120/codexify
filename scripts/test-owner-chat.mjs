@@ -19,10 +19,22 @@ async function ownerTestPage(browser, options) {
   return page;
 }
 
+test("owner presence honors configured ten-minute and one-minute boundaries", () => {
+  const source = ownerHtml.match(/function presence\([^)]*\) \{[\s\S]*?\n  \}/)?.[0];
+  assert(source);
+  const ten = Function('offlineAfterMs', `return (${source})`)(600000);
+  const one = Function('offlineAfterMs', `return (${source})`)(60000);
+  assert.equal(ten(1000, 301000), 'away');
+  assert.equal(ten(1000, 600999), 'away');
+  assert.equal(ten(1000, 601000), 'offline');
+  assert.equal(one(1000, 60999), 'online');
+  assert.equal(one(1000, 61000), 'offline');
+});
+
 test("owner presence changes at exactly three and five minutes", () => {
   const source = ownerHtml.match(/function presence\([^)]*\) \{[\s\S]*?\n  \}/)?.[0];
   assert(source);
-  const presence = Function(`return (${source})`)();
+  const presence = Function('offlineAfterMs', `return (${source})`)(300000);
   assert.equal(presence(1000, 1000 + 179999, null), "online");
   assert.equal(presence(1000, 1000 + 180000, null), "away");
   assert.equal(presence(1000, 1000 + 299999, null), "away");
@@ -31,7 +43,7 @@ test("owner presence changes at exactly three and five minutes", () => {
 
 test("idle waiting deadlines expire independently of question waits and ordinary presence", () => {
   const source = ownerHtml.match(/function presence\([^)]*\) \{[\s\S]*?\n  \}/)?.[0];
-  const presence = Function(`return (${source})`)();
+  const presence = Function('offlineAfterMs', `return (${source})`)(300000);
   assert.equal(presence(1000, 5999, null, null, 6000), "waiting");
   assert.equal(presence(1000, 6000, null, null, 6000), "online");
   assert.equal(presence(null, 5999, null, null, 6000), "waiting");
@@ -1514,7 +1526,7 @@ for (const [engineName, engine] of [["Chromium",chromium],["WebKit",webkit]]) {
 }
 
 test('verified pairing skips away after its short presence lease while normal activity retains the normal timeout',()=>{
- const source=ownerHtml.match(/function presence\([^)]*\) \{[\s\S]*?\n  \}/)?.[0];const presence=Function(`return (${source})`)();
+ const source=ownerHtml.match(/function presence\([^)]*\) \{[\s\S]*?\n  \}/)?.[0];const presence = Function('offlineAfterMs', `return (${source})`)(300000);
  assert.equal(presence(1000,5999,null,6000),'online');assert.equal(presence(1000,6000,null,6000),'offline');
  assert.equal(presence(1000,180000,null,6000),'offline');assert.equal(presence(1000,6000,9000,6000),'waiting');
  assert.equal(presence(2000,6000,null,null),'online');
