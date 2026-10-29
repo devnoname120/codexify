@@ -387,6 +387,7 @@ fn classify_latest_version(
 
 async fn latest_release_tag_via_gh(request_timeout: Duration) -> anyhow::Result<String> {
     let mut command = Command::new("gh");
+    crate::process_env::isolate_console(command.as_std_mut());
     command
         .args([
             "api",
@@ -652,7 +653,95 @@ fn read_status_record_from(
 
 pub fn read_update_status(update_id: &str) -> anyhow::Result<UpdateStatusRecord> {
     let home = home_dir().context("locate the user's home directory")?;
-    read_status_record_from(&status_dir_for_root(&home.join(".codexify")), update_id)
+    read_update_status_from_home(&home, update_id)
+}
+
+fn read_update_status_from_home(
+    home: &Path,
+    update_id: &str,
+) -> anyhow::Result<UpdateStatusRecord> {
+    let status_dir = status_dir_for_root(&home.join(".codexify"));
+    let record = read_status_record_from(&status_dir, update_id)?;
+    #[cfg(windows)]
+    if scheduled_worker_is_overdue(&record, chrono::Utc::now()) {
+        let name = powershell_quote(&windows_task_name(update_id));
+        let script = format!(
+            "$ErrorActionPreference='Stop'\n$ProgressPreference='SilentlyContinue'\n$task=Get-ScheduledTask -TaskName {name} -ErrorAction SilentlyContinue\nif ($task) {{ $info=Get-ScheduledTaskInfo -InputObject $task; @{{exists=$true;state=[string]$task.State;result=[uint32]$info.LastTaskResult}} | ConvertTo-Json -Compress }} else {{ @{{exists=$false;state=$null;result=$null}} | ConvertTo-Json -Compress }}\n"
+        );
+        // An inaccessible scheduler is not evidence that a worker stopped.
+        // Preserve its status and files when its lifetime cannot be established.
+        if let Ok(output) = crate::service::command_output_with_timeout(
+            powershell_command(&script),
+            "query the Windows update task",
+            Duration::from_secs(10),
+        ) && output.status.success()
+            && let Ok(task) = serde_json::from_slice::<WindowsUpdateTask>(&output.stdout)
+            && let Some(failed) = stopped_update_worker(&record, &task)
+        {
+            let current = read_status_record_from(&status_dir, update_id)?;
+            if current != record {
+                return Ok(current);
+            }
+            write_status_record_to(&status_dir, &failed)?;
+            let lock = home.join(".codexify/update/update.lock");
+            if fs::read_to_string(&lock).is_ok_and(|value| value.trim() == update_id) {
+                let _ = fs::remove_file(lock);
+            }
+            return Ok(failed);
+        }
+    }
+    Ok(record)
+}
+
+#[cfg(any(windows, test))]
+#[derive(Deserialize)]
+struct WindowsUpdateTask {
+    exists: bool,
+    state: Option<String>,
+    result: Option<u32>,
+}
+
+#[cfg(any(windows, test))]
+fn scheduled_worker_is_overdue(
+    record: &UpdateStatusRecord,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    record.state == UpdatePhase::Scheduled
+        && chrono::DateTime::parse_from_rfc3339(&record.updated_at)
+            .is_ok_and(|at| now.signed_duration_since(at).num_seconds() >= 60)
+}
+
+#[cfg(any(windows, test))]
+fn stopped_update_worker(
+    record: &UpdateStatusRecord,
+    task: &WindowsUpdateTask,
+) -> Option<UpdateStatusRecord> {
+    if record.state != UpdatePhase::Scheduled
+        || task
+            .result
+            .is_some_and(|result| matches!(result, 0x00041301 | 0x00041325))
+        || task.exists
+            && !task.state.as_deref().is_some_and(|state| {
+                state.eq_ignore_ascii_case("Ready") || state.eq_ignore_ascii_case("Disabled")
+            })
+    {
+        return None;
+    }
+    let detail = if task.exists {
+        format!(
+            "The Windows update task stopped before reporting progress (Task Scheduler result 0x{:08X}). See the service log and retry the update.",
+            task.result?
+        )
+    } else {
+        "The Windows update task is absent and never reported progress. See the service log and retry the update.".to_string()
+    };
+    Some(UpdateStatusRecord {
+        state: UpdatePhase::Failed,
+        updated_at: update_timestamp(),
+        failure_code: Some("worker_not_started".into()),
+        failure_detail: Some(detail),
+        ..record.clone()
+    })
 }
 
 fn cleanup_status_records(status_dir: &Path, active_update_id: &str) -> anyhow::Result<()> {
@@ -882,6 +971,8 @@ async fn trigger_from(
             port: service_port,
         },
     )?;
+    #[cfg(windows)]
+    let worker = format!("\u{feff}{worker}");
     write_private_bytes(&workspace.worker_path, worker.as_bytes(), false)?;
 
     let status_dir = workspace
@@ -1310,9 +1401,11 @@ fn write_staged_binary(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
 }
 
 async fn validate_staged_binary(path: &Path) -> anyhow::Result<()> {
+    let mut command = Command::new(path);
+    crate::process_env::isolate_console(command.as_std_mut());
     let status = tokio::time::timeout(
         BINARY_PROBE_TIMEOUT,
-        Command::new(path)
+        command
             .arg("--help")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -1706,7 +1799,7 @@ function Write-UpdateLog([string]$Message) {{
     }} catch {{}}
 }}
 
-function Write-UpdateStatus([string]$State, [string]$Code, [string]$Detail) {{
+function Write-UpdateStatus([string]$State, [string]$Code, [string]$Detail, [switch]$Required) {{
     $Temporary = "$Status.tmp.$PID"
     try {{
         $Timestamp = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
@@ -1723,20 +1816,23 @@ function Write-UpdateStatus([string]$State, [string]$Code, [string]$Detail) {{
         $Encoding = New-Object System.Text.UTF8Encoding($false)
         [IO.File]::WriteAllText($Temporary, $Json, $Encoding)
         if (Test-Path -LiteralPath $Status) {{
-            [IO.File]::Replace($Temporary, $Status, $null, $true)
+            # PowerShell coerces an ordinary $null string argument to "".
+            # File.Replace requires a real .NET null to omit the backup path.
+            [IO.File]::Replace($Temporary, $Status, [NullString]::Value, $true)
         }} else {{
             [IO.File]::Move($Temporary, $Status)
         }}
     }} catch {{
         Remove-Item -LiteralPath $Temporary -Force -ErrorAction SilentlyContinue
         Write-UpdateLog "could not persist update status $State"
+        if ($Required) {{ throw }}
     }}
 }}
 
 try {{
     Write-UpdateLog "update worker started for Codexify $Version"
+    Write-UpdateStatus 'installing' '' '' -Required
     Start-Sleep -Seconds {UPDATE_DELAY_SECONDS}
-    Write-UpdateStatus 'installing' '' ''
 
     if ($RestartService) {{
         $Stopped = $true
@@ -1944,8 +2040,17 @@ fn windows_task_name(id: &str) -> String {
 #[cfg(windows)]
 fn schedule_windows(worker: &Path, id: &str) -> anyhow::Result<()> {
     let script = windows_registration_script(worker, &windows_task_name(id))?;
+    // Keep the complete registration command inspectable without nested
+    // encoded payloads, and preserve Unicode with Windows PowerShell 5.1.
+    let mut file = tempfile::Builder::new()
+        .prefix("codexify-update-register-")
+        .suffix(".ps1")
+        .tempfile()?;
+    file.write_all(format!("\u{feff}{script}").as_bytes())?;
+    file.flush()?;
+    let path = file.into_temp_path();
     run_checked(
-        powershell_command(&script),
+        crate::service::windows_file_command(&path),
         "schedule the Codexify update as a Windows task",
     )
 }
@@ -1987,6 +2092,7 @@ fn powershell_command(script: &str) -> StdCommand {
         "pwsh.exe"
     };
     let mut command = StdCommand::new(program);
+    crate::process_env::isolate_console(&mut command);
     command.args([
         "-NoLogo",
         "-NoProfile",
@@ -2001,7 +2107,9 @@ fn powershell_command(script: &str) -> StdCommand {
 
 #[cfg(windows)]
 fn program_exists(program: &str) -> bool {
-    StdCommand::new("where.exe")
+    let mut command = StdCommand::new("where.exe");
+    crate::process_env::isolate_console(&mut command);
+    command
         .arg(program)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -2035,6 +2143,7 @@ fn spawn_detached_unix(worker: &Path) -> anyhow::Result<()> {
 }
 
 fn run_checked(mut command: StdCommand, action: &str) -> anyhow::Result<()> {
+    crate::process_env::isolate_console(&mut command);
     let output = command.output().with_context(|| {
         format!(
             "{action}: start {}",
@@ -2067,6 +2176,177 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
     use zip::write::SimpleFileOptions;
+
+    #[test]
+    fn stopped_windows_updaters_become_terminal_without_marking_live_workers_failed() {
+        let record = UpdateStatusRecord::scheduled("0123456789abcdef01234567", "2.3.23", "2.3.24");
+        let at = chrono::DateTime::parse_from_rfc3339(&record.updated_at)
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        assert!(!scheduled_worker_is_overdue(
+            &record,
+            at + chrono::Duration::seconds(59)
+        ));
+        assert!(scheduled_worker_is_overdue(
+            &record,
+            at + chrono::Duration::seconds(60)
+        ));
+        for state in ["Running", "Queued", "Unknown"] {
+            let task = WindowsUpdateTask {
+                exists: true,
+                state: Some(state.into()),
+                result: Some(0),
+            };
+            assert!(stopped_update_worker(&record, &task).is_none());
+        }
+        for result in [0x00041301, 0x00041325] {
+            let task = WindowsUpdateTask {
+                exists: true,
+                state: Some("Ready".into()),
+                result: Some(result),
+            };
+            assert!(
+                stopped_update_worker(&record, &task).is_none(),
+                "a live scheduler result must preserve a stale Ready snapshot"
+            );
+        }
+        for result in [0, 1, 0x80070005, 0x80070002] {
+            let task = WindowsUpdateTask {
+                exists: true,
+                state: Some("Ready".into()),
+                result: Some(result),
+            };
+            let failure = stopped_update_worker(&record, &task).unwrap();
+            assert_eq!(failure.state, UpdatePhase::Failed);
+            assert!(
+                failure
+                    .failure_detail
+                    .as_deref()
+                    .unwrap()
+                    .contains(&format!("0x{result:08X}"))
+            );
+            validate_status_record(&failure).unwrap();
+        }
+        let missing = WindowsUpdateTask {
+            exists: false,
+            state: None,
+            result: None,
+        };
+        assert_eq!(
+            stopped_update_worker(&record, &missing).unwrap().state,
+            UpdatePhase::Failed
+        );
+        let mut installing = record;
+        installing.state = UpdatePhase::Installing;
+        assert!(stopped_update_worker(&installing, &missing).is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_status_detects_a_disabled_worker_and_releases_only_its_lock() {
+        let root = tempfile::tempdir().unwrap();
+        let status_dir = status_dir_for_root(&root.path().join(".codexify"));
+        let id = random_id().unwrap();
+        let mut record = UpdateStatusRecord::scheduled(&id, "2.3.23", "2.3.24");
+        record.updated_at = (chrono::Utc::now() - chrono::Duration::minutes(2)).to_rfc3339();
+        write_status_record_to(&status_dir, &record).unwrap();
+        let lock = root.path().join(".codexify/update/update.lock");
+        fs::write(&lock, &id).unwrap();
+        let task = powershell_quote(&windows_task_name(&id));
+        let script = format!(
+            "$ErrorActionPreference='Stop'\n$ProgressPreference='SilentlyContinue'\n$identity=[Security.Principal.WindowsIdentity]::GetCurrent()\n$logon=if ($identity.IsSystem) {{ 'ServiceAccount' }} else {{ 'Interactive' }}\n$principal=New-ScheduledTaskPrincipal -UserId $identity.Name -LogonType $logon\n$action=New-ScheduledTaskAction -Execute $env:ComSpec -Argument '/c exit 42'\nRegister-ScheduledTask -TaskName {task} -Action $action -Principal $principal | Out-Null\nDisable-ScheduledTask -TaskName {task} | Out-Null\n"
+        );
+        run_checked(powershell_command(&script), "create isolated update task").unwrap();
+        let failure = read_update_status_from_home(root.path(), &id);
+        let cleanup =
+            format!("Unregister-ScheduledTask -TaskName {task} -Confirm:$false -ErrorAction Stop");
+        run_checked(powershell_command(&cleanup), "remove isolated update task").unwrap();
+        assert_eq!(failure.unwrap().state, UpdatePhase::Failed);
+        assert!(!lock.exists());
+        assert_eq!(
+            read_status_record_from(&status_dir, &id)
+                .unwrap()
+                .failure_code
+                .as_deref(),
+            Some("worker_not_started")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_worker_reports_start_and_completes_a_unicode_file_update() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("O'Brien caf\u{e9}");
+        fs::create_dir(&directory).unwrap();
+        let target = directory.join("installed.exe");
+        let source = fs::read(std::env::current_exe().unwrap()).unwrap();
+        fs::write(&target, &source).unwrap();
+        let mut work = UpdateWorkspace::create(&directory, &target).unwrap();
+        fs::write(&work.staged_path, &source).unwrap();
+        let log = directory.join("update.log");
+        let script = windows_worker_script(
+            &work,
+            &target,
+            &log,
+            &Version::new(1, 0, 0),
+            &Version::new(2, 0, 0),
+            ServiceRestartConfig {
+                enabled: false,
+                port: 3000,
+            },
+            &windows_task_name(&work.id),
+        )
+        .unwrap();
+        fs::write(&work.worker_path, format!("\u{feff}{script}")).unwrap();
+        let status_dir = work.status_path.parent().unwrap();
+        write_status_record_to(
+            status_dir,
+            &UpdateStatusRecord::scheduled(&work.id, "1.0.0", "2.0.0"),
+        )
+        .unwrap();
+        let mut child = crate::service::windows_file_command(&work.worker_path)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let started = Instant::now();
+        while read_status_record_from(status_dir, &work.id).unwrap().state == UpdatePhase::Scheduled
+        {
+            if started.elapsed() > Duration::from_secs(8) {
+                let _ = child.kill();
+                let output = child.wait_with_output().unwrap();
+                panic!(
+                    "Windows worker never acknowledged its start: stdout={} stderr={} log={}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr),
+                    fs::read_to_string(&log).unwrap_or_default()
+                );
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert_eq!(
+            read_status_record_from(status_dir, &work.id).unwrap().state,
+            UpdatePhase::Installing
+        );
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let record = read_status_record_from(status_dir, &work.id).unwrap();
+        assert_eq!(
+            record.state,
+            UpdatePhase::Succeeded,
+            "{}",
+            fs::read_to_string(log).unwrap()
+        );
+        assert_eq!(fs::read(&target).unwrap(), source);
+        assert!(!work.lock_path.exists());
+        assert!(!work.worker_path.exists());
+        assert!(!work.backup_path.exists());
+        work.hand_off();
+    }
 
     async fn release_server(body: &'static str, delay: Duration) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

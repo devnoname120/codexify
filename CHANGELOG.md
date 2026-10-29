@@ -6,6 +6,24 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.3.24] - 2026-10-29
+
+### Fixed
+
+- Retain model-submenu ownership when ChatGPT replaces the opening control,
+  including Japanese effort-only pickers whose model list opens in a portal.
+- Isolate Windows service, update, and diagnostic helpers from the server's
+  console and its control events.
+- Register Windows services using private UTF-8 script files rather than nested
+  encoded launch payloads; migrate recognized older launchers without changing
+  their saved configuration or task settings.
+- Fix Windows PowerShell update-status replacement by passing a typed .NET null
+  backup path. Preserve Unicode in updater scripts, acknowledge worker startup
+  immediately, and report stopped update tasks with their Task Scheduler result
+  instead of retaining an indefinite scheduled state.
+- Keep serving when a Ctrl+C listener cannot be installed, and record Windows
+  console-close events, panic locations, and normal runtime exits for diagnosis.
+
 ## [2.3.23] - 2026-10-29
 
 ### Fixed
@@ -1231,7 +1249,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   drained through bounded head/tail buffers, while component-only `_meta` remains
   outside the model-visible limit.
 
-[Unreleased]: https://github.com/devnoname120/codexify/compare/v2.3.23...HEAD
+[Unreleased]: https://github.com/devnoname120/codexify/compare/v2.3.24...HEAD
+[2.3.24]: https://github.com/devnoname120/codexify/compare/v2.3.23...v2.3.24
 [2.3.23]: https://github.com/devnoname120/codexify/compare/v2.3.22...v2.3.23
 [2.3.22]: https://github.com/devnoname120/codexify/compare/v2.3.21...v2.3.22
 [2.3.14]: https://github.com/devnoname120/codexify/compare/v2.3.13...v2.3.14

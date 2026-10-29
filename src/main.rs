@@ -291,9 +291,15 @@ async fn run(mut cli: Cli) -> anyhow::Result<()> {
     }
 
     let config = load_config(cli).map_err(anyhow::Error::msg)?;
-    start_http_server(config)
+    let result = start_http_server(config)
         .await
-        .context("start Codexify server")
+        .context("start Codexify server");
+    tracing::info!(
+        process_id = std::process::id(),
+        success = result.is_ok(),
+        "server runtime returned"
+    );
+    result
 }
 
 async fn run_browser(cli: Cli, command: BrowserCommand) -> anyhow::Result<()> {

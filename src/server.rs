@@ -2759,7 +2759,13 @@ fn flatten_server_result(
 
 async fn shutdown_signal() {
     let ctrl_c = async {
-        let _ = tokio::signal::ctrl_c().await;
+        match tokio::signal::ctrl_c().await {
+            Ok(()) => tracing::info!(process_id = std::process::id(), "server received Ctrl+C"),
+            Err(error) => {
+                tracing::error!(%error, "could not listen for Ctrl+C; continuing to serve");
+                std::future::pending::<()>().await;
+            }
+        }
     };
 
     #[cfg(unix)]

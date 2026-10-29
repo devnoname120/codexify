@@ -734,8 +734,12 @@ enable or disable login startup. Use `enable` to enable and start the definition
 or `disable` to stop it and disable future automatic startup.
 
 On Windows, the Task Scheduler action starts the supervisor through the current
-PowerShell host with `-WindowStyle Hidden` and an encoded fixed command. The
-supervisor also creates its ordinary server child with `CREATE_NO_WINDOW`. This
+PowerShell host with `-WindowStyle Hidden -File` and a private UTF-8 launcher at
+`~/.codexify/service/supervisor.ps1`. Registration uses the adjacent `install.ps1`;
+registration failures include both paths so the exact definition can be inspected.
+Neither script contains the configuration's credentials. Management helpers and
+diagnostic probes use isolated consoles rather than the foreground server's.
+The supervisor also creates its ordinary server child with `CREATE_NO_WINDOW`. This
 prevents the otherwise empty console window without changing the Interactive
 logon principal required for tunnel and network access.
 
@@ -745,6 +749,11 @@ between them and a three-second request timeout) restart the contained server pr
 initial startup and a responsive server whose tunnel is reconnecting do not
 trigger this recovery. Probe failures and recovery reasons appear in the service
 log. This monitors local HTTP responsiveness, independently of agent inactivity.
+
+Windows foreground processes also append console-close, logoff, shutdown, and
+panic markers to the service log with their process ID. Normal Ctrl+C delivery
+and server returns are logged separately. Forced termination can bypass these
+records; the absence of a marker does not establish a crash cause.
 
 The scheduled-task launcher waits for the supervisor's process handle and records
 its exit code. It restarts unexpectedly terminated supervisors, including code
@@ -822,6 +831,14 @@ record through `scheduled`, `installing`, `validating`, `restarting`, and one of
 card polls the record through the app-only `self_update_status` tool. That tool is
 advertised with app visibility rather than model visibility, and accepts only the
 opaque 96-bit update identifier returned by `self_update`.
+
+On Windows the worker records `installing` immediately, before its ten-second
+handoff delay, and uses a typed .NET null for atomic status replacement under
+Windows PowerShell 5.1. If a record remains `scheduled` for a minute and Task
+Scheduler confirms that its task is absent or stopped, polling records a failure
+with the scheduler result and releases only that update's lock. Running, queued,
+unknown, or inaccessible tasks are not classified as stopped. UTF-8 script files
+include a BOM so non-ASCII user and installation paths survive PowerShell 5.1.
 
 The card polls every second while reachable and backs off to two seconds across
 the expected restart outage. It reports success for a supervised update only

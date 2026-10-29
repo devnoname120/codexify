@@ -41,6 +41,24 @@ fn legacy_paths(arguments: &str) -> Option<(String, String)> {
         .map(|b| u16::from_le_bytes(*b))
         .collect();
     let script = String::from_utf16(&units).ok()?.replace("\r\n", "\n");
+    if script.starts_with("# Codexify supervisor launcher v2\n") {
+        let literal = |name: &str| {
+            let pattern =
+                regex::Regex::new(&format!(r"(?m)^\${name} = ('(?:[^'\r\n]|'')+')$")).ok()?;
+            let value = pattern.captures(&script)?.get(1)?.as_str();
+            Some(value)
+        };
+        let executable = literal("serviceExecutable")?;
+        let config = literal("serviceConfig")?;
+        let log = literal("serviceLog")?;
+        if script.trim_end() != super::windows_launcher_source(executable, config, log).trim_end() {
+            return None;
+        }
+        return Some((
+            executable[1..executable.len() - 1].replace("''", "'"),
+            config[1..config.len() - 1].replace("''", "'"),
+        ));
+    }
     let invocation = script
         .trim_end()
         .strip_prefix("$ErrorActionPreference = 'Stop'\n")?
@@ -72,6 +90,7 @@ pub(super) fn refresh() -> anyhow::Result<()> {
         return Ok(());
     }
     let spec = ServiceSpec::resolve(std::path::Path::new(&config))?;
+    super::write_windows_launcher(&spec)?;
     let expected = powershell_quote(&arguments);
     let replacement = powershell_quote(&windows_action_arguments(&spec));
     let update = format!(
@@ -124,6 +143,25 @@ mod tests {
             assert!(legacy_paths(&arguments(script)).is_none());
         }
         assert!(legacy_paths("-EncodedCommand not-base64").is_none());
+    }
+
+    #[test]
+    fn recognized_v2_payloads_upgrade_but_modified_scripts_are_preserved() {
+        let executable = r"C:\Users\O'Brien\app.exe";
+        let config = r"C:\Users\O'Brien\custom.json";
+        let script = super::super::windows_launcher_source(
+            &super::super::powershell_quote(executable),
+            &super::super::powershell_quote(config),
+            "'C:\\Users\\test\\service.log'",
+        );
+        assert_eq!(
+            legacy_paths(&arguments(&script)),
+            Some((executable.into(), config.into()))
+        );
+        assert!(legacy_paths(&arguments(&(script + "\nWrite-Output 'custom'\n"))).is_none());
+        assert!(
+            legacy_paths("-NoLogo -NoProfile -File \"C:\\Users\\test\\supervisor.ps1\"").is_none()
+        );
     }
 
     #[test]

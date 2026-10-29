@@ -6,6 +6,18 @@ use tokio::process::Command;
 
 use crate::types::AppConfig;
 
+/// Pipe-based management helpers must not inherit a foreground server's
+/// console or its control events. This boundary also applies to short probes.
+pub(crate) fn isolate_console(command: &mut std::process::Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
+    }
+    #[cfg(not(windows))]
+    let _ = command;
+}
+
 pub const CHILD_CONTROL_PLANE_API_KEY_ENV: &str = "CODEXIFY_OPENAI_TUNNEL_API_KEY";
 pub const CHILD_MCP_AUTHORIZATION_ENV: &str = "CODEXIFY_INTERNAL_MCP_AUTHORIZATION";
 pub const SERVICE_SUPERVISED_ENV: &str = "CODEXIFY_SERVICE_SUPERVISED";
