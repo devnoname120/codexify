@@ -19,6 +19,11 @@ use crate::process_env::SERVICE_SUPERVISED_ENV;
 use crate::terminal::{ACCENT, EMPHASIS, MUTED, SUCCESS, WARNING, paint};
 use crate::util::home_dir;
 
+#[cfg(any(windows, test))]
+mod health;
+#[cfg(any(windows, test))]
+mod windows_launcher;
+
 #[cfg(any(target_os = "macos", test))]
 const SERVICE_LABEL: &str = "dev.codexify.service";
 #[cfg(target_os = "linux")]
@@ -542,48 +547,15 @@ pub async fn wait_ready(port: u16, timeout: Duration) -> anyhow::Result<()> {
             );
         }
 
-        let probe = async {
-            let mut response = client.get(&url).send().await?;
-            if !response.status().is_success() {
-                return Ok::<Result<(), String>, reqwest::Error>(Err(format!(
-                    "health endpoint returned {}",
-                    response.status()
-                )));
-            }
-
-            let mut body = Vec::new();
-            while let Some(chunk) = response.chunk().await? {
-                if body.len().saturating_add(chunk.len()) > SERVICE_READY_MAX_BODY_BYTES {
-                    return Ok(Err(format!(
-                        "health endpoint response exceeds {SERVICE_READY_MAX_BODY_BYTES} bytes"
-                    )));
-                }
-                body.extend_from_slice(&chunk);
-            }
-            let payload: serde_json::Value = match serde_json::from_slice(&body) {
-                Ok(payload) => payload,
-                Err(error) => {
-                    return Ok(Err(format!(
-                        "health endpoint returned invalid JSON: {error}"
-                    )));
-                }
-            };
-            if payload.get("status").and_then(serde_json::Value::as_str) == Some("ok") {
-                Ok(Ok(()))
-            } else {
-                Ok(Err(
-                    "health endpoint has not reported status `ok`".to_string()
-                ))
-            }
-        };
-
-        match tokio::time::timeout(remaining.min(SERVICE_READY_REQUEST_TIMEOUT), probe).await {
-            Ok(Ok(Ok(()))) => return Ok(()),
-            Ok(Ok(Err(detail))) => {
+        match tokio::time::timeout(
+            remaining.min(SERVICE_READY_REQUEST_TIMEOUT),
+            probe_service_health(&client, &url),
+        )
+        .await
+        {
+            Ok(Ok(())) => return Ok(()),
+            Ok(Err(detail)) => {
                 last_detail = detail;
-            }
-            Ok(Err(error)) => {
-                last_detail = error.to_string();
             }
             Err(_) => {
                 last_detail = "health probe timed out".to_string();
@@ -595,6 +567,31 @@ pub async fn wait_ready(port: u16, timeout: Duration) -> anyhow::Result<()> {
             continue;
         }
         tokio::time::sleep(remaining.min(SERVICE_READY_POLL_INTERVAL)).await;
+    }
+}
+
+async fn probe_service_health(client: &reqwest::Client, url: &str) -> Result<(), String> {
+    let mut response = client.get(url).send().await.map_err(|e| e.to_string())?;
+    if !response.status().is_success() {
+        return Err(format!("health endpoint returned {}", response.status()));
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|e| e.to_string())? {
+        if body.len().saturating_add(chunk.len()) > SERVICE_READY_MAX_BODY_BYTES {
+            return Err(format!(
+                "health endpoint response exceeds {SERVICE_READY_MAX_BODY_BYTES} bytes"
+            ));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    let payload: serde_json::Value = serde_json::from_slice(&body)
+        .map_err(|error| format!("health endpoint returned invalid JSON: {error}"))?;
+    // Tunnel readiness is deliberately independent: restart an unresponsive
+    // server, not a responsive server whose upstream connection is recovering.
+    if payload.get("status").and_then(serde_json::Value::as_str) == Some("ok") {
+        Ok(())
+    } else {
+        Err("health endpoint has not reported status `ok`".to_string())
     }
 }
 
@@ -925,8 +922,64 @@ fn encode_powershell_script(script: &str) -> String {
 fn windows_hidden_service_script(spec: &ServiceSpec) -> String {
     let executable = powershell_quote(&spec.executable.to_string_lossy());
     let config = powershell_quote(&spec.config.to_string_lossy());
+    let log = powershell_quote(
+        &spec
+            .home
+            .join(".codexify")
+            .join("logs")
+            .join(LOG_FILE)
+            .to_string_lossy(),
+    );
     format!(
-        "$ErrorActionPreference = 'Stop'\n& {executable} service run --config {config}\nif ($LASTEXITCODE -ne 0) {{ exit $LASTEXITCODE }}\n"
+        r#"# Codexify supervisor launcher v2
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+$serviceExecutable = {executable}
+$serviceConfig = {config}
+$serviceLog = {log}
+function Write-ServiceEvent([string] $message) {{
+    try {{
+        [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($serviceLog)) | Out-Null
+        [IO.File]::AppendAllText($serviceLog, ('[' + [DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ') + '] [service] ' + $message + [Environment]::NewLine))
+    }} catch {{}}
+}}
+$restartDelay = 2
+while ($true) {{
+    $supervisor = $null
+    $supervisorStarted = $false
+    $startedAt = [DateTime]::UtcNow
+    try {{
+        $startInfo = New-Object Diagnostics.ProcessStartInfo
+        $startInfo.FileName = $serviceExecutable
+        $startInfo.Arguments = 'service run --config "' + $serviceConfig + '"'
+        $startInfo.UseShellExecute = $false
+        $startInfo.CreateNoWindow = $true
+        $supervisor = New-Object Diagnostics.Process
+        $supervisor.StartInfo = $startInfo
+        $null = $supervisor.Start()
+        $supervisorStarted = $true
+        while (-not $supervisor.WaitForExit(1000)) {{}}
+        $exitCode = $supervisor.ExitCode
+        Write-ServiceEvent ('supervisor exited unexpectedly with code ' + $exitCode + ' (0x' + $exitCode.ToString('X8') + ')')
+    }} catch {{
+        Write-ServiceEvent ('supervisor launcher failed: ' + $_.Exception.Message)
+        if ($supervisorStarted) {{
+            try {{
+                if (-not $supervisor.HasExited) {{ $supervisor.Kill(); $supervisor.WaitForExit() }}
+            }} catch {{
+                Write-ServiceEvent ('could not stop the owned supervisor: ' + $_.Exception.Message)
+                exit 1
+            }}
+        }}
+    }} finally {{
+        if ($supervisor) {{ $supervisor.Dispose() }}
+    }}
+    if (([DateTime]::UtcNow - $startedAt).TotalSeconds -ge 60) {{ $restartDelay = 2 }}
+    Write-ServiceEvent ('restarting supervisor in ' + $restartDelay + ' seconds')
+    Start-Sleep -Seconds $restartDelay
+    $restartDelay = [Math]::Min($restartDelay * 2, 60)
+}}
+"#
     )
 }
 
@@ -1477,6 +1530,7 @@ fn platform_install(spec: &ServiceSpec) -> anyhow::Result<()> {
 
 #[cfg(target_os = "windows")]
 fn platform_start() -> anyhow::Result<()> {
+    windows_launcher::refresh()?;
     command_output(
         powershell_command(&windows_start_script()),
         "start the Codexify scheduled task",
@@ -1495,6 +1549,7 @@ fn platform_stop() -> anyhow::Result<()> {
 
 #[cfg(target_os = "windows")]
 fn platform_restart() -> anyhow::Result<()> {
+    windows_launcher::refresh()?;
     command_output(
         powershell_command(&windows_restart_script()),
         "restart the Codexify scheduled task",
@@ -1504,6 +1559,7 @@ fn platform_restart() -> anyhow::Result<()> {
 
 #[cfg(target_os = "windows")]
 fn platform_enable() -> anyhow::Result<()> {
+    windows_launcher::refresh()?;
     let task = powershell_quote(WINDOWS_TASK);
     let script = format!(
         "$ErrorActionPreference = 'Stop'\n$task = Get-ScheduledTask -TaskName {task} -ErrorAction Stop\nEnable-ScheduledTask -InputObject $task | Out-Null\nStart-ScheduledTask -InputObject $task\n"
@@ -2048,12 +2104,26 @@ where
         let wait = child.wait();
         tokio::pin!(wait);
 
+        #[cfg(windows)]
+        let health = health::watch(&config, log.clone(), health::POLICY);
+        #[cfg(not(windows))]
+        let health = std::future::pending::<String>();
+        tokio::pin!(health);
+
         let status = tokio::select! {
             status = &mut wait => Some(status),
             _ = &mut shutdown => {
                 append_event(&log, "stopping Codexify after service shutdown request");
                 terminate_child(pid, &mut wait).await;
                 None
+            }
+            reason = &mut health => {
+                append_event(&log, &format!("restarting unresponsive Codexify: {reason}"));
+                // Closing our non-inherited Job Object terminates this server
+                // tree without depending on an external taskkill process.
+                #[cfg(windows)]
+                drop(child_job.take());
+                Some((&mut wait).await)
             }
         };
 
@@ -2649,19 +2719,30 @@ mod tests {
     #[test]
     fn scheduled_task_definition_is_valid_powershell() {
         let root = tempfile::tempdir().unwrap();
-        let path = root.path().join("service-install.ps1");
-        fs::write(&path, windows_install_script(&spec(root.path()))).unwrap();
-        let path = powershell_quote(&path.to_string_lossy());
-        let parser = format!(
-            "$tokens = $null\n$errors = $null\n[System.Management.Automation.Language.Parser]::ParseFile({path}, [ref]$tokens, [ref]$errors) | Out-Null\nif ($errors.Count) {{ $errors | ForEach-Object {{ Write-Error $_ }}; exit 1 }}\n"
-        );
-        let output = powershell_command(&parser).output().unwrap();
-        assert!(
-            output.status.success(),
-            "{}{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
+        for (name, script) in [
+            (
+                "service-install.ps1",
+                windows_install_script(&spec(root.path())),
+            ),
+            (
+                "service-launcher.ps1",
+                windows_hidden_service_script(&spec(root.path())),
+            ),
+        ] {
+            let path = root.path().join(name);
+            fs::write(&path, script).unwrap();
+            let path = powershell_quote(&path.to_string_lossy());
+            let parser = format!(
+                "$tokens = $null\n$errors = $null\n[System.Management.Automation.Language.Parser]::ParseFile({path}, [ref]$tokens, [ref]$errors) | Out-Null\nif ($errors.Count) {{ $errors | ForEach-Object {{ Write-Error $_ }}; exit 1 }}\n"
+            );
+            let output = powershell_command(&parser).output().unwrap();
+            assert!(
+                output.status.success(),
+                "{name}: {}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
     }
 
     #[test]

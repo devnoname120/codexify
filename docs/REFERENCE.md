@@ -739,6 +739,22 @@ supervisor also creates its ordinary server child with `CREATE_NO_WINDOW`. This
 prevents the otherwise empty console window without changing the Interactive
 logon principal required for tunnel and network access.
 
+The Windows supervisor begins liveness monitoring after the server first answers
+`/health` successfully. Six consecutive failed probes (with a five-second pause
+between them and a three-second request timeout) restart the contained server process tree. A slow
+initial startup and a responsive server whose tunnel is reconnecting do not
+trigger this recovery. Probe failures and recovery reasons appear in the service
+log. This monitors local HTTP responsiveness, independently of agent inactivity.
+
+The scheduled-task launcher waits for the supervisor's process handle and records
+its exit code. It restarts unexpectedly terminated supervisors, including code
+zero, with a two-to-sixty-second backoff, independently of Task Scheduler's
+failure retry behavior for on-demand starts. Explicit `service stop` and
+`service disable` remain stopped.
+Recognized older launchers are upgraded by `service start`, `restart`, or `enable`,
+including the `enable` call made by older self-update workers; custom task actions
+are preserved.
+
 `service status` queries the native service manager without loading the server
 configuration, starting the MCP server, or changing the service. It works even
 when the configuration is missing or invalid. `--config` and `CODEXIFY_CONFIG`

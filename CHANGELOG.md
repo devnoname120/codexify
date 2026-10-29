@@ -6,6 +6,16 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.3.23] - 2026-10-29
+
+### Fixed
+
+- Recover a Windows service whose server process stays alive but stops answering
+  local health checks, while allowing slow startup and transient failures.
+- Restart unexpectedly terminated Windows supervisors, including zero-code
+  exits, and upgrade recognized older task launchers during service
+  start, restart, or enable so failure recovery also applies after self-update.
+
 ## [2.3.22] - 2026-10-29
 
 ### Fixed
@@ -1221,7 +1231,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   drained through bounded head/tail buffers, while component-only `_meta` remains
   outside the model-visible limit.
 
-[Unreleased]: https://github.com/devnoname120/codexify/compare/v2.3.22...HEAD
+[Unreleased]: https://github.com/devnoname120/codexify/compare/v2.3.23...HEAD
+[2.3.23]: https://github.com/devnoname120/codexify/compare/v2.3.22...v2.3.23
 [2.3.22]: https://github.com/devnoname120/codexify/compare/v2.3.21...v2.3.22
 [2.3.14]: https://github.com/devnoname120/codexify/compare/v2.3.13...v2.3.14
 [2.3.13]: https://github.com/devnoname120/codexify/compare/v2.3.12...v2.3.13
