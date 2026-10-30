@@ -305,6 +305,66 @@ test.skipIf(!native)("successive browser sends reuse a healthy paired conversati
   expect(documentLoads).toBe(1);expect(await page.locator('body').getAttribute('data-sends')).toBe('2');
 },20_000);
 
+test.skipIf(!native)("conversation navigation waits for the composer to hydrate before sending",async()=>{
+  await fixture();
+  await surface.navigate("https://chatgpt.com/c/previous-conversation");
+  const delayed:SingleBrowserSurface={...surface,navigate:async destination=>{
+    const opened=await surface.navigate(destination);
+    await opened.evaluate(()=>{
+      const form=document.querySelector('form[data-chatgpt-composer]')!;
+      const next=form.nextSibling,parent=form.parentNode!;
+      form.remove();setTimeout(()=>parent.insertBefore(form,next),600);
+    });
+    return opened;
+  }};
+  const driver=new ChatGptBrowserDriver(delayed,build),submitted=offlineRequest('gpt-6-astra','max');
+  const loads=documentLoads;
+  await driver.execute({request:submitted,renderedPrompt:renderActionPrompt(submitted.prompt),signal:new AbortController().signal,emit:()=>{}});
+  expect(await page.locator('body').getAttribute('data-sends')).toBe('1');
+  expect(documentLoads).toBe(loads+1);
+},15_000);
+
+test.skipIf(!native)("a paired conversation still hydrating its composer is not needlessly reloaded",async()=>{
+  const driver=await fixture(),submitted=offlineRequest('gpt-6-astra','max');
+  await page.evaluate(()=>{
+    const form=document.querySelector('form[data-chatgpt-composer]')!;
+    const next=form.nextSibling,parent=form.parentNode!;
+    form.remove();setTimeout(()=>parent.insertBefore(form,next),600);
+  });
+  const loads=documentLoads;
+  await driver.execute({request:submitted,renderedPrompt:renderActionPrompt(submitted.prompt),signal:new AbortController().signal,emit:()=>{}});
+  expect(await page.locator('body').getAttribute('data-sends')).toBe('1');
+  expect(documentLoads).toBe(loads);
+},15_000);
+
+test.skipIf(!native)("a signed-in conversation with no editor reports editor availability rather than sign-in",async()=>{
+  await fixture();
+  await surface.navigate("https://chatgpt.com/c/previous-conversation");
+  const missing:SingleBrowserSurface={...surface,navigate:async destination=>{
+    const opened=await surface.navigate(destination);
+    await opened.locator('form[data-chatgpt-composer]').evaluate(form=>form.remove());
+    return opened;
+  }};
+  const driver=new ChatGptBrowserDriver(missing,build),submitted=offlineRequest('gpt-6-astra','max');
+  const error=await driver.execute({request:submitted,renderedPrompt:renderActionPrompt(submitted.prompt),signal:new AbortController().signal,emit:()=>{}}).catch(error=>error);
+  expect(error).toMatchObject({code:'editor_unavailable',phase:'composer_lookup',sendAccepted:false});
+  expect(await page.locator('body').getAttribute('data-sends')).toBe('0');
+},15_000);
+
+test.skipIf(!native)("cancelling composer hydration stops without reloading or sending",async()=>{
+  const driver=await fixture(),submitted=offlineRequest('gpt-6-astra','max');
+  await page.locator('form[data-chatgpt-composer]').evaluate(form=>form.remove());
+  const abort=new AbortController(),loads=documentLoads;
+  const timer=setTimeout(()=>abort.abort(),200);
+  try {
+    const error=await driver.execute({request:submitted,renderedPrompt:renderActionPrompt(submitted.prompt),signal:abort.signal,emit:()=>{}}).catch(error=>error);
+    expect(error).toBeInstanceOf(Error);
+    expect(abort.signal.aborted).toBeTrue();
+    expect(documentLoads).toBe(loads);
+    expect(await page.locator('body').getAttribute('data-sends')).toBe('0');
+  } finally {clearTimeout(timer);}
+},5_000);
+
 test.skipIf(!native)("editor rejection is a confirmed-unsent availability failure while edited drafts remain interference",async()=>{
   for(const mode of ["rejected","exception","edited"] as const){
     const driver=await fixture();
@@ -399,7 +459,7 @@ test.skipIf(!native)('a stale expired-session, sign-in or no-composer page reloa
   expect(documentLoads).toBe(loads+1);expect(page.url()).toBe(url);
   expect(await page.locator('body').getAttribute('data-sends')).toBe('1');
  }
-},30_000);
+},45_000);
 
 test.skipIf(!native)('authentication recovery refuses a changed account and preserves a pending materialization card',async()=>{
  for(const kind of ['account','approval'] as const){

@@ -252,6 +252,29 @@ async function stopLingeringResponse(
   );
 }
 
+async function waitForConversationComposer(page:Page,signal?:AbortSignal):Promise<void> {
+  const throwIfAuthenticationPage=()=>{
+    const url=new URL(page.url());
+    if(url.origin==="https://auth.openai.com" || url.origin==="https://chatgpt.com" && url.pathname.startsWith("/auth/")) {
+      throw new BrowserCompanionError("Sign in to ChatGPT in the browser companion","authentication_required");
+    }
+  };
+  throwIfAuthenticationPage();
+  try {
+    // DOMContentLoaded precedes React hydration. Missing composer markup at
+    // that instant says nothing about the account's authentication state.
+    await page.locator(CHATGPT_COMPOSER_SELECTOR).filter({visible:true}).first()
+      .waitFor({state:"visible",timeout:10_000,signal});
+  } catch(cause) {
+    signal?.throwIfAborted();
+    await throwIfSessionAttention(page);
+    throwIfAuthenticationPage();
+    await readChatGptAccount(page);
+    throw new BrowserCompanionError("ChatGPT did not expose the conversation's message editor; nothing was sent",
+      "editor_unavailable",{cause,phase:"composer_lookup"});
+  }
+}
+
 async function exactConversationPage(
   surface: SingleBrowserSurface,
   requestedUrl: string,
@@ -272,10 +295,15 @@ async function exactConversationPage(
         &&(error.code==="conversation_unavailable"||error.code==="authentication_required")))throw error;
       recoveryNeeded=true;
     }
-    // This is also reported as an authentication failure below. Without a
-    // recovery load, retries of an unrecognized no-composer page never progress.
+    // Give the current document time to hydrate before spending a recovery
+    // load. Persistent missing-editor pages still get one deliberate reload.
     if(!recoveryNeeded){
-      try {await assertAuthenticatedChatGptPage(page);}catch{recoveryNeeded=true;}
+      try {await waitForConversationComposer(page,signal);}
+      catch(error){
+        if(!(error instanceof BrowserCompanionError
+          &&(error.code==="editor_unavailable"||error.code==="authentication_required"||error.code==="conversation_unavailable")))throw error;
+        recoveryNeeded=true;
+      }
     }
     if(recoveryNeeded){
       // A known load or sign-in failure needs one deliberate recovery load.
@@ -283,17 +311,7 @@ async function exactConversationPage(
     }
   }
   await throwIfSessionAttention(page);
-  try {
-    await assertAuthenticatedChatGptPage(page);
-  } catch (error) {
-    // The load-failure surface may have appeared since the first inspection.
-    await throwIfSessionAttention(page);
-    throw new BrowserCompanionError(
-      "ChatGPT authentication could not be verified for the paired conversation",
-      "authentication_required",
-      { cause:error },
-    );
-  }
+  await waitForConversationComposer(page,signal);
   const canonicalUrl = canonicalChatGptConversationUrl(page.url());
   if (canonicalUrl !== canonicalChatGptConversationUrl(expectedUrl)) {
     throw new BrowserCompanionError(
