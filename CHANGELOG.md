@@ -6,6 +6,19 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.3.25] - 2026-10-31
+
+### Fixed
+
+- Wait for ChatGPT's conversation editor to finish rendering before preparing a
+  message. Report a missing editor as an availability problem instead of a
+  sign-in failure, and avoid reloading a page that is still rendering.
+- Recover pairing when an authorized ChatGPT conversation has no workspace
+  attached. Provide a one-time continuation to the existing task, complete
+  verification, and retain queued user messages until pairing succeeds.
+- Preserve a pending pairing handoff when delayed activity arrives from its
+  previous conversation owner.
+
 ## [2.3.24] - 2026-10-29
 
 ### Fixed

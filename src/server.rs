@@ -1096,6 +1096,7 @@ impl ServerHandler for CodexHandler {
         }
 
         let started = Instant::now();
+        let mut pairing_continuation = false;
         let execution = async {
             if let Some(error) = self.conversation_auth_error(&name, conversation.as_ref()) {
                 error
@@ -1173,6 +1174,29 @@ impl ServerHandler for CodexHandler {
                                 }
                                 Err(error) => TicketWait::unavailable(error),
                             }
+                        }
+                    }
+                    Some(_)
+                        if name == "automation_verify_pairing"
+                            && matches!(&workspace_at_start, Ok((None, _))) =>
+                    {
+                        match (
+                            conversation.as_ref(),
+                            self.agent_automation.as_ref(),
+                            crate::tools::automation_pair::AutomationVerifyPairing::reference(
+                                &args,
+                            ),
+                        ) {
+                            (Some(_), Some(supervisor), Ok(reference)) => {
+                                match supervisor.pairing_continuation_for_unbound(&reference).await {
+                                    Ok((token, generation)) => crate::tools::automation_pair::AutomationVerifyPairing::continuation_required(&token, &reference, generation),
+                                    Err(error) => ToolResult::error(error),
+                                }
+                            }
+                            (_, _, Err(error)) => ToolResult::error(error),
+                            _ => ToolResult::error(
+                                "Pairing recovery requires stable ChatGPT conversation and browser automation context.",
+                            ),
                         }
                     }
                     Some(_) if name == PrepareContinuation::NAME => {
@@ -1270,7 +1294,15 @@ impl ServerHandler for CodexHandler {
                                     {
                                         task_owner_generation = Some(snapshot.generation);
                                         task_conversation = Some(claimed.task);
-                                        ContinueTask::result(&claimed.workspace.to_string_lossy())
+                                        pairing_continuation = self.config.markdown_chat.automation.enabled
+                                            && self.effective_task_config(task_conversation.as_ref(), claimed.workspace.clone())
+                                                .and_then(|config| crate::agent_automation::AgentAutomationStore::for_config(&config))
+                                                .and_then(|store| store.load(task_conversation.as_ref().expect("continued task")))
+                                                .is_ok_and(|state| state.pairing.pending.as_ref().is_some_and(|pending| pending.owner_generation == snapshot.generation));
+                                        ContinueTask::result(
+                                            &claimed.workspace.to_string_lossy(),
+                                            pairing_continuation,
+                                        )
                                     }
                                     Ok(_) => ToolResult::error(
                                         "Conversation ownership changed while the continuation was completing.",
@@ -1601,6 +1633,7 @@ impl ServerHandler for CodexHandler {
         };
         if self.config.markdown_chat.enabled
             && name != "automation_verify_pairing"
+            && !pairing_continuation
             && !ticket_wait
             && !tool.is_some_and(|tool| app_only_tool(tool.as_ref()))
             && !context.ct.is_cancelled()

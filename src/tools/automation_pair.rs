@@ -14,6 +14,27 @@ struct VerifyArgs {
     reference: String,
 }
 
+impl AutomationVerifyPairing {
+    pub(crate) fn reference(args: &Value) -> Result<String, String> {
+        serde_json::from_value::<VerifyArgs>(args.clone())
+            .map(|args| args.reference)
+            .map_err(|error| format!("Invalid pairing arguments: {error}"))
+    }
+
+    pub(crate) fn continuation_required(
+        token: &str,
+        reference: &str,
+        generation: u64,
+    ) -> ToolResult {
+        let content = format!(
+            "This ChatGPT conversation has no workspace attached yet. Call `continue_task` with continuationToken `{token}` to attach the existing task and its already-selected workspace. Then call `automation_verify_pairing` again with reference `{reference}`. Do not select a project, create a worktree, inspect files, or perform task work before pairing succeeds. Do not stop or end this turn; run continue_task now, then retry verification."
+        );
+        ToolResult::text(&content).with_structured(json!({
+            "content": content, "verified": false, "pairingGeneration": generation, "terminal": false
+        }))
+    }
+}
+
 #[async_trait]
 impl Tool for AutomationVerifyPairing {
     fn name(&self) -> &'static str {

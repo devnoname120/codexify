@@ -2113,6 +2113,12 @@ and the paired account again before sending; a pending connector approval is
 preserved instead of reloaded. Healthy conversation pages remain reusable, and
 passive health checks do not navigate.
 
+Conversation preparation waits up to **10 seconds** for ChatGPT's editor to
+render after navigation. A missing editor does not establish that the account
+is signed out. If the account remains valid but the editor is unavailable,
+the action reports an editor-availability failure before inserting or sending
+anything. Cancellation also stops this wait without spending a recovery load.
+
 During offline-send preparation, each Stop click gets up to **20 seconds** to
 settle. An optional Stop confirmation starts its own full 20-second window.
 Recognized confirmations that are already open are accepted before editing the
@@ -2157,11 +2163,16 @@ Pairing is explicit. In the standalone page, paste the exact ChatGPT conversatio
 URL and choose **Pair**. Codexify stores it as an unverified candidate and queues a
 content-free verification message. The target conversation must call
 `automation_verify_pairing` with the short-lived one-time reference. Only then is
-the canonical URL bound to the current stable task and owner generation. Codexify
-does not infer a URL from recency, browser history, projects, or `openai/session`,
-does not create a replacement conversation, and does not transfer or retire task
-ownership. A later full task continuation invalidates the old pairing until the
-user verifies the new physical conversation.
+the canonical URL bound to the current stable task and owner generation. If the
+authorized target conversation has no workspace attached, verification first
+returns a one-time `continue_task` handoff to the task already selected in the
+standalone chat. The agent claims that handoff and retries verification; it must
+not select a project or create another worktree. Queued user messages remain
+unread during this initialization. The continuation transfers ownership while
+retaining the workspace and task history; verification itself does not authorize
+setup or transfer ownership. Delayed activity from the prior owner does not
+revoke the pending handoff. Codexify does not infer a URL from recency, browser
+history, projects, or `openai/session`.
 
 After Send, pairing has a 60-second verification grace period that does not hold
 the browser queue. A valid verification can still arrive later while its current

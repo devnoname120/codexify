@@ -861,6 +861,63 @@ impl AgentAutomationSupervisor {
         self.tasks.read().await.contains_key(task.stable_key())
     }
 
+    pub(crate) async fn pairing_continuation_for_unbound(
+        &self,
+        reference: &str,
+    ) -> Result<(String, u64), String> {
+        let context = self
+            .rollover
+            .get()
+            .ok_or("Task continuation is unavailable")?;
+        let index = super::AgentAutomationStore::for_config(&context.config)?;
+        let key = index.pairing_task_key(reference)?;
+        let mut task = self
+            .tasks
+            .read()
+            .await
+            .get(&key)
+            .cloned()
+            .ok_or("The intended pairing task is unavailable; retry chat pairing")?;
+        let state = task.store.load(&task.task)?;
+        let pending = state
+            .pairing
+            .pending
+            .as_ref()
+            .ok_or("The pairing request is no longer pending")?;
+        let now_ms = crate::markdown_chat::now_ms();
+        task.store.validate_pending_pairing(
+            &task.task,
+            state.pairing.generation,
+            pending.owner_generation,
+            reference,
+            now_ms,
+        )?;
+        let owner = context.continuations.owner_generation_for_task_key(&key)?;
+        let root = context
+            .bindings
+            .selected_project_root(&context.config, &task.task)?
+            .ok_or("The intended pairing task has no selected workspace")?
+            .canonicalize()
+            .map_err(|_| "The intended pairing workspace is unavailable")?;
+        // Validate the reference and intended owner before issuing any handoff.
+        // This does not consume the pairing proof or transfer task ownership.
+        task.store.prepare_pairing_handoff(
+            &task.task,
+            state.pairing.generation,
+            owner,
+            reference,
+            now_ms,
+        )?;
+        let token = context
+            .continuations
+            .issue_token_for_owner(&task.task, owner, &root)?;
+        task.owner_generation = owner
+            .checked_add(1)
+            .ok_or("Conversation owner generation overflow")?;
+        self.register_task(task).await?;
+        Ok((token, state.pairing.generation))
+    }
+
     pub async fn register_task(&self, mut task: AutomationTaskHandle) -> Result<(), String> {
         if !self.config.enabled {
             return Err("Agent-chat browser automation is disabled".into());
@@ -875,10 +932,9 @@ impl AgentAutomationSupervisor {
             task.task = previous.task;
         }
         let state = task.store.load(&task.task)?;
-        // Pending creation belongs to the next owner. Late activity from the
-        // exhausted source must not revoke that pending pairing before claim.
-        if state.pairing.creating_chat
-            && let Some(pending) = &state.pairing.pending
+        // A pending handoff belongs to the next owner, including when pairing
+        // an existing empty chat. Late source activity must not revoke it.
+        if let Some(pending) = &state.pairing.pending
             && task.owner_generation.checked_add(1) == Some(pending.owner_generation)
         {
             task.owner_generation = pending.owner_generation;

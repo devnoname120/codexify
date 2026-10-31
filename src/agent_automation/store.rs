@@ -2010,6 +2010,48 @@ impl AgentAutomationStore {
         result
     }
 
+    pub(crate) fn pairing_task_key(&self, reference: &str) -> Result<String, String> {
+        validate_reference(reference)?;
+        Ok(self
+            .read_pairing_index(&reference_digest(reference))?
+            .task_key)
+    }
+
+    pub(crate) fn prepare_pairing_handoff(
+        &self,
+        task: &ConversationIdentity,
+        generation: u64,
+        current_owner: u64,
+        reference: &str,
+        now_ms: u64,
+    ) -> Result<(), String> {
+        validate_reference(reference)?;
+        let digest = reference_digest(reference);
+        let next_owner = current_owner
+            .checked_add(1)
+            .ok_or("Conversation owner generation overflow")?;
+        self.mutate(task, |state| {
+            let pending = state
+                .pairing
+                .pending
+                .as_mut()
+                .ok_or_else(invalid_pairing_reference)?;
+            if state.pairing.creating_chat
+                || state.pairing.canonical_url.is_none()
+                || state.pairing.generation != generation
+                || pending.generation != generation
+                || pending.reference_digest != digest
+                || now_ms > pending.expires_at_ms
+                || !(pending.owner_generation == current_owner
+                    || pending.owner_generation == next_owner)
+            {
+                return Err(invalid_pairing_reference());
+            }
+            pending.owner_generation = next_owner;
+            Ok(())
+        })
+    }
+
     pub fn verify_pairing_reference(
         &self,
         actual_task: &ConversationIdentity,
