@@ -113,6 +113,20 @@ pub(crate) fn attach_fields(
     fields: Vec<(&str, Option<String>)>,
 ) {
     let original = result.structured_content.take();
+    // Unstructured MCP text tools (catalog/gateway) have no output schema.
+    // Do not turn their existing model-visible text into an empty JSON object
+    // when optional Markdown-chat notice fields are absent.
+    let text_fallback = if original_schema.is_none()
+        && original
+            .as_ref()
+            .and_then(Value::as_object)
+            .is_none_or(|object| !object.contains_key("content"))
+    {
+        let text = result.joined_text();
+        (!text.is_empty()).then_some(text)
+    } else {
+        None
+    };
     let wrap = fields
         .iter()
         .any(|(field, _)| needs_envelope(original_schema, field))
@@ -130,6 +144,9 @@ pub(crate) fn attach_fields(
             .and_then(|value| value.as_object().cloned())
             .unwrap_or_default()
     };
+    if let Some(text) = text_fallback {
+        object.insert("content".into(), Value::String(text));
+    }
     for (field, message) in fields {
         if let Some(message) = message.filter(|message| !message.is_empty()) {
             object.insert(field.into(), Value::String(message.clone()));
@@ -156,6 +173,92 @@ mod tests {
         assert_eq!(
             timestamped_user_message("body", Some(u64::MAX)),
             format!("[Unix time {} ms]\nbody", u64::MAX)
+        );
+    }
+
+    #[test]
+    fn unstructured_tool_text_survives_empty_notice_envelope() {
+        let mut result = ToolResult::text("workspace inspection: OK");
+        attach_fields(
+            &mut result,
+            None,
+            vec![(USER_MESSAGE_FIELD, None), ("workspace_changed", None)],
+        );
+        assert_eq!(
+            result.structured_content,
+            Some(json!({"content": "workspace inspection: OK"}))
+        );
+        assert_eq!(result.joined_text(), "workspace inspection: OK");
+        assert!(jsonschema::is_valid(
+            &schema(None),
+            result.structured_content.as_ref().unwrap()
+        ));
+    }
+
+    #[test]
+    fn unstructured_tool_text_and_user_notice_are_both_visible() {
+        let mut result = ToolResult::text("root=C:/approved");
+        attach_fields(
+            &mut result,
+            None,
+            vec![(USER_MESSAGE_FIELD, Some("user says hello".into()))],
+        );
+        assert_eq!(
+            result.structured_content.as_ref().unwrap()["content"],
+            "root=C:/approved"
+        );
+        assert_eq!(
+            result.structured_content.as_ref().unwrap()[USER_MESSAGE_FIELD],
+            "user says hello"
+        );
+    }
+
+    #[test]
+    fn upstream_structured_content_is_unchanged_by_notice_envelope() {
+        let mut result =
+            ToolResult::text("upstream text").with_structured(json!({"owner": "upstream"}));
+        attach_fields(&mut result, None, vec![(USER_MESSAGE_FIELD, None)]);
+        assert_eq!(
+            result.structured_content,
+            Some(json!({"owner": "upstream", "content": "upstream text"}))
+        );
+        assert_eq!(result.joined_text(), "upstream text");
+    }
+
+    #[test]
+    fn upstream_metadata_does_not_hide_text_in_chat_result() {
+        let mut result = ToolResult::text("nodeRepl.write: inspection worked")
+            .with_structured(json!({"execution_duration_ms": 0}));
+        attach_fields(&mut result, None, vec![(USER_MESSAGE_FIELD, None)]);
+        assert_eq!(
+            result.structured_content,
+            Some(json!({
+                "execution_duration_ms": 0,
+                "content": "nodeRepl.write: inspection worked"
+            }))
+        );
+    }
+
+    #[test]
+    fn upstream_content_field_is_not_overwritten() {
+        let mut result = ToolResult::text("extra text")
+            .with_structured(json!({"content": "original upstream content"}));
+        attach_fields(&mut result, None, vec![(USER_MESSAGE_FIELD, None)]);
+        assert_eq!(
+            result.structured_content,
+            Some(json!({"content": "original upstream content"}))
+        );
+        assert_eq!(result.joined_text(), "extra text");
+    }
+
+    #[test]
+    fn unstructured_error_is_not_hidden_as_empty_json() {
+        let mut result = ToolResult::error("permission denied");
+        attach_fields(&mut result, None, vec![(USER_MESSAGE_FIELD, None)]);
+        assert!(result.is_error);
+        assert_eq!(
+            result.structured_content,
+            Some(json!({"content": "permission denied"}))
         );
     }
 
