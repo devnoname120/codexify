@@ -45,10 +45,10 @@ jobs:
             cross_linker: aarch64-linux-gnu-gcc
             apt_packages: gcc-aarch64-linux-gnu
           - name: darwin-x64
-            os: macos-14
+            os: macos-15
             target: x86_64-apple-darwin
           - name: darwin-arm64
-            os: macos-14
+            os: macos-15
             target: aarch64-apple-darwin
           - name: windows-x64
             os: windows-latest
@@ -99,11 +99,11 @@ jobs:
             platform: linux
             arch: arm64
           - name: darwin-x64
-            os: macos-14
+            os: macos-15
             platform: darwin
             arch: x64
           - name: darwin-arm64
-            os: macos-14
+            os: macos-15
             platform: darwin
             arch: arm64
           - name: windows-x64

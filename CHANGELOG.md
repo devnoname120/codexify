@@ -6,13 +6,18 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [2.3.26] - 2026-11-06
+## [2.3.27] - 2026-11-06
 
 ### Fixed
 
 - Restore automatic file materialization approval after ChatGPT changed its
   approval button styling. Validate the controls by structure while preserving
   connector, account, conversation, and permission-scope checks.
+
+### Changed
+
+- Build and test macOS releases on supported macOS 15 runners after GitHub
+  retired its macOS 14 images.
 
 ## [2.3.25] - 2026-10-31
 
@@ -1270,8 +1275,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   drained through bounded head/tail buffers, while component-only `_meta` remains
   outside the model-visible limit.
 
-[Unreleased]: https://github.com/devnoname120/codexify/compare/v2.3.26...HEAD
-[2.3.26]: https://github.com/devnoname120/codexify/compare/v2.3.25...v2.3.26
+[Unreleased]: https://github.com/devnoname120/codexify/compare/v2.3.27...HEAD
+[2.3.27]: https://github.com/devnoname120/codexify/compare/v2.3.25...v2.3.27
 [2.3.25]: https://github.com/devnoname120/codexify/compare/v2.3.24...v2.3.25
 [2.3.24]: https://github.com/devnoname120/codexify/compare/v2.3.23...v2.3.24
 [2.3.23]: https://github.com/devnoname120/codexify/compare/v2.3.22...v2.3.23
