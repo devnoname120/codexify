@@ -149,6 +149,8 @@ pub struct PairingState {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub verification_sent_at_ms: Option<u64>,
     pub pending: Option<PendingPairing>,
+    #[serde(skip_serializing_if = "is_false")]
+    pub load_rate_limit_recovery: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub account_fingerprint: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -222,6 +224,8 @@ pub struct AutomationActionState {
     pub goal_turn_counted: bool,
     pub send_accepted: Option<bool>,
     pub messages_fenced: bool,
+    #[serde(skip_serializing_if = "is_false")]
+    pub conversation_load_rate_limited: bool,
     pub automatic_retry_attempts: u32,
     pub chatgpt_access_retry_attempts: u32,
     pub chatgpt_access_retry_in_progress: bool,
@@ -327,6 +331,8 @@ pub struct AutomationTaskState {
     // Startup policy; changing timings requires restarting the shared browser too.
     #[serde(skip)]
     pub retry_timings: RetryTimings,
+    #[serde(skip)]
+    offline_response_grace_ms: u64,
     #[serde(skip_serializing_if = "super::turn_renewal::TurnRenewalState::is_empty")]
     pub turn_renewal: super::turn_renewal::TurnRenewalState,
     #[serde(default)]
@@ -348,6 +354,7 @@ impl Default for AutomationTaskState {
             suspended_retry: None,
             automatic_retries_enabled: true,
             retry_timings: RetryTimings::default(),
+            offline_response_grace_ms: 0,
             turn_renewal: Default::default(),
             owner_goal_requests: Vec::new(),
         }
@@ -473,7 +480,7 @@ impl AutomationTaskState {
             &self.action,
             attempt,
             last,
-            delay,
+            self.accepted_goal_delay_ms(delay),
             self.retry_timings.jitter_percent,
         ))
     }
@@ -500,7 +507,7 @@ impl AutomationTaskState {
             &self.action,
             self.goal_wake.recovery_attempts,
             last,
-            delay,
+            self.accepted_goal_delay_ms(delay),
             self.retry_timings.jitter_percent,
         ))
     }
@@ -511,6 +518,14 @@ impl AutomationTaskState {
             && !confirmed_unsent_failure(&self.action)
             && self.goal_wake.recovery_attempts as usize
                 >= self.retry_timings.goal_recovery_delays_seconds.len()
+    }
+
+    fn accepted_goal_delay_ms(&self, delay_ms: u64) -> u64 {
+        if self.action.send_accepted == Some(true) {
+            delay_ms.max(self.offline_response_grace_ms)
+        } else {
+            delay_ms
+        }
     }
 
     pub fn automatic_retry_limit(&self) -> usize {
@@ -964,6 +979,7 @@ impl AgentAutomationStore {
             let mut state = load_state(path)?;
             state.automatic_retries_enabled = self.automatic_retries_enabled()?;
             state.retry_timings = self.retry_timings.clone();
+            state.offline_response_grace_ms = self.offline_after_ms;
             Ok(state)
         })
     }
@@ -1659,7 +1675,12 @@ impl AgentAutomationStore {
             if let Some(expected) = expected
                 && (state.action != *expected
                     || expected_pairing.map_or(
-                        state.action.status != AutomationActionStatus::ConversationLimit,
+                        state.action.status != AutomationActionStatus::ConversationLimit
+                            && !(state.action.status == AutomationActionStatus::RateLimited
+                                && state.action.conversation_load_rate_limited
+                                && state.action.send_accepted == Some(false)
+                                && !state.action.messages_fenced
+                                && state.action.kind != Some(AutomationActionKind::PairVerify)),
                         |pairing| state.pairing != *pairing,
                     )
                     // Schema rollover has a full pairing snapshot; an idle or
@@ -1686,6 +1707,11 @@ impl AgentAutomationStore {
             let expires_at_ms = now_ms
                 .checked_add(PAIRING_REFERENCE_TTL_MS)
                 .ok_or("Agent-chat pairing expiry overflow")?;
+            let load_rate_limit_recovery = expected_pairing.is_none()
+                && expected.is_some()
+                && state.action.conversation_load_rate_limited
+                && state.action.status == AutomationActionStatus::RateLimited
+                && state.action.send_accepted == Some(false);
             state.pairing = PairingState {
                 creating_chat: expected.is_some(),
                 last_attempted_url: conversation_url_for_retry(&candidate_url).map(str::to_owned),
@@ -1706,6 +1732,7 @@ impl AgentAutomationStore {
                 resume_task: expected.is_some()
                     && (state.pairing.resume_task
                         || state.action.kind == Some(AutomationActionKind::TurnRenewal)),
+                load_rate_limit_recovery,
                 pending: Some(PendingPairing {
                     generation,
                     owner_generation,
@@ -2015,6 +2042,22 @@ impl AgentAutomationStore {
         Ok(self
             .read_pairing_index(&reference_digest(reference))?
             .task_key)
+    }
+
+    pub(crate) fn pending_pairing_handoff(
+        &self,
+        task: &ConversationIdentity,
+        next_owner: u64,
+        now_ms: u64,
+    ) -> Result<bool, String> {
+        let pairing = self.load(task)?.pairing;
+        Ok(!pairing.creating_chat
+            && pairing.canonical_url.is_some()
+            && pairing.pending.as_ref().is_some_and(|pending| {
+                pending.generation == pairing.generation
+                    && pending.owner_generation == next_owner
+                    && now_ms <= pending.expires_at_ms
+            }))
     }
 
     pub(crate) fn prepare_pairing_handoff(
@@ -2414,6 +2457,22 @@ impl AgentAutomationStore {
         })
     }
 
+    pub(crate) fn mark_conversation_load_rate_limit(
+        &self,
+        task: &ConversationIdentity,
+        action_id: &str,
+    ) -> Result<(), String> {
+        self.mutate(task, |state| {
+            if state.action.id.as_deref() == Some(action_id)
+                && state.action.status == AutomationActionStatus::RateLimited
+                && state.action.send_accepted == Some(false)
+            {
+                state.action.conversation_load_rate_limited = true;
+            }
+            Ok(())
+        })
+    }
+
     pub fn update_action_status(
         &self,
         task: &ConversationIdentity,
@@ -2458,6 +2517,11 @@ impl AgentAutomationStore {
             }
             if status == AutomationActionStatus::Ambiguous {
                 state.action.send_accepted = Some(true);
+            }
+            if state.action.kind != Some(AutomationActionKind::PairVerify)
+                && state.action.send_accepted == Some(true)
+            {
+                state.pairing.load_rate_limit_recovery = false;
             }
             state.action.last_error = if verified_pairing || completed {
                 None
@@ -2725,7 +2789,7 @@ impl AgentAutomationStore {
         activity_epoch: &str,
         activity_sequence: u64,
     ) -> Result<bool, String> {
-        if expected.goal_wake.recovery_attempts == 0
+        if (expected.goal_wake.recovery_attempts == 0 && !expected.action.goal_turn_counted)
             || expected.goal_wake.activity_epoch.is_none()
             || (expected.goal_wake.activity_epoch.as_deref() == Some(activity_epoch)
                 && expected.goal_wake.activity_sequence == Some(activity_sequence))
@@ -2739,8 +2803,10 @@ impl AgentAutomationStore {
             {
                 return Ok(false);
             }
+            let was_recovering = state.goal_wake.recovery_attempts > 0;
             state.goal_wake = GoalWakeState::default();
-            if state.action.status == AutomationActionStatus::Stalled
+            if was_recovering
+                && state.action.status == AutomationActionStatus::Stalled
                 && state.action.send_accepted == Some(true)
                 && matches!(
                     state.action.kind,
@@ -2758,6 +2824,7 @@ impl AgentAutomationStore {
         &self,
         task: &ConversationIdentity,
         expected: &AutomationTaskState,
+        now_ms: u64,
     ) -> Result<(), String> {
         self.mutate(task, |state| {
             if state.action == expected.action
@@ -2765,11 +2832,27 @@ impl AgentAutomationStore {
                 && state.goal == expected.goal
                 && state.goal_recovery_exhausted()
             {
-                state.action.status = AutomationActionStatus::Stalled;
                 let retries = state.retry_timings.goal_recovery_delays_seconds.len();
-                state.action.last_error.get_or_insert_with(|| {
-                    format!("Automatic goal recovery stopped after {retries} retries without agent activity. Use Continue to try again.")
-                });
+                let message = format!("Automatic goal recovery stopped after {retries} retries without agent activity. Use Continue to try again.");
+                let last = state.action.updated_at_ms.into_iter()
+                    .chain(state.goal_wake.last_nudged_at_ms).max();
+                let delay = state.retry_timings.goal_recovery_delays_seconds.last();
+                if let (Some(last), Some(delay)) = (last, delay)
+                    && now_ms < retry_deadline(&state.action, state.goal_wake.recovery_attempts,
+                        last, state.accepted_goal_delay_ms(delay * 1000), state.retry_timings.jitter_percent)
+                {
+                    // Repair the premature exhausted banner written by older
+                    // versions without resetting the budget or sending again.
+                    if state.action.status == AutomationActionStatus::Stalled
+                        && state.action.last_error.as_deref() == Some(message.as_str())
+                    {
+                        state.action.status = AutomationActionStatus::Idle;
+                        state.action.last_error = None;
+                    }
+                    return Ok(());
+                }
+                state.action.status = AutomationActionStatus::Stalled;
+                state.action.last_error.get_or_insert(message);
                 state.action.automatic_retry_in_progress = false;
                 state.action.chatgpt_access_retry_in_progress = false;
             }
@@ -3181,6 +3264,7 @@ impl AgentAutomationStore {
                 return Ok(());
             }
             state.action.send_accepted = Some(true);
+            state.pairing.load_rate_limit_recovery = false;
             state.action.automatic_retry_attempts = 0;
             state.action.chatgpt_access_retry_attempts = 0;
             state.action.chatgpt_access_retry_in_progress = false;
@@ -3281,6 +3365,7 @@ impl AgentAutomationStore {
             let mut state = load_state(path)?;
             state.automatic_retries_enabled = self.automatic_retries_enabled()?;
             state.retry_timings = self.retry_timings.clone();
+            state.offline_response_grace_ms = self.offline_after_ms;
             let result = mutation(&mut state)?;
             if state.action.status != AutomationActionStatus::Queued {
                 state.action.cooldown_until_ms = None;
@@ -3300,6 +3385,7 @@ impl AgentAutomationStore {
             let mut state = load_state(path)?;
             state.automatic_retries_enabled = self.automatic_retries_enabled()?;
             state.retry_timings = self.retry_timings.clone();
+            state.offline_response_grace_ms = self.offline_after_ms;
             let result = mutation(&mut state);
             if state.action.status != AutomationActionStatus::Queued {
                 state.action.cooldown_until_ms = None;

@@ -9,7 +9,7 @@ import { throwIfSessionAttention } from "../src/browser-session";
 import { ChatGptBrowserDriver, type SingleBrowserSurface } from "../src/chatgpt-driver";
 import { privateChromeExecutable } from "../src/chrome-executable";
 import { protocolBuild, type ActionPrompt, type ExecuteActionRequest } from "../src/protocol";
-import {navigatePage} from "../src/navigation";
+import {navigatePage,observeConversationLoadResponses,conversationLoadWasRateLimited,conversationLoadAvailableAt} from "../src/navigation";
 
 const native = process.env.CODEXIFY_TEST_BROWSER_COMPANION_CHROME === "1";
 const build = protocolBuild("conversation-error-test");
@@ -82,6 +82,7 @@ beforeAll(async () => {
   const executablePath = await privateChromeExecutable(join(import.meta.dirname, "../.browsers", `${process.platform}-${process.arch}`));
   context = await chromium.launchPersistentContext(profile, {channel:"chrome", executablePath, headless:true});
   page = context.pages()[0]!;
+  observeConversationLoadResponses(page);
   await page.exposeFunction("recordClick", () => { clicks++; });
   await context.route("https://chatgpt.com/**", async route => {
     if (new URL(route.request().url()).pathname === "/api/auth/session") {
@@ -245,4 +246,27 @@ test.skipIf(!native)("all chats share five-minute access recovery slots and a he
   const before=documentLoads.length;await navigatePage(page,url);
   expect(documentLoads.slice(before)).toEqual([url]);
   expect(context.pages()).toEqual([page]);expect(clicks).toBe(0);
+},20_000);
+
+test.skipIf(!native)("transcript API 429s are load failures, honor Retry-After, and exclude Send, lists and other chats",async()=>{
+  currentHtml=errorPage(...labels[0]);await surface.navigate(url);
+  let status=429;
+  await context.route('https://chatgpt.com/backend-api/**',route=>route.fulfill({status,headers:{'retry-after':'900'},json:{}}));
+  const detail='/backend-api/conversations/unavailable-fixture?num_turns=10';
+  const began=Date.now();
+  expect(await page.evaluate(async path=>(await fetch(path)).status,detail)).toBe(429);
+  for(let i=0;i<100&&!conversationLoadWasRateLimited(page);i++)await Bun.sleep(10);
+  expect(conversationLoadWasRateLimited(page)).toBeTrue();
+  await expect(throwIfSessionAttention(page)).rejects.toMatchObject({code:'conversation_load_rate_limited'});
+  expect(conversationLoadAvailableAt(page,'https://chatgpt.com/c/another')!).toBeGreaterThanOrEqual(began+900_000);
+  expect((await new ChatGptBrowserDriver(surface,build).health()).authenticated).toBeTrue();
+  status=200;await page.evaluate(async path=>fetch(path),detail);
+  for(let i=0;i<100&&conversationLoadWasRateLimited(page);i++)await Bun.sleep(10);
+  expect(conversationLoadWasRateLimited(page)).toBeFalse();
+  status=429;
+  for(const [path,method] of [[detail,'POST'],['/backend-api/conversations?limit=20','GET'],['/backend-api/conversations/another-chat','GET'],['/backend-api/account/plan','GET']]){
+    await page.evaluate(async({path,method})=>fetch(path,{method}),{path:path!,method:method!});
+    await Bun.sleep(20);expect(conversationLoadWasRateLimited(page)).toBeFalse();
+  }
+  await context.unroute('https://chatgpt.com/backend-api/**');
 },20_000);

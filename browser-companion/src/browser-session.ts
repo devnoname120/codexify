@@ -3,7 +3,7 @@
 import type { Locator, Page } from "patchright";
 import { BrowserCompanionError } from "./errors";
 import {uiLabelPattern,uiTemplatePattern} from "./ui-localization";
-import {recordConversationUnavailable} from "./navigation";
+import {recordConversationUnavailable,conversationLoadWasRateLimited} from "./navigation";
 
 const rateLimitDialog = (page: Page): Locator => page.locator('[role="dialog"]')
   .filter({ hasText:uiLabelPattern("rateTitle",false) })
@@ -110,6 +110,7 @@ export async function throwIfSessionAttention(page: Page): Promise<void> {
   await throwIfConversationLimit(page);
   if (await conversationUnavailableVisible(page)) {
     recordConversationUnavailable(page);
+    if(conversationLoadWasRateLimited(page))throw new BrowserCompanionError("ChatGPT conversation loading is temporarily rate limited; wait before retrying","conversation_load_rate_limited");
     throw new BrowserCompanionError("ChatGPT conversation temporarily not accessible", "conversation_unavailable");
   }
   if (await page.getByTestId("regenerate-thread-error-button").last().isVisible().catch(() => false)

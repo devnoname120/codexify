@@ -87,6 +87,9 @@ pub trait AutomationExecutor: Send + Sync {
     async fn release_pairing_window(&self, _action_id: &str) -> Result<(), String> {
         Ok(())
     }
+    async fn refresh_pairing_window(&self, _action_id: &str) -> Result<(), String> {
+        Ok(())
+    }
     async fn approve_pending_conversation(
         &self,
         _url: &str,
@@ -157,6 +160,16 @@ impl BrowserAutomationExecutor {
 impl AutomationExecutor for BrowserAutomationExecutor {
     fn supports_pairing_reservation(&self) -> bool {
         true
+    }
+
+    async fn refresh_pairing_window(&self, action_id: &str) -> Result<(), String> {
+        let client = BrowserCompanionClient::from_config(&self.config)?;
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            client.refresh_pairing_window(action_id),
+        )
+        .await
+        .map_err(|_| "Renewing the browser pairing reservation timed out".to_string())?
     }
 
     async fn release_pairing_window(&self, action_id: &str) -> Result<(), String> {
@@ -655,7 +668,50 @@ impl AgentAutomationSupervisor {
         if state.action.id.as_deref() != Some(expected_action_id)
             || state.action.status != AutomationActionStatus::ConversationLimit
             || state.action.kind == Some(AutomationActionKind::PairVerify)
+            || state.pairing.load_rate_limit_recovery
         {
+            return Ok(false);
+        }
+        self.queue_replacement_conversation(task, &state, false, now_ms)
+            .await
+    }
+
+    async fn queue_load_rate_limit_recovery(
+        &self,
+        task: &AutomationTaskHandle,
+        action_id: &str,
+        now_ms: u64,
+    ) -> Result<bool, String> {
+        if !self.config.new_conversation_on_load_rate_limit {
+            return Ok(false);
+        }
+        let state = task.store.load(&task.task)?;
+        if state.action.id.as_deref() != Some(action_id)
+            || state.action.status != AutomationActionStatus::RateLimited
+            || !state.action.conversation_load_rate_limited
+            || state.pairing.load_rate_limit_recovery
+            || state.action.send_accepted != Some(false)
+            || state.action.messages_fenced
+            || state.action.kind == Some(AutomationActionKind::PairVerify)
+            || !state.automatic_retries_enabled
+            || state.action.automatic_retry_paused
+        {
+            return Ok(false);
+        }
+        let activity = task.chat.offline_activity().await?;
+        if activity.agent_stop_requested
+            || activity.is_online(now_ms, task.store.offline_after_ms())
+        {
+            return Ok(false);
+        }
+        let work_pending = state
+            .goal
+            .as_ref()
+            .is_some_and(|goal| goal.status == GoalStatus::Active)
+            || !task.chat.unread_snapshot().await?.messages.is_empty()
+            || state.pairing.resume_task
+            || matches!(state.action.kind, Some(AutomationActionKind::TurnRenewal));
+        if !work_pending {
             return Ok(false);
         }
         self.queue_replacement_conversation(task, &state, false, now_ms)
@@ -861,9 +917,10 @@ impl AgentAutomationSupervisor {
         self.tasks.read().await.contains_key(task.stable_key())
     }
 
-    pub(crate) async fn pairing_continuation_for_unbound(
+    pub(crate) async fn pairing_continuation_for_chat(
         &self,
         reference: &str,
+        target_workspace: Option<&std::path::Path>,
     ) -> Result<(String, u64), String> {
         let context = self
             .rollover
@@ -899,6 +956,14 @@ impl AgentAutomationSupervisor {
             .ok_or("The intended pairing task has no selected workspace")?
             .canonicalize()
             .map_err(|_| "The intended pairing workspace is unavailable")?;
+        if let Some(target) = target_workspace
+            && target
+                .canonicalize()
+                .map_err(|_| "The current conversation workspace is unavailable")?
+                != root
+        {
+            return Err("This ChatGPT conversation has a different workspace. Use a new conversation for this pairing.".into());
+        }
         // Validate the reference and intended owner before issuing any handoff.
         // This does not consume the pairing proof or transfer task ownership.
         task.store.prepare_pairing_handoff(
@@ -1522,6 +1587,15 @@ impl AgentAutomationSupervisor {
                 now_ms,
             )?;
             let mut state = task.store.load(&task.task)?;
+            if state.action.conversation_load_rate_limited
+                && let Some(action_id) = state.action.id.as_deref()
+                && let Ok(_run_guard) = self.run_lock.try_lock()
+                && self
+                    .queue_load_rate_limit_recovery(&task, action_id, now_ms)
+                    .await?
+            {
+                continue;
+            }
             if state.pairing.schema_rollover_pending
                 && state.pairing.verified_owner_generation == Some(task.owner_generation)
             {
@@ -1971,7 +2045,7 @@ impl AgentAutomationSupervisor {
             }
             if !obsolete_action && state.goal_recovery_exhausted() {
                 task.store
-                    .mark_goal_recovery_exhausted(&task.task, &state)?;
+                    .mark_goal_recovery_exhausted(&task.task, &state, now_ms)?;
                 continue;
             }
             if let Some(retry_at) = state.goal_retry_at_ms().filter(|_| !obsolete_action) {
@@ -2353,7 +2427,19 @@ impl AgentAutomationSupervisor {
         &self,
         reservation: &PairingWindow,
     ) -> Result<(), String> {
-        let deadline = tokio::time::Instant::now() + self.pairing_wait_timeout;
+        let recovery = reservation
+            .task
+            .store
+            .load(&reservation.task.task)?
+            .pairing
+            .load_rate_limit_recovery;
+        let timeout = if recovery {
+            Duration::from_millis(super::store::PAIRING_REFERENCE_TTL_MS)
+        } else {
+            self.pairing_wait_timeout
+        };
+        let deadline = tokio::time::Instant::now() + timeout;
+        let mut refresh_at = tokio::time::Instant::now() + Duration::from_secs(20);
         while tokio::time::Instant::now() < deadline {
             let state = reservation.task.store.load(&reservation.task.task)?;
             let activity = reservation.task.chat.offline_activity().await?;
@@ -2371,6 +2457,25 @@ impl AgentAutomationSupervisor {
             {
                 break;
             }
+            if recovery && !state.pairing.load_rate_limit_recovery {
+                break;
+            }
+            if recovery
+                && state.pairing.verified_owner_generation.is_none()
+                && state
+                    .pairing
+                    .pending
+                    .as_ref()
+                    .is_none_or(|pending| crate::markdown_chat::now_ms() > pending.expires_at_ms)
+            {
+                break;
+            }
+            if tokio::time::Instant::now() >= refresh_at {
+                self.executor
+                    .refresh_pairing_window(&reservation.action_id)
+                    .await?;
+                refresh_at = tokio::time::Instant::now() + Duration::from_secs(20);
+            }
             if state.pairing.verified_owner_generation == Some(reservation.owner_generation) {
                 self.scan_once(crate::markdown_chat::now_ms()).await?;
                 let follow_up = self.queue.lock().await.iter().any(|queued| {
@@ -2380,14 +2485,38 @@ impl AgentAutomationSupervisor {
                         && execution_kind(queued) != AutomationActionKind::PairVerify
                 });
                 if follow_up {
+                    self.executor
+                        .refresh_pairing_window(&reservation.action_id)
+                        .await?;
                     let mut unused = None;
-                    self.run_next_locked(
-                        crate::markdown_chat::now_ms(),
-                        Some(reservation),
-                        &mut unused,
-                    )
-                    .await?;
-                    break;
+                    let attempted = self
+                        .run_next_locked(
+                            crate::markdown_chat::now_ms(),
+                            Some(reservation),
+                            &mut unused,
+                        )
+                        .await;
+                    if let Err(error) = attempted
+                        && (!recovery
+                            || !reservation
+                                .task
+                                .store
+                                .load(&reservation.task.task)?
+                                .pairing
+                                .load_rate_limit_recovery)
+                    {
+                        return Err(error);
+                    }
+                    if !recovery
+                        || !reservation
+                            .task
+                            .store
+                            .load(&reservation.task.task)?
+                            .pairing
+                            .load_rate_limit_recovery
+                    {
+                        break;
+                    }
                 }
                 let unread = reservation.task.chat.unread_snapshot().await?;
                 if unread.messages.is_empty()
@@ -2923,6 +3052,8 @@ impl AgentAutomationSupervisor {
                         AutomationActionStatus::ConversationLimit
                     } else if send_accepted {
                         AutomationActionStatus::Ambiguous
+                    } else if accumulator.conversation_load_rate_limited {
+                        AutomationActionStatus::RateLimited
                     } else {
                         error
                             .failure_status
@@ -2942,6 +3073,22 @@ impl AgentAutomationSupervisor {
                     None,
                     terminal_at_ms,
                 )?;
+                if !send_accepted && accumulator.conversation_load_rate_limited {
+                    task.store.mark_conversation_load_rate_limit(
+                        &task.task,
+                        &execution.request.action_id,
+                    )?;
+                    if self
+                        .queue_load_rate_limit_recovery(
+                            &task,
+                            &execution.request.action_id,
+                            terminal_at_ms,
+                        )
+                        .await?
+                    {
+                        return Ok(None);
+                    }
+                }
                 if status == AutomationActionStatus::ConversationLimit
                     && self
                         .queue_conversation_rollover(
@@ -3117,6 +3264,22 @@ impl AgentAutomationSupervisor {
                 .filter(|answer| answer.len() <= MAX_PRIVATE_TEXT_BYTES),
             terminal_at_ms,
         )?;
+        if !accumulator.send_accepted
+            && (accumulator.conversation_load_rate_limited
+                || snapshot
+                    .attention
+                    .as_ref()
+                    .is_some_and(|attention| attention.code == "conversation_load_rate_limited"))
+        {
+            task.store
+                .mark_conversation_load_rate_limit(&task.task, &execution.request.action_id)?;
+            if self
+                .queue_load_rate_limit_recovery(&task, &execution.request.action_id, terminal_at_ms)
+                .await?
+            {
+                return Ok(Some(snapshot));
+            }
+        }
         if status == AutomationActionStatus::ConversationLimit
             && self
                 .queue_conversation_rollover(&task, &execution.request.action_id, terminal_at_ms)
@@ -3396,6 +3559,8 @@ impl AgentAutomationSupervisor {
                 state.phase = AutomationActionStatus::Ambiguous;
             }
             CompanionEventKind::Failed { message, code } => {
+                accumulator.conversation_load_rate_limited |=
+                    code == "conversation_load_rate_limited";
                 state.status = Some(message);
                 let failure = failed_companion_status(&code);
                 accumulator.terminal_status = Some(failure);
@@ -3462,6 +3627,7 @@ impl AgentAutomationSupervisor {
 
 #[derive(Default)]
 struct EventAccumulator {
+    conversation_load_rate_limited: bool,
     submission_complete: bool,
     selected: Option<super::CompanionSelection>,
     send_accepted: bool,
@@ -3557,6 +3723,24 @@ fn validate_terminal_snapshot(
         }
         return Ok(());
     }
+    if matches!(execution.request.prompt, ActionPrompt::CreateChat { .. })
+        && snapshot.canonical_url.is_none()
+    {
+        // Send can be accepted into a local draft before ChatGPT creates a
+        // persistent conversation. Preserve the actual failure without claiming
+        // that the browser switched chats or that the prompt is safe to replay.
+        let message = (snapshot.state != CompanionActionState::Idle)
+            .then(|| {
+                snapshot
+                    .attention
+                    .as_ref()
+                    .and_then(|attention| attention.message.as_deref())
+            })
+            .flatten()
+            .filter(|message| !message.trim().is_empty())
+            .unwrap_or("ChatGPT did not confirm creation of the new conversation");
+        return Err(execution_error(message.to_owned(), true));
+    }
     if execution.request.model.is_some() {
         let selected = snapshot.selected.as_ref().ok_or_else(|| {
             execution_error(
@@ -3628,6 +3812,34 @@ mod model_fallback_snapshot_tests {
     }
 
     #[test]
+    fn failed_creation_preserves_its_error_without_inventing_a_different_chat() {
+        let mut execution = execution();
+        execution.request.prompt = ActionPrompt::CreateChat {
+            continuation_token: "A".repeat(43),
+            reference: "B".repeat(43),
+            setup_reference: None,
+        };
+        let mut snapshot: CompanionActionSnapshot = serde_json::from_value(serde_json::json!({
+            "protocolVersion":1,"build":"test","actionId":"fallback","state":"ambiguous","sendAccepted":true,
+            "canonicalUrl":null,"selected":null,"lastEventSequence":6,
+            "attention":{"code":"ambiguous_send","message":"Browser operation timed out after 30 seconds without progress"}
+        })).unwrap();
+        let failure = validate_terminal_snapshot(&execution, &snapshot).unwrap_err();
+        assert_eq!(
+            failure.message,
+            "Browser operation timed out after 30 seconds without progress"
+        );
+        assert!(failure.send_accepted);
+        snapshot.state = CompanionActionState::Idle;
+        let failure = validate_terminal_snapshot(&execution, &snapshot).unwrap_err();
+        assert_eq!(
+            failure.message,
+            "ChatGPT did not confirm creation of the new conversation"
+        );
+        assert!(failure.send_accepted);
+    }
+
+    #[test]
     fn terminal_proof_accepts_ranked_fallbacks_but_keeps_identity_and_selection_guards() {
         let execution = execution();
         let mut snapshot: CompanionActionSnapshot = serde_json::from_value(serde_json::json!({
@@ -3690,6 +3902,7 @@ fn failed_companion_status(code: &str) -> AutomationActionStatus {
             AutomationActionStatus::ConversationUnavailable
         }
         "conversation_limit" => AutomationActionStatus::ConversationLimit,
+        "conversation_load_rate_limited" => AutomationActionStatus::RateLimited,
         _ => AutomationActionStatus::Failed,
     }
 }

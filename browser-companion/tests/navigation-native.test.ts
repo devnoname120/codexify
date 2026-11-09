@@ -15,7 +15,7 @@ test.skipIf(process.env.CODEXIFY_TEST_BROWSER_COMPANION_CHROME!=="1")("a real Ch
       return route.fulfill({contentType:'text/html',body:'Fixture home'});
     });
     await page.goto('https://chatgpt.com/');
-    await expect(navigatePage(page,'https://chatgpt.com/c/limited')).rejects.toMatchObject({code:'rate_limited'});
+    await expect(navigatePage(page,'https://chatgpt.com/c/limited')).rejects.toMatchObject({code:'conversation_load_rate_limited'});
     await expect(navigatePage(page,'https://chatgpt.com/c/another')).rejects.toMatchObject({code:'conversation_cooldown'});
     expect(loads).toEqual(['/c/limited']);
   }finally{await browser.close();}

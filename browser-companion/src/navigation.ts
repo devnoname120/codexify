@@ -30,6 +30,41 @@ export function configureNavigationTimings(raw?:string):void {
 }
 type Budget = {lastLoad:number|null; blockedUntil:number; unavailableUntil:number|null; tail:Promise<void>};
 const budgets = new WeakMap<BrowserContext,Budget>();
+const rateLimitedConversations = new WeakMap<Page,{url:string;until:number}>();
+const observedPages = new WeakSet<Page>();
+
+function recordLoadRateLimit(page:Page,retryAfter:string|null):void {
+  const budget=navigationBudget(page.context());
+  const value=retryAfter?.trim();
+  const delay=value&&/^\d+$/.test(value)?Number(value)*1_000:Date.parse(value??'')-Date.now();
+  budget.blockedUntil=Math.max(budget.blockedUntil,Date.now()+Math.max(timings.conversationLoadIntervalSeconds*1_000,
+    Number.isFinite(delay)&&delay>=0?delay:timings.rateLimitCooldownSeconds*1_000));
+  try{rateLimitedConversations.set(page,{url:canonicalChatGptConversationUrl(page.url()),until:budget.blockedUntil});}catch{}
+}
+
+export function conversationLoadWasRateLimited(page:Page):boolean {
+  try{const failure=rateLimitedConversations.get(page);return !!failure&&failure.until>Date.now()&&failure.url===canonicalChatGptConversationUrl(page.url());}catch{return false;}
+}
+
+/** ChatGPT can serve the document successfully and rate-limit its transcript API. */
+export function observeConversationLoadResponses(page:Page):void {
+  if(observedPages.has(page))return;
+  observedPages.add(page);
+  page.on('response',response=>{
+    void (async()=>{
+      const request=response.request(),url=new URL(response.url());
+      if(request.method()!=='GET'||url.origin!=='https://chatgpt.com')return;
+      const match=/^\/backend-api\/(?:f\/)?conversations?\/([^/]+)\/?$/.exec(url.pathname);
+      if(!match)return;
+      const current=canonicalChatGptConversationUrl(page.url());
+      if(current!==canonicalChatGptConversationUrl('https://chatgpt.com/c/'+match[1]))return;
+      if(response.status()===429){
+        const retryAfter=await response.headerValue('retry-after');
+        if(canonicalChatGptConversationUrl(page.url())===current)recordLoadRateLimit(page,retryAfter);
+      }else if(response.status()>=200&&response.status()<300)rateLimitedConversations.delete(page);
+    })().catch(()=>{});
+  });
+}
 
 function navigationBudget(context:BrowserContext):Budget {
   let budget=budgets.get(context);
@@ -62,6 +97,7 @@ export function recordConversationAvailable(page:Page):void {
   if(isConversationUrl(new URL(page.url()))){
     const budget=budgets.get(page.context());
     if(budget)budget.unavailableUntil=null;
+    rateLimitedConversations.delete(page);
   }
 }
 
@@ -101,9 +137,8 @@ export async function navigatePage(page:Page,url:string,options:{signal?:AbortSi
     const response=options.reload?await page.reload(settings):await page.goto(target.href,settings);
     if(response?.status()===429){
       const retryAfter=await response.headerValue("retry-after");
-      const retryAfterMs=retryAfter?.trim()&&/^\d+$/.test(retryAfter.trim())?Number(retryAfter.trim())*1_000:Date.parse(retryAfter??"")-Date.now();
-      if(conversation)budget.blockedUntil=Math.max(budget.blockedUntil,Date.now()+Math.max(timings.conversationLoadIntervalSeconds*1_000,Number.isFinite(retryAfterMs)&&retryAfterMs>=0?retryAfterMs:timings.rateLimitCooldownSeconds*1_000));
-      throw new BrowserCompanionError("ChatGPT conversation loading is temporarily rate limited; wait before retrying", "rate_limited");
+      if(conversation)recordLoadRateLimit(page,retryAfter);
+      throw new BrowserCompanionError("ChatGPT conversation loading is temporarily rate limited; wait before retrying", conversation?"conversation_load_rate_limited":"rate_limited");
     }
   }finally{release();}
 }

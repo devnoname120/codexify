@@ -1142,3 +1142,31 @@ test("re-pairing reservation expires or releases without replaying Send",async()
     if(mode!=="shutdown") await coordinator.close();
   }
 });
+
+test("a first-work failure before Send keeps the reserved page and a renewed lease",async()=>{
+  class FirstWorkFailure extends PairingWindowDriver {
+    fail=true;
+    override async execute(execution:DriverExecution){
+      if(execution.request.prompt.kind!=="create_chat"&&this.fail){
+        this.fail=false;this.runs.push(execution.request.actionId);
+        throw new BrowserCompanionError("Model could not be selected","model_unavailable");
+      }
+      await super.execute(execution);
+    }
+  }
+  const driver=new FirstWorkFailure(),coordinator=new SingleWindowCoordinator(driver,TEST_BUILD,{operationMs:1000,cleanupMs:100,hardStopMs:100,pairingRetentionMs:200});
+  await coordinator.execute(retainedPairing());for await(const _ of coordinator.events("pair-window",0)){}
+  const first={...request("first-work-failure"),url:"https://chatgpt.com/c/paired-window",expectedUrl:"https://chatgpt.com/c/paired-window",pairingContinuationOf:"pair-window"};
+  await coordinator.execute(first);for await(const _ of coordinator.events(first.actionId,0)){}
+  expect((await coordinator.health()).activeActionId).toBe("pair-window");
+  await expect(coordinator.execute(request("other"))).rejects.toThrow("busy");
+  await expect(coordinator.accountPlan("epoch")).rejects.toThrow("busy");
+  await Bun.sleep(120);expect(coordinator.refreshPairingWindow("pair-window")).toBeTrue();
+  expect(coordinator.refreshPairingWindow("wrong-action")).toBeFalse();
+  await Bun.sleep(120);expect((await coordinator.health()).activeActionId).toBe("pair-window");
+  const retry={...first,actionId:"first-work-retry",idempotencyKey:"first-work-retry"};
+  await coordinator.execute(retry);for await(const _ of coordinator.events(retry.actionId,0)){}
+  expect((await coordinator.health()).activeActionId).toBeNull();
+  expect(driver.runs).toEqual(["pair-window","first-work-failure","first-work-retry"]);
+  await coordinator.close();
+});

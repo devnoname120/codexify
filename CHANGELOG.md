@@ -6,6 +6,36 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.3.29] - 2026-11-09
+
+### Added
+
+- Optionally create and automatically pair a replacement ChatGPT conversation
+  when loading an existing conversation returns HTTP 429, including transcript
+  requests. Preserve the task, workspace, goal, pending messages, and model
+  selection, and keep the browser on the replacement through pairing and the
+  first work prompt. Enable `agentChat.automation.newConversationOnLoadRateLimit`
+  to use this recovery; it is disabled by default.
+
+### Fixed
+
+- Give accepted goal continuations at least the configured offline timeout
+  before another recovery attempt. Wait for the final attempt before reporting
+  an exhausted retry budget, and clear stale recovery state when tool activity
+  resumes without replaying accepted messages.
+- Recover pairing when a ChatGPT conversation has selected the correct workspace
+  but has not attached to the intended task. Validate the pending handoff and
+  owner generation before consuming its one-time verification reference.
+- Retain the shared browser during extended replacement verification and retries
+  before the first work prompt is sent, preventing other chats or account
+  maintenance from navigating away during the handoff.
+- Narrow the default conversation-list request filters so individual ChatGPT
+  transcripts remain accessible. Migrate only the exact legacy defaults while
+  retaining custom filters.
+- Preserve the actual creation error when ChatGPT accepts a prompt into a local
+  draft but does not confirm a persistent conversation, instead of reporting a
+  misleading conversation mismatch.
+
 ## [2.3.28] - 2026-11-06
 
 ### Fixed
@@ -1275,7 +1305,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   drained through bounded head/tail buffers, while component-only `_meta` remains
   outside the model-visible limit.
 
-[Unreleased]: https://github.com/devnoname120/codexify/compare/v2.3.28...HEAD
+[Unreleased]: https://github.com/devnoname120/codexify/compare/v2.3.29...HEAD
+[2.3.29]: https://github.com/devnoname120/codexify/compare/v2.3.28...v2.3.29
 [2.3.28]: https://github.com/devnoname120/codexify/compare/v2.3.25...v2.3.28
 [2.3.25]: https://github.com/devnoname120/codexify/compare/v2.3.24...v2.3.25
 [2.3.24]: https://github.com/devnoname120/codexify/compare/v2.3.23...v2.3.24

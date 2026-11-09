@@ -1001,6 +1001,22 @@ impl ServerHandler for CodexHandler {
         } else {
             Ok((None, None))
         };
+        // Selecting the correct folder does not attach this physical chat to
+        // the original logical task. Recover that handoff before consuming its
+        // one-time proof, even when the target already selected a workspace.
+        let pairing_task_mismatch = name == "automation_verify_pairing"
+            && authorized_before
+            && task_conversation.as_ref().is_some_and(|task| {
+                crate::tools::automation_pair::AutomationVerifyPairing::reference(&args)
+                    .ok()
+                    .and_then(|reference| {
+                        crate::agent_automation::AgentAutomationStore::for_config(&self.config)
+                            .ok()?
+                            .pairing_task_key(&reference)
+                            .ok()
+                    })
+                    .is_some_and(|key| key != task.stable_key())
+            });
         let _analytics_tool_guard = if agent_call && authorized_before && name != ContinueTask::NAME
         {
             task_conversation
@@ -1178,7 +1194,8 @@ impl ServerHandler for CodexHandler {
                     }
                     Some(_)
                         if name == "automation_verify_pairing"
-                            && matches!(&workspace_at_start, Ok((None, _))) =>
+                            && (pairing_task_mismatch
+                                || matches!(&workspace_at_start, Ok((None, _)))) =>
                     {
                         match (
                             conversation.as_ref(),
@@ -1188,7 +1205,11 @@ impl ServerHandler for CodexHandler {
                             ),
                         ) {
                             (Some(_), Some(supervisor), Ok(reference)) => {
-                                match supervisor.pairing_continuation_for_unbound(&reference).await {
+                                let target_workspace = workspace_at_start
+                                    .as_ref()
+                                    .ok()
+                                    .and_then(|(root, _)| root.as_deref());
+                                match supervisor.pairing_continuation_for_chat(&reference, target_workspace).await {
                                     Ok((token, generation)) => crate::tools::automation_pair::AutomationVerifyPairing::continuation_required(&token, &reference, generation),
                                     Err(error) => ToolResult::error(error),
                                 }
@@ -1247,17 +1268,20 @@ impl ServerHandler for CodexHandler {
                                         .to_string()
                                 });
                             }
-                            if self
+                            let selected_target = self
                                 .project_bindings
-                                .selected_project_root(&self.config, physical)?
-                                .is_some()
-                            {
-                                return Err(
-                                "This ChatGPT conversation already has a workspace. Continue the task in a new conversation before selecting anything."
-                                    .into(),
-                            );
+                                .selected_project_root(&self.config, physical)?;
+                            self.continuations.claim_with_generation(physical, &token, |source_task, saved, owner| {
+                            if let Some(target) = selected_target.as_ref() {
+                                let next_owner = owner.checked_add(1).ok_or("Conversation owner generation overflow")?;
+                                let permitted = target.canonicalize().ok().as_deref() == Some(saved)
+                                    && self.effective_task_config(Some(source_task), saved.to_path_buf())
+                                        .and_then(|config|crate::agent_automation::AgentAutomationStore::for_config(&config))
+                                        .and_then(|store|store.pending_pairing_handoff(source_task, next_owner, crate::markdown_chat::now_ms()))?;
+                                if !permitted {
+                                    return Err("This ChatGPT conversation already has a workspace. Continue the task in a new conversation before selecting anything.".into());
+                                }
                             }
-                            self.continuations.claim(physical, &token, |source_task, saved| {
                             let current = {
                                 self.project_bindings
                                     .selected_project_root(&self.config, source_task)?

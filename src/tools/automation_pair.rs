@@ -27,7 +27,7 @@ impl AutomationVerifyPairing {
         generation: u64,
     ) -> ToolResult {
         let content = format!(
-            "This ChatGPT conversation has no workspace attached yet. Call `continue_task` with continuationToken `{token}` to attach the existing task and its already-selected workspace. Then call `automation_verify_pairing` again with reference `{reference}`. Do not select a project, create a worktree, inspect files, or perform task work before pairing succeeds. Do not stop or end this turn; run continue_task now, then retry verification."
+            "This ChatGPT conversation is not attached to the intended task yet. Call `continue_task` with continuationToken `{token}` to attach the existing task and its already-selected workspace. Then call `automation_verify_pairing` again with reference `{reference}`. Do not select a project, create a worktree, inspect files, or perform task work before pairing succeeds. Do not stop or end this turn; run continue_task now, then retry verification."
         );
         ToolResult::text(&content).with_structured(json!({
             "content": content, "verified": false, "pairingGeneration": generation, "terminal": false

@@ -26,11 +26,12 @@
       "connectorName": "",
       "maxQueuedActions": 64,
       "autoApproveToolCalls": true,
+      "newConversationOnLoadRateLimit": false,
       "requestBlockingEnabled": false,
       "requestBlockList": [
         "^https?://(www\\.)?chatgpt\\.com/.*/rgstr",
-        "^https?://(www\\.)?chatgpt\\.com/backend-api/.*/conversations",
-        "^https?://(www\\.)?chatgpt\\.com/backend-api/conversations",
+        "^https?://(www\\.)?chatgpt\\.com/backend-api/.*/conversations(?:\\?|$)",
+        "^https?://(www\\.)?chatgpt\\.com/backend-api/conversations(?:\\?|$)",
         "^https?://(www\\.)?chatgpt\\.com/backend-api/sidebar",
         "^https?://(www\\.)?chatgpt\\.com/backend-api/.*/sidebar"
       ]

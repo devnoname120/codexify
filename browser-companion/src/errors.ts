@@ -2,6 +2,7 @@ export type BrowserFailureCode =
   | "authentication_required"
   | "approval_required"
   | "rate_limited"
+  | "conversation_load_rate_limited"
   | "conversation_cooldown"
   | "external_interference"
   | "ambiguous_send"

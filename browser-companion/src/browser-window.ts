@@ -415,7 +415,6 @@ export class SingleWindowCoordinator {
     this.executeKeys.set(request.idempotencyKey, request.actionId);
     this.pendingActionId = request.actionId;
     if (continuing) {
-      this.releasePairingWindow(reservation.actionId);
       // Keep maintenance operations that were already queued from navigating
       // before this continuation's preflight acquires the window operation lock.
       this.activeActionId = request.actionId;
@@ -457,9 +456,18 @@ export class SingleWindowCoordinator {
       if (!record.terminal) this.emitFailure(record, asCompanionError(error));
     } finally {
       if (this.pendingActionId === request.actionId) this.pendingActionId = null;
-      if (this.activeActionId === request.actionId && this.pairingWindow?.actionId !== request.actionId) this.activeActionId = null;
+      if (this.activeActionId === request.actionId && this.pairingWindow?.actionId !== request.actionId) this.activeActionId = record.pairingContinuation ? this.pairingWindow?.actionId ?? null : null;
       record.resolveRunSettled();
     }
+  }
+
+  refreshPairingWindow(actionId:string):boolean {
+    const reservation=this.pairingWindow;
+    if(!reservation||reservation.actionId!==actionId)return false;
+    clearTimeout(reservation.timer);
+    reservation.timer=setTimeout(()=>this.releasePairingWindow(actionId),this.timeouts.pairingRetentionMs??180_000);
+    reservation.timer.unref?.();
+    return true;
   }
 
   releasePairingWindow(actionId:string):boolean {
@@ -698,12 +706,12 @@ export class SingleWindowCoordinator {
       if (!this.closing && record.request.retainPairingWindow && record.request.prompt.kind === "create_chat"
         && record.snapshot.state === "idle" && record.snapshot.sendAccepted && !record.snapshot.attention
         && record.snapshot.canonicalUrl && this.activeActionId === record.request.actionId) {
-        const timer = setTimeout(()=>this.releasePairingWindow(record.request.actionId),this.timeouts.pairingRetentionMs ?? 90_000);
+        const timer = setTimeout(()=>this.releasePairingWindow(record.request.actionId),this.timeouts.pairingRetentionMs ?? 180_000);
         timer.unref?.();
         this.pairingWindow = {actionId:record.request.actionId,url:record.snapshot.canonicalUrl,
           generation:record.request.pairingGeneration,account:record.request.expectedAccountFingerprint,
           connector:record.request.connectorName,timer};
-      } else if (this.activeActionId === record.request.actionId) this.activeActionId = null;
+      } else if (this.activeActionId === record.request.actionId) this.activeActionId = record.pairingContinuation ? this.pairingWindow?.actionId ?? null : null;
       record.resolveRunSettled();
     }
   }
@@ -838,9 +846,11 @@ export class SingleWindowCoordinator {
     if(event.type === "waiting")record.snapshot.cooldownUntilMs=event.availableAtMs;
     if (event.type === "model_verified") record.snapshot.selected = { model:event.model, effort:event.effort };
     if (event.type === "send_accepted") {
+      if(record.pairingContinuation && this.pairingWindow)this.releasePairingWindow(this.pairingWindow.actionId);
       record.snapshot.sendAccepted = true;
       if(record.request.prompt.kind !== "create_chat")record.snapshot.canonicalUrl = record.request.expectedUrl;
     }
+    if(event.type === "ambiguous_send" && record.pairingContinuation && this.pairingWindow)this.releasePairingWindow(this.pairingWindow.actionId);
     if (event.type === "conversation_created" || event.type === "generation_complete" || event.type === "submission_complete") record.snapshot.canonicalUrl = event.canonicalUrl;
     actionSnapshotSchema.parse(record.snapshot);
     for (const listener of [...record.listeners]) listener(event);

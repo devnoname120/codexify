@@ -2638,6 +2638,7 @@ mod tests {
             &[
                 "autoApproveToolCalls",
                 "automaticRetries",
+                "newConversationOnLoadRateLimit",
                 "retryTimings",
                 "connectorName",
                 "descriptorPath",

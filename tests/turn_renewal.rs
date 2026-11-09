@@ -943,6 +943,7 @@ async fn stalled_goal_renewal_stops_after_three_retries_across_restart() {
     f.supervisor.scan_once(DUE + 10_000).await.unwrap();
     assert!(f.supervisor.run_next(DUE + 10_000).await.is_err());
     for (attempt, delay) in [60_000, 120_000, 240_000].into_iter().enumerate() {
+        let delay = delay.max(f.config.markdown_chat.offline_timeout_minutes * 60_000);
         let failed = f.store.load(&f.task).unwrap();
         assert_eq!(failed.automatic_retry_attempts(), attempt as u32);
         assert_eq!(failed.automatic_retry_limit(), 3);

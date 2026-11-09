@@ -7,7 +7,7 @@ import type { SingleBrowserSurface } from "./chatgpt-driver";
 import { BrowserCompanionError } from "./errors";
 import { backgroundChromeArgs } from "./background-chrome";
 import {prepareRequestBlockList,requestBlockListArgs,verifyRequestBlockList} from "./request-block-list";
-import {isChatGptPage,navigatePage} from "./navigation";
+import {isChatGptPage,navigatePage,observeConversationLoadResponses} from "./navigation";
 import {installChatModeCompatibility} from "./chat-mode";
 
 const CHATGPT_HOME = "https://chatgpt.com/";
@@ -73,6 +73,7 @@ export class ChromeSingleWindowSurface implements SingleBrowserSurface {
         if (restored !== page) await restored.close();
       }
       const surface = new ChromeSingleWindowSurface(context, page);
+      observeConversationLoadResponses(page);
       if(!isChatGptPage(page.url()))await surface.navigate(CHATGPT_HOME);
       else await page.evaluate(installChatModeCompatibility, undefined, undefined, false);
       return surface;

@@ -8222,10 +8222,10 @@ async fn offline_goal_retries_three_times_with_backoff_without_tool_activity_acr
                 .last_nudged_at_ms
                 .unwrap()
                 .max(state.action.updated_at_ms.unwrap())
-                + delay;
+                + delay.max(AUTOMATION_OFFLINE_AFTER_MS);
             let deadline = state
                 .automatic_retry_at_ms()
-                .unwrap_or(earliest + delay / 10);
+                .unwrap_or(earliest + delay.max(AUTOMATION_OFFLINE_AFTER_MS) / 10);
             let restarted = AgentAutomationSupervisor::new(
                 f.config.markdown_chat.automation.clone(),
                 f.executor.clone(),
@@ -8271,6 +8271,42 @@ async fn offline_goal_retries_three_times_with_backoff_without_tool_activity_acr
             ) && e.unread_message_ids.is_empty()));
         }
         assert_eq!(f.store.load(&f.task).unwrap().goal.unwrap().turn_count, 5);
+        let final_send = f.store.load(&f.task).unwrap();
+        let waiting_at = final_send
+            .goal_wake
+            .last_nudged_at_ms
+            .unwrap()
+            .max(final_send.action.updated_at_ms.unwrap())
+            + 1;
+        f.supervisor.scan_once(waiting_at).await.unwrap();
+        let waiting = f.store.load(&f.task).unwrap();
+        assert_eq!(
+            waiting.action.status,
+            if submitted_only {
+                AutomationActionStatus::Idle
+            } else {
+                AutomationActionStatus::Stalled
+            },
+            "the final submitted attempt still needs its response window"
+        );
+        if submitted_only {
+            assert!(
+                waiting.action.last_error.is_none(),
+                "{:?}",
+                waiting.action.last_error
+            );
+        } else {
+            assert!(
+                !waiting
+                    .action
+                    .last_error
+                    .as_deref()
+                    .is_some_and(|error| error.starts_with("Automatic goal recovery stopped")),
+                "{:?}",
+                waiting.action.last_error
+            );
+        }
+        assert_eq!(f.executor.calls.load(Ordering::SeqCst), 4);
         let exhausted_at =
             f.store.load(&f.task).unwrap().action.updated_at_ms.unwrap() + 86_400_000;
         let restarted = AgentAutomationSupervisor::new(
@@ -8310,7 +8346,7 @@ async fn offline_goal_retries_three_times_with_backoff_without_tool_activity_acr
             .last_nudged_at_ms
             .unwrap()
             .max(resumed.action.updated_at_ms.unwrap())
-            + 66_000;
+            + 330_000;
         restarted.scan_once(retry_at).await.unwrap();
         assert_eq!(restarted.queued_count().await, 1);
         restarted.run_next(retry_at + 1).await.unwrap();
@@ -8330,6 +8366,95 @@ async fn offline_goal_retries_three_times_with_backoff_without_tool_activity_acr
             .await
             .unwrap();
         assert_eq!(restarted.queued_count().await, 1);
+    }
+}
+
+#[tokio::test]
+async fn accepted_goal_recovery_honors_configured_silence_and_waits_for_the_final_attempt() {
+    let mut f = fixture_with_offline_timeout(64, 7).await;
+    f.config
+        .markdown_chat
+        .automation
+        .retry_timings
+        .jitter_percent = 0;
+    f.store = Arc::new(AgentAutomationStore::for_config(&f.config).unwrap());
+    let goal = f
+        .store
+        .set_goal(
+            &f.task,
+            "Allow the response time to reach its first tool",
+            100,
+        )
+        .unwrap();
+    f.store.run_goal(&f.task, goal.revision, 101).unwrap();
+    f.chat.record_agent_call(1_000).await.unwrap();
+    f.executor.events.lock().unwrap().extend([
+        CompanionEventKind::SendAccepted,
+        CompanionEventKind::SubmissionComplete {
+            canonical_url: "https://chatgpt.com/c/example".into(),
+        },
+    ]);
+    let silence = 7 * 60_000;
+    let mut now = 1_000 + silence;
+    for attempt in 0..=3 {
+        let supervisor = AgentAutomationSupervisor::new(
+            f.config.markdown_chat.automation.clone(),
+            f.executor.clone(),
+        );
+        supervisor
+            .register_task(AutomationTaskHandle::new(
+                f.task.clone(),
+                0,
+                Arc::new(AgentAutomationStore::for_config(&f.config).unwrap()),
+                f.chat.clone(),
+            ))
+            .await
+            .unwrap();
+        supervisor.scan_once(now).await.unwrap();
+        assert_eq!(supervisor.queued_count().await, 1);
+        supervisor.run_next(now + 1).await.unwrap();
+        let sent = f.store.load(&f.task).unwrap();
+        let last = sent
+            .action
+            .updated_at_ms
+            .unwrap()
+            .max(sent.goal_wake.last_nudged_at_ms.unwrap());
+        supervisor.scan_once(last + silence - 1).await.unwrap();
+        let waiting = f.store.load(&f.task).unwrap();
+        assert_eq!(
+            waiting.action.status,
+            AutomationActionStatus::Idle,
+            "attempt {attempt}"
+        );
+        assert!(waiting.action.last_error.is_none());
+        assert_eq!(waiting.goal_wake.recovery_attempts, attempt);
+        assert_eq!(supervisor.queued_count().await, 0);
+        assert_eq!(
+            f.executor.calls.load(Ordering::SeqCst),
+            attempt as usize + 1
+        );
+        now = last + silence;
+        if attempt == 3 {
+            // Existing persisted banners are corrected during the final wait,
+            // without a reset, an extra Send, or changes to delivery evidence.
+            f.store.update_action_status(&f.task, sent.action.id.as_deref().unwrap(),
+                AutomationActionStatus::Stalled,
+                Some("Automatic goal recovery stopped after 3 retries without agent activity. Use Continue to try again."),
+                None, last).unwrap();
+            supervisor.scan_once(last + silence - 1).await.unwrap();
+            let repaired = f.store.load(&f.task).unwrap();
+            assert_eq!(repaired.action.status, AutomationActionStatus::Idle);
+            assert_eq!(repaired.action.id, sent.action.id);
+            assert_eq!(repaired.action.send_accepted, Some(true));
+            assert_eq!(repaired.goal_wake.recovery_attempts, 3);
+            assert!(repaired.action.last_error.is_none());
+            supervisor.scan_once(now).await.unwrap();
+            let exhausted = f.store.load(&f.task).unwrap();
+            assert_eq!(exhausted.action.status, AutomationActionStatus::Stalled);
+            assert!(exhausted.action.last_error.is_some());
+            assert_eq!(supervisor.queued_count().await, 0);
+            assert_eq!(f.executor.calls.load(Ordering::SeqCst), 4);
+        }
     }
 }
 
@@ -8591,9 +8716,10 @@ async fn resumed_goal_activity_clears_retry_cooldowns_across_restart() {
                 + u64::from(failure == "ambiguous" && !failed.action.goal_turn_counted)
         );
         assert!(restarted.live_state(&f.task).await.is_none());
-        restarted.scan_once(retry_at).await.unwrap();
+        let before_offline = retry_at.min(resumed_at + AUTOMATION_OFFLINE_AFTER_MS - 1);
+        restarted.scan_once(before_offline).await.unwrap();
         assert_eq!(restarted.queued_count().await, 0);
-        assert!(restarted.run_next(retry_at + 1).await.unwrap().is_none());
+        assert!(restarted.run_next(before_offline).await.unwrap().is_none());
         let reopened = AgentAutomationStore::for_config(&f.config)
             .unwrap()
             .load(&f.task)
@@ -9782,7 +9908,11 @@ async fn configured_retry_timings_drive_dispatch_and_exhaustion_across_restart()
                         .updated_at_ms
                         .unwrap()
                         .max(failed.goal_wake.last_nudged_at_ms.unwrap_or(0))
-                        + seconds * 1000,
+                        + if mode == "goal" {
+                            (seconds * 1000).max(AUTOMATION_OFFLINE_AFTER_MS)
+                        } else {
+                            seconds * 1000
+                        },
                     "{mode}"
                 );
                 now = deadline;
@@ -10079,7 +10209,7 @@ async fn repeated_cooldowns_preserve_real_failure_budget_and_resume_at_availabil
 #[tokio::test]
 async fn goal_recovery_cooldown_does_not_consume_a_goal_retry_or_count_an_extra_turn() {
     let now = 1000 + AUTOMATION_OFFLINE_AFTER_MS;
-    let until = now + 300_000;
+    let until = now + 600_000;
     let (f, supervisor, _) = waiting_fixture(
         vec![
             CooldownOutcome::Accepted,
@@ -10115,7 +10245,7 @@ async fn goal_recovery_cooldown_does_not_consume_a_goal_retry_or_count_an_extra_
                 .updated_at_ms
                 .unwrap()
                 .max(after.goal_wake.last_nudged_at_ms.unwrap_or(0))
-                + 120_000
+                + 120_000_u64.max(AUTOMATION_OFFLINE_AFTER_MS)
         )
     );
 }
