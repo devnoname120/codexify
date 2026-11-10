@@ -563,6 +563,7 @@ mod tests {
         catalog: CapabilityCatalog,
         executions: Mutex<Vec<AutomationExecution>>,
         next_limit: Mutex<Option<bool>>,
+        next_failure: Mutex<Option<(&'static str, bool)>>,
         created_url: Mutex<String>,
         reserve_pairing: std::sync::atomic::AtomicBool,
         released_pairings: Mutex<Vec<String>>,
@@ -616,6 +617,27 @@ mod tests {
                     }),
                 });
             }
+            if let Some((code, accepted)) = self.next_failure.lock().unwrap().take() {
+                return Ok(CompanionActionSnapshot {
+                    protocol_version: 1,
+                    build: self.catalog.build.clone(),
+                    action_id: execution.request.action_id,
+                    state: CompanionActionState::Failed,
+                    send_accepted: accepted,
+                    canonical_url: accepted.then_some(execution.request.expected_url),
+                    selected: execution
+                        .request
+                        .model
+                        .zip(execution.request.effort)
+                        .map(|(model, effort)| CompanionSelection { model, effort }),
+                    last_event_sequence: 0,
+                    cooldown_until_ms: None,
+                    attention: Some(crate::agent_automation::CompanionAttention {
+                        code: code.into(),
+                        message: Some("Fixture failure".into()),
+                    }),
+                });
+            }
             Ok(CompanionActionSnapshot {
                 protocol_version: 1,
                 build: self.catalog.build.clone(),
@@ -664,6 +686,19 @@ mod tests {
         Arc<CreationExecutor>,
         tokio::task::JoinHandle<()>,
     ) {
+        fixture_with_recovery(settings, tickets, false).await
+    }
+
+    async fn fixture_with_recovery(
+        settings: bool,
+        tickets: bool,
+        recovery: bool,
+    ) -> (
+        tempfile::TempDir,
+        OwnerState,
+        Arc<CreationExecutor>,
+        tokio::task::JoinHandle<()>,
+    ) {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
         #[cfg(unix)]
@@ -674,6 +709,10 @@ mod tests {
         let project = root.join("projects");
         std::fs::create_dir_all(project.join("repo")).unwrap();
         let mut config = crate::config::default_config(project);
+        config
+            .markdown_chat
+            .automation
+            .new_conversation_on_load_rate_limit = recovery;
 
         config.markdown_chat.enabled = true;
         config.experimental.agent_tickets = tickets;
@@ -733,6 +772,7 @@ mod tests {
             catalog,
             executions: Mutex::new(Vec::new()),
             next_limit: Mutex::new(None),
+            next_failure: Mutex::new(None),
             created_url: Mutex::new("https://chatgpt.com/c/created-chat".into()),
             reserve_pairing: Default::default(),
             released_pairings: Default::default(),
@@ -801,7 +841,21 @@ mod tests {
         OwnerAutomationContext,
         ConversationIdentity,
     ) {
-        let (temp, state, executor, server) = fixture_with_settings(true).await;
+        schema_source_with_recovery(false).await
+    }
+
+    async fn schema_source_with_recovery(
+        recovery: bool,
+    ) -> (
+        tempfile::TempDir,
+        OwnerState,
+        Arc<CreationExecutor>,
+        tokio::task::JoinHandle<()>,
+        Value,
+        OwnerAutomationContext,
+        ConversationIdentity,
+    ) {
+        let (temp, state, executor, server) = fixture_with_recovery(true, false, recovery).await;
         let _ = prepare_chat(State(state.clone()), Json(Default::default()))
             .await
             .unwrap();
@@ -2391,6 +2445,251 @@ mod tests {
                 .is_none()
         );
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn load_rate_limit_recovery_is_opt_in_pre_send_and_keeps_pairing_and_first_work_together()
+    {
+        for (enabled, code, accepted, goal_only, already_recovering, expect_recovery) in [
+            (
+                true,
+                "conversation_load_rate_limited",
+                false,
+                true,
+                false,
+                true,
+            ),
+            (
+                true,
+                "conversation_load_rate_limited",
+                false,
+                false,
+                false,
+                true,
+            ),
+            (
+                false,
+                "conversation_load_rate_limited",
+                false,
+                true,
+                false,
+                false,
+            ),
+            (
+                true,
+                "conversation_load_rate_limited",
+                true,
+                true,
+                false,
+                false,
+            ),
+            (true, "rate_limited", false, true, false, false),
+            (true, "conversation_unavailable", false, true, false, false),
+            (
+                true,
+                "conversation_load_rate_limited",
+                false,
+                true,
+                true,
+                false,
+            ),
+        ] {
+            let (_temp, state, executor, server, _created, context, source) =
+                schema_source_with_recovery(enabled).await;
+            let supervisor = state.automation.as_ref().unwrap().clone();
+            if goal_only {
+                let goal = context
+                    .store
+                    .set_goal(
+                        &context.task,
+                        "Keep pursuing the existing goal",
+                        crate::markdown_chat::now_ms(),
+                    )
+                    .unwrap();
+                context
+                    .store
+                    .run_goal(&context.task, goal.revision, crate::markdown_chat::now_ms())
+                    .unwrap();
+            } else {
+                context
+                    .chat
+                    .append_user(
+                        "pending-load".into(),
+                        "Preserve this pending message".into(),
+                    )
+                    .await
+                    .unwrap();
+            }
+            if already_recovering {
+                let path = context
+                    .store
+                    .task_directory(&context.task)
+                    .unwrap()
+                    .join("automation.json");
+                let mut saved: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+                saved["pairing"]["loadRateLimitRecovery"] = serde_json::json!(true);
+                std::fs::write(&path, serde_json::to_vec(&saved).unwrap()).unwrap();
+                assert!(
+                    context
+                        .store
+                        .load(&context.task)
+                        .unwrap()
+                        .pairing
+                        .load_rate_limit_recovery
+                );
+            }
+            let before = context.store.load(&context.task).unwrap();
+            executor
+                .reserve_pairing
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            *executor.next_failure.lock().unwrap() = Some((code, accepted));
+            let now = crate::markdown_chat::now_ms()
+                + crate::agent_automation::PAIRING_VERIFICATION_GRACE_MS
+                + 1000;
+            supervisor.scan_once(now).await.unwrap();
+            supervisor.run_next(now).await.unwrap().unwrap();
+            let recovering = context.store.load(&context.task).unwrap();
+            assert_eq!(
+                recovering.pairing.creating_chat, expect_recovery,
+                "{enabled} {code} {accepted}"
+            );
+            assert!(state.continuations.owner_snapshot(&source).unwrap().active);
+            if !expect_recovery {
+                server.abort();
+                continue;
+            }
+            assert!(recovering.pairing.load_rate_limit_recovery);
+            assert_eq!(recovering.selection, before.selection);
+            assert_eq!(
+                recovering
+                    .goal
+                    .as_ref()
+                    .map(|g| (&g.markdown, g.revision, g.status)),
+                before
+                    .goal
+                    .as_ref()
+                    .map(|g| (&g.markdown, g.revision, g.status))
+            );
+            // An unrelated creation must not overtake pairing or its first work.
+            let _ = create_chat(
+                State(state.clone()),
+                Json(body("competing-recovery", false)),
+            )
+            .await
+            .unwrap();
+            assert_eq!(supervisor.queued_count().await, 2);
+            *executor.created_url.lock().unwrap() = "https://chatgpt.com/c/load-replacement".into();
+            let count = executor.executions.lock().unwrap().len();
+            let running = tokio::spawn({
+                let supervisor = supervisor.clone();
+                async move { supervisor.run_next(crate::markdown_chat::now_ms()).await }
+            });
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while executor.executions.lock().unwrap().len() == count
+                    || context
+                        .store
+                        .load(&context.task)
+                        .unwrap()
+                        .pairing
+                        .canonical_url
+                        .is_none()
+                {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .unwrap();
+            let replacement = executor.executions.lock().unwrap()[count].clone();
+            assert_eq!(replacement.task_key, context.task.stable_key());
+            assert!(replacement.request.retain_pairing_window);
+            let competing = tokio::spawn({
+                let supervisor = supervisor.clone();
+                async move { supervisor.run_next(crate::markdown_chat::now_ms()).await }
+            });
+            tokio::time::sleep(Duration::from_millis(900)).await;
+            assert!(
+                !running.is_finished(),
+                "rate-limit recovery must outlast the ordinary short pairing wait"
+            );
+            assert!(
+                !competing.is_finished(),
+                "unrelated work must not navigate away"
+            );
+            let ActionPrompt::CreateChat {
+                continuation_token,
+                reference,
+                ..
+            } = replacement.request.prompt
+            else {
+                panic!("replacement initialization expected")
+            };
+            let destination =
+                ConversationIdentity::from_openai_session("load-replacement-owner").unwrap();
+            state
+                .continuations
+                .claim(&destination, &continuation_token, |_, _| Ok(()))
+                .unwrap();
+            context
+                .store
+                .verify_pairing_reference(
+                    &context.task,
+                    2,
+                    &reference,
+                    crate::markdown_chat::now_ms(),
+                )
+                .unwrap();
+            supervisor.notify();
+            tokio::time::timeout(Duration::from_secs(3), running)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(2), competing)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert!(!state.continuations.owner_snapshot(&source).unwrap().active);
+            let after = context.store.load(&context.task).unwrap();
+            assert_eq!(after.selection, before.selection);
+            assert_eq!(
+                after
+                    .goal
+                    .as_ref()
+                    .map(|g| (&g.markdown, g.revision, g.status)),
+                before
+                    .goal
+                    .as_ref()
+                    .map(|g| (&g.markdown, g.revision, g.status))
+            );
+            assert_eq!(
+                after.pairing.canonical_url.as_deref(),
+                Some("https://chatgpt.com/c/load-replacement")
+            );
+            assert!(
+                !after.pairing.load_rate_limit_recovery,
+                "the first accepted work prompt ends recovery"
+            );
+            let requests = executor.executions.lock().unwrap().clone();
+            let follow_up = &requests[count + 1];
+            assert_eq!(follow_up.task_key, context.task.stable_key());
+            assert_eq!(
+                follow_up.request.url,
+                "https://chatgpt.com/c/load-replacement"
+            );
+            assert_eq!(
+                follow_up.request.pairing_continuation_of.as_deref(),
+                Some(replacement.request.action_id.as_str())
+            );
+            assert!(matches!(
+                (&follow_up.request.prompt, goal_only),
+                (ActionPrompt::OfflineGoal { .. }, true)
+                    | (ActionPrompt::OfflineChat { .. }, false)
+            ));
+            assert_ne!(requests[count + 2].task_key, context.task.stable_key());
+            server.abort();
+        }
     }
 
     #[tokio::test]

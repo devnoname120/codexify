@@ -74,6 +74,29 @@ class BlockingDriver extends ImmediateDriver {
   }
 }
 
+test("pairing lease renewal is authenticated and preserves the held page",async()=>{
+  class PairDriver extends ImmediateDriver {
+    override async execute(execution:DriverExecution){
+      execution.emit({type:'send_accepted'});
+      execution.emit({type:'conversation_created',canonicalUrl:'https://chatgpt.com/c/held'});
+      execution.emit({type:'submission_complete',canonicalUrl:'https://chatgpt.com/c/held'});
+    }
+  }
+  const root=await mkdtemp(join(tmpdir(),'pair-lease-control-'));
+  const coordinator=new SingleWindowCoordinator(new PairDriver(),TEST_BUILD);
+  const server=await startControlServer(coordinator,join(root,'descriptor.json'));
+  try{
+    const request:ExecuteActionRequest={...executeBody(),url:'https://chatgpt.com/new',expectedUrl:'https://chatgpt.com/new',model:null,effort:null,retainPairingWindow:true,prompt:{kind:'create_chat',continuationToken:'A'.repeat(43),reference:Buffer.alloc(32,1).toString('base64url'),setupReference:null}};
+    await coordinator.execute(request);for await(const _ of coordinator.events(request.actionId,0)){}
+    const endpoint=server.endpoint+'/v1/actions/refresh-pairing',body=JSON.stringify({actionId:request.actionId});
+    expect((await fetch(endpoint,{method:'POST',body})).status).toBe(401);
+    const headers={Authorization:`Bearer ${server.token}`,'Content-Type':'application/json'};
+    expect(await(await fetch(endpoint,{method:'POST',headers,body})).json()).toEqual({retained:true});
+    expect((await coordinator.health()).activeActionId).toBe(request.actionId);
+    expect(await(await fetch(endpoint,{method:'POST',headers,body:JSON.stringify({actionId:'other'})})).json()).toEqual({retained:false});
+  }finally{await server.close();}
+});
+
 class PrivateFailureDriver extends ImmediateDriver {
   override async capabilities(): Promise<CapabilityCatalog> {
     throw new Error(

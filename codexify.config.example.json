@@ -125,13 +125,14 @@
       "connectorName": "",
       "requestBlockList": [
         "^https?://(www\\.)?chatgpt\\.com/.*/rgstr",
-        "^https?://(www\\.)?chatgpt\\.com/backend-api/.*/conversations",
-        "^https?://(www\\.)?chatgpt\\.com/backend-api/conversations",
+        "^https?://(www\\.)?chatgpt\\.com/backend-api/.*/conversations(?:\\?|$)",
+        "^https?://(www\\.)?chatgpt\\.com/backend-api/conversations(?:\\?|$)",
         "^https?://(www\\.)?chatgpt\\.com/backend-api/sidebar",
         "^https?://(www\\.)?chatgpt\\.com/backend-api/.*/sidebar"
       ],
       "maxQueuedActions": 64,
       "autoApproveToolCalls": true,
+      "newConversationOnLoadRateLimit": false,
       "automaticRetries": true,
       "retryTimings": {
         "actionDelaysSeconds": [30, 60, 120, 240, 480],

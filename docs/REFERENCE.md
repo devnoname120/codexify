@@ -1984,7 +1984,10 @@ between tool calls. Change it under **Chats & goals → Offline timeout (minutes
 then restart Codexify. New tool activity resets the interval. Active tool calls
 and explicit waits continue to suppress premature recovery. The separately
 configured retry schedules are preserved. The browser always uses one shared
-window rather than a configurable tab count.
+window rather than a configurable tab count. After a goal continuation is sent,
+each recovery wait is at least the offline timeout, even when its configured
+retry delay is shorter. The final attempt receives this full wait before being
+marked exhausted; an accepted Send alone is not a failed recovery attempt.
 
 The dedicated browser opts out of ChatGPT's client-side Work rollout, keeping
 its automation in Chat mode and preventing the merged model picker from silently
@@ -2004,6 +2007,11 @@ patterns, each 1–4096 printable ASCII characters; Chromium additionally checks
 regex syntax and compiled-memory limits. Non-ASCII URL characters must be matched
 in their URL-encoded or punycode form.
 
+The conversation-list defaults match only the list endpoint, with or without a
+query, so individual `/conversations/<id>` requests remain available. The exact
+older shipped list patterns are narrowed when loaded; custom expressions are
+preserved.
+
 For example, merge this into the existing `agentChat.automation` object:
 
 ```json
@@ -2011,8 +2019,8 @@ For example, merge this into the existing `agentChat.automation` object:
   "requestBlockingEnabled": true,
   "requestBlockList": [
     "^https?://(www\\.)?chatgpt\\.com/.*/rgstr",
-    "^https?://(www\\.)?chatgpt\\.com/backend-api/.*/conversations",
-    "^https?://(www\\.)?chatgpt\\.com/backend-api/conversations",
+    "^https?://(www\\.)?chatgpt\\.com/backend-api/.*/conversations(?:\\?|$)",
+    "^https?://(www\\.)?chatgpt\\.com/backend-api/conversations(?:\\?|$)",
     "^https?://(www\\.)?chatgpt\\.com/backend-api/sidebar",
     "^https?://(www\\.)?chatgpt\\.com/backend-api/.*/sidebar"
   ]
@@ -3550,6 +3558,26 @@ is unsupported.
 
 ### Automatic error retries
 
+`agentChat.automation.newConversationOnLoadRateLimit` defaults to `false`.
+Enable **New conversation when loading is rate-limited** under **Settings →
+Chats & goals → Automatic retries**, then restart Codexify, to recover from a
+confirmed HTTP 429 while loading an existing ChatGPT conversation. This includes
+the transcript API returning 429 after the document itself loaded successfully.
+The same Codexify task, workspace, history, selected model/effort, pending messages,
+and goal continue in a freshly created and automatically paired ChatGPT chat.
+The shared browser stays on that chat through verification and acceptance of
+the first work prompt; other chats and account maintenance cannot navigate away
+during the handoff. A failure before the first work prompt is sent retains the
+page for its normal retry policy. Stop/cancellation, expired pairing, or loss of
+the browser reservation ends the handoff.
+
+This option follows the automatic-retry and per-action pause controls. It does
+not trigger for ordinary local cooldown waits, authentication failures, model
+limits, unconfirmed network errors, or a prompt that may already have been sent.
+A failed replacement creation does not recursively create more conversations.
+Rate limits and `Retry-After` still apply to subsequent existing-chat loads;
+fresh creation is a separate browser operation.
+
 `agentChat.automation.automaticRetries` defaults to `true`. Change **Settings →
 Chats & goals → Automatic retries** to apply the policy immediately, including
 retries already queued. With it off, initial sends and normal goal continuations
@@ -3564,7 +3592,7 @@ shared browser. Defaults preserve the existing behavior:
 | --- | --- | --- |
 | `actionDelaysSeconds` | `[30, 60, 120, 240, 480]` | Confirmed-unsent browser action failures. |
 | `chatgptAccessDelaysSeconds` | `[180, 300, 600, 1200, 1800, 3600]` | Sign-in, conversation access, and actual rate-limit failures. |
-| `goalRecoveryDelaysSeconds` | `[60, 120, 240]` | Recover an active goal when the agent remains offline after a continuation. |
+| `goalRecoveryDelaysSeconds` | `[60, 120, 240]` | Recover an active goal after a continuation; each effective wait is at least `offlineTimeoutMinutes`. |
 | `jitterPercent` | `10` | Add a stable random wait between 0 and this percentage of each retry delay or approval resume wait. Set to `0` for no jitter. |
 | `approvalResumeGraceSeconds` | `180` | Wait for agent activity after accepting an approval before considering another continuation. |
 | `conversationLoadIntervalSeconds` | `180` | Minimum interval between conversation document loads or reloads across all chats. |

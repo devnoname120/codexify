@@ -2078,6 +2078,7 @@ fn configured_retry_timings_survive_restart_and_shortening_without_changing_send
             let bytes = serde_json::to_vec(&state).unwrap();
             let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
             assert!(json.get("retryTimings").is_none());
+            assert!(json.get("offlineResponseGraceMs").is_none());
             std::fs::write(&path, &bytes).unwrap();
             let restarted = AgentAutomationStore::for_state_root(&config, root.path())
                 .unwrap()
@@ -2086,7 +2087,14 @@ fn configured_retry_timings_survive_restart_and_shortening_without_changing_send
             assert_eq!(restarted.automatic_retry_limit(), delays.len());
             assert_eq!(
                 restarted.automatic_retry_at_ms(),
-                delays.get(attempt).map(|seconds| 100 + seconds * 1000)
+                delays.get(attempt).map(|seconds| {
+                    let delay = seconds * 1000;
+                    100 + if accepted {
+                        delay.max(config.markdown_chat.offline_timeout_minutes * 60_000)
+                    } else {
+                        delay
+                    }
+                })
             );
             assert_eq!(std::fs::read(&path).unwrap(), bytes);
             if !accepted {

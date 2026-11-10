@@ -341,6 +341,7 @@ impl ConversationContinuationStore {
         Ok(token)
     }
 
+    #[cfg(test)]
     pub(crate) fn claim<F>(
         &self,
         physical: &ConversationIdentity,
@@ -349,6 +350,20 @@ impl ConversationContinuationStore {
     ) -> Result<ClaimedContinuation, String>
     where
         F: FnOnce(&ConversationIdentity, &Path) -> Result<(), String>,
+    {
+        self.claim_with_generation(physical, token, |task, workspace, _| {
+            validate(task, workspace)
+        })
+    }
+
+    pub(crate) fn claim_with_generation<F>(
+        &self,
+        physical: &ConversationIdentity,
+        token: &str,
+        validate: F,
+    ) -> Result<ClaimedContinuation, String>
+    where
+        F: FnOnce(&ConversationIdentity, &Path, u64) -> Result<(), String>,
     {
         validate_token(token)?;
         let digest = token_digest(token);
@@ -398,7 +413,7 @@ impl ConversationContinuationStore {
             "Conversation handoff state contains an invalid task identity".to_string()
         })?;
         let workspace = PathBuf::from(&token_record.workspace);
-        validate(&task, &workspace)?;
+        validate(&task, &workspace, token_record.generation)?;
 
         let mut next = runtime.stored.clone();
         let next_task = next

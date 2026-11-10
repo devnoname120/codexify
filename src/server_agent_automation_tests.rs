@@ -24,6 +24,15 @@ impl crate::agent_automation::AutomationExecutor for ServerAutomationNoopExecuto
 
 #[tokio::test]
 async fn unbound_pairing_continues_the_existing_task_before_verifying_without_delivering_work() {
+    pairing_continues_existing_task(false).await;
+}
+
+#[tokio::test]
+async fn selected_workspace_pairing_continues_the_existing_task_before_verifying_without_delivering_work() {
+    pairing_continues_existing_task(true).await;
+}
+
+async fn pairing_continues_existing_task(preselected: bool) {
     let root = tempfile::tempdir().unwrap();
     let workspace = std::fs::canonicalize(root.path()).unwrap();
     let mut config = crate::config::default_config(workspace.clone());
@@ -39,6 +48,9 @@ async fn unbound_pairing_continues_the_existing_task_before_verifying_without_de
     let source = ConversationIdentity::from_openai_session(source_name).unwrap();
     let target = ConversationIdentity::from_openai_session(target_name).unwrap();
     bind_fixture_workspace(&handler, Some(&source)).await;
+    if preselected {
+        bind_fixture_workspace(&handler, Some(&target)).await;
+    }
     let effective = handler.effective_task_config(Some(&source), workspace.clone()).unwrap();
     let store = Arc::new(crate::agent_automation::AgentAutomationStore::for_config(&effective).unwrap());
     let chat = handler.markdown_chat.chat(&effective, Some(&source), &handler.session).unwrap();
@@ -66,6 +78,15 @@ async fn unbound_pairing_continues_the_existing_task_before_verifying_without_de
     assert_eq!(invalid.is_error, Some(true));
     assert_eq!(store.load(&source).unwrap().pairing.pending.unwrap().owner_generation, 0);
 
+    if preselected {
+        // Ordinary handoffs still cannot replace a selected workspace. Only
+        // a live pairing handoff to this same workspace may reuse the chat.
+        let ordinary = continuations.issue_token_for_owner(&source, 0, &workspace).unwrap();
+        let rejected = client.call_tool(automation_request("continue_task", json!({"continuationToken":ordinary}), target_name)).await.unwrap();
+        assert_eq!(rejected.is_error, Some(true));
+        assert_eq!(continuations.owner_snapshot(&target).unwrap().task, target);
+    }
+
     let mut tokens = Vec::new();
     for _ in 0..2 {
         let response = client.call_tool(automation_request("automation_verify_pairing", json!({"reference":issue.reference}), target_name)).await.unwrap();
@@ -78,7 +99,19 @@ async fn unbound_pairing_continues_the_existing_task_before_verifying_without_de
         tokens.push(content.split('`').nth(3).unwrap().to_owned());
     }
     assert_ne!(tokens[0], tokens[1]);
-    assert!(bindings.selected_project_root(&config, &target).unwrap().is_none());
+    if preselected {
+        let other = workspace.join("another-workspace");
+        std::fs::create_dir(&other).unwrap();
+        let other_name = "pairing-other-workspace";
+        let other_chat = ConversationIdentity::from_openai_session(other_name).unwrap();
+        bindings.select_project_root(&config, &other_chat, &other.to_string_lossy()).await.unwrap();
+        authorizations.authorize(Some(&other_chat), &SessionState::new()).unwrap();
+        let rejected = client.call_tool(automation_request("automation_verify_pairing", json!({"reference":issue.reference}), other_name)).await.unwrap();
+        assert_eq!(rejected.is_error, Some(true));
+        assert_eq!(store.load(&source).unwrap().pairing.pending.unwrap().owner_generation, 1);
+        assert_eq!(continuations.owner_snapshot(&other_chat).unwrap().task, other_chat);
+    }
+    assert_eq!(bindings.selected_project_root(&config, &target).unwrap(), preselected.then(||workspace.clone()));
     assert!(continuations.owner_snapshot(&source).unwrap().active);
     // A delayed source call must not revoke the pairing reserved for the next owner.
     supervisor.register_task(handle).await.unwrap();

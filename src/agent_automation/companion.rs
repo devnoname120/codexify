@@ -769,6 +769,22 @@ impl BrowserCompanionClient {
         Ok(receipt)
     }
 
+    pub async fn refresh_pairing_window(&self, action_id: &str) -> Result<(), String> {
+        validate_opaque(action_id, "browser action ID")?;
+        let value: serde_json::Value = self
+            .request_json(
+                Method::POST,
+                "/v1/actions/refresh-pairing",
+                Some(&serde_json::json!({"actionId":action_id})),
+                &CancellationToken::new(),
+            )
+            .await?;
+        if value["retained"] != true {
+            return Err("The browser pairing reservation is no longer held".into());
+        }
+        Ok(())
+    }
+
     pub async fn release_pairing_window(&self, action_id: &str) -> Result<(), String> {
         validate_opaque(action_id, "browser action ID")?;
         let _: serde_json::Value = self

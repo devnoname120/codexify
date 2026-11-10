@@ -394,7 +394,7 @@ export class ChatGptBrowserDriver implements BrowserDriver {
       try {
         await throwIfSessionAttention(page);
       } catch (error) {
-        if (error instanceof BrowserCompanionError && ["conversation_unavailable","conversation_limit"].includes(error.code)) {
+        if (error instanceof BrowserCompanionError && ["conversation_unavailable","conversation_limit","conversation_load_rate_limited"].includes(error.code)) {
           // The account was verified independently. Keep it signed in; the
           // shared navigation budget enforces the conversation-load cooldown.
           return {authenticated:true, accountFingerprint:account.fingerprint, status:"idle", detail:error.message};

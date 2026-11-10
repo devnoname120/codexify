@@ -139,6 +139,7 @@ pub struct AgentAutomationConfig {
     pub max_queued_actions: usize,
     pub auto_approve_tool_calls: bool,
     pub automatic_retries: bool,
+    pub new_conversation_on_load_rate_limit: bool,
     pub retry_timings: RetryTimings,
     pub chatgpt_project_url: Option<String>,
     #[serde(deserialize_with = "deserialize_request_block_list")]
@@ -155,12 +156,13 @@ impl Default for AgentAutomationConfig {
             max_queued_actions: DEFAULT_AUTOMATION_MAX_QUEUED_ACTIONS,
             auto_approve_tool_calls: true,
             automatic_retries: true,
+            new_conversation_on_load_rate_limit: false,
             retry_timings: RetryTimings::default(),
             chatgpt_project_url: None,
             request_block_list: vec![
                 r"^https?://(www\.)?chatgpt\.com/.*/rgstr".into(),
-                r"^https?://(www\.)?chatgpt\.com/backend-api/.*/conversations".into(),
-                r"^https?://(www\.)?chatgpt\.com/backend-api/conversations".into(),
+                r"^https?://(www\.)?chatgpt\.com/backend-api/.*/conversations(?:\?|$)".into(),
+                r"^https?://(www\.)?chatgpt\.com/backend-api/conversations(?:\?|$)".into(),
                 r"^https?://(www\.)?chatgpt\.com/backend-api/sidebar".into(),
                 r"^https?://(www\.)?chatgpt\.com/backend-api/.*/sidebar".into(),
             ],
@@ -248,7 +250,19 @@ fn deserialize_request_block_list<'de, D>(deserializer: D) -> Result<Vec<String>
 where
     D: serde::Deserializer<'de>,
 {
-    Option::<Vec<String>>::deserialize(deserializer).map(Option::unwrap_or_default)
+    let mut patterns = Option::<Vec<String>>::deserialize(deserializer)?.unwrap_or_default();
+    for pattern in &mut patterns {
+        // These shipped list filters predate /conversations/<id>. Upgrade only
+        // the exact legacy defaults, retaining every custom expression.
+        if matches!(
+            pattern.as_str(),
+            r"^https?://(www\.)?chatgpt\.com/backend-api/.*/conversations"
+                | r"^https?://(www\.)?chatgpt\.com/backend-api/conversations"
+        ) {
+            pattern.push_str(r"(?:\?|$)");
+        }
+    }
+    Ok(patterns)
 }
 
 pub(crate) fn now_ms() -> u64 {
@@ -743,6 +757,51 @@ mod tests {
                 serde_json::json!({"retryTimings":{"unknownDelay":42}})
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn conversation_list_filters_allow_individual_chats_and_upgrade_only_legacy_defaults() {
+        let defaults = AgentAutomationConfig::default();
+        let patterns: Vec<_> = defaults
+            .request_block_list
+            .iter()
+            .map(|value| regex::Regex::new(value).unwrap())
+            .collect();
+        for url in [
+            "https://chatgpt.com/backend-api/conversations",
+            "https://chatgpt.com/backend-api/conversations?limit=20",
+            "https://chatgpt.com/backend-api/gizmos/project/conversations?limit=50",
+        ] {
+            assert!(
+                patterns.iter().any(|pattern| pattern.is_match(url)),
+                "list must remain blocked: {url}"
+            );
+        }
+        for url in [
+            "https://chatgpt.com/backend-api/conversations/chat-id?num_turns=10",
+            "https://chatgpt.com/backend-api/gizmos/project/conversations/chat-id",
+            "https://chatgpt.com/backend-api/conversation",
+        ] {
+            assert!(
+                !patterns.iter().any(|pattern| pattern.is_match(url)),
+                "chat must remain available: {url}"
+            );
+        }
+        let config: AgentAutomationConfig =
+            serde_json::from_value(serde_json::json!({"requestBlockList":[
+                r"^https?://(www\.)?chatgpt\.com/backend-api/.*/conversations",
+                r"^https?://(www\.)?chatgpt\.com/backend-api/conversations",
+                r"^https://example\.com/conversations"
+            ]}))
+            .unwrap();
+        assert_eq!(
+            &config.request_block_list[..2],
+            &defaults.request_block_list[1..3]
+        );
+        assert_eq!(
+            config.request_block_list[2],
+            r"^https://example\.com/conversations"
         );
     }
 

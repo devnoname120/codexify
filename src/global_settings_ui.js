@@ -174,6 +174,7 @@ body.system-progress-visible{height:100dvh;display:flex;flex-direction:column}bo
     'agentChat.offlineTimeoutMinutes':['Minutes without an agent tool call before a chat is considered offline and automatic follow-ups may be sent. Whole minutes, from 1 to 1440. Restart to apply.','chats','Offline timeout (minutes)'],
     'agentChat.rolloutEnabled':['Keep chronological per-chat progress reports and checkpoint reminders. Independent of turn renewal. Applies immediately.','chats','Progress journal'],
     'agentChat.automation.automaticRetries':['Retry failed browser actions automatically. Turn off to keep manual Retry available without scheduling retries. Applies immediately.','chats','Automatic retries'],
+    'agentChat.automation.newConversationOnLoadRateLimit':['Create and auto-pair a replacement when ChatGPT rate-limits loading an existing conversation. Preserve the task and stay on the replacement through pairing and the first work message. Restart to apply.','chats','New conversation when loading is rate-limited'],
     'agentChat.automation.retryTimings.actionDelaysSeconds':['Delays between retries when a browser action failed before sending. One delay per retry, in order; stop after the last entry. Use s, m, or h, for example 30s, 1m, 2m. Restart to apply.','chats','Failed send retry delays'],
     'agentChat.automation.retryTimings.chatgptAccessDelaysSeconds':['Retry delays for sign-in, inaccessible conversations, rate limits, and shared loading cooldowns. One delay per retry, then stop. Use s, m, or h. Restart to apply.','chats','ChatGPT access retry delays'],
     'agentChat.automation.retryTimings.goalRecoveryDelaysSeconds':['Delays before trying to recover a goal when the agent stays offline after a continuation. One delay per retry, then stop. Use s, m, or h. Restart to apply.','chats','Goal recovery retry delays'],
@@ -296,7 +297,7 @@ body.system-progress-visible{height:100dvh;display:flex;flex-direction:column}bo
     if(group==='notifications')section=path.includes('.events.')?'Events':'Delivery';
     if(group==='browser')section='Browser companion';
     if(path.startsWith('agentChat.turnRenewal'))section='Turn renewal';
-    if(path.startsWith('agentChat.automation.retryTimings')||path==='agentChat.automation.automaticRetries')section='Automatic retries';
+    if(path.startsWith('agentChat.automation.retryTimings')||path==='agentChat.automation.automaticRetries'||path==='agentChat.automation.newConversationOnLoadRateLimit')section='Automatic retries';
     if(path==='agentChat.rolloutEnabled'||path==='agentChat.rolloutReminderInterval')section='Progress journal';
     if(group==='connections')section=['apiKey','conversationAuthToken','allowedHosts'].includes(root)?'Authentication & access':'Integrations';
     return {path,sample,category:group,section,name:meta?.[2]||label(key),help:meta?.[0]||'',secret:/(?:token|key|password|secret)/i.test(key)&&(sample==null||typeof sample!=='object')};
