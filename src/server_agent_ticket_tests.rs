@@ -24,11 +24,8 @@ async fn ticket_test_configuration_keeps_chat_state_inside_the_fixture() {
     for enabled in [false, true] {
         let root = tempfile::tempdir().unwrap();
         let workspace = root.path().canonicalize().unwrap();
-        let mut handler = handler_with_tools(
-            &workspace,
-            Vec::new(),
-            crate::types::ToolLogLevel::Info,
-        );
+        let mut handler =
+            handler_with_tools(&workspace, Vec::new(), crate::types::ToolLogLevel::Info);
         handler.config = Arc::new(ticket_test_config(&workspace, enabled));
         // Fail before creating state if replacing the fixture config restores
         // the default storage in the user's real home directory.
@@ -47,11 +44,18 @@ async fn ticket_test_configuration_keeps_chat_state_inside_the_fixture() {
         assert!(path.starts_with(&workspace));
         chat.ensure().await.unwrap();
         chat.warn_ticket_rejection().await.unwrap();
-        assert!(std::fs::read_to_string(&path).unwrap().contains(crate::agent_tickets::WARNING));
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains(crate::agent_tickets::WARNING)
+        );
         drop(chat);
         drop(handler);
         root.close().unwrap();
-        assert!(!path.exists(), "dropping the fixture must remove its chat state");
+        assert!(
+            !path.exists(),
+            "dropping the fixture must remove its chat state"
+        );
     }
 }
 
