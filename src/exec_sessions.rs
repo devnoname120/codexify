@@ -118,8 +118,9 @@ pub fn shell_type_of(bin: &str) -> ShellType {
     }
 }
 
-/// The shell used when the caller names none. `$SHELL` wins on every platform;
-/// Windows falls back to PowerShell, matching Codex.
+/// The shell used when the caller names none. `$SHELL` wins on every platform.
+/// Windows prefers PowerShell 7 but does not implicitly select Windows
+/// PowerShell 5.1 because the legacy host is not a safe implicit execution path.
 pub fn default_shell_bin() -> String {
     if let Ok(shell) = std::env::var("SHELL")
         && !shell.is_empty()
@@ -127,10 +128,45 @@ pub fn default_shell_bin() -> String {
         return shell;
     }
     if cfg!(windows) {
-        "powershell.exe".to_string()
+        preferred_windows_shell_bin()
     } else {
         "/bin/sh".to_string()
     }
+}
+
+fn preferred_windows_shell_bin() -> String {
+    windows_pwsh_candidates()
+        .into_iter()
+        .find_map(|candidate| executable_on_path(&candidate))
+        .unwrap_or_else(|| "cmd.exe".to_string())
+}
+
+fn windows_pwsh_candidates() -> Vec<String> {
+    let mut candidates = vec!["pwsh.exe".to_string(), "pwsh".to_string()];
+    for variable in ["ProgramW6432", "ProgramFiles"] {
+        let Some(root) = std::env::var_os(variable).map(std::path::PathBuf::from) else {
+            continue;
+        };
+        let candidate = root.join("PowerShell").join("7").join("pwsh.exe");
+        let candidate = candidate.to_string_lossy().into_owned();
+        if !candidates.contains(&candidate) {
+            candidates.push(candidate);
+        }
+    }
+    candidates.push(r"C:\Program Files\PowerShell\7\pwsh.exe".to_string());
+    candidates
+}
+
+#[cfg(any(windows, test))]
+fn windows_powershell_candidates() -> Vec<String> {
+    windows_pwsh_candidates()
+        .into_iter()
+        .chain([
+            "powershell.exe".to_string(),
+            "powershell".to_string(),
+            r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe".to_string(),
+        ])
+        .collect()
 }
 
 fn ultimate_fallback_shell_bin() -> String {
@@ -170,29 +206,32 @@ pub fn resolve_model_shell(explicit: &str) -> Vec<String> {
         return shell_argv(default);
     }
 
-    let candidates: &[&str] = match requested.as_str() {
-        "zsh" => &["zsh", "/bin/zsh"],
-        "bash" => &["bash", "/bin/bash", "/usr/bin/bash"],
-        "sh" => &["sh", "/bin/sh"],
+    let candidates: Vec<String> = match requested.as_str() {
+        "zsh" => ["zsh", "/bin/zsh"]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+        "bash" => ["bash", "/bin/bash", "/usr/bin/bash"]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+        "sh" => ["sh", "/bin/sh"].into_iter().map(str::to_string).collect(),
         #[cfg(windows)]
-        "pwsh" => &[
-            "pwsh",
-            "powershell",
-            r"C:\Program Files\PowerShell\7\pwsh.exe",
-        ],
+        "pwsh" => windows_pwsh_candidates(),
         #[cfg(not(windows))]
-        "pwsh" => &["pwsh", "powershell", "/usr/local/bin/pwsh"],
+        "pwsh" => ["pwsh", "powershell", "/usr/local/bin/pwsh"]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
         #[cfg(windows)]
-        "powershell" => &[
-            "powershell",
-            "pwsh",
-            r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
-            r"C:\Program Files\PowerShell\7\pwsh.exe",
-        ],
+        "powershell" => windows_powershell_candidates(),
         #[cfg(not(windows))]
-        "powershell" => &["powershell", "pwsh", "/usr/local/bin/pwsh"],
-        "cmd" => &["cmd.exe", "cmd"],
-        _ => &[],
+        "powershell" => ["powershell", "pwsh", "/usr/local/bin/pwsh"]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+        "cmd" => ["cmd.exe", "cmd"].into_iter().map(str::to_string).collect(),
+        _ => Vec::new(),
     };
     let bin = candidates
         .iter()
@@ -212,11 +251,7 @@ fn shell_basename(path: &str) -> Option<String> {
 }
 
 fn shell_names_match(actual: &str, requested: &str) -> bool {
-    actual == requested
-        || matches!(
-            (actual, requested),
-            ("pwsh", "powershell") | ("powershell", "pwsh")
-        )
+    actual == requested || matches!((actual, requested), ("pwsh", "powershell"))
 }
 
 fn shell_argv(bin: String) -> Vec<String> {
@@ -1711,6 +1746,27 @@ mod tests {
         let resolved = resolve_model_shell(supplied);
         assert_ne!(resolved[0], supplied);
         assert_eq!(shell_type_of(&resolved[0]), shell_type_of(supplied));
+    }
+
+    #[test]
+    fn pwsh_requests_never_match_legacy_windows_powershell() {
+        assert!(shell_names_match("pwsh", "powershell"));
+        assert!(!shell_names_match("powershell", "pwsh"));
+        assert!(
+            windows_pwsh_candidates()
+                .iter()
+                .all(|candidate| shell_basename(candidate).as_deref() == Some("pwsh"))
+        );
+        let generic = windows_powershell_candidates();
+        let first_legacy = generic
+            .iter()
+            .position(|candidate| shell_basename(candidate).as_deref() == Some("powershell"))
+            .unwrap();
+        assert!(
+            generic[..first_legacy]
+                .iter()
+                .all(|candidate| shell_basename(candidate).as_deref() == Some("pwsh"))
+        );
     }
 
     #[test]

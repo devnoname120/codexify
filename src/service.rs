@@ -926,21 +926,6 @@ fn encode_powershell_script(script: &str) -> String {
     base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
-#[cfg(any(target_os = "windows", test))]
-fn windows_hidden_service_script(spec: &ServiceSpec) -> String {
-    let executable = powershell_quote(&spec.executable.to_string_lossy());
-    let config = powershell_quote(&spec.config.to_string_lossy());
-    let log = powershell_quote(
-        &spec
-            .home
-            .join(".codexify")
-            .join("logs")
-            .join(LOG_FILE)
-            .to_string_lossy(),
-    );
-    windows_launcher_source(&executable, &config, &log)
-}
-
 #[cfg(any(windows, test))]
 fn windows_launcher_source(executable: &str, config: &str, log: &str) -> String {
     format!(
@@ -999,34 +984,24 @@ while ($true) {{
 #[cfg(any(target_os = "windows", test))]
 fn windows_action_arguments(spec: &ServiceSpec) -> String {
     format!(
-        "-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File \"{}\"",
-        windows_launcher_path(spec).display()
+        "service launch --scheduled-task --config \"{}\"",
+        spec.config.display()
     )
 }
 
-#[cfg(any(windows, test))]
-fn windows_launcher_path(spec: &ServiceSpec) -> PathBuf {
-    spec.home.join(".codexify/service/supervisor.ps1")
-}
-
-#[cfg(windows)]
-fn write_windows_launcher(spec: &ServiceSpec) -> anyhow::Result<()> {
-    // Windows PowerShell 5.1 otherwise reads non-ASCII paths using the ANSI
-    // code page. The BOM is required for a file-based UTF-8 launcher.
-    write_definition(
-        &windows_launcher_path(spec),
-        &format!("\u{feff}{}", windows_hidden_service_script(spec)),
-        0o600,
-    )
+#[cfg(target_os = "windows")]
+fn windows_registration_path(spec: &ServiceSpec) -> PathBuf {
+    spec.home.join(".codexify/service/install.ps1")
 }
 
 #[cfg(any(target_os = "windows", test))]
 fn windows_install_script(spec: &ServiceSpec) -> String {
+    let executable = powershell_quote(&spec.executable.to_string_lossy());
     let arguments = powershell_quote(&windows_action_arguments(spec));
     let working_dir = powershell_quote(&spec.working_dir.to_string_lossy());
     let task = powershell_quote(WINDOWS_TASK);
     format!(
-        "$ErrorActionPreference = 'Stop'\n$taskName = {task}\n$existing = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue\nif ($existing) {{ Stop-ScheduledTask -InputObject $existing -ErrorAction SilentlyContinue }}\n$identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name\n$engine = (Get-Process -Id $PID).Path\n$action = New-ScheduledTaskAction -Execute $engine -Argument {arguments} -WorkingDirectory {working_dir}\n$trigger = New-ScheduledTaskTrigger -AtLogOn -User $identity\n$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew\n$principal = New-ScheduledTaskPrincipal -UserId $identity -LogonType Interactive -RunLevel Limited\nRegister-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Force | Out-Null\nEnable-ScheduledTask -TaskName $taskName | Out-Null\nStart-ScheduledTask -TaskName $taskName\n"
+        "$ErrorActionPreference = 'Stop'\n$taskName = {task}\n$existing = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue\nif ($existing) {{ Stop-ScheduledTask -InputObject $existing -ErrorAction SilentlyContinue }}\n$identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name\n$action = New-ScheduledTaskAction -Execute {executable} -Argument {arguments} -WorkingDirectory {working_dir}\n$trigger = New-ScheduledTaskTrigger -AtLogOn -User $identity\n$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew\n$principal = New-ScheduledTaskPrincipal -UserId $identity -LogonType Interactive -RunLevel Limited\nRegister-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Force | Out-Null\nEnable-ScheduledTask -TaskName $taskName | Out-Null\nStart-ScheduledTask -TaskName $taskName\n"
     )
 }
 
@@ -1576,8 +1551,7 @@ fn platform_status() -> anyhow::Result<ServiceStatus> {
 
 #[cfg(target_os = "windows")]
 fn platform_install(spec: &ServiceSpec) -> anyhow::Result<()> {
-    write_windows_launcher(spec)?;
-    let registration = windows_launcher_path(spec).with_file_name("install.ps1");
+    let registration = windows_registration_path(spec);
     write_definition(
         &registration,
         &format!("\u{feff}{}", windows_install_script(spec)),
@@ -1587,13 +1561,7 @@ fn platform_install(spec: &ServiceSpec) -> anyhow::Result<()> {
         windows_file_command(&registration),
         "install the Codexify scheduled task",
     )
-    .with_context(|| {
-        format!(
-            "registration script: {}; launcher: {}",
-            registration.display(),
-            windows_launcher_path(spec).display()
-        )
-    })?;
+    .with_context(|| format!("registration script: {}", registration.display()))?;
     Ok(())
 }
 
@@ -1969,6 +1937,206 @@ impl Drop for WindowsChildJob {
     fn drop(&mut self) {
         unsafe {
             windows_sys::Win32::Foundation::CloseHandle(self.0);
+        }
+    }
+}
+
+#[cfg(windows)]
+pub async fn run_launcher(config: PathBuf) -> anyhow::Result<()> {
+    if !config.is_absolute() {
+        bail!("service launcher requires an absolute --config path");
+    }
+    let config = normalize_native_path(config);
+    validate_native_path(&config)?;
+    let executable = std::env::current_exe()
+        .context("locate the running codexify executable")?
+        .canonicalize()
+        .context("canonicalize the running codexify executable")?;
+    let executable = normalize_native_path(executable);
+    let log = Arc::new(StdMutex::new(RotatingLog::open(
+        log_path()?,
+        LOG_MAX_BYTES,
+        LOG_GENERATIONS,
+    )?));
+
+    launch_supervisor(
+        config,
+        executable,
+        log,
+        SUPERVISOR_POLICY,
+        shutdown_signal(),
+    )
+    .await
+}
+
+#[cfg(not(windows))]
+pub async fn run_launcher(_config: PathBuf) -> anyhow::Result<()> {
+    bail!("the native service launcher is only supported on Windows")
+}
+
+#[cfg(any(windows, test))]
+async fn launch_supervisor<F>(
+    config: PathBuf,
+    executable: PathBuf,
+    log: Arc<StdMutex<RotatingLog>>,
+    policy: SupervisorPolicy,
+    shutdown: F,
+) -> anyhow::Result<()>
+where
+    F: std::future::Future<Output = ()>,
+{
+    append_event(
+        &log,
+        &format!(
+            "native launcher started with executable {} and config {}",
+            executable.display(),
+            config.display()
+        ),
+    );
+
+    tokio::pin!(shutdown);
+    let mut restart_delay = policy.restart_min_delay;
+    loop {
+        let mut command = TokioCommand::new(&executable);
+        command
+            .arg("service")
+            .arg("run")
+            .arg("--config")
+            .arg(&config)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        #[cfg(unix)]
+        command.process_group(0);
+        #[cfg(windows)]
+        command.creation_flags(windows_server_creation_flags());
+
+        let started = Instant::now();
+        let mut child = match command.spawn() {
+            Ok(child) => child,
+            Err(error) => {
+                append_event(
+                    &log,
+                    &format!("failed to start the service supervisor: {error}"),
+                );
+                tokio::select! {
+                    _ = &mut shutdown => {
+                        append_event(&log, "native launcher stopped");
+                        return Ok(());
+                    }
+                    _ = tokio::time::sleep(restart_delay) => {}
+                }
+                restart_delay = (restart_delay * 2).min(policy.restart_max_delay);
+                continue;
+            }
+        };
+
+        #[cfg(windows)]
+        let mut child_job = Some(
+            match WindowsChildJob::new().and_then(|job| {
+                job.assign(&child)?;
+                Ok(job)
+            }) {
+                Ok(job) => job,
+                Err(error) => {
+                    append_event(
+                        &log,
+                        &format!("failed to contain the service supervisor tree: {error}"),
+                    );
+                    if let Some(pid) = child.id() {
+                        taskkill(pid, true);
+                    }
+                    let _ = child.wait().await;
+                    tokio::select! {
+                        _ = &mut shutdown => {
+                            append_event(&log, "native launcher stopped");
+                            return Ok(());
+                        }
+                        _ = tokio::time::sleep(restart_delay) => {}
+                    }
+                    restart_delay = (restart_delay * 2).min(policy.restart_max_delay);
+                    continue;
+                }
+            },
+        );
+
+        let pid = child.id();
+        append_event(
+            &log,
+            &format!(
+                "started service supervisor{}",
+                pid.map(|pid| format!(" with pid {pid}"))
+                    .unwrap_or_default()
+            ),
+        );
+        let stdout_task = child
+            .stdout
+            .take()
+            .map(|stdout| tokio::spawn(drain_to_log(stdout, log.clone())));
+        let stderr_task = child
+            .stderr
+            .take()
+            .map(|stderr| tokio::spawn(drain_to_log(stderr, log.clone())));
+        let wait = child.wait();
+        tokio::pin!(wait);
+
+        let status = tokio::select! {
+            status = &mut wait => Some(status),
+            _ = &mut shutdown => {
+                append_event(&log, "stopping the service supervisor after launcher shutdown request");
+                #[cfg(windows)]
+                {
+                    drop(child_job.take());
+                    let _ = (&mut wait).await;
+                }
+                #[cfg(not(windows))]
+                terminate_child(pid, &mut wait).await;
+                None
+            }
+        };
+
+        #[cfg(unix)]
+        if let Some(pid) = pid {
+            signal_process_group(pid, libc::SIGKILL);
+        }
+        #[cfg(windows)]
+        drop(child_job.take());
+
+        await_drain(stdout_task).await;
+        await_drain(stderr_task).await;
+
+        let Some(status) = status else {
+            append_event(&log, "native launcher stopped");
+            return Ok(());
+        };
+        match status {
+            Ok(status) => append_event(&log, &format!("service supervisor exited with {status}")),
+            Err(error) => append_event(
+                &log,
+                &format!("could not wait for the service supervisor: {error}"),
+            ),
+        }
+
+        let delay = if started.elapsed() >= policy.stable_runtime {
+            policy.restart_min_delay
+        } else {
+            restart_delay
+        };
+        restart_delay = (delay * 2).min(policy.restart_max_delay);
+        append_event(
+            &log,
+            &format!(
+                "restarting the service supervisor in {} seconds",
+                delay.as_secs_f64()
+            ),
+        );
+        tokio::select! {
+            _ = &mut shutdown => {
+                append_event(&log, "native launcher stopped");
+                return Ok(());
+            }
+            _ = tokio::time::sleep(delay) => {}
         }
     }
 }
@@ -2524,17 +2692,14 @@ mod tests {
         assert!(script.contains("New-ScheduledTaskTrigger -AtLogOn"));
         assert!(script.contains("-RestartCount 999"));
         assert!(script.contains("New-TimeSpan -Minutes 1"));
-        assert!(script.contains("-WindowStyle Hidden"));
-        assert!(script.contains("-File"));
+        assert!(script.contains("service launch --scheduled-task --config"));
         assert!(!script.contains("-EncodedCommand"));
-        assert!(script.contains("supervisor.ps1"));
-        assert!(script.contains("(Get-Process -Id $PID).Path"));
-        assert!(
-            !script.contains("New-ScheduledTaskAction -Execute '/tmp/codexify-test/bin/codexify'")
-        );
-        let launcher = windows_hidden_service_script(&spec);
-        assert!(launcher.contains(&powershell_quote(&spec.executable.to_string_lossy())));
-        assert!(launcher.contains(&powershell_quote(&spec.config.to_string_lossy())));
+        assert!(!script.contains("supervisor.ps1"));
+        assert!(!script.contains("(Get-Process -Id $PID).Path"));
+        assert!(script.contains(&format!(
+            "New-ScheduledTaskAction -Execute {}",
+            powershell_quote(&spec.executable.to_string_lossy())
+        )));
         assert_eq!(windows_server_creation_flags(), 0x0800_0000);
     }
 
@@ -2856,16 +3021,10 @@ Write-Output 'ISOLATED'
     #[test]
     fn scheduled_task_definition_is_valid_powershell() {
         let root = tempfile::tempdir().unwrap();
-        for (name, script) in [
-            (
-                "service-install.ps1",
-                windows_install_script(&spec(root.path())),
-            ),
-            (
-                "service-launcher.ps1",
-                windows_hidden_service_script(&spec(root.path())),
-            ),
-        ] {
+        for (name, script) in [(
+            "service-install.ps1",
+            windows_install_script(&spec(root.path())),
+        )] {
             let path = root.path().join(name);
             fs::write(&path, script).unwrap();
             let path = powershell_quote(&path.to_string_lossy());
@@ -3008,6 +3167,97 @@ Write-Output 'ISOLATED'
         assert!(output.contains("fake server run"));
         assert!(output.contains("Codexify exited with"));
         assert!(output.contains("restarting Codexify"));
+
+        let descendant: i32 = fs::read_to_string(descendant)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while unsafe { libc::kill(descendant, 0) } == 0 && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_ne!(unsafe { libc::kill(descendant, 0) }, 0);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn native_launcher_restarts_failed_supervisor_and_captures_output() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let config = root.path().join("codexify.config.json");
+        let executable = root.path().join("codexify-fake");
+        let count = root.path().join("starts");
+        let arguments = root.path().join("arguments");
+        let descendant = root.path().join("descendant");
+        let log_path = root.path().join("codexify.log");
+        fs::write(&config, "{}").unwrap();
+        fs::write(
+            &executable,
+            format!(
+                "#!/bin/sh\ncount=0\n[ ! -f '{}' ] || count=$(cat '{}')\nnext=$((count + 1))\nsleep 30 &\ndescendant_tmp='{}.tmp.'$$\nprintf '%s\\n' $! > \"$descendant_tmp\"\nmv \"$descendant_tmp\" '{}'\narguments_tmp='{}.tmp.'$$\nprintf '%s\\n' \"$@\" > \"$arguments_tmp\"\nmv \"$arguments_tmp\" '{}'\ncount_tmp='{}.tmp.'$$\nprintf '%s\\n' $next > \"$count_tmp\"\nmv \"$count_tmp\" '{}'\nprintf 'fake supervisor run %s\\n' $next\nexit 7\n",
+                count.display(),
+                count.display(),
+                descendant.display(),
+                descendant.display(),
+                arguments.display(),
+                arguments.display(),
+                count.display(),
+                count.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+        let log = Arc::new(StdMutex::new(
+            RotatingLog::open(log_path.clone(), 1024 * 1024, 2).unwrap(),
+        ));
+        let policy = SupervisorPolicy {
+            restart_min_delay: Duration::from_millis(5),
+            restart_max_delay: Duration::from_millis(20),
+            stable_runtime: Duration::from_secs(1),
+            config_retry_delay: Duration::from_millis(5),
+        };
+
+        let count_for_shutdown = count.clone();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            launch_supervisor(config.clone(), executable, log, policy, async move {
+                let deadline = Instant::now() + Duration::from_secs(2);
+                loop {
+                    if fs::read_to_string(&count_for_shutdown)
+                        .ok()
+                        .and_then(|value| value.trim().parse::<usize>().ok())
+                        .is_some_and(|starts| starts >= 2)
+                        || Instant::now() >= deadline
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }),
+        )
+        .await
+        .expect("native launcher hung while a descendant held its output pipe")
+        .unwrap();
+
+        let output = fs::read_to_string(&log_path).unwrap();
+        let starts: usize = fs::read_to_string(count)
+            .unwrap_or_else(|error| panic!("{error}; service log:\n{output}"))
+            .trim()
+            .parse()
+            .unwrap();
+        assert!(
+            starts >= 2,
+            "launcher started the supervisor only {starts} time(s)"
+        );
+        assert_eq!(
+            fs::read_to_string(arguments).unwrap().trim(),
+            format!("service\nrun\n--config\n{}", config.display())
+        );
+        assert!(output.contains("fake supervisor run"));
+        assert!(output.contains("service supervisor exited with"));
+        assert!(output.contains("restarting the service supervisor"));
 
         let descendant: i32 = fs::read_to_string(descendant)
             .unwrap()
