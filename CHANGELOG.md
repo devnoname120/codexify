@@ -6,6 +6,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- Preserve text-only MCP results in response envelopes while bounding the
+  generated structured text and retaining upstream metadata and full user notices.
+
 ## [2.3.29] - 2026-11-09
 
 ### Added

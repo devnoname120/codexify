@@ -1898,6 +1898,7 @@ impl ServerHandler for CodexHandler {
                 &mut result,
                 tool.and_then(|tool| tool.output_schema()).as_ref(),
                 output_fields,
+                tool_output_token_budget(&self.config),
             );
         }
         if ticketed && let Some(audit) = &self.audit {
@@ -4300,6 +4301,117 @@ mod tests {
                 .and_then(|metadata| metadata.0.get("trace")),
             Some(&json!("upstream"))
         );
+    }
+
+    #[test]
+    fn unstructured_chat_envelopes_bound_text_and_metadata_before_notices() {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = crate::config::default_config(root.path().to_path_buf());
+        for budget in [20_u64, 10_000] {
+            config.output.max_tool_output_tokens = Some(budget);
+            for metadata in [
+                None,
+                Some(json!({"duration": 0})),
+                Some(json!({WORKSPACE_CHANGE_FIELD: 17})),
+                Some(json!([1, 2])),
+            ] {
+                for text in [
+                    "x".repeat(budget as usize * 8),
+                    String::from_utf8([34, 92, 10].repeat(budget as usize * 8)).unwrap(),
+                    "é😀".repeat(budget as usize * 4),
+                ] {
+                    let mut result = ToolResult::text(text);
+                    result.structured_content = metadata.clone();
+                    result.content.push(ToolContent::Image {
+                        data: "image-data".into(),
+                        mime_type: "image/png".into(),
+                    });
+                    finalize_model_visible_result(None, &mut result, &config);
+                    crate::markdown_chat::output::attach_fields(
+                        &mut result,
+                        None,
+                        vec![(WORKSPACE_CHANGE_FIELD, None)],
+                        tool_output_token_budget(&config),
+                    );
+                    assert!(!result.is_error);
+                    let value = result.structured_content.as_ref().unwrap();
+                    assert!(
+                        (serde_json::to_vec(value).unwrap().len() as u64).div_ceil(4) <= budget
+                    );
+                    assert!(
+                        crate::output_budget::approx_token_count(&result.joined_text()) <= budget
+                    );
+                    assert_eq!(value["content"], result.joined_text());
+                    assert_eq!(result.audit.truncated, Some(true));
+                    assert!(result.content.iter().any(|block| matches!(block, ToolContent::Image { data, .. } if data == "image-data")));
+                    if let Some(original) = metadata.as_ref() {
+                        if original.is_array() || original.get(WORKSPACE_CHANGE_FIELD).is_some() {
+                            assert_eq!(&value["upstream_result"], original);
+                        } else {
+                            assert_eq!(value["duration"], original["duration"]);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn bounded_unstructured_text_keeps_full_user_notices_and_ticket_handoff() {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = crate::config::default_config(root.path().to_path_buf());
+        config.output.max_tool_output_tokens = Some(20);
+        let user = "Complete user instructions\n".repeat(10_000);
+        let mut result =
+            ToolResult::text("x".repeat(1_000)).with_structured(json!({"duration": 0}));
+        finalize_model_visible_result(None, &mut result, &config);
+        crate::markdown_chat::output::attach_fields(
+            &mut result,
+            None,
+            vec![
+                (crate::markdown_chat::USER_MESSAGE_FIELD, Some(user.clone())),
+                (
+                    crate::agent_tickets::OUTPUT_FIELD,
+                    Some("next-ticket".into()),
+                ),
+            ],
+            tool_output_token_budget(&config),
+        );
+        assert!(!result.is_error);
+        let mut value = result.structured_content.clone().unwrap();
+        let object = value.as_object_mut().unwrap();
+        assert_eq!(
+            object.remove(crate::markdown_chat::USER_MESSAGE_FIELD),
+            Some(json!(user))
+        );
+        assert_eq!(
+            object.remove(crate::agent_tickets::OUTPUT_FIELD),
+            Some(json!("next-ticket"))
+        );
+        assert_eq!(object["duration"], 0);
+        assert!((serde_json::to_vec(&value).unwrap().len() as u64).div_ceil(4) <= 20);
+        assert!(result.joined_text().contains("Complete user instructions"));
+    }
+
+    #[test]
+    fn tiny_unstructured_mirror_budget_returns_a_bounded_error_without_empty_json() {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = crate::config::default_config(root.path().to_path_buf());
+        for budget in [1, 2, 3] {
+            config.output.max_tool_output_tokens = Some(budget);
+            let mut result = ToolResult::text("original text");
+            finalize_model_visible_result(None, &mut result, &config);
+            crate::markdown_chat::output::attach_fields(
+                &mut result,
+                None,
+                vec![(WORKSPACE_CHANGE_FIELD, None)],
+                tool_output_token_budget(&config),
+            );
+            assert!(result.is_error);
+            assert!(result.structured_content.is_none());
+            assert!(!result.joined_text().is_empty());
+            assert!(crate::output_budget::approx_token_count(&result.joined_text()) <= budget);
+        }
     }
 
     #[test]

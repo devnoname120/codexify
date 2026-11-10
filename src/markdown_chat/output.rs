@@ -2,6 +2,9 @@ use serde_json::{Map, Value, json};
 
 #[cfg(test)]
 use super::USER_MESSAGE_FIELD;
+#[cfg(test)]
+use crate::output_budget::DEFAULT_MAX_TOOL_OUTPUT_TOKENS;
+use crate::output_budget::fill_text_mirror_with_metadata_budget;
 use crate::types::{ToolContent, ToolResult};
 
 pub(crate) fn timestamped_user_message(markdown: &str, at_ms: Option<u64>) -> String {
@@ -104,29 +107,30 @@ pub(crate) fn attach_field(
     field: &str,
     message: Option<String>,
 ) {
-    attach_fields(result, original_schema, vec![(field, message)]);
+    attach_fields(
+        result,
+        original_schema,
+        vec![(field, message)],
+        DEFAULT_MAX_TOOL_OUTPUT_TOKENS,
+    );
 }
 
 pub(crate) fn attach_fields(
     result: &mut ToolResult,
     original_schema: Option<&Value>,
     fields: Vec<(&str, Option<String>)>,
+    max_output_tokens: u64,
 ) {
     let original = result.structured_content.take();
     // Unstructured MCP text tools (catalog/gateway) have no output schema.
     // Do not turn their existing model-visible text into an empty JSON object
     // when optional Markdown-chat notice fields are absent.
-    let text_fallback = if original_schema.is_none()
+    let text_fallback = original_schema.is_none()
         && original
             .as_ref()
             .and_then(Value::as_object)
             .is_none_or(|object| !object.contains_key("content"))
-    {
-        let text = result.joined_text();
-        (!text.is_empty()).then_some(text)
-    } else {
-        None
-    };
+        && !result.joined_text().is_empty();
     let wrap = fields
         .iter()
         .any(|(field, _)| needs_envelope(original_schema, field))
@@ -144,8 +148,16 @@ pub(crate) fn attach_fields(
             .and_then(|value| value.as_object().cloned())
             .unwrap_or_default()
     };
-    if let Some(text) = text_fallback {
-        object.insert("content".into(), Value::String(text));
+    let mut missing_mirror = false;
+    if text_fallback {
+        fill_text_mirror_with_metadata_budget(result, object, max_output_tokens);
+        match result.structured_content.take() {
+            Some(Value::Object(mirror)) => object = mirror,
+            _ => {
+                missing_mirror = true;
+                object = Map::new();
+            }
+        }
     }
     for (field, message) in fields {
         if let Some(message) = message.filter(|message| !message.is_empty()) {
@@ -156,7 +168,8 @@ pub(crate) fn attach_fields(
                 .push(ToolContent::Text(json!({field:message}).to_string()));
         }
     }
-    result.structured_content = Some(Value::Object(object));
+    result.structured_content =
+        (!missing_mirror || !object.is_empty()).then_some(Value::Object(object));
 }
 
 #[cfg(test)]
@@ -183,6 +196,7 @@ mod tests {
             &mut result,
             None,
             vec![(USER_MESSAGE_FIELD, None), ("workspace_changed", None)],
+            DEFAULT_MAX_TOOL_OUTPUT_TOKENS,
         );
         assert_eq!(
             result.structured_content,
@@ -202,6 +216,7 @@ mod tests {
             &mut result,
             None,
             vec![(USER_MESSAGE_FIELD, Some("user says hello".into()))],
+            DEFAULT_MAX_TOOL_OUTPUT_TOKENS,
         );
         assert_eq!(
             result.structured_content.as_ref().unwrap()["content"],
@@ -217,7 +232,12 @@ mod tests {
     fn upstream_structured_content_is_unchanged_by_notice_envelope() {
         let mut result =
             ToolResult::text("upstream text").with_structured(json!({"owner": "upstream"}));
-        attach_fields(&mut result, None, vec![(USER_MESSAGE_FIELD, None)]);
+        attach_fields(
+            &mut result,
+            None,
+            vec![(USER_MESSAGE_FIELD, None)],
+            DEFAULT_MAX_TOOL_OUTPUT_TOKENS,
+        );
         assert_eq!(
             result.structured_content,
             Some(json!({"owner": "upstream", "content": "upstream text"}))
@@ -229,7 +249,12 @@ mod tests {
     fn upstream_metadata_does_not_hide_text_in_chat_result() {
         let mut result = ToolResult::text("nodeRepl.write: inspection worked")
             .with_structured(json!({"execution_duration_ms": 0}));
-        attach_fields(&mut result, None, vec![(USER_MESSAGE_FIELD, None)]);
+        attach_fields(
+            &mut result,
+            None,
+            vec![(USER_MESSAGE_FIELD, None)],
+            DEFAULT_MAX_TOOL_OUTPUT_TOKENS,
+        );
         assert_eq!(
             result.structured_content,
             Some(json!({
@@ -243,7 +268,12 @@ mod tests {
     fn upstream_content_field_is_not_overwritten() {
         let mut result = ToolResult::text("extra text")
             .with_structured(json!({"content": "original upstream content"}));
-        attach_fields(&mut result, None, vec![(USER_MESSAGE_FIELD, None)]);
+        attach_fields(
+            &mut result,
+            None,
+            vec![(USER_MESSAGE_FIELD, None)],
+            DEFAULT_MAX_TOOL_OUTPUT_TOKENS,
+        );
         assert_eq!(
             result.structured_content,
             Some(json!({"content": "original upstream content"}))
@@ -254,7 +284,12 @@ mod tests {
     #[test]
     fn unstructured_error_is_not_hidden_as_empty_json() {
         let mut result = ToolResult::error("permission denied");
-        attach_fields(&mut result, None, vec![(USER_MESSAGE_FIELD, None)]);
+        attach_fields(
+            &mut result,
+            None,
+            vec![(USER_MESSAGE_FIELD, None)],
+            DEFAULT_MAX_TOOL_OUTPUT_TOKENS,
+        );
         assert!(result.is_error);
         assert_eq!(
             result.structured_content,
@@ -314,6 +349,7 @@ mod tests {
                     (USER_MESSAGE_FIELD, Some("full user text".into())),
                     ("workspace_changed", Some("new workspace".into())),
                 ],
+                DEFAULT_MAX_TOOL_OUTPUT_TOKENS,
             );
             let value = result.structured_content.unwrap();
             assert_eq!(value[USER_MESSAGE_FIELD], "full user text");
