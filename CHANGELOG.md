@@ -15,6 +15,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `powershell.exe`, containing and restarting the native supervisor independently
   of user PowerShell processes. Migrate recognized encoded and file-based legacy
   launchers while preserving custom Scheduled Task actions.
+- Preserve text-only MCP results in response envelopes while bounding the
+  generated structured text and retaining upstream metadata and full user notices.
 
 ## [2.3.29] - 2026-11-09
 

@@ -6,6 +6,7 @@ fn ticket_test_config(root: &std::path::Path, enabled: bool) -> AppConfig {
         serde_json::to_vec(&json!({
             "schemaVersion": 1,
             "workDir": root,
+            "memory": { "dir": root.join("test-state") },
             "experimental": {"agentTickets": enabled},
             "codexMcp": { "enabled": false }
         }))
@@ -16,6 +17,46 @@ fn ticket_test_config(root: &std::path::Path, enabled: bool) -> AppConfig {
     let mut config = crate::config::load_config(cli).unwrap();
     config.work_dir = std::fs::canonicalize(&config.work_dir).unwrap();
     config
+}
+
+#[tokio::test]
+async fn ticket_test_configuration_keeps_chat_state_inside_the_fixture() {
+    for enabled in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().canonicalize().unwrap();
+        let mut handler =
+            handler_with_tools(&workspace, Vec::new(), crate::types::ToolLogLevel::Info);
+        handler.config = Arc::new(ticket_test_config(&workspace, enabled));
+        // Fail before creating state if replacing the fixture config restores
+        // the default storage in the user's real home directory.
+        assert!(crate::memory::task_state_dir(&handler.config).starts_with(&workspace));
+        let identity = ConversationIdentity::from_openai_session("wait-mcp").unwrap();
+        bind_fixture_workspace(&handler, Some(&identity)).await;
+        let effective = handler
+            .project_bindings
+            .effective_config(&handler.config, &identity)
+            .unwrap();
+        let chat = handler
+            .markdown_chat
+            .chat(&effective, Some(&identity), &handler.session)
+            .unwrap();
+        let path = chat.path().to_path_buf();
+        assert!(path.starts_with(&workspace));
+        chat.ensure().await.unwrap();
+        chat.warn_ticket_rejection().await.unwrap();
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains(crate::agent_tickets::WARNING)
+        );
+        drop(chat);
+        drop(handler);
+        root.close().unwrap();
+        assert!(
+            !path.exists(),
+            "dropping the fixture must remove its chat state"
+        );
+    }
 }
 
 #[tokio::test]
