@@ -145,6 +145,8 @@ fn run_projects_list(cli: &Cli, args: &ProjectsListArgs) -> Result<(), String> {
 }
 
 fn main() {
+    #[cfg(windows)]
+    detach_scheduled_launcher_console();
     if std::env::args_os().nth(1).as_deref()
         == Some(std::ffi::OsStr::new(codexify::tools::grep::WORKER_ARGUMENT))
     {
@@ -155,6 +157,26 @@ fn main() {
         return;
     }
     run_main();
+}
+
+#[cfg(windows)]
+fn detach_scheduled_launcher_console() {
+    if !scheduled_launcher_console_detach_requested(std::env::args_os()) {
+        return;
+    }
+    unsafe {
+        windows_sys::Win32::System::Console::FreeConsole();
+    }
+}
+
+#[cfg(any(windows, test))]
+fn scheduled_launcher_console_detach_requested(
+    mut arguments: impl Iterator<Item = std::ffi::OsString>,
+) -> bool {
+    let _ = arguments.next();
+    arguments.next().as_deref() == Some(std::ffi::OsStr::new("service"))
+        && arguments.next().as_deref() == Some(std::ffi::OsStr::new("launch"))
+        && arguments.any(|argument| argument == "--scheduled-task")
 }
 
 #[tokio::main]
@@ -479,8 +501,40 @@ async fn run_service(cli: &Cli, command: ServiceCommand) -> anyhow::Result<()> {
             let config = config_path_for_service(cli).map_err(anyhow::Error::msg)?;
             service::run_supervisor(config).await
         }
+        ServiceCommand::Launch(_) => {
+            let config = config_path_for_service(cli).map_err(anyhow::Error::msg)?;
+            service::run_launcher(config).await
+        }
         ServiceCommand::WaitReady(args) => {
             service::wait_ready(args.port, std::time::Duration::from_millis(args.timeout_ms)).await
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::scheduled_launcher_console_detach_requested;
+
+    fn args<'a>(values: &'a [&'a str]) -> impl Iterator<Item = std::ffi::OsString> + 'a {
+        values.iter().map(std::ffi::OsString::from)
+    }
+
+    #[test]
+    fn only_the_scheduled_launcher_marker_detaches_the_console() {
+        assert!(scheduled_launcher_console_detach_requested(args(&[
+            "codexify",
+            "service",
+            "launch",
+            "--scheduled-task",
+            "--config",
+            r"C:\Users\test\codexify.config.json",
+        ])));
+        for values in [
+            &["codexify", "service", "launch"][..],
+            &["codexify", "service", "run", "--scheduled-task"][..],
+            &["codexify", "doctor", "--scheduled-task"][..],
+        ] {
+            assert!(!scheduled_launcher_console_detach_requested(args(values)));
         }
     }
 }

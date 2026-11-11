@@ -683,21 +683,33 @@ trust state, warnings, and diagnostics. `--json`, redirected output, and
 ## Background service
 
 The installation scripts register a per-user native service, start it
-immediately, and enable it for subsequent user logins. The service definition
-invokes the installed executable with an absolute config path:
+immediately, and enable it for subsequent user logins. Linux and macOS invoke
+the installed executable with an absolute config path:
 
 ```text
 codexify service run --config /absolute/path/to/codexify.config.json
 ```
 
+The Windows Scheduled Task instead invokes the hidden native launcher:
+
+```text
+codexify service launch --scheduled-task --config C:\absolute\path\to\codexify.config.json
+```
+
+That long-lived launcher starts `service run`, records its exit, and restarts it
+with bounded backoff. Keeping the persistent task action native prevents a user
+PowerShell process and the service launcher from sharing the same host or
+failure domain.
+
 The hidden `service run` command supervises the ordinary Codexify server. It
 waits when the config file has not been created yet, restarts a failed server
 with bounded exponential backoff, and forwards stdout and stderr into
 `~/.codexify/logs/codexify.log`. The current log rotates at 10 MiB, with five
-numbered generations retained. The native service manager also restarts the
-supervisor if the supervisor itself fails. On Windows, the supervised server is
-contained in a kill-on-close Job Object so stopping the scheduled task cannot
-leave its process tree behind.
+numbered generations retained. The native service manager also restarts its
+entry point if that process fails. On Windows, the launcher contains the native
+supervisor tree in a kill-on-close Job Object, and the supervisor separately
+contains the server tree, so stopping the Scheduled Task cannot leave either
+layer or its descendants behind.
 
 Persisted log files remain plain text. `codexify service logs` applies terminal
 colors only while displaying them, strips legacy ANSI control sequences, moves
@@ -733,15 +745,18 @@ codexify service remove
 enable or disable login startup. Use `enable` to enable and start the definition,
 or `disable` to stop it and disable future automatic startup.
 
-On Windows, the Task Scheduler action starts the supervisor through the current
-PowerShell host with `-WindowStyle Hidden -File` and a private UTF-8 launcher at
-`~/.codexify/service/supervisor.ps1`. Registration uses the adjacent `install.ps1`;
-registration failures include both paths so the exact definition can be inspected.
-Neither script contains the configuration's credentials. Management helpers and
-diagnostic probes use isolated consoles rather than the foreground server's.
-The supervisor also creates its ordinary server child with `CREATE_NO_WINDOW`. This
-prevents the otherwise empty console window without changing the Interactive
-logon principal required for tunnel and network access.
+On Windows, the Task Scheduler action points directly at `codexify.exe service
+launch --scheduled-task`; the private marker detaches the task-launched console
+before the asynchronous runtime starts, and no persistent PowerShell process is
+part of the service tree.
+Registration still uses the private UTF-8
+`~/.codexify/service/install.ps1` as a one-shot management helper, and that file
+contains no configuration credentials. Management helpers and diagnostic probes
+use isolated consoles rather than the foreground server's. The native launcher
+creates the supervisor with `CREATE_NO_WINDOW`, and the supervisor applies the
+same boundary to its ordinary server child. This prevents empty console windows
+without changing the Interactive logon principal required for tunnel and
+network access.
 
 The Windows supervisor begins liveness monitoring after the server first answers
 `/health` successfully. Six consecutive failed probes (with a five-second pause
@@ -755,14 +770,14 @@ panic markers to the service log with their process ID. Normal Ctrl+C delivery
 and server returns are logged separately. Forced termination can bypass these
 records; the absence of a marker does not establish a crash cause.
 
-The scheduled-task launcher waits for the supervisor's process handle and records
-its exit code. It restarts unexpectedly terminated supervisors, including code
-zero, with a two-to-sixty-second backoff, independently of Task Scheduler's
-failure retry behavior for on-demand starts. Explicit `service stop` and
-`service disable` remain stopped.
-Recognized older launchers are upgraded by `service start`, `restart`, or `enable`,
-including the `enable` call made by older self-update workers; custom task actions
-are preserved.
+The native Scheduled Task launcher waits for the supervisor's process handle and
+records its exit code. It restarts unexpectedly terminated supervisors,
+including code zero, with a two-to-sixty-second backoff, independently of Task
+Scheduler's failure retry behavior for on-demand starts. Explicit `service stop`
+and `service disable` remain stopped. `service start`, `restart`, or `enable`
+upgrades exact recognized encoded and file-based PowerShell launchers to the
+native action, including the `enable` call made by older self-update workers;
+modified and custom task actions are preserved.
 
 `service status` queries the native service manager without loading the server
 configuration, starting the MCP server, or changing the service. It works even
@@ -1555,7 +1570,7 @@ The `exec` block governs resident-process resources and the default shell for
 |-----|---------|-------------|
 | `maxSessions` | `8` | Cap on concurrent background sessions per ChatGPT conversation, or per MCP transport for clients without conversation metadata |
 | `idleTimeoutMs` | `300000` | Milliseconds without a tool interaction before a resident process is killed and forgotten; `0` disables idle expiry |
-| `defaultShell` | `$SHELL`, else PowerShell on Windows and `/bin/sh` elsewhere | Shell used when an `exec_command` call names none |
+| `defaultShell` | `$SHELL`; otherwise PowerShell 7 then `cmd.exe` on Windows, and `/bin/sh` elsewhere | Shell used when an `exec_command` call names none |
 
 `exec_command` does not tokenize, filter, or allow-list commands. Its `cmd` value
 is passed to the selected shell as written after ordinary input and working-directory
@@ -3092,7 +3107,18 @@ Windows, macOS and Linux are supported natively. Which shell runs is decided by 
 | `powershell`, `pwsh` | `<shell> -NoProfile -Command "<cmd>"` |
 | `cmd` | `cmd /c "<cmd>"` |
 
-The default comes from `$SHELL` on every platform, so starting the server from Git Bash on Windows gets bash — with real `ls -la`, pipes and `$VAR` — rather than PowerShell. Set `exec.defaultShell` to override, or pass `shell` on an individual `exec_command` call.
+The default comes from `$SHELL` on every platform, so starting the server from
+Git Bash on Windows gets bash — with real `ls -la`, pipes and `$VAR` — rather
+than PowerShell. Without that explicit environment choice, Windows selects
+PowerShell 7 from `PATH` or its standard installation directory and falls back
+to `cmd.exe`; it never implicitly selects Windows PowerShell 5.1. Set
+`exec.defaultShell` to override, or pass `shell` on an individual
+`exec_command` call.
+
+On Windows, an explicit `pwsh` request is strict and never downgrades to
+`powershell.exe`. The broader `powershell` name prefers PowerShell 7 and retains
+Windows PowerShell 5.1 only as a compatibility fallback. A configured absolute
+`exec.defaultShell` remains authoritative.
 
 Two Windows-specific details are handled: `powershell -Command` collapses every non-zero child exit code to `1`, so commands are wrapped to re-raise `$LASTEXITCODE`; and `exec_command`'s description gains Codex's PowerShell rules (`-LiteralPath` over `-Path`, `-WindowStyle Hidden`) when the server runs there.
 

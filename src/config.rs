@@ -322,6 +322,9 @@ pub enum ServiceCommand {
     /// Run the service supervisor under the native service manager.
     #[command(hide = true)]
     Run,
+    /// Run the persistent Windows task launcher.
+    #[command(hide = true)]
+    Launch(ServiceLaunchArgs),
     /// Wait until the restarted service and its tunnel are ready.
     #[command(hide = true)]
     WaitReady(ServiceWaitReadyArgs),
@@ -332,6 +335,12 @@ pub struct ServiceStatusArgs {
     /// Emit one machine-readable JSON status object.
     #[arg(long)]
     pub json: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct ServiceLaunchArgs {
+    #[arg(long, hide = true)]
+    pub scheduled_task: bool,
 }
 
 #[derive(Args, Debug)]
@@ -3729,6 +3738,27 @@ mod tests {
             Some(CliCommand::Service {
                 command: ServiceCommand::Run
             })
+        ));
+    }
+
+    #[test]
+    fn service_launcher_cli_accepts_definition_argument_order() {
+        let parsed = Cli::try_parse_from([
+            "codexify",
+            "service",
+            "launch",
+            "--scheduled-task",
+            "--config",
+            "/tmp/codexify.config.json",
+        ])
+        .unwrap();
+        assert_eq!(parsed.config.as_deref(), Some("/tmp/codexify.config.json"));
+        assert!(matches!(
+            parsed.command,
+            Some(CliCommand::Service {
+                command: ServiceCommand::Launch(args)
+            })
+            if args.scheduled_task
         ));
     }
 

@@ -8,6 +8,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Prefer PowerShell 7 for model-selected PowerShell commands on Windows, never
+  downgrade an explicit `pwsh` request to Windows PowerShell 5.1, and use
+  `cmd.exe` as the implicit fallback when PowerShell 7 is unavailable.
+- Run the persistent Windows service launcher in Codexify instead of
+  `powershell.exe`, containing and restarting the native supervisor independently
+  of user PowerShell processes. Migrate recognized encoded and file-based legacy
+  launchers while preserving custom Scheduled Task actions.
 - Preserve text-only MCP results in response envelopes while bounding the
   generated structured text and retaining upstream metadata and full user notices.
 

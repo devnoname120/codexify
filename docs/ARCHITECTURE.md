@@ -807,9 +807,12 @@ commands manage one
 per-user native definition: an XDG-aware systemd user unit on Linux, a launchd agent on
 macOS, or an at-logon Scheduled Task on Windows. Installation stores the current
 executable path and the selected config path as absolute arguments. The hidden
-`service run` command is the native manager's entry point. The updater also uses
-the hidden `service wait-ready` command to poll the loopback health endpoint under
-a deadline after a restart.
+`service run` command is the systemd/launchd entry point and the supervised
+server runner. On Windows, the Scheduled Task enters through hidden `service
+launch --scheduled-task`, which detaches the task console before its native
+restart loop starts `service run`. The updater also uses
+the hidden `service wait-ready` command to poll the loopback health endpoint
+under a deadline after a restart.
 
 `service status [--json]` reuses the native `service::status()` inspection used by
 Doctor, without loading `AppConfig` or probing server health. Its human and JSON
@@ -822,17 +825,21 @@ The service runner does not construct a second server configuration. It waits if
 the selected file does not exist, then starts the ordinary Codexify executable
 with `--config <absolute-path>`. Child stdout and stderr are serialized into a
 private 10 MiB log with five numbered generations. Child failures use bounded
-exponential restart backoff; systemd, launchd, and Task Scheduler separately
-restart the runner if the runner itself fails. On shutdown, the runner terminates
-the server process group/tree before exiting. Windows children are assigned to a
-kill-on-close Job Object so Task Scheduler termination cannot orphan the server
-or its descendants.
+exponential restart backoff; systemd and launchd restart the runner if it fails.
+On Windows, the native launcher applies the same bounded restart policy to the
+runner, while Task Scheduler restarts the launcher itself. On shutdown, each
+layer terminates its child process group/tree before exiting. The Windows
+launcher and runner use nested kill-on-close Job Objects so Task Scheduler
+termination cannot orphan the runner, server, or their descendants.
 
 `start`, `stop`, and `restart` preserve the manager's enablement state. The older
 `enable` and `disable` commands intentionally combine enablement and runtime
 changes. On Windows, the scheduled action launches the fixed supervisor command
-through the active PowerShell engine with a hidden window and Interactive logon;
-the supervisor sets `CREATE_NO_WINDOW` on its server child as a second boundary.
+directly through `codexify.exe service launch --scheduled-task` with Interactive
+logon. The native
+launcher starts the supervisor with `CREATE_NO_WINDOW`, and the supervisor sets
+the same flag on its server child. Start/restart/enable migrate exact recognized
+PowerShell launchers from older releases; custom actions are not rewritten.
 
 Service-supervised tracing is emitted without terminal escapes. The public log
 viewer reassembles partial lines, strips escapes from older files, highlights
@@ -987,7 +994,7 @@ the original order and rejects duplicate names.
 | `project_clone.rs` | Strict provider-agnostic HTTPS/SSH Git repository URL parsing plus GitHub branch/PR/commit target parsing, conservative normalized remote matching, existing-checkout discovery, exact GitHub target-ref or object-ID fetching, bounded non-interactive cloning below `projectCloneDir`, cross-process repository locks, collision refusal, and post-clone verification. |
 | `worktrees.rs` | Per-task managed Git worktree lifecycle: create a detached checkout under `worktrees.root` via `git worktree add`, optionally at an exact fetched commit, dual source/worktree root tracking, startup sweep bounded by `keepCount`, Windows `\\?\`-prefix handling, and the opt-in `allowSetupScript` gate for per-worktree environment setup. |
 | `project_catalog.rs` | Live, read-only project discovery from native Codex plus explicit metadata; canonical access-root filtering, deduplication, deterministic query ranking, sanitized MCP warnings, and local diagnostics. |
-| `exec_sessions.rs` | Generic-client project/scratch fallback plus task-owned unified-exec sessions and transport-local diff state: private persistent scratch storage with transport-local bindings, trusted configured-shell resolution, Codex-compatible model shell-type selection by basename, PowerShell exit-code wrapping, background stdout/stderr drain tasks, process-group kill, idle cleanup, and output truncation (UTF-16 units to match the TS). |
+| `exec_sessions.rs` | Generic-client project/scratch fallback plus task-owned unified-exec sessions and transport-local diff state: private persistent scratch storage with transport-local bindings, trusted configured-shell resolution, Codex-compatible model shell-type selection by basename, strict PowerShell 7 requests and legacy-host avoidance on Windows, PowerShell exit-code wrapping, background stdout/stderr drain tasks, process-group kill, idle cleanup, and output truncation (UTF-16 units to match the TS). |
 | `diff.rs` | Project-scoped Git snapshots, persistent task refs, transport-local fallbacks, incremental comparisons whose emitted snapshot can advance the private diff cursor through compare-and-swap, legacy review-ref migration, diff parsing and component-payload budgets. |
 | `diff_ui.rs` | Embedded MCP Apps resource, component-only diff-result metadata, legacy review-card compatibility, and persisted private interaction state for the interactive `show_diff` card. |
 | `setup_ui.rs` / `setup_ui.html` | Compact setup/status MCP App with a searchable project/scratch chooser, selected direct/worktree/scratch path rendering, full-task continuation token generation, retired-owner read-only state, cached-bypass update checks, background structured doctor diagnostics, direct connector-settings Refresh routing, conversational Autofix, and debug timing display. |
