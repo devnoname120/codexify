@@ -18,13 +18,22 @@ impl GlobalRuntime {
     }
     fn record_plan(&mut self, result: Result<Value, String>, now_ms: u64) {
         match result {
-            Ok(plan) => {
+            Ok(plan)
+                if plan["label"]
+                    .as_str()
+                    .is_some_and(|label| !label.trim().is_empty()) =>
+            {
+                let complete = plan["kind"] != "pro" || plan["label"] != "Pro";
                 self.plan = Some(plan);
-                self.plan_attempted = true;
-                self.plan_retry_at_ms = 0;
+                self.plan_attempted = complete;
+                self.plan_retry_at_ms = if complete {
+                    0
+                } else {
+                    now_ms.saturating_add(60_000)
+                };
             }
             Err(error) if error.to_lowercase().contains("busy") || error.contains("423") => {}
-            Err(_) => {
+            Ok(_) | Err(_) => {
                 // Cache successful lookups only; retry transient failures after a cooldown.
                 self.plan_retry_at_ms = now_ms.saturating_add(60_000);
             }
@@ -45,9 +54,27 @@ async fn refresh_saved_connector(
     client: &BrowserCompanionClient,
 ) -> Result<Value, String> {
     let name = require_connector_name(&state.config).map_err(|(_, error)| error)?;
-    client
+    let schema = state
+        .automation
+        .as_ref()
+        .and_then(|automation| automation.current_schema_version());
+    let revisions = crate::global_settings::schema_versions(&state.config).ok();
+    let result = client
         .refresh_connector(&name, &CancellationToken::new())
-        .await
+        .await?;
+    if let (Some(schema), Some((revision, structural))) = (schema, revisions)
+        && state
+            .automation
+            .as_ref()
+            .and_then(|automation| automation.current_schema_version())
+            .as_deref()
+            == Some(&schema)
+        && crate::global_settings::schema_versions(&state.config).ok()
+            == Some((revision.clone(), structural.clone()))
+    {
+        super::schema_refresh::record_completed(&state.config, &schema, &revision, &structural)?;
+    }
+    Ok(result)
 }
 
 pub(super) fn start(state: OwnerState) {
@@ -803,6 +830,30 @@ mod tests {
         assert_eq!(runtime.plan_retry_at_ms, 0);
     }
     #[test]
+    fn empty_plan_does_not_become_a_cached_success_or_hide_a_verified_plan() {
+        let mut runtime = GlobalRuntime::default();
+        runtime.record_plan(Ok(json!({"label":"  ","kind":"unknown"})), 1000);
+        assert!(runtime.plan.is_none());
+        assert!(!runtime.plan_attempted);
+        assert_eq!(runtime.plan_retry_at_ms, 61_000);
+        runtime.record_plan(Ok(json!({"label":"Pro 20x","kind":"pro"})), 61_000);
+        runtime.record_plan(Ok(json!({"label":"","kind":"unknown"})), 62_000);
+        assert_eq!(runtime.plan.as_ref().unwrap()["label"], "Pro 20x");
+    }
+
+    #[test]
+    fn basic_pro_remains_visible_while_the_billing_tier_is_retried() {
+        let mut runtime = GlobalRuntime::default();
+        runtime.record_plan(Ok(json!({"label":"Pro","kind":"pro"})), 1000);
+        assert_eq!(runtime.plan.as_ref().unwrap()["label"], "Pro");
+        assert!(!runtime.plan_attempted);
+        assert_eq!(runtime.plan_retry_at_ms, 61_000);
+        runtime.record_plan(Ok(json!({"label":"Pro 20x","kind":"pro"})), 61_000);
+        assert_eq!(runtime.plan.as_ref().unwrap()["label"], "Pro 20x");
+        assert!(runtime.plan_attempted);
+        assert_eq!(runtime.plan_retry_at_ms, 0);
+    }
+    #[test]
     fn cached_plan_survives_transient_health_failures_and_resets_for_a_verified_new_account() {
         let mut runtime = GlobalRuntime {
             update: None,
@@ -1021,7 +1072,7 @@ mod tests {
         )
         .unwrap();
         Arc::make_mut(&mut state.config).loaded_config_path = Some(path.clone());
-        crate::owner_chat::start_schema_refresh(state.config.clone());
+        crate::owner_chat::start_schema_refresh(state.config.clone(), state.automation.clone());
         tokio::time::timeout(Duration::from_secs(2), async {
             while crate::global_settings::read_schema_intent(&state.config).is_none() {
                 tokio::time::sleep(Duration::from_millis(10)).await;
@@ -1105,7 +1156,7 @@ mod tests {
         assert_eq!(intent["requiresRestart"], true);
         intent["dueAtMs"] = json!(0);
         crate::global_settings::write_schema_intent(&state.config, &intent).unwrap();
-        crate::owner_chat::start_schema_refresh(state.config.clone());
+        crate::owner_chat::start_schema_refresh(state.config.clone(), state.automation.clone());
         tokio::time::sleep(Duration::from_millis(1200)).await;
         assert_eq!(fixture.calls.load(Ordering::SeqCst), 0);
         // Simulate the new worker after Restart: its PID differs from the writer.

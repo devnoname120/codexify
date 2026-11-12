@@ -13,6 +13,10 @@ import { responseDomSnapshot, type ChatGptResponseDomCache } from "../src/respon
 import { readTurnDomState } from "../src/turn-binding";
 import type {BrowserSimplicity} from "../src/minimal-page";
 import {throwIfConversationRateLimited} from "../src/navigation";
+import {installChatModeCompatibility} from "../src/chat-mode";
+
+// Chat-mode compatibility is installed on every page; these tests inspect styling scripts.
+const styled=<T extends {script:unknown}>(scripts:T[]):T[]=>scripts.filter(entry=>entry.script!==installChatModeCompatibility);
 
 const fakeExecutablePath = join(tmpdir(), "managed-chrome");
 
@@ -110,9 +114,9 @@ test("an explicit Bones level overrides the legacy toggle and styles a restored 
   const shared=new FakePage();shared.currentUrl="https://chatgpt.com/c/restored";
   const {fake}=await createSurface([shared],false,"bones");
   expect(shared.navigations).toEqual([]);
-  expect(fake.initScripts).toHaveLength(1);
-  expect(fake.initScripts[0]!.arg).toMatchObject({level:"bones"});
-  expect(shared.evaluatedScripts[0]!.arg).toMatchObject({level:"bones"});
+  expect(styled(fake.initScripts)).toHaveLength(1);
+  expect(styled(fake.initScripts)[0]!.arg).toMatchObject({level:"bones"});
+  expect(styled(shared.evaluatedScripts)[0]!.arg).toMatchObject({level:"bones"});
   expect(launchSpy!.mock.calls[0]![1]?.reducedMotion).toBe("reduce");
 });
 
@@ -127,7 +131,7 @@ test("the browser uses a dedicated persistent Chrome profile and one shared page
   expect(restored.closed).toBeTrue();
   expect(await surface.page()).toBe(shared as unknown as Page);
   expect(shared.navigations).toEqual(["https://chatgpt.com/"]);
-  expect((context as FakeContext).initScripts).toHaveLength(0);
+  expect(styled((context as FakeContext).initScripts)).toHaveLength(0);
   await surface.reveal();
   expect(shared.revealed).toBeTrue();
 });
@@ -150,8 +154,8 @@ test("startup preserves a restored ChatGPT conversation without loading home",as
   const shared=new FakePage();shared.currentUrl='https://chatgpt.com/c/restored';
   const {surface}=await createSurface([shared],true);
   expect(shared.navigations).toEqual([]);expect(await surface.page()).toBe(shared as unknown as Page);
-  expect(shared.evaluatedScripts).toHaveLength(1);
-  expect(shared.evaluatedScripts[0]!.arg).toMatchObject({styleId:"codexify-minimal-chatgpt"});
+  expect(styled(shared.evaluatedScripts)).toHaveLength(1);
+  expect(styled(shared.evaluatedScripts)[0]!.arg).toMatchObject({styleId:"codexify-minimal-chatgpt"});
 });
 
 test("minimal UI is off unless explicitly enabled and preserves ordinary restored tabs",async()=>{
@@ -160,8 +164,8 @@ test("minimal UI is off unless explicitly enabled and preserves ordinary restore
   try {
     const shared=new FakePage();shared.currentUrl="https://chatgpt.com/c/restored";
     const {fake}=await createSurface([shared]);
-    expect(fake.initScripts).toHaveLength(0);
-    expect(shared.evaluatedScripts).toHaveLength(0);
+    expect(styled(fake.initScripts)).toHaveLength(0);
+    expect(styled(shared.evaluatedScripts)).toHaveLength(0);
     expect(launchSpy!.mock.calls[0]![1]?.reducedMotion).toBeUndefined();
   } finally {
     if(previous===undefined)delete process.env.CODEXIFY_BROWSER_MINIMAL_UI;
@@ -174,7 +178,7 @@ test("an explicit disabled setting overrides a minimal UI environment opt-in",as
   process.env.CODEXIFY_BROWSER_MINIMAL_UI="1";
   try {
     const {surface,fake}=await createSurface(undefined,false);
-    expect(fake.initScripts).toHaveLength(0);
+    expect(styled(fake.initScripts)).toHaveLength(0);
     expect(launchSpy!.mock.calls[0]![1]?.reducedMotion).toBeUndefined();
     await expect(surface.setPresentationStyle("body { color:red; }")).rejects.toThrow("Enable browser simplifications");
   }finally{
@@ -224,7 +228,8 @@ test("registered lanes own distinct fixed pages and simultaneous actions within 
   expect(primary.context()).toBe(secondary.context());
   expect(await surface.page()).toBe(primary);
   expect(fake.tabs[1]!.navigations).toEqual(["https://chatgpt.com/"]);
-  expect(fake.tabs[1]!.listenerCount("response")).toBe(1);
+  // Rate-limit and transcript-load observers each listen for responses.
+  expect(fake.tabs[1]!.listenerCount("response")).toBe(2);
   expect(fake.tabs[1]!.evaluatedScripts.at(-1)!.arg).toMatchObject({level:"bones"});
   await Promise.all([surface.beginAction(),lane.beginAction()]);
   await expect(surface.beginAction()).rejects.toThrow("already owns an action");
@@ -365,10 +370,10 @@ test("presentation is shared by all idle lanes and cannot update during any lane
   expect(receipt.revision).toBe(1);
   expect(await readFile(join(profilePath!,"presentation.css"),"utf8")).toBe("body { color: red; }");
   for(const page of fake.tabs)expect(page.evaluatedScripts.at(-1)!.arg).toMatchObject({revision:1,level:"bones"});
-  expect(fake.initScripts).toHaveLength(2);
+  expect(styled(fake.initScripts)).toHaveLength(2);
   const again=await lane.setPresentationStyle("body { color: red; }");
   expect(again.revision).toBe(1);
-  expect(fake.initScripts).toHaveLength(2);
+  expect(styled(fake.initScripts)).toHaveLength(2);
 });
 
 test("shared presentation reserves maintenance before asynchronous page validation",async()=>{

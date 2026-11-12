@@ -116,6 +116,7 @@
     "enabled": true,
     "port": 3120,
     "maxWaitMs": 55000,
+    "offlineTimeoutMinutes": 5,
     "defaultMessageMode": "queue",
     "rolloutReminderInterval": 25,
     "automation": {
@@ -124,39 +125,23 @@
       "connectorName": "",
       "requestBlockList": [
         "^https?://(www\\.)?chatgpt\\.com/.*/rgstr",
-        "^https?://(www\\.)?chatgpt\\.com/backend-api/.*/conversations",
-        "^https?://(www\\.)?chatgpt\\.com/backend-api/conversations",
+        "^https?://(www\\.)?chatgpt\\.com/backend-api/.*/conversations(?:\\?|$)",
+        "^https?://(www\\.)?chatgpt\\.com/backend-api/conversations(?:\\?|$)",
         "^https?://(www\\.)?chatgpt\\.com/backend-api/sidebar",
         "^https?://(www\\.)?chatgpt\\.com/backend-api/.*/sidebar"
       ],
       "maxQueuedActions": 64,
       "browserActionLanes": 2,
       "autoApproveToolCalls": true,
+      "newConversationOnLoadRateLimit": false,
       "automaticRetries": true,
       "retryTimings": {
-        "actionDelaysSeconds": [
-          30,
-          60,
-          120,
-          240,
-          480
-        ],
-        "chatgptAccessDelaysSeconds": [
-          180,
-          300,
-          600,
-          1200,
-          1800,
-          3600
-        ],
-        "goalRecoveryDelaysSeconds": [
-          60,
-          120,
-          240
-        ],
+        "actionDelaysSeconds": [30, 60, 120, 240, 480],
+        "chatgptAccessDelaysSeconds": [180, 300, 600, 1200, 1800, 3600],
+        "goalRecoveryDelaysSeconds": [60, 120, 240],
         "jitterPercent": 10,
         "approvalResumeGraceSeconds": 180,
-        "conversationLoadIntervalSeconds": 180,
+        "conversationLoadIntervalSeconds": 1,
         "conversationUnavailableCooldownSeconds": 300,
         "rateLimitCooldownSeconds": 180,
         "infiniteRetries": false

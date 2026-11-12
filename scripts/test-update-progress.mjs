@@ -51,6 +51,8 @@ async function tick(page,title) {
 }
 const assertDraft=async f=>{
  assert.equal(await f.draft.inputValue(),'Keep this draft through startup');
+ assert.doesNotMatch(await f.page.locator('#global-progress-detail').textContent(),/Your draft is kept/);
+ assert.doesNotMatch(await f.page.locator('#chat-host #status').textContent(),/Your draft is kept/);
  assert.equal(await f.send.isDisabled(),true);
  await f.draft.press('Enter');
  assert.equal(await f.draft.inputValue(),'Keep this draft through startup');
@@ -86,6 +88,7 @@ for(const [name,engine] of [['Chromium',chromium],['WebKit',webkit]]) {
    assert.equal(await page.locator('#global-progress').isVisible(),true);
    value.readiness={ready:false,loading:true,phase:'refreshing_connector',detail:'Refreshing ChatGPT connector tools…'};value.connectorRefresh.phase='running';
    await tick(page,'Refreshing ChatGPT connector tools');await assertDraft(f);
+   assert.equal(await page.locator('#global-progress-detail').textContent(),'');
    value.readiness={ready:true,loading:false,phase:'ready'};value.connectorRefresh.phase='completed';
    await tick(page,'Codexify updated.');
    await page.waitForFunction(()=>document.querySelector('#chat-host .chat-shell')?.shadowRoot?.getElementById('send')?.disabled===false);

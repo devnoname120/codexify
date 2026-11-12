@@ -321,7 +321,7 @@ mod tests {
                 root.path().join("artifacts"),
             )),
             agent_automation: None,
-            agent_runtime:None,
+            agent_runtime: None,
             cancellation,
         };
 

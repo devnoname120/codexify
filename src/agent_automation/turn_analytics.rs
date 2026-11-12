@@ -20,7 +20,7 @@ const MAX_BYTES: u64 = 1024 * 1024;
 pub(crate) const MAX_DURATION_MS: u64 = 5 * 60 * 60 * 1000;
 const MAX_SAMPLES: usize = 256;
 const MAX_GAP_MS: u64 = 90_000;
-const OFFLINE_MS: u64 = crate::markdown_chat::AUTOMATION_OFFLINE_AFTER_MS;
+const OFFLINE_MS: u64 = 240_000; // Statistical observation window, independent of presence settings.
 
 #[derive(Default)]
 struct ToolCounter {
@@ -51,24 +51,22 @@ fn begin_tracked_tool(registry: &ToolRegistry, task: &str, owner: u64) -> Option
     // This lock covers only bounded registry bookkeeping and atomic updates.
     // A known task must not become global activity just because a peer enters
     // its tool at the same moment: that would defer every idle team's wake.
-    registry.lock()
-        .ok()
-        .and_then(|mut map| {
-            if map.len() >= 4096 {
-                let since = crate::markdown_chat::now_ms().saturating_sub(24 * 60 * 60 * 1000);
-                map.retain(|_, c| {
-                    c.active.load(Ordering::Acquire) > 0
-                        || c.finished_at.load(Ordering::Relaxed) >= since
-                });
-            }
-            let k = key(task, owner);
-            if map.len() >= 4096 && !map.contains_key(&k) {
-                return None;
-            }
-            let c = map.entry(k).or_default().clone();
-            c.active.fetch_add(1, Ordering::AcqRel);
-            Some(c)
-        })
+    registry.lock().ok().and_then(|mut map| {
+        if map.len() >= 4096 {
+            let since = crate::markdown_chat::now_ms().saturating_sub(24 * 60 * 60 * 1000);
+            map.retain(|_, c| {
+                c.active.load(Ordering::Acquire) > 0
+                    || c.finished_at.load(Ordering::Relaxed) >= since
+            });
+        }
+        let k = key(task, owner);
+        if map.len() >= 4096 && !map.contains_key(&k) {
+            return None;
+        }
+        let c = map.entry(k).or_default().clone();
+        c.active.fetch_add(1, Ordering::AcqRel);
+        Some(c)
+    })
 }
 pub(crate) fn begin_tool(task: &str, owner: u64) -> ToolGuard {
     let counter = begin_tracked_tool(TOOLS.get_or_init(Default::default), task, owner);
@@ -86,7 +84,12 @@ struct NativeActivity {
 fn native_activity(task: &str, owner: u64) -> NativeActivity {
     native_activity_from(TOOLS.get(), &UNTRACKED, task, owner)
 }
-fn native_activity_from(registry: Option<&ToolRegistry>, untracked: &ToolCounter, task: &str, owner: u64) -> NativeActivity {
+fn native_activity_from(
+    registry: Option<&ToolRegistry>,
+    untracked: &ToolCounter,
+    task: &str,
+    owner: u64,
+) -> NativeActivity {
     if untracked.active.load(Ordering::Acquire) > 0 {
         return NativeActivity::default();
     }
@@ -108,7 +111,8 @@ fn native_activity_from(registry: Option<&ToolRegistry>, untracked: &ToolCounter
 
 pub(crate) fn native_call_recent_or_running(task: &str, owner: u64, now_ms: u64) -> bool {
     let activity = native_activity(task, owner);
-    !activity.reliable || activity.active > 0
+    !activity.reliable
+        || activity.active > 0
         || activity.finished_at > 0 && now_ms.saturating_sub(activity.finished_at) < OFFLINE_MS
 }
 
@@ -863,62 +867,101 @@ mod tests {
     }
     #[test]
     fn known_tool_contention_does_not_become_untracked_or_defer_an_idle_peer() {
-        let registry=Arc::new(ToolRegistry::default());
-        let untracked=ToolCounter::default();
-        let owner=734;let task="contended-known-tool";let peer="idle-peer";
-        registry.lock().unwrap().insert(key(peer,owner),Arc::default());
-        let held=registry.lock().unwrap();
-        let (started_tx,started_rx)=std::sync::mpsc::channel();
-        let (guard_tx,guard_rx)=std::sync::mpsc::channel();
-        let worker_registry=registry.clone();
-        let worker=std::thread::spawn(move||{
+        let registry = Arc::new(ToolRegistry::default());
+        let untracked = ToolCounter::default();
+        let owner = 734;
+        let task = "contended-known-tool";
+        let peer = "idle-peer";
+        registry
+            .lock()
+            .unwrap()
+            .insert(key(peer, owner), Arc::default());
+        let held = registry.lock().unwrap();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (guard_tx, guard_rx) = std::sync::mpsc::channel();
+        let worker_registry = registry.clone();
+        let worker = std::thread::spawn(move || {
             started_tx.send(()).unwrap();
-            let counter=begin_tracked_tool(&worker_registry,task,owner)
+            let counter = begin_tracked_tool(&worker_registry, task, owner)
                 .expect("a known tool must wait for brief registry contention");
-            guard_tx.send(ToolGuard{counter:Some(counter)}).unwrap();
+            guard_tx
+                .send(ToolGuard {
+                    counter: Some(counter),
+                })
+                .unwrap();
         });
-        started_rx.recv_timeout(std::time::Duration::from_secs(1)).unwrap();
-        assert!(matches!(guard_rx.recv_timeout(std::time::Duration::from_millis(20)),Err(std::sync::mpsc::RecvTimeoutError::Timeout)));
+        started_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+        assert!(matches!(
+            guard_rx.recv_timeout(std::time::Duration::from_millis(20)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ));
         drop(held);
-        let guard=guard_rx.recv_timeout(std::time::Duration::from_secs(1)).unwrap();
+        let guard = guard_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
         worker.join().unwrap();
-        assert_eq!(native_activity_from(Some(&registry),&untracked,task,owner).active,1);
-        let idle=native_activity_from(Some(&registry),&untracked,peer,owner);
-        assert!(idle.reliable);assert_eq!(idle.active,0);assert_eq!(idle.finished_at,0);
+        assert_eq!(
+            native_activity_from(Some(&registry), &untracked, task, owner).active,
+            1
+        );
+        let idle = native_activity_from(Some(&registry), &untracked, peer, owner);
+        assert!(idle.reliable);
+        assert_eq!(idle.active, 0);
+        assert_eq!(idle.finished_at, 0);
         drop(guard);
-        assert!(native_activity_from(Some(&registry),&untracked,task,owner).finished_at>0);
-        let idle=native_activity_from(Some(&registry),&untracked,peer,owner);
-        assert!(idle.reliable);assert_eq!(idle.active,0);assert_eq!(idle.finished_at,0,"known A completion must not start a four-minute B wake delay");
-        assert_eq!(untracked.active.load(Ordering::Acquire),0);
-        assert_eq!(untracked.finished_at.load(Ordering::Relaxed),0);
+        assert!(native_activity_from(Some(&registry), &untracked, task, owner).finished_at > 0);
+        let idle = native_activity_from(Some(&registry), &untracked, peer, owner);
+        assert!(idle.reliable);
+        assert_eq!(idle.active, 0);
+        assert_eq!(
+            idle.finished_at, 0,
+            "known A completion must not start a four-minute B wake delay"
+        );
+        assert_eq!(untracked.active.load(Ordering::Acquire), 0);
+        assert_eq!(untracked.finished_at.load(Ordering::Relaxed), 0);
     }
     #[test]
     fn real_untracked_and_unreadable_registry_activity_remains_conservative() {
-        let registry=ToolRegistry::default();let untracked=ToolCounter::default();
-        untracked.active.store(1,Ordering::Release);
-        assert!(!native_activity_from(Some(&registry),&untracked,"idle-peer",1).reliable);
-        untracked.active.store(0,Ordering::Release);untracked.finished_at.store(123,Ordering::Relaxed);
-        let idle=native_activity_from(Some(&registry),&untracked,"idle-peer",1);
-        assert!(idle.reliable);assert_eq!(idle.finished_at,123);
-        let held=registry.lock().unwrap();
-        assert!(!native_activity_from(Some(&registry),&untracked,"idle-peer",1).reliable);
+        let registry = ToolRegistry::default();
+        let untracked = ToolCounter::default();
+        untracked.active.store(1, Ordering::Release);
+        assert!(!native_activity_from(Some(&registry), &untracked, "idle-peer", 1).reliable);
+        untracked.active.store(0, Ordering::Release);
+        untracked.finished_at.store(123, Ordering::Relaxed);
+        let idle = native_activity_from(Some(&registry), &untracked, "idle-peer", 1);
+        assert!(idle.reliable);
+        assert_eq!(idle.finished_at, 123);
+        let held = registry.lock().unwrap();
+        assert!(!native_activity_from(Some(&registry), &untracked, "idle-peer", 1).reliable);
         drop(held);
-        let poisoned=ToolRegistry::default();
-        let _=std::panic::catch_unwind(||{let _held=poisoned.lock().unwrap();panic!("fixture registry poison");});
-        assert!(begin_tracked_tool(&poisoned,"known",1).is_none());
-        assert!(!native_activity_from(Some(&poisoned),&untracked,"idle-peer",1).reliable);
+        let poisoned = ToolRegistry::default();
+        let _ = std::panic::catch_unwind(|| {
+            let _held = poisoned.lock().unwrap();
+            panic!("fixture registry poison");
+        });
+        assert!(begin_tracked_tool(&poisoned, "known", 1).is_none());
+        assert!(!native_activity_from(Some(&poisoned), &untracked, "idle-peer", 1).reliable);
     }
     #[test]
     fn full_registry_retains_known_tracking_and_conservative_unknown_fallback() {
-        let registry=ToolRegistry::default();let now=crate::markdown_chat::now_ms();
+        let registry = ToolRegistry::default();
+        let now = crate::markdown_chat::now_ms();
         for index in 0..4096 {
-            let counter=Arc::new(ToolCounter::default());counter.finished_at.store(now,Ordering::Relaxed);
-            registry.lock().unwrap().insert(key(&format!("capacity-{index}"),1),counter);
+            let counter = Arc::new(ToolCounter::default());
+            counter.finished_at.store(now, Ordering::Relaxed);
+            registry
+                .lock()
+                .unwrap()
+                .insert(key(&format!("capacity-{index}"), 1), counter);
         }
-        assert!(begin_tracked_tool(&registry,"new-over-capacity",1).is_none());
-        let counter=begin_tracked_tool(&registry,"capacity-0",1).unwrap();
-        assert_eq!(counter.active.load(Ordering::Acquire),1);
-        drop(ToolGuard{counter:Some(counter)});
+        assert!(begin_tracked_tool(&registry, "new-over-capacity", 1).is_none());
+        let counter = begin_tracked_tool(&registry, "capacity-0", 1).unwrap();
+        assert_eq!(counter.active.load(Ordering::Acquire), 1);
+        drop(ToolGuard {
+            counter: Some(counter),
+        });
     }
     #[test]
     fn native_tool_guard_tracks_scope_including_early_return_and_cancellation() {

@@ -574,8 +574,9 @@ mod tests {
         config.loaded_config_path = Some(root.path().join("settings.json"));
         std::fs::write(
             config.loaded_config_path.as_ref().unwrap(),
-            json!({"agentChat":{"automation":{"automaticRetries":true}}}).to_string(),
-        ).unwrap();
+            json!({"agentChat":{"automation":{"automaticRetries":true,"connectorName":"Codexify"}}}).to_string(),
+        )
+        .unwrap();
         config.memory.dir = Some(root.path().join("metadata").display().to_string());
         config.markdown_chat.automation.descriptor_path =
             root.path().join("descriptor.json").display().to_string();
@@ -994,7 +995,8 @@ mod tests {
                     std::fs::write(
                         f.state.config.loaded_config_path.as_ref().unwrap(),
                         json!({"agentChat":{"automation":{"automaticRetries":false}}}).to_string(),
-                    ).unwrap();
+                    )
+                    .unwrap();
                 }
                 "owner" => {
                     let root = f

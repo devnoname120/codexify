@@ -17,9 +17,9 @@ use crate::markdown_chat::AgentAutomationConfig;
 pub const PROTOCOL_VERSION: u32 = 1;
 pub const COMPANION_KIND: &str = "codexify-browser-companion";
 pub const PROTOCOL_SCHEMA_HASH: &str =
-    "7d1f04ca4cb844940820aeeb703a42c36363cee5e5f7209d46c5907f26c5ce05";
+    "36957a042ed31cae11d0401411999119d39c22af98278a46b25c412b0be765c6";
 pub const PROTOCOL_BUILD_SUFFIX: &str =
-    "+protocol.7d1f04ca4cb844940820aeeb703a42c36363cee5e5f7209d46c5907f26c5ce05";
+    "+protocol.36957a042ed31cae11d0401411999119d39c22af98278a46b25c412b0be765c6";
 
 const MAX_DESCRIPTOR_BYTES: u64 = 8192;
 const MAX_JSON_BYTES: usize = 1024 * 1024;
@@ -84,11 +84,11 @@ pub struct CompanionHealth {
     pub authenticated: bool,
     pub account_fingerprint: Option<String>,
     pub active_action_id: Option<String>,
-    #[serde(default,skip_serializing_if="Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub action_capacity: Option<usize>,
-    #[serde(default,skip_serializing_if="Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub available_action_slots: Option<usize>,
-    #[serde(default,skip_serializing_if="Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub active_action_ids: Vec<String>,
 }
 
@@ -100,7 +100,11 @@ impl CompanionHealth {
 
     pub(crate) fn free_action_slots(&self) -> usize {
         self.available_action_slots.unwrap_or_else(|| {
-            usize::from(self.status == CompanionSessionStatus::Idle && self.active_action_id.is_none() && self.active_action_ids.is_empty())
+            usize::from(
+                self.status == CompanionSessionStatus::Idle
+                    && self.active_action_id.is_none()
+                    && self.active_action_ids.is_empty(),
+            )
         })
     }
 }
@@ -163,6 +167,12 @@ pub struct ExecuteActionRequest {
     pub auto_approve_tool_calls: bool,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub bypass_conversation_cooldown: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub retain_pairing_window: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pairing_continuation_of: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_ticket: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -190,6 +200,7 @@ pub enum ActionPrompt {
     TurnRenewal {
         handoff_id: String,
     },
+    TaskContinuation {},
     OfflineCombined {
         batch_id: String,
         messages: Vec<CompanionUnreadMessage>,
@@ -460,7 +471,7 @@ impl BrowserCompanionClient {
             return Ok(None);
         }
         if !response.status().is_success() {
-            return Err(status_error(response.status()));
+            return Err(self.response_status_error(response, cancellation).await);
         }
         let value: Liveness = self.decode_json_response(response, cancellation).await?;
         if value.protocol_version != PROTOCOL_VERSION || value.build != self.build.as_ref() {
@@ -487,8 +498,18 @@ impl BrowserCompanionClient {
 
     /// Action preflight waits for a free page's fresh account observation. UI
     /// health remains passive and may report warming without proving sign-out.
-    pub async fn ready_health(&self, cancellation: &CancellationToken) -> Result<CompanionHealth,String> {
-        let health:CompanionHealth=self.request_json(Method::GET,"/v1/health?ready=1",Option::<&Value>::None,cancellation).await?;
+    pub async fn ready_health(
+        &self,
+        cancellation: &CancellationToken,
+    ) -> Result<CompanionHealth, String> {
+        let health: CompanionHealth = self
+            .request_json(
+                Method::GET,
+                "/v1/health?ready=1",
+                Option::<&Value>::None,
+                cancellation,
+            )
+            .await?;
         self.validate_health(&health)?;
         Ok(health)
     }
@@ -565,9 +586,45 @@ impl BrowserCompanionClient {
             )
             .await?;
         if !response.status().is_success() {
-            return Err(status_error(response.status()));
+            return Err(self.response_status_error(response, cancellation).await);
         }
         self.decode_json_response(response, cancellation).await
+    }
+
+    pub async fn navigation_available_at(
+        &self,
+        url: &str,
+        cancellation: &CancellationToken,
+    ) -> Result<Option<u64>, String> {
+        validate_chatgpt_url(url)?;
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct Availability {
+            protocol_version: u32,
+            build: String,
+            available_at_ms: Option<u64>,
+        }
+        let response = self
+            .send_json_with_timeout(
+                Method::POST,
+                "/v1/navigation/availability",
+                Some(&serde_json::json!({"url":url})),
+                cancellation,
+                Some(Duration::from_secs(2)),
+            )
+            .await?;
+        if !response.status().is_success() {
+            return Err(self.response_status_error(response, cancellation).await);
+        }
+        let value: Availability = self.decode_json_response(response, cancellation).await?;
+        self.validate_envelope(value.protocol_version, &value.build)?;
+        if value
+            .available_at_ms
+            .is_some_and(|at| at == 0 || at > 9_007_199_254_740_991)
+        {
+            return Err("Browser availability deadline is invalid".into());
+        }
+        Ok(value.available_at_ms)
     }
 
     pub async fn refresh_connector(
@@ -585,7 +642,7 @@ impl BrowserCompanionClient {
             )
             .await?;
         if !response.status().is_success() {
-            return Err(status_error(response.status()));
+            return Err(self.response_status_error(response, cancellation).await);
         }
         self.decode_json_response(response, cancellation).await
     }
@@ -622,7 +679,7 @@ impl BrowserCompanionClient {
             )
             .await?;
         if !response.status().is_success() {
-            return Err(status_error(response.status()));
+            return Err(self.response_status_error(response, cancellation).await);
         }
         let catalog: CapabilityCatalog = self.decode_json_response(response, cancellation).await?;
         validate_catalog(&catalog)?;
@@ -753,6 +810,35 @@ impl BrowserCompanionClient {
         Ok(receipt)
     }
 
+    pub async fn refresh_pairing_window(&self, action_id: &str) -> Result<(), String> {
+        validate_opaque(action_id, "browser action ID")?;
+        let value: serde_json::Value = self
+            .request_json(
+                Method::POST,
+                "/v1/actions/refresh-pairing",
+                Some(&serde_json::json!({"actionId":action_id})),
+                &CancellationToken::new(),
+            )
+            .await?;
+        if value["retained"] != true {
+            return Err("The browser pairing reservation is no longer held".into());
+        }
+        Ok(())
+    }
+
+    pub async fn release_pairing_window(&self, action_id: &str) -> Result<(), String> {
+        validate_opaque(action_id, "browser action ID")?;
+        let _: serde_json::Value = self
+            .request_json(
+                Method::POST,
+                "/v1/actions/release-pairing",
+                Some(&serde_json::json!({"actionId":action_id})),
+                &CancellationToken::new(),
+            )
+            .await?;
+        Ok(())
+    }
+
     pub async fn action(
         &self,
         action_id: &str,
@@ -783,7 +869,7 @@ impl BrowserCompanionClient {
             .send_json_with_timeout::<Value>(Method::GET, &path, None, cancellation, None)
             .await?;
         if !response.status().is_success() {
-            return Err(status_error(response.status()));
+            return Err(self.response_status_error(response, cancellation).await);
         }
         let content_type = response
             .headers()
@@ -891,16 +977,19 @@ impl BrowserCompanionClient {
                     },
                 }
             }
-            Ok(response) => ExecuteAttempt::Failed {
-                message: status_error(response.status()),
-                retryable_if_absent: matches!(
-                    response.status(),
-                    StatusCode::BAD_GATEWAY
-                        | StatusCode::SERVICE_UNAVAILABLE
-                        | StatusCode::GATEWAY_TIMEOUT
-                ),
-                ambiguous_if_unreconciled: false,
-            },
+            Ok(response) => {
+                let code = response.status();
+                ExecuteAttempt::Failed {
+                    message: self.response_status_error(response, cancellation).await,
+                    retryable_if_absent: matches!(
+                        code,
+                        StatusCode::BAD_GATEWAY
+                            | StatusCode::SERVICE_UNAVAILABLE
+                            | StatusCode::GATEWAY_TIMEOUT
+                    ),
+                    ambiguous_if_unreconciled: false,
+                }
+            }
             Err(error) => ExecuteAttempt::Failed {
                 message: error.message,
                 retryable_if_absent: !cancellation.is_cancelled(),
@@ -923,7 +1012,7 @@ impl BrowserCompanionClient {
             return Ok(None);
         }
         if !response.status().is_success() {
-            return Err(status_error(response.status()));
+            return Err(self.response_status_error(response, cancellation).await);
         }
         let snapshot = self
             .decode_json_response::<CompanionActionSnapshot>(response, cancellation)
@@ -946,18 +1035,30 @@ impl BrowserCompanionClient {
         if let Some(action_id) = &health.active_action_id {
             validate_opaque(action_id, "browser action ID")?;
         }
-        let capacity=health.action_capacity.unwrap_or(1);
+        let capacity = health.action_capacity.unwrap_or(1);
         if !(1..=4).contains(&capacity)
-            || health.available_action_slots.is_some_and(|slots|slots>capacity)
-            || health.active_action_ids.len()>capacity
-        { return Err("Browser companion action capacity is invalid".into()); }
-        let mut unique=std::collections::HashSet::new();
-        for action_id in &health.active_action_ids {
-            validate_opaque(action_id,"browser action ID")?;
-            if !unique.insert(action_id) {return Err("Browser companion repeats an active action ID".into());}
+            || health
+                .available_action_slots
+                .is_some_and(|slots| slots > capacity)
+            || health.active_action_ids.len() > capacity
+        {
+            return Err("Browser companion action capacity is invalid".into());
         }
-        if let Some(action_id)=&health.active_action_id { unique.insert(action_id); }
-        if unique.len()>capacity || health.available_action_slots.is_some_and(|slots|unique.len()+slots>capacity) {
+        let mut unique = std::collections::HashSet::new();
+        for action_id in &health.active_action_ids {
+            validate_opaque(action_id, "browser action ID")?;
+            if !unique.insert(action_id) {
+                return Err("Browser companion repeats an active action ID".into());
+            }
+        }
+        if let Some(action_id) = &health.active_action_id {
+            unique.insert(action_id);
+        }
+        if unique.len() > capacity
+            || health
+                .available_action_slots
+                .is_some_and(|slots| unique.len() + slots > capacity)
+        {
             return Err("Browser companion action capacity is inconsistent".into());
         }
         Ok(())
@@ -1014,7 +1115,7 @@ impl BrowserCompanionClient {
     {
         let response = self.send_json(method, path, body, cancellation).await?;
         if !response.status().is_success() {
-            return Err(status_error(response.status()));
+            return Err(self.response_status_error(response, cancellation).await);
         }
         self.decode_json_response(response, cancellation).await
     }
@@ -1070,6 +1171,9 @@ impl BrowserCompanionClient {
             message,
             may_have_reached_companion: false,
         })?;
+        // Only static operation labels are logged/displayed: never the loopback
+        // endpoint, bearer, action IDs, query strings, or raw reqwest error URL.
+        let operation = companion_operation(&method, path);
         let mut request = self
             .http
             .request(method, url)
@@ -1099,11 +1203,84 @@ impl BrowserCompanionClient {
                 message: cancelled_error(),
                 may_have_reached_companion: true,
             }),
-            response = request.send() => response.map_err(|error| RequestFailure {
-                message: "Browser companion request failed before a verified response".to_string(),
-                may_have_reached_companion: !error.is_connect() && !error.is_builder(),
+            response = request.send() => response.map_err(|error| {
+                let reason = if error.is_timeout() && error.is_connect() {
+                    format!("connection timed out after {}s", self.request_timeout.min(Duration::from_secs(10)).as_secs_f64())
+                } else if error.is_timeout() {
+                    timeout.map_or_else(|| "timed out".to_string(), |limit| format!("timed out after {}s", limit.as_secs_f64()))
+                } else if error.is_connect() {
+                    "could not connect".to_string()
+                } else {
+                    "connection interrupted".to_string()
+                };
+                tracing::warn!(operation, reason, "Browser companion request failed");
+                RequestFailure {
+                    message: format!("Browser companion request failed before a verified response ({operation}: {reason})"),
+                    may_have_reached_companion: !error.is_connect() && !error.is_builder(),
+                }
             }),
         }
+    }
+
+    async fn response_status_error(
+        &self,
+        response: reqwest::Response,
+        cancellation: &CancellationToken,
+    ) -> String {
+        let fallback = status_error(response.status());
+        if response.status() != StatusCode::CONFLICT {
+            return fallback;
+        }
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields, rename_all = "camelCase")]
+        struct Failure {
+            protocol_version: u32,
+            build: String,
+            error: Detail,
+        }
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Detail {
+            code: String,
+            phase: String,
+            message: String,
+        }
+        let Ok(value) = self
+            .decode_json_response::<Failure>(response, cancellation)
+            .await
+        else {
+            return fallback;
+        };
+        const PHASES: &[&str] = &[
+            "composer_lookup",
+            "effort_control_lookup",
+            "picker_open",
+            "model_options",
+            "model_identity",
+            "effort_selection",
+            "effort_restore",
+            "capability_discovery",
+        ];
+        const CODES: &[&str] = &[
+            "selector_drift",
+            "model_unavailable",
+            "external_interference",
+            "cancelled",
+            "failed",
+        ];
+        if self
+            .validate_envelope(value.protocol_version, &value.build)
+            .is_err()
+            || !PHASES.contains(&value.error.phase.as_str())
+            || !CODES.contains(&value.error.code.as_str())
+            || validate_visible(&value.error.message, 4096, "browser failure message").is_err()
+        {
+            return fallback;
+        }
+        format!(
+            "{} [{}; {}]",
+            value.error.message, value.error.phase, value.error.code
+        )
     }
 
     async fn decode_json_response<T>(
@@ -1138,6 +1315,29 @@ impl BrowserCompanionClient {
         self.endpoint
             .join(path.trim_start_matches('/'))
             .map_err(|_| "Browser companion request path is invalid".to_string())
+    }
+}
+
+fn companion_operation(method: &Method, path: &str) -> &'static str {
+    match (method.as_str(), path.split('?').next().unwrap_or_default()) {
+        ("GET", "/v1/liveness") => "checking browser liveness",
+        ("GET", "/v1/health") => "checking browser account/session",
+        ("POST", "/v1/actions/execute") => "admitting browser action",
+        ("POST", "/v1/actions/cancel") => "cancelling browser action",
+        ("GET", route) if route.starts_with("/v1/actions/") && route.ends_with("/events") => {
+            "reading browser action events"
+        }
+        ("GET", route) if route.starts_with("/v1/actions/") => "reading browser action status",
+        ("POST", "/v1/account/plan") => "checking subscription tier",
+        ("POST", "/v1/connectors/refresh") => "refreshing connector",
+        ("POST", "/v1/turns/handoff") => "checking turn handoff",
+        ("POST", "/v1/approvals/conversation") => "checking conversation approval",
+        ("POST", "/v1/session/capabilities" | "/v1/new-chat/capabilities") => {
+            "reading model catalog"
+        }
+        ("POST", "/v1/session/login") => "opening browser login",
+        ("POST", "/v1/window/reveal") => "showing browser window",
+        _ => "browser operation",
     }
 }
 
@@ -1287,7 +1487,9 @@ fn process_is_alive(pid: u32) -> bool {
 #[cfg(windows)]
 fn process_is_alive(pid: u32) -> bool {
     use windows_sys::Win32::Foundation::{CloseHandle, WAIT_TIMEOUT};
-    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject};
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
+    };
 
     let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
     if handle.is_null() {
@@ -1383,6 +1585,31 @@ impl BrowserCompanionClient {
 }
 
 fn validate_execute_request(request: &ExecuteActionRequest) -> Result<(), String> {
+    if let Some(ticket) = &request.agent_ticket
+        && (ticket.len() != 8
+            || !ticket
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')))
+    {
+        return Err("Invalid browser agent ticket".into());
+    }
+    if request.retain_pairing_window && !matches!(request.prompt, ActionPrompt::CreateChat { .. })
+        || request
+            .pairing_continuation_of
+            .as_deref()
+            .is_some_and(|parent| {
+                parent == request.action_id
+                    || matches!(
+                        request.prompt,
+                        ActionPrompt::CreateChat { .. } | ActionPrompt::PairVerify { .. }
+                    )
+            })
+    {
+        return Err("Invalid pairing window reservation".into());
+    }
+    if let Some(parent) = &request.pairing_continuation_of {
+        validate_opaque(parent, "pairing browser action ID")?;
+    }
     validate_opaque(&request.action_id, "browser action ID")?;
     validate_opaque(&request.idempotency_key, "browser action idempotency key")?;
     validate_chatgpt_url(&request.url)?;
@@ -1404,6 +1631,11 @@ fn validate_execute_request(request: &ExecuteActionRequest) -> Result<(), String
         _ => return Err("Browser model and effort must be supplied together; pairing uses the conversation settings".into()),
     }
     validate_prompt(&request.prompt)?;
+    if render_action_prompt_with_ticket(&request.prompt, request.agent_ticket.as_deref()).len()
+        > MAX_PROMPT_BYTES
+    {
+        return Err("Browser automation prompt exceeds the safety limit".into());
+    }
     let encoded = serde_json::to_vec(request)
         .map_err(|_| "Could not encode browser action request".to_string())?;
     if encoded.len() > MAX_JSON_BYTES {
@@ -1434,6 +1666,7 @@ fn validate_prompt(prompt: &ActionPrompt) -> Result<(), String> {
                 return Err("Turn handoff ID is invalid".into());
             }
         }
+        ActionPrompt::TaskContinuation {} => {}
         ActionPrompt::OfflineChat { batch_id, messages } => {
             validate_batch(batch_id, messages)?;
         }
@@ -1478,6 +1711,19 @@ fn validate_prompt(prompt: &ActionPrompt) -> Result<(), String> {
 
 pub(crate) fn rendered_action_prompt_bytes(prompt: &ActionPrompt) -> usize {
     render_action_prompt(prompt).len()
+}
+
+pub(crate) fn browser_ticket_prompt_overhead() -> usize {
+    render_action_prompt_with_ticket(&ActionPrompt::TaskContinuation {}, Some("AAAAAAAA")).len()
+        - render_action_prompt(&ActionPrompt::TaskContinuation {}).len()
+}
+
+fn render_action_prompt_with_ticket(prompt: &ActionPrompt, ticket: Option<&str>) -> String {
+    let mut rendered = render_action_prompt(prompt);
+    if let Some(ticket) = ticket {
+        rendered.push_str(&format!("\n\nCodexify supplied a fresh agent ticket for this prompt: `{ticket}`. Pass it as `codexify_ticket` on the first ticketed tool call in this turn, including setup or pairing verification. `continue_task` is exempt and does not consume it. After that first call, use the latest `new_codexify_ticket` returned by each response. This ticket replaces any ticket remembered from a previous turn; do not omit it or reuse an older one."));
+    }
+    rendered
 }
 
 fn validate_batch(batch_id: &str, messages: &[CompanionUnreadMessage]) -> Result<(), String> {
@@ -1567,6 +1813,7 @@ fn render_action_prompt(prompt: &ActionPrompt) -> String {
         ActionPrompt::OfflineChat { messages, .. } => unread_clause(messages),
         ActionPrompt::OfflineGoal { .. } => GOAL_CLAUSE.to_string(),
         ActionPrompt::TurnRenewal { .. } => "Continue.".to_string(),
+        ActionPrompt::TaskContinuation {} => "Continue the previous user request in this Codexify task using its existing workspace, CHAT.md and progress history. Initialization and pairing are already complete. Call get_agent_brief, read the task history and continue from the saved state; do not treat this as a new task or repeat completed work.".to_string(),
         ActionPrompt::OfflineCombined { messages, .. } => {
             format!("{}\n\n{GOAL_CLAUSE}", unread_clause(messages))
         }
@@ -1809,18 +2056,30 @@ mod process_liveness_tests {
             let mut child = Command::new("cmd.exe")
                 .args(["/D", "/C", &format!("exit {exit_code}")])
                 .creation_flags(CREATE_NO_WINDOW)
-                .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
-                .spawn().unwrap();
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap();
             let pid = child.id();
             let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
-            assert!(!handle.is_null(), "retain the disposable child's process object");
+            assert!(
+                !handle.is_null(),
+                "retain the disposable child's process object"
+            );
             let _retained = unsafe { OwnedHandle::from_raw_handle(handle) };
             assert_eq!(child.wait().unwrap().code(), Some(exit_code));
             // Reproduce the old successful-OpenProcess condition explicitly.
             let exited_handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
-            assert!(!exited_handle.is_null(), "the exited process object must still be openable");
+            assert!(
+                !exited_handle.is_null(),
+                "the exited process object must still be openable"
+            );
             let _exited = unsafe { OwnedHandle::from_raw_handle(exited_handle) };
-            assert!(!process_is_alive(pid), "exit code {exit_code} is not a running process");
+            assert!(
+                !process_is_alive(pid),
+                "exit code {exit_code} is not a running process"
+            );
         }
     }
 }

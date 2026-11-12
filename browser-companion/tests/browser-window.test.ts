@@ -296,7 +296,8 @@ test("only an explicitly manual action bypasses navigation cooldown and still re
   expect(loads).toEqual(["https://chatgpt.com/c/existing",manual.url]);
   const after=request("cooldown-after");await coordinator.execute(after);
   expect((await collect(coordinator,after.actionId)).some(event=>event.type==="waiting")).toBe(true);
-  await expect(coordinator.execute({...request("cooldown-wrong-account"),expectedAccountFingerprint:"other",bypassConversationCooldown:true})).rejects.toThrow("account changed");
+  await coordinator.execute({...request("cooldown-wrong-account"),expectedAccountFingerprint:"other",bypassConversationCooldown:true});
+  expect((await collect(coordinator,"cooldown-wrong-account")).at(-1)).toMatchObject({type:"failed",message:expect.stringContaining("account changed")});
   expect(loads).toHaveLength(2);
 });
 
@@ -329,6 +330,7 @@ test("concurrent execute preflights cannot acquire the single window twice", asy
   try {
     expect(results.filter(result => result.status === "fulfilled")).toHaveLength(1);
     expect(results.filter(result => result.status === "rejected")).toHaveLength(1);
+    while (!driver.runs.length) await Bun.sleep(1);
     expect(driver.maxActiveHealthCalls).toBe(1);
     expect(driver.runs).toHaveLength(1);
   } finally {
@@ -343,6 +345,7 @@ test("execute is idempotent but an action ID cannot be rebound to another reques
   expect((await coordinator.execute(submitted)).actionId).toBe("same");
   expect((await coordinator.execute(structuredClone(submitted))).actionId).toBe("same");
   await expect(coordinator.execute({ ...submitted, effort:"medium" })).rejects.toThrow("different request");
+  while (!driver.releases.has("same")) await Bun.sleep(1);
   driver.releases.get("same")?.();
   await collect(coordinator, "same");
   expect(driver.runs).toEqual(["same"]);
@@ -363,15 +366,15 @@ test("cancellation is idempotent and never starts another action", async () => {
   expect(driver.runs).toEqual(["cancel"]);
 });
 
-test("a manually busy shared window is rejected before navigation or queue ownership", async () => {
+test("a manually busy shared window produces a retained failure before navigation", async () => {
   const driver = new DeferredDriver();
   driver.status = "busy";
   const coordinator = new SingleWindowCoordinator(driver, TEST_BUILD);
 
-  await expect(coordinator.execute(request("manual-busy"))).rejects.toThrow("not idle");
-
+  await coordinator.execute(request("manual-busy"));
+  expect((await collect(coordinator,"manual-busy")).at(-1)).toMatchObject({type:"failed",message:expect.stringContaining("not idle")});
   expect(driver.runs).toEqual([]);
-  expect(await coordinator.action("manual-busy")).toBeUndefined();
+  expect(await coordinator.action("manual-busy")).toMatchObject({state:"failed",sendAccepted:false});
   expect((await coordinator.health()).status).toBe("busy");
 });
 
@@ -653,8 +656,8 @@ test("pairing and default conversation actions allow an omitted connector and st
   for (let attempt=0;attempt<20;attempt++) {snapshot=await coordinator.action(pair.actionId);if(snapshot?.state==="idle")break;await Bun.sleep(5);}
   expect(snapshot?.sendAccepted).toBeTrue();expect(snapshot?.selected).toBeNull();
   const wrongAccount = {...pair,actionId:"wrong-account-pair",idempotencyKey:"wrong-account-idem",expectedAccountFingerprint:"different-account"};
-  let failure: unknown;try {await coordinator.execute(wrongAccount);} catch(error){failure=error;}
-  expect((failure as Error).message).toContain("account changed");
+  await coordinator.execute(wrongAccount);
+  expect((await collect(coordinator,wrongAccount.actionId)).at(-1)).toMatchObject({type:"failed",message:expect.stringContaining("account changed")});
   expect(driver.runs).toEqual(["no-model-pair"]);
   await coordinator.close();
 });
@@ -756,8 +759,11 @@ test("ordinary sends still require model verification before connector verificat
 test("a stopped browser is not reported as a ChatGPT authentication failure",async()=>{
   const driver=new DeferredDriver();driver.authenticated=false;driver.status="unavailable";
   const coordinator=new SingleWindowCoordinator(driver,TEST_BUILD);
-  const failure=await coordinator.execute(request("browser-closed")).then(()=>undefined,error=>error);
-  expect(failure).toBeInstanceOf(Error);expect(failure.message).not.toContain("authentication");expect(driver.runs).toEqual([]);
+  await coordinator.execute(request("browser-closed"));
+  const failure=(await collect(coordinator,"browser-closed")).at(-1);
+  expect(failure).toMatchObject({type:"failed"});
+  expect(failure?.type==="failed" && failure.message.includes("authentication")).toBeFalse();
+  expect(driver.runs).toEqual([]);
 });
 
 test("passive approval checks yield to active sends and never start another action",async()=>{
@@ -996,6 +1002,8 @@ test.each(['deadline','cancel'] as const)('an unsettled unsent conversation load
  (driver as BrowserDriver).close=async()=>{closed++;};
  const coordinator=new SingleWindowCoordinator(driver,TEST_BUILD,{operationMs:35,cleanupMs:10,hardStopMs:20});
  const input=request(`retained-load-${mode}`);await coordinator.execute(input);
+ // Admission is acknowledged before preflight; cancel once the load has begun.
+ while(attempts===0)await Bun.sleep(1);
  if(mode==='cancel')await coordinator.cancel({idempotencyKey:`cancel-${mode}`,actionId:input.actionId});
  const events=await collect(coordinator,input.actionId),last=events.at(-1) as any;
  expect(last.type).toBe('failed');expect(last.code).toBe(mode==='deadline'?'conversation_unavailable':'cancelled');
@@ -1004,7 +1012,7 @@ test.each(['deadline','cancel'] as const)('an unsettled unsent conversation load
  expect((await coordinator.liveness()).available).toBeTrue();expect(probes).toBe(1);
  rendererAlive=false;expect((await coordinator.liveness()).available).toBeFalse();expect(probes).toBe(2);
  rendererAlive=true;
- await expect(coordinator.execute(request('blocked-late-load'))).rejects.toThrow('still owns');
+ await expect(coordinator.execute(request('blocked-late-load'))).rejects.toThrow('busy');
  await expect(coordinator.reveal('https://chatgpt.com/c/other')).rejects.toThrow('still owns');
  expect(attempts).toBe(1);
  release();await Bun.sleep(10);
@@ -1079,6 +1087,19 @@ test('cancelled connector phases retain ownership until the late phase settles b
  await Bun.sleep(5);
  expect(restored).toBe(1);expect(closed).toBe(0);
  expect((await coordinator.capabilities()).accountFingerprint).toBe('account-1');
+});
+
+test('a stalled admitted preflight records a definite unsent failure and retires its driver',async()=>{
+ const driver=new DeferredDriver();let closed=0;
+ driver.health=async()=>new Promise(()=>{});
+ (driver as BrowserDriver).close=async()=>{closed++;};
+ const coordinator=new SingleWindowCoordinator(driver,TEST_BUILD,shortBudget);
+ await coordinator.execute(request('stalled-preflight'));
+ const events=await collect(coordinator,'stalled-preflight');
+ expect(events.at(-1)).toMatchObject({type:'failed',message:expect.stringContaining('timed out')});
+ expect(await coordinator.action('stalled-preflight')).toMatchObject({state:'failed',sendAccepted:false});
+ expect(driver.runs).toEqual([]);expect(closed).toBe(1);
+ expect((await coordinator.health()).status).toBe('unavailable');
  await coordinator.close();
 });
 
@@ -1090,7 +1111,7 @@ test('connector maintenance retains the UI lease across steps and restoration',a
  (driver as BrowserDriver).refreshConnectorSteps=async(_name,run,signal)=>{
   await run(async()=>{order.push('first-step');entered();await gate;},signal);
   await run(async()=>{order.push('second-step');},signal);
-  return {appId:'asdk_app_fixture',refreshObserved:true,permissionChanged:false,schemaVerified:false};
+  return {appId:'asdk_app_fixture',refreshObserved:true,permissionChanged:false,schemaVerified:false as const};
  };
  const coordinator=new SingleWindowCoordinator(driver,TEST_BUILD,shortBudget);
  const refresh=coordinator.refreshConnector('Fixture connector');await started;
@@ -1112,7 +1133,7 @@ test('refresh observation and restoration exclude plan checks, navigation and su
   await run(async()=>{order.push('prepare-refresh');},signal);
   observing();await confirmation;order.push('confirmed');
   await run(async()=>{restoring();await restoration;order.push('restored');});
-  return {appId:'asdk_app_fixture',refreshObserved:true,permissionChanged:false,schemaVerified:false};
+  return {appId:'asdk_app_fixture',refreshObserved:true,permissionChanged:false,schemaVerified:false as const};
  };
  (driver as BrowserDriver).accountPlan=async()=>{order.push('plan');return {accountFingerprint:'account-1',kind:'pro',label:'Pro 20x',sourceLabel:'ChatGPT Pro 200'};};
  const capabilities=driver.capabilities.bind(driver);
@@ -1156,7 +1177,8 @@ test('cancelled refresh restores its page before queued account work can run',as
 test("queued health polling leaves the active Chrome tab alone and rechecks identity after release",async()=>{
   const driver=new SlowHealthDriver(),coordinator=new SingleWindowCoordinator(driver,TEST_BUILD);
   await coordinator.execute(request("health-owner"));
-  await Bun.sleep(0);
+  // Admission precedes preflight; wait until the action owns the tab.
+  while(!driver.releases.has("health-owner"))await Bun.sleep(1);
   const calls=driver.healthCalls;
   driver.authenticated=false;
   const polls=await Promise.all(Array.from({length:100},()=>coordinator.health()));
@@ -1240,10 +1262,11 @@ for(const operation of ["login","capabilities","execute"] as const)test(`${opera
   const pending=operation==="login"?coordinator.login():operation==="capabilities"?coordinator.capabilities():coordinator.execute(request("full-health"));
   let settled=false;void pending.finally(()=>{settled=true;});
   await Bun.sleep(PASSIVE_HEALTH_BUDGET_MS+25);
-  expect(settled).toBe(false);expect(driver.loginCalls).toBe(0);expect(driver.capabilityCalls).toBe(0);expect(driver.runs).toEqual([]);
+  // Execute acknowledges admission immediately; its preflight still waits.
+  expect(settled).toBe(operation==="execute");expect(driver.loginCalls).toBe(0);expect(driver.capabilityCalls).toBe(0);expect(driver.runs).toEqual([]);
   release();const result=await pending;
   if(operation==="login")expect(result).toMatchObject({status:"idle",authenticated:true,accountFingerprint:"account-1"});
-  if(operation==="execute"){await Bun.sleep(0);driver.releases.get("full-health")?.();}
+  if(operation==="execute"){while(!driver.releases.has("full-health"))await Bun.sleep(1);driver.releases.get("full-health")?.();}
   await coordinator.close();
 });
 
@@ -1324,7 +1347,9 @@ test("a shared passive identity never authorizes an action after the real accoun
   expect(await coordinator.health()).toMatchObject({authenticated:true,accountFingerprint:"account-1"});
   account="changed-account";
   expect(await coordinator.health()).toMatchObject({authenticated:true,accountFingerprint:"account-1"});expect(calls).toBe(1);
-  await expect(coordinator.execute(request("fresh-account-required"))).rejects.toThrow("account changed");
+  await coordinator.execute(request("fresh-account-required"));
+  const events=await collect(coordinator,"fresh-account-required");
+  expect(events.at(-1)).toMatchObject({type:"failed",message:expect.stringContaining("account changed")});
   expect(driver.runs).toEqual([]);expect(calls).toBe(2);
   expect(await coordinator.health()).toMatchObject({authenticated:true,accountFingerprint:"changed-account"});expect(calls).toBe(3);
   await coordinator.close();
@@ -1428,4 +1453,101 @@ for(const sent of [false,true])test(`cooldown deferral preserves ${sent?'accepte
  expect(snapshot?.cooldownUntilMs!==undefined).toBe(!sent);
  expect((await coordinator.health()).activeActionId).toBeNull();
  await coordinator.close();
+});
+
+for(const accepted of [false,true])test(`conversation length limit retains its terminal cause after accepted=${accepted}`,async()=>{
+ const driver=new DeferredDriver();driver.execute=async execution=>{
+  driver.runs.push(execution.request.actionId);
+  if(accepted){execution.emit({type:'model_verified',model:'gpt-6-sol',effort:'high'});execution.emit({type:'send_accepted'});}
+  throw new BrowserCompanionError('Conversation length limit','conversation_limit',{sendAccepted:accepted});
+ };
+ const coordinator=new SingleWindowCoordinator(driver,TEST_BUILD),id='full-'+accepted;
+ await coordinator.execute(request(id));const events=await collect(coordinator,id),snapshot=await coordinator.action(id);
+ expect(events.at(-1)).toMatchObject({type:'failed',code:'conversation_limit'});
+ expect(snapshot).toMatchObject({state:'failed',sendAccepted:accepted,attention:{code:'conversation_limit'}});
+ expect(driver.runs).toEqual([id]);await coordinator.close();
+});
+
+class PairingWindowDriver extends DeferredDriver {
+  maintenanceCalls = 0;
+  async accountPlan() { this.maintenanceCalls++; return {label:"Pro",sourceLabel:"Pro",kind:"pro" as const,accountFingerprint:"account-1"}; }
+  async prepareNewChat() { this.maintenanceCalls++; return this.capabilities(); }
+  async refreshConnector() { this.maintenanceCalls++; return {appId:"app",refreshObserved:true,permissionChanged:false,schemaVerified:false as const}; }
+  override async execute(execution:DriverExecution) {
+    this.runs.push(execution.request.actionId);
+    if (execution.request.model && execution.request.effort) execution.emit({type:"model_verified",model:execution.request.model,effort:execution.request.effort});
+    execution.emit({type:"send_accepted"});
+    const canonicalUrl = execution.request.prompt.kind === "create_chat" ? "https://chatgpt.com/c/paired-window" : execution.request.expectedUrl;
+    if (execution.request.prompt.kind === "create_chat") execution.emit({type:"conversation_created",canonicalUrl});
+    execution.emit({type:"submission_complete",canonicalUrl});
+  }
+}
+
+const retainedPairing = ():ExecuteActionRequest=>({...request("pair-window"),url:"https://chatgpt.com/new",expectedUrl:"https://chatgpt.com/new",
+  model:null,effort:null,retainPairingWindow:true,prompt:{kind:"create_chat",continuationToken:"A".repeat(43),reference:Buffer.alloc(32,1).toString('base64url'),setupReference:null}});
+
+test("re-pairing retains the browser through verification and admits only its matching continuation",async()=>{
+  const driver=new PairingWindowDriver(),coordinator=new SingleWindowCoordinator(driver,TEST_BUILD);
+  await coordinator.execute(retainedPairing());
+  for await(const _ of coordinator.events("pair-window",0)){}
+  expect((await coordinator.health()).activeActionId).toBe("pair-window");
+  await expect(coordinator.execute(request("other"))).rejects.toThrow("busy");
+  await expect(coordinator.accountPlan("epoch")).rejects.toThrow("busy");
+  await expect(coordinator.newChatCapabilities(null)).rejects.toThrow("busy");
+  await expect(coordinator.refreshConnector("Codexify")).rejects.toThrow("busy");
+  expect(driver.maintenanceCalls).toBe(0);
+  const followUp:ExecuteActionRequest={...request("normal-prompt"),url:"https://chatgpt.com/c/paired-window",expectedUrl:"https://chatgpt.com/c/paired-window",pairingContinuationOf:"pair-window"};
+  for(const change of [{url:"https://chatgpt.com/c/other"},{pairingGeneration:2},{expectedAccountFingerprint:"other-account"},{connectorName:"Other connector"},{pairingContinuationOf:"other-pair"}]) {
+    await expect(coordinator.execute({...followUp,...change})).rejects.toThrow("busy");
+  }
+  // A still-generating initialization response belongs to this reservation.
+  driver.status="busy";
+  await coordinator.execute(followUp);
+  for await(const _ of coordinator.events(followUp.actionId,0)){}
+  expect(driver.runs).toEqual(["pair-window","normal-prompt"]);
+  expect((await coordinator.health()).activeActionId).toBeNull();
+  await coordinator.close();
+});
+
+test("re-pairing reservation expires or releases without replaying Send",async()=>{
+  for(const mode of ["timeout","release","shutdown"] as const) {
+    const driver=new PairingWindowDriver(),coordinator=new SingleWindowCoordinator(driver,TEST_BUILD,{operationMs:1000,cleanupMs:100,hardStopMs:100,pairingRetentionMs:30});
+    await coordinator.execute(retainedPairing());
+    for await(const _ of coordinator.events("pair-window",0)){}
+    expect(coordinator.releasePairingWindow("wrong-action")).toBeFalse();
+    if(mode==="timeout") await Bun.sleep(60);
+    else if(mode==="release") expect(coordinator.releasePairingWindow("pair-window")).toBeTrue();
+    else await coordinator.close();
+    expect((await coordinator.health()).activeActionId).toBeNull();
+    expect(driver.runs).toEqual(["pair-window"]);
+    if(mode!=="shutdown") await coordinator.close();
+  }
+});
+
+test("a first-work failure before Send keeps the reserved page and a renewed lease",async()=>{
+  class FirstWorkFailure extends PairingWindowDriver {
+    fail=true;
+    override async execute(execution:DriverExecution){
+      if(execution.request.prompt.kind!=="create_chat"&&this.fail){
+        this.fail=false;this.runs.push(execution.request.actionId);
+        throw new BrowserCompanionError("Model could not be selected","model_unavailable");
+      }
+      await super.execute(execution);
+    }
+  }
+  const driver=new FirstWorkFailure(),coordinator=new SingleWindowCoordinator(driver,TEST_BUILD,{operationMs:1000,cleanupMs:100,hardStopMs:100,pairingRetentionMs:200});
+  await coordinator.execute(retainedPairing());for await(const _ of coordinator.events("pair-window",0)){}
+  const first={...request("first-work-failure"),url:"https://chatgpt.com/c/paired-window",expectedUrl:"https://chatgpt.com/c/paired-window",pairingContinuationOf:"pair-window"};
+  await coordinator.execute(first);for await(const _ of coordinator.events(first.actionId,0)){}
+  expect((await coordinator.health()).activeActionId).toBe("pair-window");
+  await expect(coordinator.execute(request("other"))).rejects.toThrow("busy");
+  await expect(coordinator.accountPlan("epoch")).rejects.toThrow("busy");
+  await Bun.sleep(120);expect(coordinator.refreshPairingWindow("pair-window")).toBeTrue();
+  expect(coordinator.refreshPairingWindow("wrong-action")).toBeFalse();
+  await Bun.sleep(120);expect((await coordinator.health()).activeActionId).toBe("pair-window");
+  const retry={...first,actionId:"first-work-retry",idempotencyKey:"first-work-retry"};
+  await coordinator.execute(retry);for await(const _ of coordinator.events(retry.actionId,0)){}
+  expect((await coordinator.health()).activeActionId).toBeNull();
+  expect(driver.runs).toEqual(["pair-window","first-work-failure","first-work-retry"]);
+  await coordinator.close();
 });

@@ -5,6 +5,7 @@ import {navigatePage} from "./navigation";
 import { BrowserCompanionError } from "./errors";
 import { assertAuthenticatedChatGptPage } from "./session";
 import type { SingleBrowserSurface } from "./chatgpt-driver";
+import {selectChatMode} from "./chat-mode";
 
 export function validateNewChatProjectUrl(value: string | null): string | null {
   if (value === null) return null;
@@ -28,7 +29,11 @@ export async function openNewChat(surface: SingleBrowserSurface, projectUrl: str
     progress?.("document_loaded");
     await assertAuthenticatedChatGptPage(page);
     const composer=await activeComposer(page,30_000,signal);
-    if(!(await composerText(composer)).trim()){progress?.("editor_ready");return page;}
+    if(!(await composerText(composer)).trim()){
+      await selectChatMode(page,signal);
+      progress?.("editor_ready");
+      return page;
+    }
   }
   if(page.url()===destination)await navigatePage(page,destination,{reload:true,signal});
   else page=await surface.navigate(destination,signal);
@@ -59,6 +64,7 @@ export async function openNewChat(surface: SingleBrowserSurface, projectUrl: str
   if (await page.locator('[data-message-author-role="user"], [data-message-author-role="assistant"]').count()) {
     throw new BrowserCompanionError("The new ChatGPT chat is not empty", "external_interference");
   }
+  await selectChatMode(page,signal);
   return page;
 }
 

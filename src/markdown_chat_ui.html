@@ -200,7 +200,7 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
   let rpcId = 1, initialized = false, tornDown = false, pollTimer = null, saveTimer = null;
   let refreshing = false, sending = false, loadingOlder = false, visible = true;
   let revision = null, before = null, hasMore = false, delivered = 0, readThrough = 0, chatFile = null, failures = 0, snapshotEnd = 0;
-  let lastAgentCall = null, totalToolCalls = null, clockOffset = 0, presenceTimer = null;
+  let lastAgentCall = null, totalToolCalls = null, clockOffset = 0, presenceTimer = null, offlineAfterMs = 300000;
   let waitingForPresenceRefresh = false;
   let wakeStatus = null, wakeVersion = 0;
   let agentWaitingUntil = null, agentPresenceUntil = null, waitingReplyEnd = 0, inputRequired = false;
@@ -257,7 +257,7 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
     return awaitingAnswer() ? "steer" : defaultMessageMode;
   }
   function messageHint() {
-    if (startupBlocked()) return `${runtimeLoading.detail || "Codexify is starting."} Your draft is kept.`;
+    if (startupBlocked()) return runtimeLoading.detail || "Codexify is starting.";
     if (awaitingAnswer()) return `Enter or ${modifierLabel}+Enter to send your answer. Shift + Enter for a new line.`;
     return composerMessageMode() === "queue" ? `Enter to queue. ${modifierLabel}+Enter to steer. Shift + Enter for a new line.` : `Enter to send. ${modifierLabel}+Enter to queue. Shift + Enter for a new line.`;
   }
@@ -455,8 +455,8 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
       : { state:"offline", label:"offline", delay:null };
     if (!Number.isFinite(lastCall)) return { state:"offline", label:"offline", delay:null };
     const age = Math.max(0, now - lastCall);
-    if (age < 180000) return { state:"online", label:"online", delay:180000 - age };
-    if (age < 300000) return { state:"away", label:`last seen ${Math.floor(age / 60000)} mins ago`, delay:60000 - age % 60000 };
+    if (age < Math.min(180000, offlineAfterMs)) return { state:"online", label:"online", delay:Math.min(180000, offlineAfterMs) - age };
+    if (age < offlineAfterMs) return { state:"away", label:`last seen ${Math.floor(age / 60000)} mins ago`, delay:60000 - age % 60000 };
     return { state:"offline", label:"offline", delay:null };
   }
   function toolCallLabel(count) { return `${count} tool call${count === 1 ? "" : "s"}`; }
@@ -747,6 +747,7 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
     if (Number.isSafeInteger(page.read_through)) readThrough = Math.max(readThrough, page.read_through);
     if (!history) {
       if (expectedWakeVersion === wakeVersion && !sending && Object.hasOwn(page,"wake_status")) wakeStatus = page.wake_status;
+      if (Number.isSafeInteger(page.offline_after_ms) && page.offline_after_ms > 0) offlineAfterMs = page.offline_after_ms;
       lastAgentCall = Number.isSafeInteger(page.last_agent_call_at_ms) ? page.last_agent_call_at_ms : null;
       agentStopped = page.agent_stop_requested === true;
       agentPresenceUntil = Number.isSafeInteger(page.agent_presence_until_ms) ? page.agent_presence_until_ms : null;
@@ -909,19 +910,19 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
       save();
     }
   }
-  async function stopAgent() {
-    if (startupBlocked() || !available || isReadOnly() || !chatFile || sending || stopping || tornDown) return;
+  async function stopAgent(pendingWake = false) {
+    if ((!pendingWake && startupBlocked()) || !available || isReadOnly() || !chatFile || sending || stopping || tornDown) return;
     const origin = generation;
     stopRequestId ||= crypto.randomUUID();
     stopping = true; resizeInput();
     try {
       const payload = await call("chat_ui_send", { ...requestDestination(), request_id:stopRequestId, message:"Stop the current agent turn.", stop_agent:true });
       if (payload.stopped !== true) throw new Error("The stop request was not confirmed. Retry to check it.");
-      await new Promise(resolve => setTimeout(resolve, 3000));
+      if (!pendingWake) await new Promise(resolve => setTimeout(resolve, 3000));
       if (!currentGeneration(origin)) return;
       agentStopped = true; lastAgentCall = null; agentWaitingUntil = null; agentPresenceUntil = null; stopRequestId = null;
       wakeStatus = null; wakeVersion++;
-      status("Stop requested. The goal stays paused until you press Play.");
+      status(pendingWake ? "Wake-up cancelled. Your message is kept." : "Stop requested. The goal stays paused until you press Play.");
       revision = null; void refresh();
     } catch (error) {
       if (currentGeneration(origin)) { status(error.message || "Could not request a stop. Try again.", true); workspaceMismatch(error); }
@@ -1123,6 +1124,7 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
     .catch(() => { if (!window.openai?.callTool) status("This host has not connected the chat widget.", true); });
   if (!bridge && window.openai?.callTool) void refresh();
   return {
+    cancelWake:()=>stopAgent(true),
     setAvailable,
     setLoading,
     setReadOnly,

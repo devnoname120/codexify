@@ -37,12 +37,16 @@ export async function approveConversationCard(page:Page, request:ConversationApp
     const heading = alert?.querySelector('.text-secondary > span.wrap-anywhere');
     const form = element.querySelector('form');
     const buttons = form?.querySelectorAll('button');
-    const trigger = form?.querySelector('button[type="button"][aria-haspopup="menu"].bg-primary-solid');
+    const trigger = form?.querySelector('button[type="button"][aria-haspopup="menu"]');
     if (element.querySelectorAll('[role="alert"]').length !== 1 || element.querySelectorAll('form').length !== 1
       || heading?.textContent?.trim() !== name || !form || buttons?.length !== 3 || !trigger
+      // Verify the separate denial and split approval controls by structure;
+      // ChatGPT changes their color classes independently of their behavior.
+      || buttons[0]?.getAttribute('type') !== 'button' || buttons[1]?.getAttribute('type') !== 'button'
+      || buttons[0]?.hasAttribute('aria-haspopup') || buttons[1]?.hasAttribute('aria-haspopup')
+      || buttons[2] !== trigger || trigger.previousElementSibling !== buttons[1]
       || trigger.parentElement?.querySelectorAll('button').length !== 2
-      || !trigger.previousElementSibling?.matches('button[type="button"].bg-primary-solid')
-      || !form.querySelector('button[type="button"].bg-primary-soft-alpha')) return false;
+      || trigger.parentElement?.parentElement !== buttons[0]?.parentElement) return false;
     // Match the connector chip in this same turn, not names mentioned by an answer.
     const turn = element.closest('[data-turn-key]');
     const mentions = [...(turn?.querySelectorAll('[data-user-message-bubble] [data-prompt-link-href^="app://"]') ?? [])]
@@ -59,7 +63,7 @@ export async function approveConversationCard(page:Page, request:ConversationApp
     return inherited.size===0||inherited.size===1&&inherited.has(appId);
   }, {name:request.connectorName,appId:expectedAppId});
   if (!await trusted()) return false;
-  const trigger = card.locator('form button[type="button"][aria-haspopup="menu"].bg-primary-solid');
+  const trigger = card.locator('form button[type="button"][aria-haspopup="menu"]');
   const menus = page.locator('[role="menu"]').filter({visible:true});
   const existingMenus = await menus.count();
   if (existingMenus > 1 || !await trigger.isEnabled()) return false;

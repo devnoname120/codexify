@@ -431,6 +431,7 @@ async fn probe_resolved_version(
     pathext: Option<&OsStr>,
 ) -> Result<String, String> {
     let mut process = Command::new(resolved);
+    crate::process_env::isolate_console(process.as_std_mut());
     process
         .arg("--version")
         .current_dir(cwd)

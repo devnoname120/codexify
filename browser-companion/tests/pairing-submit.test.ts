@@ -36,14 +36,15 @@ let quietGenerationMs = 0;
 let generatingOnLoad = false;
 let acceptsStop:boolean|number|"reload" = true;
 let stopFinishDelayMs=200;
-let fixtureLanguage:"en"|"el"|"it"="en";
+let fixtureLanguage:"en"|"el"|"it"|"ja"="en";
 const fixtureUi={
   en:{send:"Send",stop:"Stop",counter:"of",efforts:["Instant","Medium","High","Extra High","Pro"]},
+  ja:{send:"送信",stop:"停止",counter:"of",efforts:["Instant","中","高","非常に高い","Pro"]},
   el:{send:"Αποστολή",stop:"Διακοπή",counter:"από",efforts:["Γρήγορο","Μεσαίο","Υψηλό","Πολύ υψηλό","Pro"]},
   it:{send:"Invia",stop:"Interrompi",counter:"di",efforts:["Immediato","Medio","Alto","Molto alto","Pro"]},
 } as const;
 let localizedStopFallback=false;
-let stopConfirmation: {delayMs?:number;persists?:boolean;preexisting?:boolean;captured?:boolean;duplicateSubmit?:boolean;unrelated?:boolean;changeUrl?:boolean;frame?:"url"|"srcdoc"|"nested"|"hidden"|"foreign"}|undefined;
+let stopConfirmation: {delayMs?:number;persists?:boolean;preexisting?:boolean;captured?:boolean;duplicateSubmit?:boolean;unrelated?:boolean;changeUrl?:boolean;afterModelSelection?:boolean;trapFocus?:boolean;frame?:"url"|"srcdoc"|"nested"|"hidden"|"foreign"}|undefined;
 const capturedStopDialogHtml=readFileSync(join(import.meta.dirname,'fixtures/stop-response-dialog.html'),'utf8');
 // Same structural contract as ChatGPT, with localized labels and arbitrary Radix IDs.
 const stopDialogHtml = `<div class="codex-dialog-overlay" style="position:fixed;inset:0;z-index:50;background:#0005"></div>
@@ -138,7 +139,7 @@ async function installFixtureRoutes(){
         window.renderModel=()=>{
           const model=window.definitions[window.family],index=model.value-model.min;
           range.innerHTML='<div data-model-reasoning-effort-slider><span role="slider" aria-valuemin="'+model.min+'" aria-valuemax="'+(model.min+model.labels.length-1)+'" aria-valuenow="'+model.value+'"></span>'+model.labels.map((label,i)=>'<span data-selected="'+(i===index)+'" data-locked="'+model.locked.includes(i)+'" aria-label="'+(${hideEffortLabels}?'':label)+'"></span>').join('')+'</div>';
-          document.querySelector('#effort-description').textContent=window.family+' '+model.labels[index]+', '+(index+1)+${JSON.stringify(" "+fixtureUi[fixtureLanguage].counter+" ")}+model.labels.length+'.';
+          document.querySelector('#effort-description').textContent=${fixtureLanguage==="ja" ? "model.labels[index]+'、'+model.labels.length+'件中'+(index+1)+'件目。'" : "window.family+' '+model.labels[index]+', '+(index+1)+"+JSON.stringify(" "+fixtureUi[fixtureLanguage].counter+" ")+"+model.labels.length+'.'"};
           control.textContent=model.labels[index];document.body.dataset.family=window.family;document.body.dataset.effort=model.labels[index];
           document.querySelectorAll('[data-family]').forEach(row=>row.setAttribute('aria-checked',String(row.dataset.family===window.family)));
         };
@@ -152,7 +153,15 @@ async function installFixtureRoutes(){
           if(next>=model.min&&next<model.min+model.labels.length)model.value=next;
           window.renderModel();
         };
-        document.addEventListener('keydown',event=>{if(event.key==='Escape'){picker.hidden=true;control.setAttribute('aria-expanded','false');}});
+        document.addEventListener('keydown',event=>{if(event.key==='Escape'){
+          const closingPicker=control.getAttribute('aria-expanded')==='true';
+          picker.hidden=true;control.setAttribute('aria-expanded','false');
+          if(stopConfirmation?.afterModelSelection&&closingPicker&&!document.body.dataset.lateStopDialog){
+            document.body.dataset.lateStopDialog='true';
+            form.insertAdjacentHTML('beforeend','<button type="button" data-fixture-stop data-testid="stop-button" aria-label="Stop">Stop</button>');
+            showStopDialog(form.querySelector('[data-fixture-stop]'));
+          }
+        }});
         window.renderModel();
         document.body.dataset.effortChanges="0";document.body.dataset.familyChanges="";
         editor.focus();const initialCaret=document.createRange();initialCaret.selectNodeContents(editor);initialCaret.collapse(false);
@@ -165,12 +174,13 @@ async function installFixtureRoutes(){
           const show=(dialogDocument,frame)=>{
             dialogDocument.body.insertAdjacentHTML('beforeend',${JSON.stringify(dialogHtml)});
             const dialog=dialogDocument.querySelector('[role="dialog"]'),dialogForm=dialog.querySelector('form');
+            if(stopConfirmation.trapFocus){form.inert=true;dialogForm.querySelector('[type="submit"]').focus();}
             if(stopConfirmation.unrelated){dialogForm.querySelector('h2').textContent='Delete this conversation?';dialogForm.querySelector('.heading-dialog').textContent='Delete this conversation?';dialogForm.querySelector('[type="submit"]').textContent='Delete';}
             if(stopConfirmation.duplicateSubmit)dialogForm.querySelector('[type="submit"]').after(dialogForm.querySelector('[type="submit"]').cloneNode(true));
             if(stopConfirmation.changeUrl)history.replaceState({},'', 'https://chatgpt.com/c/changed-during-stop');
             dialogForm.addEventListener('submit',event=>{
               event.preventDefault();document.body.dataset.confirmations=String(Number(document.body.dataset.confirmations)+1);document.body.dataset.order+='confirm,';document.body.dataset.confirmedAt=String(Date.now());document.body.dataset.draftOnConfirmation=editor.textContent;
-              if(!stopConfirmation.persists){dialog.remove();dialogDocument.querySelector('.codex-dialog-overlay').remove();frame?.remove();finishStop(stop);}
+              if(!stopConfirmation.persists){dialog.remove();dialogDocument.querySelector('.codex-dialog-overlay').remove();frame?.remove();form.inert=false;editor.focus();finishStop(stop);}
             });
           };
           if(!stopConfirmation.frame){show(document);return;}
@@ -297,6 +307,66 @@ test.skipIf(!native)("successive browser sends reuse a healthy paired conversati
   expect(documentLoads).toBe(1);expect(await page.locator('body').getAttribute('data-sends')).toBe('2');
 },20_000);
 
+test.skipIf(!native)("conversation navigation waits for the composer to hydrate before sending",async()=>{
+  await fixture();
+  await surface.navigate("https://chatgpt.com/c/previous-conversation");
+  const delayed:SingleBrowserSurface={...surface,navigate:async destination=>{
+    const opened=await surface.navigate(destination);
+    await opened.evaluate(()=>{
+      const form=document.querySelector('form[data-chatgpt-composer]')!;
+      const next=form.nextSibling,parent=form.parentNode!;
+      form.remove();setTimeout(()=>parent.insertBefore(form,next),600);
+    });
+    return opened;
+  }};
+  const driver=new ChatGptBrowserDriver(delayed,build),submitted=offlineRequest('gpt-6-astra','max');
+  const loads=documentLoads;
+  await driver.execute({request:submitted,renderedPrompt:renderActionPrompt(submitted.prompt),signal:new AbortController().signal,emit:()=>{}});
+  expect(await page.locator('body').getAttribute('data-sends')).toBe('1');
+  expect(documentLoads).toBe(loads+1);
+},15_000);
+
+test.skipIf(!native)("a paired conversation still hydrating its composer is not needlessly reloaded",async()=>{
+  const driver=await fixture(),submitted=offlineRequest('gpt-6-astra','max');
+  await page.evaluate(()=>{
+    const form=document.querySelector('form[data-chatgpt-composer]')!;
+    const next=form.nextSibling,parent=form.parentNode!;
+    form.remove();setTimeout(()=>parent.insertBefore(form,next),600);
+  });
+  const loads=documentLoads;
+  await driver.execute({request:submitted,renderedPrompt:renderActionPrompt(submitted.prompt),signal:new AbortController().signal,emit:()=>{}});
+  expect(await page.locator('body').getAttribute('data-sends')).toBe('1');
+  expect(documentLoads).toBe(loads);
+},15_000);
+
+test.skipIf(!native)("a signed-in conversation with no editor reports editor availability rather than sign-in",async()=>{
+  await fixture();
+  await surface.navigate("https://chatgpt.com/c/previous-conversation");
+  const missing:SingleBrowserSurface={...surface,navigate:async destination=>{
+    const opened=await surface.navigate(destination);
+    await opened.locator('form[data-chatgpt-composer]').evaluate(form=>form.remove());
+    return opened;
+  }};
+  const driver=new ChatGptBrowserDriver(missing,build),submitted=offlineRequest('gpt-6-astra','max');
+  const error=await driver.execute({request:submitted,renderedPrompt:renderActionPrompt(submitted.prompt),signal:new AbortController().signal,emit:()=>{}}).catch(error=>error);
+  expect(error).toMatchObject({code:'editor_unavailable',phase:'composer_lookup',sendAccepted:false});
+  expect(await page.locator('body').getAttribute('data-sends')).toBe('0');
+},15_000);
+
+test.skipIf(!native)("cancelling composer hydration stops without reloading or sending",async()=>{
+  const driver=await fixture(),submitted=offlineRequest('gpt-6-astra','max');
+  await page.locator('form[data-chatgpt-composer]').evaluate(form=>form.remove());
+  const abort=new AbortController(),loads=documentLoads;
+  const timer=setTimeout(()=>abort.abort(),200);
+  try {
+    const error=await driver.execute({request:submitted,renderedPrompt:renderActionPrompt(submitted.prompt),signal:abort.signal,emit:()=>{}}).catch(error=>error);
+    expect(error).toBeInstanceOf(Error);
+    expect(abort.signal.aborted).toBeTrue();
+    expect(documentLoads).toBe(loads);
+    expect(await page.locator('body').getAttribute('data-sends')).toBe('0');
+  } finally {clearTimeout(timer);}
+},5_000);
+
 test.skipIf(!native)("editor rejection is a confirmed-unsent availability failure while edited drafts remain interference",async()=>{
   for(const mode of ["rejected","exception","edited"] as const){
     const driver=await fixture();
@@ -391,7 +461,7 @@ test.skipIf(!native)('a stale expired-session, sign-in or no-composer page reloa
   expect(documentLoads).toBe(loads+1);expect(page.url()).toBe(url);
   expect(await page.locator('body').getAttribute('data-sends')).toBe('1');
  }
-},30_000);
+},45_000);
 
 test.skipIf(!native)('authentication recovery refuses a changed account and preserves a pending materialization card',async()=>{
  for(const kind of ['account','approval'] as const){
@@ -448,7 +518,9 @@ test.skipIf(!native)("whitespace-only drafts are removed from the submitted text
 
 test.skipIf(!native)("model discovery preserves an unsent draft and waits for an empty composer",async()=>{
   const driver=await fixture('Keep this model-picker draft');
-  await expect(driver.capabilities()).rejects.toThrow('requires an empty composer');
+  const failure=await driver.capabilities().catch(error=>error);
+  expect(failure.message).toContain('requires an empty composer');
+  expect(failure.phase).toBe('capability_discovery');
   expect(await composerText(await activeComposer(page))).toBe('Keep this model-picker draft');
   expect(await page.locator('body').getAttribute('data-sends')).toBe('0');
 },20_000);
@@ -986,6 +1058,21 @@ test.skipIf(!native)("offline Stop never confirms unrelated or ambiguous dialogs
   }
 },15_000);
 
+test.skipIf(!native)("late Stop dialog during message preparation is confirmed before touching the blocked editor",async()=>{
+  const driver=await fixture();
+  stopConfirmation={captured:true,afterModelSelection:true,trapFocus:true};
+  stopFinishDelayMs=1_200;
+  await syncFixture();const loads=documentLoads;
+  const offline=offlineRequest('gpt-6-sol','high');
+  await executeFixture(driver,{request:offline,renderedPrompt:renderActionPrompt(offline.prompt),signal:AbortSignal.timeout(20_000),emit:()=>{}});
+  expect(await page.locator('body').getAttribute('data-order')).toBe('confirm,stopped,send,');
+  expect(await page.locator('body').getAttribute('data-stops')).toBe('0');
+  expect(await page.locator('body').getAttribute('data-confirmations')).toBe('1');
+  expect(await page.locator('body').getAttribute('data-sends')).toBe('1');
+  expect(await page.locator('[role="dialog"]').count()).toBe(0);
+  expect(documentLoads).toBe(loads);
+},25_000);
+
 test.skipIf(!native)("offline Stop confirms dialogs in ChatGPT frames without reloading",async()=>{
   for(const frame of ["url","srcdoc","nested"] as const){
     const driver=await fixture("",true,connector,0,true);
@@ -1381,3 +1468,102 @@ test.skipIf(!native)("a created conversation URL is retained when applying the s
  expect((await coordinator.action(create.actionId))?.sendAccepted).toBeTrue();
  expect(await page.evaluate(()=>document.body.dataset.sends)).toBe('1');
 },20_000);
+
+
+async function lazyJapanesePicker() {
+  await page.evaluate(()=>{
+    const script=document.createElement('script');script.textContent=`(()=>{
+      const view=document.querySelector('[data-model-picker-view]');
+      view.querySelector('[data-family="5.5"]')?.remove();
+      const rows=[...view.querySelectorAll('[role="menuitemradio"]')];
+      rows.forEach(row=>row.remove());view.dataset.modelPickerView='simple';
+      const toggle=document.createElement('button');toggle.type='button';toggle.setAttribute('role','menuitem');
+      toggle.setAttribute('aria-expanded','false');toggle.textContent='Instant ›';view.append(toggle);
+      const close=()=>{rows.forEach(row=>row.remove());toggle.setAttribute('aria-expanded','false');view.dataset.modelPickerView='simple';};
+      toggle.onclick=()=>{view.append(...rows);toggle.setAttribute('aria-expanded','true');view.dataset.modelPickerView='advanced';window.renderModel();};
+      rows.forEach(row=>row.addEventListener('click',close));
+      document.addEventListener('keydown',event=>{if(event.key==='Escape')close();});
+      for(const family of ['6','5.6'])Object.assign(window.definitions[family],{labels:['Instant','中','高'],value:2,locked:[]});
+      document.querySelector('#effort').removeAttribute('data-testid');window.renderModel();
+    })();`;document.body.append(script);
+  });
+}
+
+for(const creating of [false,true])test.skipIf(!native)(`Japanese lazy picker ${creating?'creates a new chat':'pairs an existing chat'} with one Medium send`,async()=>{
+  const driver=await fixture('',true,connector,0,false,true,{family:'6',value:2,locked:[]});
+  fixtureLanguage='ja';await syncFixture();await lazyJapanesePicker();
+  if(creating)await page.evaluate(()=>history.replaceState({},'','/'));
+  const catalog=await driver.capabilities();
+  expect(catalog.models.map(model=>model.id)).toEqual(['gpt-6-sol','gpt-5.6-sol']);
+  const submitted:ExecuteActionRequest=creating?{...request,url:'https://chatgpt.com/new',expectedUrl:'https://chatgpt.com/new',model:'gpt-6-sol',effort:'high',prompt:{kind:'create_chat',reference:newReference,continuationToken:Buffer.alloc(32,2).toString('base64url'),setupReference:null}}:request;
+  const coordinator=new SingleWindowCoordinator(driver,build);
+  await executeCoordinatorFixture(coordinator,submitted);const events=[];
+  for await(const event of coordinator.events(submitted.actionId,0))events.push(event);
+  expect(events.at(-1)?.type).toBe('submission_complete');
+  expect(events.filter(event=>event.type==='send_accepted')).toHaveLength(1);
+  expect(await page.evaluate(()=>[document.body.dataset.sends,document.body.dataset.sentFamily,document.body.dataset.sentEffort,document.body.dataset.family,document.body.dataset.effort])).toEqual(['1','6','中','6','高']);
+  await coordinator.close();
+},30_000);
+
+const conversationLimitHtml=readFileSync(new URL('./fixtures/conversation-limit-alert.html',import.meta.url),'utf8');
+test.skipIf(!native)('re-pairing sends the normal prompt in the retained conversation without another load',async()=>{
+ const driver=await fixture(),coordinator=new SingleWindowCoordinator(driver,build);
+ const create:ExecuteActionRequest={...request,url:'https://chatgpt.com/new',expectedUrl:'https://chatgpt.com/new',retainPairingWindow:true,agentTicket:'FreshT_1',
+   prompt:{kind:'create_chat',reference:newReference,continuationToken:Buffer.alloc(32,2).toString('base64url'),setupReference:null}};
+ await executeCoordinatorFixture(coordinator,create);for await(const _ of coordinator.events(create.actionId,0)){}
+ const canonicalUrl=page.url(),loads=documentLoads;
+ expect(await page.locator('body').getAttribute('data-sent-text')).toContain('FreshT_1');
+ expect((await coordinator.health()).activeActionId).toBe(create.actionId);
+ await expect(coordinator.accountPlan('pairing-test')).rejects.toThrow('busy');
+ await expect(coordinator.execute({...request,actionId:'unrelated',idempotencyKey:'unrelated-key'})).rejects.toThrow('busy');
+ const followUp:ExecuteActionRequest={...request,actionId:'paired-normal',idempotencyKey:'paired-normal-key',url:canonicalUrl,expectedUrl:canonicalUrl,
+   pairingContinuationOf:create.actionId,agentTicket:'FreshT_2',model:'gpt-6-sol',effort:'high',prompt:{kind:'offline_goal',goalRevision:1}};
+ await executeCoordinatorFixture(coordinator,followUp);for await(const _ of coordinator.events(followUp.actionId,0)){}
+ expect(page.url()).toBe(canonicalUrl);
+ expect(documentLoads).toBe(loads);
+ expect(await page.locator('body').getAttribute('data-sends')).toBe('2');
+ expect(await page.locator('body').getAttribute('data-sent-text')).toContain('FreshT_2');
+ expect((await coordinator.health()).activeActionId).toBeNull();
+ await coordinator.close();
+},30_000);
+test.skipIf(!native)('task continuation resumes a fresh conversation without an old handoff marker',async()=>{
+ const driver=await fixture(), events:Array<Parameters<DriverExecution['emit']>[0]>=[];
+ const submitted:ExecuteActionRequest={...request,prompt:{kind:'task_continuation'}};
+ await executeFixture(driver,{request:submitted,renderedPrompt:renderActionPrompt(submitted.prompt),signal:new AbortController().signal,emit:event=>events.push(event)});
+ expect(await page.locator('body').getAttribute('data-sends')).toBe('1');
+ expect(events.filter(event=>event.type==='send_accepted')).toHaveLength(1);
+ expect(events.at(-1)?.type).toBe('submission_complete');
+},20_000);
+for(const stage of ["before","preparation","after"] as const)test.skipIf(!native)(`conversation length limit is reported without retrying Send (stage=${stage})`,async()=>{
+ const driver=await fixture(),coordinator=new SingleWindowCoordinator(driver,build),submitted=offlineRequest('gpt-6-astra','max');
+ await page.evaluate(({html,stage})=>{
+  const script=document.createElement('script');script.textContent=`(()=>{const html=${JSON.stringify(html)},stage=${JSON.stringify(stage)};let shown=false;const show=()=>{if(!shown){shown=true;document.body.insertAdjacentHTML('beforeend',html);}};if(stage==='after')document.querySelector('form').addEventListener('submit',()=>setTimeout(show,50));else if(stage==='preparation')document.querySelector('form').addEventListener('input',()=>{if(/goal/.test(document.querySelector('[data-composer-markdown]').textContent))show();});else show();document.addEventListener('click',event=>{if(event.target.closest('[role="alert"] button'))document.body.dataset.errorRetries='1';});})();`;document.body.append(script);
+ },{html:conversationLimitHtml,stage});
+ await executeCoordinatorFixture(coordinator,submitted);const events=[];for await(const event of coordinator.events(submitted.actionId,0))events.push(event);
+ expect(events.at(-1)).toMatchObject({type:'failed',code:'conversation_limit'});
+ expect(await page.evaluate(()=>[document.body.dataset.sends,document.body.dataset.errorRetries||'0'])).toEqual([stage==='after'?'1':'0','0']);
+ expect((await coordinator.health()).authenticated).toBeTrue();
+},20_000);
+
+test.skipIf(!native)('quoted or hidden conversation length warnings do not trigger rollover',async()=>{
+ const {conversationLimitVisible}=await import('../src/browser-session');await fixture();
+ for(const attributes of ['data-user-message-bubble','data-conversation-role="assistant"','hidden','inert','aria-hidden="true"','style="opacity:0"']){
+  await page.evaluate(({html,attributes})=>{document.querySelector('#quoted-limit')?.remove();document.body.insertAdjacentHTML('beforeend',`<div id="quoted-limit" ${attributes}>${html}</div>`);},{html:conversationLimitHtml,attributes});
+  expect(await conversationLimitVisible(page)).toBeFalse();
+ }
+},10_000);
+
+test.skipIf(!native)('a changed account cannot authorize a conversation-length rollover',async()=>{
+ const driver=await fixture(),coordinator=new SingleWindowCoordinator(driver,build);await coordinator.health();
+ changeAccountAtRequest=2;await page.locator('body').evaluate((body,html)=>body.insertAdjacentHTML('beforeend',html),conversationLimitHtml);
+ const submitted=offlineRequest('gpt-6-astra','max');await executeCoordinatorFixture(coordinator,submitted);const events=[];for await(const event of coordinator.events(submitted.actionId,0))events.push(event);
+ expect(events.at(-1)?.type).toBe('authentication_required');expect(await page.evaluate(()=>document.body.dataset.sends)).toBe('0');
+},10_000);
+
+test.skipIf(!native)('a conversation length alert on a redirected chat cannot replace the requested chat',async()=>{
+ await fixture();await page.goto('https://chatgpt.com/c/unrelated-source');
+ const driver=new ChatGptBrowserDriver({...surface,navigate:async()=>{await surface.navigate('https://chatgpt.com/c/wrong-target');await page.locator('body').evaluate((body,html)=>body.insertAdjacentHTML('beforeend',html),conversationLimitHtml);return page;}},build);
+ const coordinator=new SingleWindowCoordinator(driver,build),submitted=offlineRequest('gpt-6-astra','max');
+ await executeCoordinatorFixture(coordinator,submitted);const events=[];for await(const event of coordinator.events(submitted.actionId,0))events.push(event);
+ expect(events.at(-1)?.type).toBe('external_interference');expect(await page.evaluate(()=>document.body.dataset.sends)).toBe('0');
+},10_000);

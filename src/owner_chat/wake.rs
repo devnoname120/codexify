@@ -11,6 +11,7 @@ pub(super) struct WakeStatus {
 
 #[derive(Default)]
 pub(super) struct Activity {
+    offline_after_ms: Option<u64>,
     last_call: Option<u64>,
     last_user: Option<u64>,
     stopped: bool,
@@ -22,6 +23,7 @@ pub(super) struct Activity {
 impl From<&OwnerChatSummary> for Activity {
     fn from(summary: &OwnerChatSummary) -> Self {
         Self {
+            offline_after_ms: None,
             last_call: summary.last_agent_call_at_ms,
             last_user: summary.last_user_entry_at_ms,
             stopped: summary.agent_stop_requested,
@@ -33,6 +35,11 @@ impl From<&OwnerChatSummary> for Activity {
 }
 
 impl Activity {
+    pub fn with_offline_timeout(mut self, timeout: u64) -> Self {
+        self.offline_after_ms = Some(timeout);
+        self
+    }
+
     pub fn offline(&self, now: u64) -> bool {
         !self.stopped
             && ![self.waiting_until, self.idle_until]
@@ -41,8 +48,10 @@ impl Activity {
                 .any(|until| now < until)
             && self.presence_until.map_or_else(
                 || {
-                    self.last_call
-                        .is_none_or(|last| now.saturating_sub(last) >= OFFLINE_AFTER_MS)
+                    self.last_call.is_none_or(|last| {
+                        now.saturating_sub(last)
+                            >= self.offline_after_ms.unwrap_or(OFFLINE_AFTER_MS)
+                    })
                 },
                 |until| now >= until,
             )

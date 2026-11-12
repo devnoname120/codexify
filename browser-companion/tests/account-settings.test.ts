@@ -1,5 +1,7 @@
 import {expect,spyOn,test} from "bun:test";
-import {classifyPlan,readBillingPlan,refreshConnectorTools} from "../src/account-settings";
+import {classifyPlan,completeAccountPlan,readBillingPlan,refreshConnectorTools} from "../src/account-settings";
+import {navigatePage} from "../src/navigation";
+import {ConversationCooldownError} from "../src/errors";
 import {chromium} from "patchright";
 import {join} from "node:path";
 import {privateChromeExecutable} from "../src/chrome-executable";
@@ -16,6 +18,9 @@ test("billing aliases preserve unknown plans instead of calling them Free",()=>{
   ["ChatGPT Business","ChatGPT Business","unknown"],["ChatGPT Pro 300","ChatGPT Pro 300","pro"]
  ]){const plan=classifyPlan(source!);expect(plan.label).toBe(label!);expect(plan.kind).toBe(kind as any);}
  expect(classifyPlan("")).toEqual({label:"",sourceLabel:"",kind:"unknown"});
+ expect(completeAccountPlan({...classifyPlan("Pro"),accountFingerprint:"account"})).toBeFalse();
+ expect(completeAccountPlan({...classifyPlan("Pro 200"),accountFingerprint:"account"})).toBeTrue();
+ expect(completeAccountPlan({...classifyPlan(""),accountFingerprint:"account"})).toBeFalse();
 });
 test("model display names come from the picker when it names the family",()=>{
  const efforts=[{id:"low",label:"Instant",index:0,available:true,reason:null}];
@@ -51,6 +56,7 @@ test.skipIf(process.env.CODEXIFY_TEST_BROWSER_COMPANION_CHROME!=="1")("passive p
    if(path.endsWith('/permissions')){permissionVisits++;return route.fulfill({contentType:'text/html; charset=utf-8',body:`<h2>Permissions</h2>${['Preguntar','Solo lectura','Bajo riesgo','Permitir todo'].map((label,index)=>`<div role="radio" tabindex="0" aria-checked="${permission==='allow_all'?index===3:index===1}" data-index="${index}">${label}</div>`).join('')}<script>document.querySelectorAll('[role=radio]').forEach(node=>node.onclick=async()=>{await fetch('/set-permission',{method:'POST'});document.querySelectorAll('[role=radio]').forEach(item=>item.setAttribute('aria-checked',String(item===node)));});</script>`});}
    return route.fulfill({contentType:'text/html; charset=utf-8',body:`<section id="plugin-settings"><div hidden>Fixture connector</div><h2>Fixture connector</h2><button>Detalles</button><button style="color:rgb(255,0,0)">Quitar</button><section id="settings-cards"><div role="button" id="permission"><svg width="16" height="16"><path d="M1 1L10 10"/></svg><span>${permissionLabel}</span><span>Elegir permisos</span><span>${permission==='allow_all'?allowLabel:'Solo lectura'}</span></div><div id="choices" hidden>${['Preguntar','Solo lectura','Bajo riesgo','Permitir todo'].map((label,index)=>`<div role="radio" tabindex="0" aria-checked="${permission==='allow_all'?index===3:index===1}" data-index="${index}">${label}</div>`).join('')}</div><section id="manage"><div><span>Nombre</span><button>Editar nombre</button></div><div><span>Descripción</span><button>Editar descripción</button></div><div><span>Actualizar herramientas</span><button id="refresh">Actualizar herramientas</button></div><div><span>Eliminar</span><button style="color:rgb(255,0,0)" onclick="fetch('/delete',{method:'POST'})">Eliminar</button></div></section></section></section><script>document.getElementById('permission').onclick=()=>document.getElementById('choices').hidden=false;document.querySelectorAll('[role=radio]').forEach(node=>node.onclick=async()=>{await fetch('/set-permission',{method:'POST'});document.querySelectorAll('[role=radio]').forEach(item=>item.setAttribute('aria-checked',String(item===node)));document.getElementById('permission').textContent='Allow all';});document.getElementById('refresh').onclick=async function(){this.disabled=true;await fetch('/refresh',{method:'POST'});${replaceRefresh?'const fresh=this.cloneNode(true);fresh.disabled=false;fresh.removeAttribute("data-refresh-tools-target");this.replaceWith(fresh);':fastRefresh?'this.disabled=false;':`setTimeout(()=>this.disabled=false,${refreshDelay});`}};</script>`});
   });
+  await page.goto('https://chatgpt.com/c/original');
   const plan=await readBillingPlan(page);expect(plan.label).toBe('Pro 20x');
   const result=await refreshConnectorTools(page,'Fixture connector',undefined,undefined,undefined,witness);expect(result.refreshObserved).toBeTrue();expect(result.permissionChanged).toBeTrue();expect(result.schemaVerified).toBeFalse();
   expect(permission).toBe('allow_all');expect(refreshes).toBe(1);expect(deletes).toBe(0);

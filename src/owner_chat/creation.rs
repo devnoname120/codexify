@@ -439,16 +439,20 @@ async fn queue_creation(
         .continuations
         .owner_generation_for_task_key(task.stable_key())
         .map_err(internal_error)?;
-    if owner != 0 {
+    let saved = store.load(task).map_err(internal_error)?;
+    if owner != 0 && (!saved.pairing.creating_chat || saved.action.send_accepted != Some(false)) {
         return Err(internal_error(
             "This chat was already created; replace its pairing instead of creating it again",
         ));
     }
     let token = state
         .continuations
-        .issue_token(task, task, root)
+        .issue_token_for_owner(task, owner, root)
         .map_err(internal_error)?;
     let now = crate::markdown_chat::now_ms();
+    let next_owner = owner
+        .checked_add(1)
+        .ok_or_else(|| internal_error("Conversation owner generation overflow"))?;
     if let Some((model, effort, catalog)) = selection {
         store
             .set_selection(
@@ -469,7 +473,7 @@ async fn queue_creation(
         .as_deref()
         .unwrap_or("https://chatgpt.com/new");
     let issue = store
-        .issue_creation_pairing(task, destination, 1, now)
+        .issue_creation_pairing(task, destination, next_owner, now)
         .map_err(internal_error)?;
     let supervisor = state
         .automation
@@ -478,7 +482,7 @@ async fn queue_creation(
     supervisor
         .register_task(AutomationTaskHandle::new(
             task.clone(),
-            1,
+            next_owner,
             store.clone(),
             chat.clone(),
         ))
@@ -565,9 +569,27 @@ mod tests {
         health_entered: tokio::sync::Notify,
         health_release: tokio::sync::Notify,
         health_account: Mutex<String>,
+        next_limit: Mutex<Option<bool>>,
+        next_failure: Mutex<Option<(&'static str, bool)>>,
+        created_url: Mutex<String>,
+        reserve_pairing: std::sync::atomic::AtomicBool,
+        released_pairings: Mutex<Vec<String>>,
+        tickets: Arc<crate::agent_tickets::AgentTicketStore>,
     }
     #[async_trait]
     impl AutomationExecutor for CreationExecutor {
+        fn supports_pairing_reservation(&self) -> bool {
+            self.reserve_pairing
+                .load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        async fn release_pairing_window(&self, action_id: &str) -> Result<(), String> {
+            self.released_pairings
+                .lock()
+                .unwrap()
+                .push(action_id.into());
+            Ok(())
+        }
         async fn prepare_new_chat(
             &self,
             _: Option<&str>,
@@ -583,17 +605,59 @@ mod tests {
             _: CancellationToken,
         ) -> Result<CompanionActionSnapshot, AutomationExecutionError> {
             self.executions.lock().unwrap().push(execution.clone());
+            if let Some(accepted) = self.next_limit.lock().unwrap().take() {
+                return Ok(CompanionActionSnapshot {
+                    protocol_version: 1,
+                    build: self.catalog.build.clone(),
+                    action_id: execution.request.action_id,
+                    state: CompanionActionState::Failed,
+                    send_accepted: accepted,
+                    canonical_url: accepted.then_some(execution.request.expected_url),
+                    selected: accepted.then(|| CompanionSelection {
+                        model: execution.request.model.unwrap(),
+                        effort: execution.request.effort.unwrap(),
+                    }),
+                    last_event_sequence: 0,
+                    cooldown_until_ms: None,
+                    attention: Some(crate::agent_automation::CompanionAttention {
+                        code: "conversation_limit".into(),
+                        message: Some("Conversation length limit".into()),
+                    }),
+                });
+            }
+            if let Some((code, accepted)) = self.next_failure.lock().unwrap().take() {
+                return Ok(CompanionActionSnapshot {
+                    protocol_version: 1,
+                    build: self.catalog.build.clone(),
+                    action_id: execution.request.action_id,
+                    state: CompanionActionState::Failed,
+                    send_accepted: accepted,
+                    canonical_url: accepted.then_some(execution.request.expected_url),
+                    selected: execution
+                        .request
+                        .model
+                        .zip(execution.request.effort)
+                        .map(|(model, effort)| CompanionSelection { model, effort }),
+                    last_event_sequence: 0,
+                    cooldown_until_ms: None,
+                    attention: Some(crate::agent_automation::CompanionAttention {
+                        code: code.into(),
+                        message: Some("Fixture failure".into()),
+                    }),
+                });
+            }
             Ok(CompanionActionSnapshot {
                 protocol_version: 1,
                 build: self.catalog.build.clone(),
                 action_id: execution.request.action_id,
                 state: CompanionActionState::Idle,
                 send_accepted: true,
-                canonical_url: Some("https://chatgpt.com/c/created-chat".into()),
-                selected: Some(CompanionSelection {
-                    model: execution.request.model.unwrap(),
-                    effort: execution.request.effort.unwrap(),
-                }),
+                canonical_url: Some(self.created_url.lock().unwrap().clone()),
+                selected: execution
+                    .request
+                    .model
+                    .zip(execution.request.effort)
+                    .map(|(model, effort)| CompanionSelection { model, effort }),
                 last_event_sequence: 0,
                 cooldown_until_ms: None,
                 attention: None,
@@ -602,6 +666,42 @@ mod tests {
     }
 
     async fn fixture() -> (
+        tempfile::TempDir,
+        OwnerState,
+        Arc<CreationExecutor>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        fixture_with_settings(false).await
+    }
+
+    async fn fixture_with_settings(
+        settings: bool,
+    ) -> (
+        tempfile::TempDir,
+        OwnerState,
+        Arc<CreationExecutor>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        fixture_with_options(settings, false).await
+    }
+
+    async fn fixture_with_options(
+        settings: bool,
+        tickets: bool,
+    ) -> (
+        tempfile::TempDir,
+        OwnerState,
+        Arc<CreationExecutor>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        fixture_with_recovery(settings, tickets, false).await
+    }
+
+    async fn fixture_with_recovery(
+        settings: bool,
+        tickets: bool,
+        recovery: bool,
+    ) -> (
         tempfile::TempDir,
         OwnerState,
         Arc<CreationExecutor>,
@@ -617,8 +717,13 @@ mod tests {
         let project = root.join("projects");
         std::fs::create_dir_all(project.join("repo")).unwrap();
         let mut config = crate::config::default_config(project);
+        config
+            .markdown_chat
+            .automation
+            .new_conversation_on_load_rate_limit = recovery;
 
         config.markdown_chat.enabled = true;
+        config.experimental.agent_tickets = tickets;
         config.markdown_chat.automation.enabled = true;
         config.markdown_chat.features.conversation_recovery = true;
         config.markdown_chat.automation.connector_name = "Codexify".into();
@@ -627,11 +732,35 @@ mod tests {
             root.join("descriptor.json").display().to_string();
         config.markdown_chat.automation.chatgpt_project_url =
             Some("https://chatgpt.com/g/g-p-0123456789abcdef0123456789abcdef/project".into());
+        if settings {
+            let path = root.join("settings.json");
+            std::fs::write(
+                &path,
+                serde_json::to_vec(&json!({"agentChat":{"automation":{"connectorName":"Codexify"}},"experimental":{"agentTickets":tickets}})).unwrap(),
+            )
+            .unwrap();
+            config.loaded_config_path = Some(path);
+            let revision = crate::global_settings::schema_revision(&config).unwrap();
+            crate::global_settings::write_schema_intent(
+                &config,
+                &json!({"phase":"idle","observedRevision":revision,
+                    "observedConnectorSchemaVersion":crate::server::automation_schema_version(
+                        &crate::registry::load_tools_for_config(&config), &config)}),
+            )
+            .unwrap();
+        }
         let build = format!("fixture{}", crate::agent_automation::PROTOCOL_BUILD_SUFFIX);
         let catalog:CapabilityCatalog=serde_json::from_value(json!({"protocolVersion":1,"build":build,"accountFingerprint":"creation-account","catalogRevision":"creation-catalog","models":[{"id":"discovered-model","label":"Discovered model","efforts":[{"id":"adaptive-choice","label":"Adaptive choice","available":true,"reason":null}]}]})).unwrap();
+        let tickets = Arc::new(crate::agent_tickets::AgentTicketStore::default());
         let executor = Arc::new(CreationExecutor {
             catalog,
             executions: Mutex::new(Vec::new()),
+            next_limit: Mutex::new(None),
+            next_failure: Mutex::new(None),
+            created_url: Mutex::new("https://chatgpt.com/c/created-chat".into()),
+            reserve_pairing: Default::default(),
+            released_pairings: Default::default(),
+            tickets: tickets.clone(),
             preparations: AtomicUsize::new(0),
             block_health: AtomicBool::new(false),
             health_entered: Default::default(),
@@ -671,9 +800,10 @@ mod tests {
             )
             .unwrap();
         }
-        let supervisor = AgentAutomationSupervisor::new(
+        let supervisor = AgentAutomationSupervisor::new_with_pairing_wait_timeout(
             config.markdown_chat.automation.clone(),
             executor.clone(),
+            Duration::from_millis(750),
         );
         let state = OwnerState {
             config: Arc::new(config.clone()),
@@ -695,6 +825,18 @@ mod tests {
             global: Arc::default(),
             token: "owner-test".into(),
         };
+        state
+            .automation
+            .as_ref()
+            .unwrap()
+            .enable_conversation_rollover(
+                state.config.clone(),
+                state.project_bindings.clone(),
+                state.continuations.clone(),
+                Arc::new(crate::registry::load_tools_for_config(&state.config)),
+                tickets,
+            )
+            .unwrap();
         (temp, state, executor, task)
     }
 
@@ -712,6 +854,919 @@ mod tests {
         }
     }
 
+    async fn schema_source() -> (
+        tempfile::TempDir,
+        OwnerState,
+        Arc<CreationExecutor>,
+        tokio::task::JoinHandle<()>,
+        Value,
+        OwnerAutomationContext,
+        ConversationIdentity,
+    ) {
+        schema_source_with_recovery(false).await
+    }
+
+    async fn schema_source_with_recovery(
+        recovery: bool,
+    ) -> (
+        tempfile::TempDir,
+        OwnerState,
+        Arc<CreationExecutor>,
+        tokio::task::JoinHandle<()>,
+        Value,
+        OwnerAutomationContext,
+        ConversationIdentity,
+    ) {
+        let (temp, state, executor, server) = fixture_with_recovery(true, false, recovery).await;
+        let _ = prepare_chat(State(state.clone()), Json(Default::default()))
+            .await
+            .unwrap();
+        let created = create_chat(State(state.clone()), Json(body("schema-source", false)))
+            .await
+            .unwrap()
+            .0;
+        let located = selected(&state, created["id"].as_str().unwrap()).unwrap();
+        let context = automation_context(&state, &located).await.unwrap();
+        state
+            .automation
+            .as_ref()
+            .unwrap()
+            .run_next(crate::markdown_chat::now_ms())
+            .await
+            .unwrap()
+            .unwrap();
+        let execution = executor.executions.lock().unwrap()[0].clone();
+        let ActionPrompt::CreateChat {
+            continuation_token,
+            reference,
+            ..
+        } = execution.request.prompt
+        else {
+            panic!("creation expected")
+        };
+        let source = ConversationIdentity::from_openai_session("schema-source-owner").unwrap();
+        state
+            .continuations
+            .claim(&source, &continuation_token, |_, _| Ok(()))
+            .unwrap();
+        context
+            .store
+            .verify_pairing_reference(&context.task, 1, &reference, crate::markdown_chat::now_ms())
+            .unwrap();
+        let context = automation_context(&state, &located).await.unwrap();
+        (temp, state, executor, server, created, context, source)
+    }
+
+    #[tokio::test]
+    async fn connector_schema_changes_during_creation_do_not_relabel_the_conversation() {
+        let (_temp, state, executor, server) = fixture_with_settings(true).await;
+        let _ = prepare_chat(State(state.clone()), Json(Default::default()))
+            .await
+            .unwrap();
+        let created = create_chat(State(state.clone()), Json(body("schema-in-flight", false)))
+            .await
+            .unwrap()
+            .0;
+        let located = selected(&state, created["id"].as_str().unwrap()).unwrap();
+        let context = automation_context(&state, &located).await.unwrap();
+        let supervisor = state.automation.as_ref().unwrap();
+        supervisor
+            .run_next(crate::markdown_chat::now_ms())
+            .await
+            .unwrap()
+            .unwrap();
+        let before = context
+            .store
+            .load(&context.task)
+            .unwrap()
+            .pairing
+            .connector_schema_version;
+        change_schema(&state, true);
+        let execution = executor.executions.lock().unwrap()[0].clone();
+        let ActionPrompt::CreateChat {
+            continuation_token,
+            reference,
+            ..
+        } = execution.request.prompt
+        else {
+            panic!("creation expected")
+        };
+        let physical =
+            ConversationIdentity::from_openai_session("created-with-old-schema").unwrap();
+        state
+            .continuations
+            .claim(&physical, &continuation_token, |_, _| Ok(()))
+            .unwrap();
+        context
+            .store
+            .verify_pairing_reference(&context.task, 1, &reference, crate::markdown_chat::now_ms())
+            .unwrap();
+        let _ = automation_context(&state, &located).await.unwrap();
+        assert_eq!(
+            context
+                .store
+                .load(&context.task)
+                .unwrap()
+                .pairing
+                .connector_schema_version,
+            before
+        );
+        assert_ne!(supervisor.current_schema_version(), before);
+        assert!(
+            supervisor
+                .prepare_schema_rollover(&context.task)
+                .await
+                .unwrap()
+        );
+        supervisor
+            .scan_once(crate::markdown_chat::now_ms())
+            .await
+            .unwrap();
+        assert_eq!(supervisor.queued_count().await, 1);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn re_pairing_keeps_the_window_for_its_first_prompt_and_releases_on_stop_or_timeout() {
+        use std::sync::atomic::Ordering;
+        for decision in [
+            "verified",
+            "goal",
+            "continuation",
+            "timeout",
+            "stop",
+            "superseded",
+        ] {
+            let (_temp, state, executor, server, _created, context, _source) =
+                schema_source().await;
+            let supervisor = state.automation.as_ref().unwrap().clone();
+            // Queue an unrelated chat before the replacement is created.
+            *executor.created_url.lock().unwrap() = "https://chatgpt.com/c/competing-chat".into();
+            let created = create_chat(State(state.clone()), Json(body("competing-chat", false)))
+                .await
+                .unwrap()
+                .0;
+            let located = selected(&state, created["id"].as_str().unwrap()).unwrap();
+            let other = automation_context(&state, &located).await.unwrap();
+            supervisor
+                .run_next(crate::markdown_chat::now_ms())
+                .await
+                .unwrap()
+                .unwrap();
+            let initial = executor.executions.lock().unwrap().last().unwrap().clone();
+            assert!(
+                !initial.request.retain_pairing_window,
+                "ordinary new chats do not reserve a follow-up"
+            );
+            let ActionPrompt::CreateChat {
+                continuation_token,
+                reference,
+                ..
+            } = initial.request.prompt
+            else {
+                unreachable!()
+            };
+            let physical = ConversationIdentity::from_openai_session("competing-owner").unwrap();
+            state
+                .continuations
+                .claim(&physical, &continuation_token, |_, _| Ok(()))
+                .unwrap();
+            other
+                .store
+                .verify_pairing_reference(
+                    &other.task,
+                    1,
+                    &reference,
+                    crate::markdown_chat::now_ms(),
+                )
+                .unwrap();
+            let _ = automation_context(&state, &located).await.unwrap();
+            other
+                .chat
+                .append_user("other-request".into(), "Handle the other task".into())
+                .await
+                .unwrap();
+            let now = crate::markdown_chat::now_ms()
+                + crate::agent_automation::PAIRING_VERIFICATION_GRACE_MS
+                + 1000;
+            supervisor.scan_once(now).await.unwrap();
+            assert_eq!(supervisor.queued_count().await, 1);
+            if decision == "goal" {
+                let goal = context
+                    .store
+                    .set_goal(&context.task, "Resume this goal", now)
+                    .unwrap();
+                context
+                    .store
+                    .run_goal(&context.task, goal.revision, now)
+                    .unwrap();
+            } else if decision == "continuation" {
+                let path = context.chat.path().with_file_name("automation.json");
+                let mut value: Value =
+                    serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+                value["pairing"]["resumeTask"] = json!(true);
+                std::fs::write(path, serde_json::to_vec(&value).unwrap()).unwrap();
+            } else {
+                context
+                    .chat
+                    .append_user("follow-up".into(), "Continue my request".into())
+                    .await
+                    .unwrap();
+            }
+            executor.reserve_pairing.store(true, Ordering::SeqCst);
+            change_schema(&state, true);
+            assert!(
+                supervisor
+                    .prepare_schema_rollover(&context.task)
+                    .await
+                    .unwrap()
+            );
+            *executor.created_url.lock().unwrap() = "https://chatgpt.com/c/retained-pair".into();
+            supervisor.scan_once(now).await.unwrap();
+            let before = executor.executions.lock().unwrap().len();
+            let running = tokio::spawn({
+                let supervisor = supervisor.clone();
+                async move { supervisor.run_next(crate::markdown_chat::now_ms()).await }
+            });
+            tokio::time::timeout(Duration::from_secs(1), async {
+                loop {
+                    if executor.executions.lock().unwrap().len() > before
+                        && context
+                            .store
+                            .load(&context.task)
+                            .unwrap()
+                            .pairing
+                            .canonical_url
+                            .is_some()
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .unwrap();
+            let repair = executor.executions.lock().unwrap()[before].clone();
+            assert!(repair.request.retain_pairing_window);
+            let competing = tokio::spawn({
+                let supervisor = supervisor.clone();
+                async move { supervisor.run_next(crate::markdown_chat::now_ms()).await }
+            });
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            assert!(
+                !competing.is_finished(),
+                "another queue runner must wait for the handoff"
+            );
+            match decision {
+                "verified" | "goal" | "continuation" => {
+                    let ActionPrompt::CreateChat {
+                        continuation_token,
+                        reference,
+                        ..
+                    } = &repair.request.prompt
+                    else {
+                        unreachable!()
+                    };
+                    let destination =
+                        ConversationIdentity::from_openai_session("retained-new-owner").unwrap();
+                    state
+                        .continuations
+                        .claim(&destination, continuation_token, |_, _| Ok(()))
+                        .unwrap();
+                    context
+                        .store
+                        .verify_pairing_reference(
+                            &context.task,
+                            2,
+                            reference,
+                            crate::markdown_chat::now_ms(),
+                        )
+                        .unwrap();
+                    supervisor.notify();
+                }
+                "stop" => {
+                    context
+                        .chat
+                        .request_agent_stop("stop-repair".into())
+                        .await
+                        .unwrap();
+                    supervisor.notify();
+                }
+                "superseded" => {
+                    context
+                        .store
+                        .issue_pairing(
+                            &context.task,
+                            "https://chatgpt.com/c/manual-replacement",
+                            1,
+                            crate::markdown_chat::now_ms(),
+                        )
+                        .unwrap();
+                    supervisor.notify();
+                }
+                "timeout" => {}
+                _ => unreachable!(),
+            }
+            let _ = tokio::time::timeout(Duration::from_secs(2), running)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            let _ = tokio::time::timeout(Duration::from_secs(1), competing)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            let executions = executor.executions.lock().unwrap().clone();
+            assert_eq!(
+                executor.released_pairings.lock().unwrap().as_slice(),
+                std::slice::from_ref(&repair.request.action_id)
+            );
+            if matches!(decision, "verified" | "goal" | "continuation") {
+                let follow_up = &executions[before + 1];
+                assert_eq!(follow_up.task_key, context.task.stable_key());
+                assert_eq!(
+                    follow_up.request.pairing_continuation_of.as_deref(),
+                    Some(repair.request.action_id.as_str())
+                );
+                assert_eq!(follow_up.request.url, "https://chatgpt.com/c/retained-pair");
+                assert!(!follow_up.request.retain_pairing_window);
+                assert!(matches!(
+                    (&follow_up.request.prompt, decision),
+                    (ActionPrompt::OfflineChat { .. }, "verified")
+                        | (ActionPrompt::OfflineGoal { .. }, "goal")
+                        | (ActionPrompt::TaskContinuation {}, "continuation")
+                ));
+            } else {
+                assert_eq!(
+                    executions.len(),
+                    before + 1,
+                    "unverified/stopped/superseded pairing must not send task work"
+                );
+            }
+            assert_eq!(
+                other.chat.unread_snapshot().await.unwrap().messages.len(),
+                1
+            );
+            server.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn browser_messages_supply_fresh_valid_tickets_for_initialization_messages_and_retries() {
+        let (_temp, state, executor, server) = fixture_with_options(true, true).await;
+        let supervisor = state.automation.as_ref().unwrap();
+        let _ = prepare_chat(State(state.clone()), Json(Default::default()))
+            .await
+            .unwrap();
+        let created = create_chat(State(state.clone()), Json(body("ticketed-browser", false)))
+            .await
+            .unwrap()
+            .0;
+        let located = selected(&state, created["id"].as_str().unwrap()).unwrap();
+        let context = automation_context(&state, &located).await.unwrap();
+        supervisor
+            .run_next(crate::markdown_chat::now_ms())
+            .await
+            .unwrap()
+            .unwrap();
+        let initial = executor.executions.lock().unwrap()[0].clone();
+        let first_ticket = initial.request.agent_ticket.unwrap();
+        let ActionPrompt::CreateChat {
+            continuation_token,
+            reference,
+            ..
+        } = initial.request.prompt
+        else {
+            unreachable!()
+        };
+        let physical = ConversationIdentity::from_openai_session("ticketed-browser-owner").unwrap();
+        state
+            .continuations
+            .claim(&physical, &continuation_token, |_, _| Ok(()))
+            .unwrap();
+        let session = crate::exec_sessions::SessionState::new();
+        let latest = executor
+            .tickets
+            .reserve_for_call(
+                crate::agent_tickets::TicketCall {
+                    conversation: Some(&physical),
+                    task: Some(&context.task),
+                    owner_generation: Some(1),
+                    tool: "automation_verify_pairing",
+                },
+                &session,
+                Some(first_ticket.clone()),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap()
+            .commit(CancellationToken::new())
+            .await
+            .unwrap()
+            .unwrap();
+        context
+            .store
+            .verify_pairing_reference(&context.task, 1, &reference, crate::markdown_chat::now_ms())
+            .unwrap();
+        let _ = automation_context(&state, &located).await.unwrap();
+        let mut previous = first_ticket;
+        let mut latest = latest;
+        for (index, retry) in [false, true, false].into_iter().enumerate() {
+            context
+                .chat
+                .append_user(format!("ticket-input-{index}"), "Resume my task".into())
+                .await
+                .unwrap();
+            let now = crate::markdown_chat::now_ms()
+                + crate::agent_automation::PAIRING_VERIFICATION_GRACE_MS
+                + 1000;
+            supervisor.scan_once(now).await.unwrap();
+            if retry {
+                let action = context
+                    .store
+                    .load(&context.task)
+                    .unwrap()
+                    .action
+                    .id
+                    .unwrap();
+                context
+                    .store
+                    .update_action_status(
+                        &context.task,
+                        &action,
+                        crate::agent_automation::AutomationActionStatus::Failed,
+                        Some("confirmed unsent"),
+                        None,
+                        now,
+                    )
+                    .unwrap();
+                let _ = supervisor
+                    .retry_failed_action(&context.task, &action, now + 1)
+                    .await
+                    .unwrap();
+            }
+            supervisor.run_next(now + 2).await.unwrap().unwrap();
+            let sent = executor.executions.lock().unwrap().last().unwrap().clone();
+            let supplied = sent.request.agent_ticket.unwrap();
+            assert_ne!(supplied, previous);
+            // The previous chain remains usable until the fresh prompt is redeemed.
+            latest = executor
+                .tickets
+                .reserve(Some(&physical), &session, Some(latest))
+                .await
+                .unwrap()
+                .commit(CancellationToken::new())
+                .await
+                .unwrap()
+                .unwrap();
+            let old = latest;
+            latest = executor
+                .tickets
+                .reserve_for_call(
+                    crate::agent_tickets::TicketCall {
+                        conversation: Some(&physical),
+                        task: Some(&context.task),
+                        owner_generation: Some(1),
+                        tool: "chat_read",
+                    },
+                    &session,
+                    Some(supplied.clone()),
+                    CancellationToken::new(),
+                )
+                .await
+                .unwrap()
+                .commit(CancellationToken::new())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                executor
+                    .tickets
+                    .reserve(Some(&physical), &session, Some(old))
+                    .await
+                    .is_err()
+            );
+            context.chat.read(true).await.unwrap();
+            previous = supplied;
+        }
+        server.abort();
+    }
+
+    fn change_schema(state: &OwnerState, refreshed: bool) {
+        let previous = crate::global_settings::schema_revision(&state.config).unwrap();
+        let path = state.config.loaded_config_path.as_ref().unwrap();
+        let mut document: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        document["experimental"]["forceReadOnlyToolAnnotations"] = json!(true);
+        std::fs::write(path, serde_json::to_vec(&document).unwrap()).unwrap();
+        let revision = crate::global_settings::schema_revision(&state.config).unwrap();
+        assert_ne!(previous, revision);
+        crate::global_settings::write_schema_intent(&state.config, &json!({
+            "phase": if refreshed {"completed"} else {"queued"},
+            "revision": revision,
+            "observedRevision": if refreshed {revision} else {previous},
+            "observedConnectorSchemaVersion": if refreshed {state.automation.as_ref().unwrap().current_schema_version()} else {None},
+        })).unwrap();
+    }
+
+    #[tokio::test]
+    async fn connector_schema_rollover_from_idle_legacy_pairing_queues_and_delivers_the_wake() {
+        let (_temp, state, executor, server, _created, context, _source) = schema_source().await;
+        let supervisor = state.automation.as_ref().unwrap();
+        let path = context.chat.path().with_file_name("automation.json");
+        let mut saved: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        saved["action"] =
+            serde_json::to_value(crate::agent_automation::AutomationActionState::default())
+                .unwrap();
+        saved["pairing"]["connectorSchemaVersion"] = Value::Null;
+        std::fs::write(&path, serde_json::to_vec(&saved).unwrap()).unwrap();
+        context
+            .chat
+            .append_user(
+                "idle-schema-message".into(),
+                "Continue from the idle conversation".into(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            supervisor
+                .prepare_schema_rollover(&context.task)
+                .await
+                .unwrap()
+        );
+        let before = context.store.load(&context.task).unwrap();
+        assert_eq!(before.pairing.generation, 1);
+        assert_eq!(before.action.pairing_generation, None);
+        assert!(before.pairing.schema_rollover_pending);
+
+        let now = crate::markdown_chat::now_ms();
+        supervisor.scan_once(now).await.unwrap();
+        assert_eq!(
+            supervisor.queued_count().await,
+            1,
+            "an idle action must not strand schema rollover"
+        );
+        *executor.created_url.lock().unwrap() =
+            "https://chatgpt.com/c/idle-schema-replacement".into();
+        supervisor.run_next(now + 1).await.unwrap().unwrap();
+        let execution = executor.executions.lock().unwrap()[1].clone();
+        let ActionPrompt::CreateChat {
+            continuation_token,
+            reference,
+            ..
+        } = execution.request.prompt
+        else {
+            panic!("a fresh conversation must precede the wake");
+        };
+        let destination = ConversationIdentity::from_openai_session("idle-schema-owner").unwrap();
+        state
+            .continuations
+            .claim(&destination, &continuation_token, |_, _| Ok(()))
+            .unwrap();
+        context
+            .store
+            .verify_pairing_reference(&context.task, 2, &reference, now + 2)
+            .unwrap();
+        let ready = context.store.load(&context.task).unwrap();
+        assert!(!ready.pairing.schema_rollover_pending);
+        assert_eq!(ready.selection, before.selection);
+        let next = now + crate::agent_automation::PAIRING_VERIFICATION_GRACE_MS + 1_000;
+        supervisor.scan_once(next).await.unwrap();
+        assert_eq!(supervisor.queued_count().await, 1);
+        assert_eq!(
+            supervisor.next_queued_kind().await,
+            Some(crate::agent_automation::AutomationActionKind::OfflineChat)
+        );
+        supervisor.run_next(next + 1).await.unwrap().unwrap();
+        let execution = executor.executions.lock().unwrap()[2].clone();
+        let ActionPrompt::OfflineChat { messages, .. } = execution.request.prompt else {
+            panic!("the original message must wake the replacement conversation");
+        };
+        assert_eq!(messages.len(), 1);
+        assert!(
+            messages[0]
+                .markdown
+                .contains("Continue from the idle conversation")
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn connector_schema_rollover_holds_online_input_until_refresh_and_preserves_owner_data() {
+        for mode in [
+            crate::markdown_chat::MessageMode::Steer,
+            crate::markdown_chat::MessageMode::Queue,
+        ] {
+            let (_temp, state, executor, server, created, context, source) = schema_source().await;
+            let supervisor = state.automation.as_ref().unwrap();
+            let before = context.store.load(&context.task).unwrap();
+            assert!(before.pairing.connector_schema_version.is_some());
+            context
+                .chat
+                .record_agent_call(crate::markdown_chat::now_ms())
+                .await
+                .unwrap();
+            change_schema(&state, false);
+            let _ = super::super::chat_send(
+                State(state.clone()),
+                Path(created["id"].as_str().unwrap().into()),
+                Json(SendBody {
+                    request_id: "new-schema-input".into(),
+                    message: "Use the refreshed tools".into(),
+                    stop_agent: false,
+                    attachment_ids: vec![],
+                    message_mode: Some(mode),
+                }),
+            )
+            .await
+            .unwrap();
+            let held = context.store.load(&context.task).unwrap();
+            assert!(held.pairing.schema_rollover_pending);
+            assert_eq!(
+                held.pairing.connector_schema_version,
+                before.pairing.connector_schema_version
+            );
+            assert!(
+                context
+                    .chat
+                    .read(true)
+                    .await
+                    .err()
+                    .unwrap()
+                    .contains("connector schema changed")
+            );
+            assert!(
+                context
+                    .chat
+                    .append("late old-owner response".into())
+                    .await
+                    .is_err()
+            );
+            let now = crate::markdown_chat::now_ms();
+            supervisor.scan_once(now).await.unwrap();
+            assert_eq!(
+                supervisor.queued_count().await,
+                0,
+                "creation must wait for connector refresh"
+            );
+            assert_eq!(executor.executions.lock().unwrap().len(), 1);
+            let revision = crate::global_settings::schema_revision(&state.config).unwrap();
+            crate::global_settings::write_schema_intent(
+                &state.config,
+                &json!({"phase":"completed","observedRevision":revision,"revision":revision,
+                    "observedConnectorSchemaVersion":supervisor.current_schema_version()}),
+            )
+            .unwrap();
+            supervisor.scan_once(now + 1).await.unwrap();
+            supervisor.scan_once(now + 2).await.unwrap();
+            assert_eq!(supervisor.queued_count().await, 1);
+            *executor.created_url.lock().unwrap() =
+                "https://chatgpt.com/c/schema-replacement".into();
+            supervisor.run_next(now + 3).await.unwrap().unwrap();
+            let execution = executor.executions.lock().unwrap()[1].clone();
+            let ActionPrompt::CreateChat {
+                continuation_token,
+                reference,
+                ..
+            } = execution.request.prompt
+            else {
+                panic!("replacement expected")
+            };
+            let replacing = context.store.load(&context.task).unwrap();
+            assert!(replacing.pairing.schema_rollover_pending);
+            assert_ne!(
+                replacing.pairing.connector_schema_version,
+                before.pairing.connector_schema_version
+            );
+            assert_eq!(replacing.selection, before.selection);
+            assert_eq!(replacing.action.automatic_retry_attempts, 0);
+            let destination =
+                ConversationIdentity::from_openai_session("schema-replacement-owner").unwrap();
+            state
+                .continuations
+                .claim(&destination, &continuation_token, |task, _| {
+                    assert_eq!(task.stable_key(), context.task.stable_key());
+                    Ok(())
+                })
+                .unwrap();
+            context
+                .store
+                .verify_pairing_reference(&context.task, 2, &reference, now + 4)
+                .unwrap();
+            assert!(!state.continuations.owner_snapshot(&source).unwrap().active);
+            let final_state = context.store.load(&context.task).unwrap();
+            assert!(!final_state.pairing.schema_rollover_pending);
+            if mode == crate::markdown_chat::MessageMode::Queue {
+                context.chat.release_queued_message(u64::MAX).await.unwrap();
+            }
+            let unread = context.chat.unread_snapshot().await.unwrap();
+            assert_eq!(unread.messages.len(), 1);
+            assert_eq!(unread.messages[0].id, "new-schema-input");
+            assert!(
+                !supervisor
+                    .prepare_schema_rollover(&context.task)
+                    .await
+                    .unwrap()
+            );
+            assert_eq!(
+                executor.executions.lock().unwrap().len(),
+                2,
+                "one replacement, no old-conversation Send"
+            );
+            server.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn connector_schema_check_covers_queued_sends_goals_retries_renewals_and_legacy_pairings()
+    {
+        for scenario in ["queued", "goal", "retry", "renewal", "legacy", "matching"] {
+            let (_temp, state, executor, server, _created, context, _source) =
+                schema_source().await;
+            let supervisor = state.automation.as_ref().unwrap();
+            let now = crate::markdown_chat::now_ms()
+                + crate::agent_automation::PAIRING_VERIFICATION_GRACE_MS
+                + 1_000;
+            if scenario == "goal" {
+                let goal = context
+                    .store
+                    .set_goal(&context.task, "Continue the goal", now)
+                    .unwrap();
+                context
+                    .store
+                    .run_goal(&context.task, goal.revision, now)
+                    .unwrap();
+            } else if scenario == "renewal" {
+                let mut document: Value = serde_json::from_slice(
+                    &std::fs::read(context.chat.path().with_file_name("automation.json")).unwrap(),
+                )
+                .unwrap();
+                document["turnRenewal"] = json!({"send":{"actionId":"old-turn","atMs":now-60_000,
+                    "model":"gpt-5.6-sol","effort":"max","pairingGeneration":1,"ownerGeneration":1},
+                    "handoff":{"id":"schema-handoff","requestedAtMs":now,"reportComplete":true}});
+                std::fs::write(
+                    context.chat.path().with_file_name("automation.json"),
+                    serde_json::to_vec(&document).unwrap(),
+                )
+                .unwrap();
+                // Renewal settings are live and independent of the connector schema.
+                let path = state.config.loaded_config_path.as_ref().unwrap();
+                let mut settings: Value =
+                    serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+                settings["agentChat"]["turnRenewal"]["enabled"] = json!(true);
+                std::fs::write(path, serde_json::to_vec(&settings).unwrap()).unwrap();
+            } else {
+                context
+                    .chat
+                    .append_user("schema-unread".into(), "Preserve this message".into())
+                    .await
+                    .unwrap();
+            }
+            supervisor.scan_once(now).await.unwrap();
+            assert_eq!(supervisor.queued_count().await, 1, "{scenario}");
+            if scenario == "renewal" {
+                assert_eq!(
+                    supervisor.next_queued_kind().await,
+                    Some(crate::agent_automation::AutomationActionKind::TurnRenewal)
+                );
+            }
+            if scenario == "matching" {
+                supervisor.run_next(now).await.unwrap().unwrap();
+                assert!(matches!(
+                    executor.executions.lock().unwrap()[1].request.prompt,
+                    ActionPrompt::OfflineChat { .. }
+                ));
+                server.abort();
+                continue;
+            }
+            if scenario == "legacy" {
+                let path = context.chat.path().with_file_name("automation.json");
+                let mut value: Value =
+                    serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+                value["pairing"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("connectorSchemaVersion");
+                std::fs::write(path, serde_json::to_vec(&value).unwrap()).unwrap();
+            } else {
+                change_schema(&state, true);
+            }
+            *executor.created_url.lock().unwrap() =
+                format!("https://chatgpt.com/c/schema-{scenario}-replacement");
+            if scenario == "retry" {
+                let action_id = context
+                    .store
+                    .load(&context.task)
+                    .unwrap()
+                    .action
+                    .id
+                    .unwrap();
+                context
+                    .store
+                    .update_action_status(
+                        &context.task,
+                        &action_id,
+                        crate::agent_automation::AutomationActionStatus::Failed,
+                        Some("unsent"),
+                        None,
+                        now,
+                    )
+                    .unwrap();
+                supervisor
+                    .retry_failed_action(&context.task, &action_id, now + 1)
+                    .await
+                    .unwrap();
+            } else {
+                assert!(supervisor.run_next(now + 1).await.unwrap().is_none());
+            }
+            assert_eq!(
+                executor.executions.lock().unwrap().len(),
+                1,
+                "{scenario}: stale conversation must receive no browser Send"
+            );
+            assert_eq!(supervisor.queued_count().await, 1, "{scenario}");
+            assert!(
+                context
+                    .store
+                    .load(&context.task)
+                    .unwrap()
+                    .pairing
+                    .creating_chat,
+                "{scenario}"
+            );
+            supervisor.run_next(now + 2).await.unwrap().unwrap();
+            assert!(
+                matches!(
+                    executor.executions.lock().unwrap()[1].request.prompt,
+                    ActionPrompt::CreateChat { .. }
+                ),
+                "{scenario}"
+            );
+            if scenario == "renewal" {
+                let execution = executor.executions.lock().unwrap()[1].clone();
+                let ActionPrompt::CreateChat {
+                    continuation_token,
+                    reference,
+                    ..
+                } = execution.request.prompt
+                else {
+                    unreachable!()
+                };
+                let physical =
+                    ConversationIdentity::from_openai_session("renewal-new-owner").unwrap();
+                state
+                    .continuations
+                    .claim(&physical, &continuation_token, |_, _| Ok(()))
+                    .unwrap();
+                context
+                    .store
+                    .verify_pairing_reference(&context.task, 2, &reference, now + 3)
+                    .unwrap();
+                let _ = automation_context(
+                    &state,
+                    &selected(&state, _created["id"].as_str().unwrap()).unwrap(),
+                )
+                .await
+                .unwrap();
+                assert!(
+                    context
+                        .store
+                        .load(&context.task)
+                        .unwrap()
+                        .pairing
+                        .resume_task
+                );
+                supervisor
+                    .scan_once(now + crate::agent_automation::PAIRING_VERIFICATION_GRACE_MS + 5)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    supervisor.queued_count().await,
+                    1,
+                    "renewal without a goal must resume after pairing"
+                );
+                supervisor
+                    .run_next(now + crate::agent_automation::PAIRING_VERIFICATION_GRACE_MS + 6)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert!(matches!(
+                    executor.executions.lock().unwrap()[2].request.prompt,
+                    ActionPrompt::TaskContinuation {}
+                ));
+                assert!(
+                    !context
+                        .store
+                        .load(&context.task)
+                        .unwrap()
+                        .pairing
+                        .resume_task
+                );
+            }
+            server.abort();
+        }
+    }
+
     #[tokio::test]
     async fn new_chat_preparation_keeps_its_browser_lease_through_account_validation() {
         let (_temp, state, executor, server) = fixture().await;
@@ -721,11 +1776,16 @@ mod tests {
             prepare_chat(State(preparing_state), Json(Default::default())).await
         });
         tokio::time::timeout(Duration::from_secs(2), executor.health_entered.notified())
-            .await.unwrap();
+            .await
+            .unwrap();
         let supervisor = state.automation.as_ref().unwrap().clone();
         let mut contender = tokio::spawn(async move { supervisor.prepare_new_chat(None).await });
-        assert!(tokio::time::timeout(Duration::from_millis(50), &mut contender).await.is_err(),
-            "another browser action must wait for preparation's health proof");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut contender)
+                .await
+                .is_err(),
+            "another browser action must wait for preparation's health proof"
+        );
         assert_eq!(executor.preparations.load(Ordering::SeqCst), 1);
         executor.block_health.store(false, Ordering::SeqCst);
         executor.health_release.notify_one();
@@ -741,7 +1801,9 @@ mod tests {
     async fn new_chat_preparation_rejects_a_genuinely_different_account() {
         let (_temp, state, executor, server) = fixture().await;
         *executor.health_account.lock().unwrap() = "different-account".into();
-        let error = prepare_chat(State(state.clone()), Json(Default::default())).await.unwrap_err();
+        let error = prepare_chat(State(state.clone()), Json(Default::default()))
+            .await
+            .unwrap_err();
         assert!(error.1.contains("ChatGPT account changed"));
         assert!(state.catalog_cache.lock().await.entry.is_none());
         assert!(executor.executions.lock().unwrap().is_empty());
@@ -1485,14 +2547,51 @@ mod tests {
         let pairing = context.store.load(&context.task).unwrap().pairing;
         // Real replacements retain the previous physical owner's turn clock.
         // It must not revoke the next owner's pending creation on registration.
-        context.store.queue_action(&context.task, "old-goal-turn", AutomationActionKind::OfflineGoal,
-            pairing.generation, Some(goal.revision), 12).unwrap();
-        context.store.record_turn_send(&context.task, crate::agent_automation::turn_renewal::TurnSend {
-            action_id:"old-goal-turn".into(),at_ms:12,model:Some("discovered-model".into()),
-            effort:Some("adaptive-choice".into()),pairing_generation:pairing.generation,owner_generation:1,
-        }).unwrap();
-        context.store.update_action_status(&context.task,"old-goal-turn",AutomationActionStatus::Idle,None,None,12).unwrap();
-        assert!(context.store.load(&context.task).unwrap().turn_renewal.send.is_some());
+        context
+            .store
+            .queue_action(
+                &context.task,
+                "old-goal-turn",
+                AutomationActionKind::OfflineGoal,
+                pairing.generation,
+                Some(goal.revision),
+                12,
+            )
+            .unwrap();
+        context
+            .store
+            .record_turn_send(
+                &context.task,
+                crate::agent_automation::turn_renewal::TurnSend {
+                    action_id: "old-goal-turn".into(),
+                    at_ms: 12,
+                    model: Some("discovered-model".into()),
+                    effort: Some("adaptive-choice".into()),
+                    pairing_generation: pairing.generation,
+                    owner_generation: 1,
+                },
+            )
+            .unwrap();
+        context
+            .store
+            .update_action_status(
+                &context.task,
+                "old-goal-turn",
+                AutomationActionStatus::Idle,
+                None,
+                None,
+                12,
+            )
+            .unwrap();
+        assert!(
+            context
+                .store
+                .load(&context.task)
+                .unwrap()
+                .turn_renewal
+                .send
+                .is_some()
+        );
         context
             .store
             .queue_action(
@@ -1643,5 +2742,518 @@ mod tests {
                 .is_none()
         );
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn load_rate_limit_recovery_is_opt_in_pre_send_and_keeps_pairing_and_first_work_together()
+    {
+        for (enabled, code, accepted, goal_only, already_recovering, expect_recovery) in [
+            (
+                true,
+                "conversation_load_rate_limited",
+                false,
+                true,
+                false,
+                true,
+            ),
+            (
+                true,
+                "conversation_load_rate_limited",
+                false,
+                false,
+                false,
+                true,
+            ),
+            (
+                false,
+                "conversation_load_rate_limited",
+                false,
+                true,
+                false,
+                false,
+            ),
+            (
+                true,
+                "conversation_load_rate_limited",
+                true,
+                true,
+                false,
+                false,
+            ),
+            (true, "rate_limited", false, true, false, false),
+            (true, "conversation_unavailable", false, true, false, false),
+            (
+                true,
+                "conversation_load_rate_limited",
+                false,
+                true,
+                true,
+                false,
+            ),
+        ] {
+            let (_temp, state, executor, server, _created, context, source) =
+                schema_source_with_recovery(enabled).await;
+            let supervisor = state.automation.as_ref().unwrap().clone();
+            if goal_only {
+                let goal = context
+                    .store
+                    .set_goal(
+                        &context.task,
+                        "Keep pursuing the existing goal",
+                        crate::markdown_chat::now_ms(),
+                    )
+                    .unwrap();
+                context
+                    .store
+                    .run_goal(&context.task, goal.revision, crate::markdown_chat::now_ms())
+                    .unwrap();
+            } else {
+                context
+                    .chat
+                    .append_user(
+                        "pending-load".into(),
+                        "Preserve this pending message".into(),
+                    )
+                    .await
+                    .unwrap();
+            }
+            if already_recovering {
+                let path = context
+                    .store
+                    .task_directory(&context.task)
+                    .unwrap()
+                    .join("automation.json");
+                let mut saved: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+                saved["pairing"]["loadRateLimitRecovery"] = serde_json::json!(true);
+                std::fs::write(&path, serde_json::to_vec(&saved).unwrap()).unwrap();
+                assert!(
+                    context
+                        .store
+                        .load(&context.task)
+                        .unwrap()
+                        .pairing
+                        .load_rate_limit_recovery
+                );
+            }
+            let before = context.store.load(&context.task).unwrap();
+            executor
+                .reserve_pairing
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            *executor.next_failure.lock().unwrap() = Some((code, accepted));
+            let now = crate::markdown_chat::now_ms()
+                + crate::agent_automation::PAIRING_VERIFICATION_GRACE_MS
+                + 1000;
+            supervisor.scan_once(now).await.unwrap();
+            supervisor.run_next(now).await.unwrap().unwrap();
+            let recovering = context.store.load(&context.task).unwrap();
+            assert_eq!(
+                recovering.pairing.creating_chat, expect_recovery,
+                "{enabled} {code} {accepted}"
+            );
+            assert!(state.continuations.owner_snapshot(&source).unwrap().active);
+            if !expect_recovery {
+                server.abort();
+                continue;
+            }
+            assert!(recovering.pairing.load_rate_limit_recovery);
+            assert_eq!(recovering.selection, before.selection);
+            assert_eq!(
+                recovering
+                    .goal
+                    .as_ref()
+                    .map(|g| (&g.markdown, g.revision, g.status)),
+                before
+                    .goal
+                    .as_ref()
+                    .map(|g| (&g.markdown, g.revision, g.status))
+            );
+            // An unrelated creation must not overtake pairing or its first work.
+            let _ = create_chat(
+                State(state.clone()),
+                Json(body("competing-recovery", false)),
+            )
+            .await
+            .unwrap();
+            assert_eq!(supervisor.queued_count().await, 2);
+            *executor.created_url.lock().unwrap() = "https://chatgpt.com/c/load-replacement".into();
+            let count = executor.executions.lock().unwrap().len();
+            let running = tokio::spawn({
+                let supervisor = supervisor.clone();
+                async move { supervisor.run_next(crate::markdown_chat::now_ms()).await }
+            });
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while executor.executions.lock().unwrap().len() == count
+                    || context
+                        .store
+                        .load(&context.task)
+                        .unwrap()
+                        .pairing
+                        .canonical_url
+                        .is_none()
+                {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .unwrap();
+            let replacement = executor.executions.lock().unwrap()[count].clone();
+            assert_eq!(replacement.task_key, context.task.stable_key());
+            assert!(replacement.request.retain_pairing_window);
+            let competing = tokio::spawn({
+                let supervisor = supervisor.clone();
+                async move { supervisor.run_next(crate::markdown_chat::now_ms()).await }
+            });
+            tokio::time::sleep(Duration::from_millis(900)).await;
+            assert!(
+                !running.is_finished(),
+                "rate-limit recovery must outlast the ordinary short pairing wait"
+            );
+            assert!(
+                !competing.is_finished(),
+                "unrelated work must not navigate away"
+            );
+            let ActionPrompt::CreateChat {
+                continuation_token,
+                reference,
+                ..
+            } = replacement.request.prompt
+            else {
+                panic!("replacement initialization expected")
+            };
+            let destination =
+                ConversationIdentity::from_openai_session("load-replacement-owner").unwrap();
+            state
+                .continuations
+                .claim(&destination, &continuation_token, |_, _| Ok(()))
+                .unwrap();
+            context
+                .store
+                .verify_pairing_reference(
+                    &context.task,
+                    2,
+                    &reference,
+                    crate::markdown_chat::now_ms(),
+                )
+                .unwrap();
+            supervisor.notify();
+            tokio::time::timeout(Duration::from_secs(3), running)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(2), competing)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert!(!state.continuations.owner_snapshot(&source).unwrap().active);
+            let after = context.store.load(&context.task).unwrap();
+            assert_eq!(after.selection, before.selection);
+            assert_eq!(
+                after
+                    .goal
+                    .as_ref()
+                    .map(|g| (&g.markdown, g.revision, g.status)),
+                before
+                    .goal
+                    .as_ref()
+                    .map(|g| (&g.markdown, g.revision, g.status))
+            );
+            assert_eq!(
+                after.pairing.canonical_url.as_deref(),
+                Some("https://chatgpt.com/c/load-replacement")
+            );
+            assert!(
+                !after.pairing.load_rate_limit_recovery,
+                "the first accepted work prompt ends recovery"
+            );
+            let requests = executor.executions.lock().unwrap().clone();
+            let follow_up = &requests[count + 1];
+            assert_eq!(follow_up.task_key, context.task.stable_key());
+            assert_eq!(
+                follow_up.request.url,
+                "https://chatgpt.com/c/load-replacement"
+            );
+            assert_eq!(
+                follow_up.request.pairing_continuation_of.as_deref(),
+                Some(replacement.request.action_id.as_str())
+            );
+            assert!(matches!(
+                (&follow_up.request.prompt, goal_only),
+                (ActionPrompt::OfflineGoal { .. }, true)
+                    | (ActionPrompt::OfflineChat { .. }, false)
+            ));
+            assert_ne!(requests[count + 2].task_key, context.task.stable_key());
+            server.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn conversation_limit_rollover_preserves_task_and_pairs_one_replacement() {
+        for (accepted, stop_before_creation, no_selection, no_pending_message) in [
+            (false, false, false, false),
+            (true, false, false, false),
+            (false, true, false, false),
+            (false, false, true, false),
+            (true, false, false, true),
+        ] {
+            let (_temp, state, executor, server) = fixture().await;
+            let _ = prepare_chat(State(state.clone()), Json(serde_json::Map::new()))
+                .await
+                .unwrap();
+            let created = create_chat(State(state.clone()), Json(body("limit-source", false)))
+                .await
+                .unwrap()
+                .0;
+            let located = selected(&state, created["id"].as_str().unwrap()).unwrap();
+            let context = automation_context(&state, &located).await.unwrap();
+            let supervisor = state.automation.as_ref().unwrap();
+            let now = crate::markdown_chat::now_ms();
+            supervisor.run_next(now).await.unwrap().unwrap();
+            let first = executor.executions.lock().unwrap()[0].clone();
+            let ActionPrompt::CreateChat {
+                continuation_token,
+                reference,
+                ..
+            } = first.request.prompt
+            else {
+                panic!("initial creation expected")
+            };
+            let source = ConversationIdentity::from_openai_session("exhausted-source").unwrap();
+            state
+                .continuations
+                .claim(&source, &continuation_token, |_, _| Ok(()))
+                .unwrap();
+            context
+                .store
+                .verify_pairing_reference(&context.task, 1, &reference, now)
+                .unwrap();
+            let context = automation_context(&state, &located).await.unwrap();
+            context
+                .chat
+                .append_user("read-before-limit".into(), "Already handled".into())
+                .await
+                .unwrap();
+            context.chat.read(true).await.unwrap();
+            if !no_pending_message {
+                context
+                    .chat
+                    .append_user("pending-at-limit".into(), "Keep this request".into())
+                    .await
+                    .unwrap();
+            }
+            let goal = context
+                .store
+                .set_goal(&context.task, "Preserve the active task", now)
+                .unwrap();
+            context
+                .store
+                .run_goal(&context.task, goal.revision, now)
+                .unwrap();
+            if no_selection {
+                context.store.clear_selection(&context.task).unwrap();
+            }
+            let before = context.store.load(&context.task).unwrap();
+            *executor.next_limit.lock().unwrap() = Some(accepted);
+            *executor.created_url.lock().unwrap() = "https://chatgpt.com/c/replacement-chat".into();
+            let scan_at = crate::markdown_chat::now_ms()
+                + crate::agent_automation::PAIRING_VERIFICATION_GRACE_MS
+                + 1_000;
+            supervisor.scan_once(scan_at).await.unwrap();
+            supervisor.run_next(scan_at).await.unwrap().unwrap();
+            let replacing = context.store.load(&context.task).unwrap();
+            assert!(replacing.pairing.creating_chat);
+            assert_eq!(
+                replacing.pairing.pending.as_ref().unwrap().owner_generation,
+                2
+            );
+            assert_eq!(
+                replacing.action.kind,
+                Some(crate::agent_automation::AutomationActionKind::PairVerify)
+            );
+            assert_eq!(replacing.action.automatic_retry_attempts, 0);
+            assert_eq!(replacing.selection, before.selection);
+            assert_eq!(
+                replacing.goal.as_ref().unwrap().status,
+                crate::agent_automation::GoalStatus::Active
+            );
+            assert_eq!(supervisor.queued_count().await, 1);
+            // Late activity/polling by the old owner cannot revoke or duplicate creation.
+            supervisor
+                .register_task(AutomationTaskHandle::new(
+                    context.task.clone(),
+                    1,
+                    context.store.clone(),
+                    context.chat.clone(),
+                ))
+                .await
+                .unwrap();
+            supervisor.scan_once(scan_at + 1).await.unwrap();
+            assert_eq!(supervisor.queued_count().await, 1);
+            if stop_before_creation {
+                context
+                    .chat
+                    .request_agent_stop("stop-rollover".into())
+                    .await
+                    .unwrap();
+                assert!(supervisor.run_next(scan_at + 1).await.unwrap().is_none());
+                assert_eq!(executor.executions.lock().unwrap().len(), 2);
+                assert!(state.continuations.owner_snapshot(&source).unwrap().active);
+                assert_eq!(
+                    context
+                        .store
+                        .load(&context.task)
+                        .unwrap()
+                        .action
+                        .send_accepted,
+                    Some(false)
+                );
+                server.abort();
+                continue;
+            }
+            supervisor.run_next(scan_at + 1).await.unwrap().unwrap();
+            let executions = executor.executions.lock().unwrap().clone();
+            assert_eq!(executions.len(), 3);
+            assert_eq!(
+                executions
+                    .iter()
+                    .filter(|e| e.request.url == "https://chatgpt.com/c/created-chat")
+                    .count(),
+                1
+            );
+            let ActionPrompt::CreateChat {
+                continuation_token,
+                reference,
+                ..
+            } = &executions[2].request.prompt
+            else {
+                panic!("replacement creation expected")
+            };
+            let destination =
+                ConversationIdentity::from_openai_session("replacement-owner").unwrap();
+            let workspace = state
+                .project_bindings
+                .selected_project_root(&state.config, &context.task)
+                .unwrap()
+                .unwrap();
+            let claimed = state
+                .continuations
+                .claim(&destination, continuation_token, |task, root| {
+                    assert_eq!(task.stable_key(), context.task.stable_key());
+                    assert_eq!(root, workspace);
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(claimed.task.stable_key(), context.task.stable_key());
+            context
+                .store
+                .verify_pairing_reference(&context.task, 2, reference, scan_at + 2)
+                .unwrap();
+            assert!(!state.continuations.owner_snapshot(&source).unwrap().active);
+            assert_eq!(
+                state
+                    .continuations
+                    .owner_snapshot(&destination)
+                    .unwrap()
+                    .generation,
+                2
+            );
+            let after = context.store.load(&context.task).unwrap();
+            assert_eq!(
+                after.pairing.canonical_url.as_deref(),
+                Some("https://chatgpt.com/c/replacement-chat")
+            );
+            assert_eq!(after.selection, before.selection);
+            assert_eq!(after.goal.as_ref().unwrap().markdown, goal.markdown);
+            let unread = context.chat.unread_snapshot().await.unwrap();
+            assert_eq!(
+                unread
+                    .messages
+                    .iter()
+                    .map(|m| m.id.as_str())
+                    .collect::<Vec<_>>(),
+                if no_pending_message {
+                    vec![]
+                } else {
+                    vec!["pending-at-limit"]
+                }
+            );
+            supervisor
+                .scan_once(scan_at + crate::agent_automation::PAIRING_VERIFICATION_GRACE_MS + 1_001)
+                .await
+                .unwrap();
+            assert_eq!(
+                supervisor.queued_count().await,
+                1,
+                "the replacement must wake pending work after initialization"
+            );
+            assert_eq!(
+                supervisor.next_queued_kind().await,
+                Some(if no_pending_message {
+                    crate::agent_automation::AutomationActionKind::OfflineGoal
+                } else {
+                    crate::agent_automation::AutomationActionKind::OfflineCombined
+                })
+            );
+            server.abort();
+        }
+    }
+
+    #[test]
+    fn stale_limit_detection_cannot_replace_a_newer_manual_pairing() {
+        let root = tempfile::tempdir().unwrap();
+        let task = ConversationIdentity::from_openai_session("stale-length-limit").unwrap();
+        let store = AgentAutomationStore::new(root.path().join("chats")).unwrap();
+        let first = store
+            .issue_pairing(&task, "https://chatgpt.com/c/source", 0, 100)
+            .unwrap();
+        store
+            .record_pairing_canonical_url(
+                &task,
+                first.generation,
+                "https://chatgpt.com/c/source",
+                100,
+            )
+            .unwrap();
+        store
+            .verify_pairing_reference(&task, 0, &first.reference, 100)
+            .unwrap();
+        store
+            .queue_action(
+                &task,
+                "limit-action",
+                crate::agent_automation::AutomationActionKind::OfflineChat,
+                first.generation,
+                None,
+                101,
+            )
+            .unwrap();
+        store
+            .update_action_status(
+                &task,
+                "limit-action",
+                crate::agent_automation::AutomationActionStatus::ConversationLimit,
+                Some("Full"),
+                None,
+                102,
+            )
+            .unwrap();
+        let expected = store.load(&task).unwrap().action;
+        let manual = store
+            .issue_pairing(&task, "https://chatgpt.com/c/manually-selected", 0, 103)
+            .unwrap();
+        assert!(
+            store
+                .issue_rollover_pairing(&task, "https://chatgpt.com/new", 1, 104, &expected)
+                .unwrap()
+                .is_none()
+        );
+        let after = store.load(&task).unwrap();
+        assert_eq!(after.pairing.generation, manual.generation);
+        assert_eq!(
+            after.pairing.candidate_url.as_deref(),
+            Some("https://chatgpt.com/c/manually-selected")
+        );
     }
 }

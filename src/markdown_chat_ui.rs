@@ -124,14 +124,8 @@ mod tests {
         assert!(html.contains("root.after(chatHost)"));
         assert!(html.contains("setup_ui_select_project"));
         assert!(html.contains("Read by agent"));
-        assert!(html.contains(&format!(
-            "if (age < {}) return {{ state:\"away\"",
-            crate::markdown_chat::OFFLINE_AFTER_MS
-        )));
-        assert!(html.contains(&format!(
-            "if (age < {}) return {{ state:\"online\"",
-            crate::markdown_chat::AWAY_AFTER_MS
-        )));
+        assert!(html.contains("if (age < offlineAfterMs) return { state:\"away\""));
+        assert!(html.contains("if (age < Math.min(180000, offlineAfterMs))"));
         assert!(html.contains(".warning-banner"));
         assert!(html.contains("id=\"tool-total\""));
         assert!(html.contains("tool-call-marker"));

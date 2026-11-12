@@ -1062,7 +1062,7 @@ mod tests {
                 state_root.join("artifacts"),
             )),
             agent_automation: None,
-            agent_runtime:None,
+            agent_runtime: None,
             cancellation: tokio_util::sync::CancellationToken::new(),
         }
     }

@@ -55,6 +55,7 @@ pub struct WidgetMessage {
 
 #[derive(Debug, Serialize)]
 pub struct WidgetPage {
+    pub offline_after_ms: u64,
     pub chat_file: String,
     pub revision: String,
     pub delivered_through: u64,
@@ -642,6 +643,7 @@ impl ChatFile {
                 );
                 let unchanged = before.is_none() && known_revision.as_deref() == Some(&revision);
                 let mut page = WidgetPage {
+                    offline_after_ms: chat.offline_after_ms(),
                     chat_file: chat.path.display().to_string(),
                     revision,
                     delivered_through: cursor.delivered_through,
@@ -1080,9 +1082,14 @@ impl ChatFile {
 
     /// Coordinator steering may never implicitly undo an explicit worker stop.
     pub async fn append_worker_instruction(
-        self: &Arc<Self>, id: String, message: String,
+        self: &Arc<Self>,
+        id: String,
+        message: String,
     ) -> Result<UserSendReceipt, String> {
-        self.run(move |chat| super::queue::append_steering_guarded(chat, id, message, Vec::new(), true)).await
+        self.run(move |chat| {
+            super::queue::append_steering_guarded(chat, id, message, Vec::new(), true)
+        })
+        .await
     }
 
     pub async fn append_user_with_attachments(

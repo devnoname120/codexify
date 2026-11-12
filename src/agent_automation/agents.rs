@@ -66,7 +66,7 @@ pub struct AgentControlRequest {
     pub action: AgentControlAction,
     pub expected_revision: Option<u64>,
     pub content: Option<String>,
-    #[serde(default,skip_serializing_if="Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
 }
 
@@ -98,7 +98,7 @@ impl AgentTeamState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct AgentChild {
-    #[serde(default,skip_serializing_if="Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retired_at_ms: Option<u64>,
     pub task_key: String,
     pub request_id: String,
@@ -169,30 +169,47 @@ impl<'a> AgentRequestSnapshot<'a> {
         }
     }
 
-    fn workspace(&mut self, task: &ConversationIdentity) -> Result<Arc<AgentRequestWorkspace>, String> {
+    fn workspace(
+        &mut self,
+        task: &ConversationIdentity,
+    ) -> Result<Arc<AgentRequestWorkspace>, String> {
         if let Some(workspace) = self.workspaces.get(task.stable_key()) {
             return workspace.clone();
         }
         #[cfg(test)]
-        { *self.workspace_loads.entry(task.stable_key().into()).or_default() += 1; }
+        {
+            *self
+                .workspace_loads
+                .entry(task.stable_key().into())
+                .or_default() += 1;
+        }
         let workspace = self.runtime.store(task).map(|(config, store)| {
             // effective_config already validates the selected project/scratch
             // binding, including managed-worktree roots outside the access root.
-            self.roots.insert(task.stable_key().into(), Some(config.work_dir.clone()));
+            self.roots
+                .insert(task.stable_key().into(), Some(config.work_dir.clone()));
             Arc::new(AgentRequestWorkspace { config, store })
         });
-        self.workspaces.insert(task.stable_key().into(), workspace.clone());
+        self.workspaces
+            .insert(task.stable_key().into(), workspace.clone());
         workspace
     }
 
     fn root(&mut self, task: &ConversationIdentity) -> Result<Option<std::path::PathBuf>, String> {
-        if let Some(root) = self.roots.get(task.stable_key()) { return Ok(root.clone()); }
+        if let Some(root) = self.roots.get(task.stable_key()) {
+            return Ok(root.clone());
+        }
         match self.workspace(task) {
             Ok(workspace) => Ok(Some(workspace.config.work_dir.clone())),
             Err(error) => {
                 // Only an actually unselected reservation is a missing worker.
                 // Invalid bindings or stores retain their original error.
-                if self.runtime.bindings.selected_project_root(&self.runtime.config, task)?.is_some() {
+                if self
+                    .runtime
+                    .bindings
+                    .selected_project_root(&self.runtime.config, task)?
+                    .is_some()
+                {
                     return Err(error);
                 }
                 self.roots.insert(task.stable_key().into(), None);
@@ -202,17 +219,26 @@ impl<'a> AgentRequestSnapshot<'a> {
     }
 
     fn state(&mut self, task: &ConversationIdentity) -> Result<Arc<AutomationTaskState>, String> {
-        if let Some(state) = self.states.get(task.stable_key()) { return state.clone(); }
+        if let Some(state) = self.states.get(task.stable_key()) {
+            return state.clone();
+        }
         let workspace = self.workspace(task)?;
         #[cfg(test)]
-        { *self.state_loads.entry(task.stable_key().into()).or_default() += 1; }
+        {
+            *self
+                .state_loads
+                .entry(task.stable_key().into())
+                .or_default() += 1;
+        }
         let state = workspace.store.load(task).map(Arc::new);
         self.states.insert(task.stable_key().into(), state.clone());
         state
     }
 
     fn full_development_access(&mut self, task: &ConversationIdentity) -> Result<bool, String> {
-        if !self.runtime.config.markdown_chat.features.agent_teams { return Ok(false); }
+        if !self.runtime.config.markdown_chat.features.agent_teams {
+            return Ok(false);
+        }
         let root = self.root(task)?;
         let account = self.state(task)?.selection.account_fingerprint.clone();
         let mut current = task.clone();
@@ -222,13 +248,22 @@ impl<'a> AgentRequestSnapshot<'a> {
                 return Ok(false);
             }
             let saved = self.state(&current)?;
-            if saved.selection.account_fingerprint != account { return Ok(false); }
+            if saved.selection.account_fingerprint != account {
+                return Ok(false);
+            }
             let Some(parent_key) = &saved.agents.parent_task_key else {
                 return Ok(saved.agents.full_development_access);
             };
-            let parent = ConversationIdentity::from_stable_keys(parent_key.clone(), parent_key.clone())
-                .ok_or("Invalid team parent")?;
-            if !self.state(&parent)?.agents.children.iter().any(|child|child.task_key==current.stable_key()) {
+            let parent =
+                ConversationIdentity::from_stable_keys(parent_key.clone(), parent_key.clone())
+                    .ok_or("Invalid team parent")?;
+            if !self
+                .state(&parent)?
+                .agents
+                .children
+                .iter()
+                .any(|child| child.task_key == current.stable_key())
+            {
                 return Ok(false);
             }
             current = parent;
@@ -238,72 +273,170 @@ impl<'a> AgentRequestSnapshot<'a> {
 }
 
 impl AgentRuntime {
-    fn active_project_workers(&self,task:&ConversationIdentity,snapshot:&mut AgentRequestSnapshot<'_>)->Result<usize,String>{
-        let directory=snapshot.workspace(task)?.store.task_directory(task)?;
-        let root=directory.parent().ok_or("Missing project chats")?;
-        let mut states=std::collections::HashMap::new();
-        for entry in std::fs::read_dir(root).map_err(|e|e.to_string())?{
-            let entry=entry.map_err(|e|e.to_string())?;
-            let key=entry.file_name().to_string_lossy().into_owned();
-            if !entry.path().join("automation.json").is_file(){continue;}
-            if let Some(identity)=ConversationIdentity::from_stable_keys(key.clone(),key.clone()) {
+    fn active_project_workers(
+        &self,
+        task: &ConversationIdentity,
+        snapshot: &mut AgentRequestSnapshot<'_>,
+    ) -> Result<usize, String> {
+        let directory = snapshot.workspace(task)?.store.task_directory(task)?;
+        let root = directory.parent().ok_or("Missing project chats")?;
+        let mut states = std::collections::HashMap::new();
+        for entry in std::fs::read_dir(root).map_err(|e| e.to_string())? {
+            let entry = entry.map_err(|e| e.to_string())?;
+            let key = entry.file_name().to_string_lossy().into_owned();
+            if !entry.path().join("automation.json").is_file() {
+                continue;
+            }
+            if let Some(identity) = ConversationIdentity::from_stable_keys(key.clone(), key.clone())
+            {
                 snapshot.workspace(&identity)?;
-                if let Ok(saved)=snapshot.state(&identity){states.insert(key,saved);}
+                if let Ok(saved) = snapshot.state(&identity) {
+                    states.insert(key, saved);
+                }
             }
         }
-        let mut active=std::collections::HashSet::new();
-        for saved in states.values(){for child in &saved.agents.children {
-            if child.retired_at_ms.is_some(){continue;}
-            let running=states.get(&child.task_key).is_none_or(|state|state.pairing.creating_chat||state.goal.as_ref().is_none_or(|goal|goal.status==GoalStatus::Active));
-            if running {active.insert(child.task_key.clone());}
-        }}
+        let mut active = std::collections::HashSet::new();
+        for saved in states.values() {
+            for child in &saved.agents.children {
+                if child.retired_at_ms.is_some() {
+                    continue;
+                }
+                let running = states.get(&child.task_key).is_none_or(|state| {
+                    state.pairing.creating_chat
+                        || state
+                            .goal
+                            .as_ref()
+                            .is_none_or(|goal| goal.status == GoalStatus::Active)
+                });
+                if running {
+                    active.insert(child.task_key.clone());
+                }
+            }
+        }
         Ok(active.len())
     }
 
-    pub async fn stop_team(&self,task:&ConversationIdentity,request_id:&str)->Result<Value,String>{
-        let _guard=CONTROL_LOCK.lock().await;
-        let _spawn_guard=SPAWN_LOCK.lock().await;
-        let (_,store)=self.store(task)?;let before=store.load(task)?;
-        if before.agents.parent_task_key.is_some(){return Err("Stop the team from its main coordinator chat".into());}
-        let receipt_id=format!("stop-team-{:x}",Sha256::digest(request_id.as_bytes()));
-        let digest=format!("{:x}",Sha256::digest(b"stop-team"));
-        let pending=store.mutate(task,|saved|{
-            if let Some(receipt)=saved.agents.control_requests.iter().find(|receipt|receipt.request_id==receipt_id){return Ok(!receipt.applied);}
-            while saved.agents.control_requests.len()>=128 {let index=saved.agents.control_requests.iter().position(|receipt|receipt.applied).ok_or("Too many pending team controls")?;saved.agents.control_requests.remove(index);}
-            saved.agents.control_requests.push(AgentControlReceipt{request_id:receipt_id.clone(),digest,applied:false});Ok(true)
+    pub async fn stop_team(
+        &self,
+        task: &ConversationIdentity,
+        request_id: &str,
+    ) -> Result<Value, String> {
+        let _guard = CONTROL_LOCK.lock().await;
+        let _spawn_guard = SPAWN_LOCK.lock().await;
+        let (_, store) = self.store(task)?;
+        let before = store.load(task)?;
+        if before.agents.parent_task_key.is_some() {
+            return Err("Stop the team from its main coordinator chat".into());
+        }
+        let receipt_id = format!("stop-team-{:x}", Sha256::digest(request_id.as_bytes()));
+        let digest = format!("{:x}", Sha256::digest(b"stop-team"));
+        let pending = store.mutate(task, |saved| {
+            if let Some(receipt) = saved
+                .agents
+                .control_requests
+                .iter()
+                .find(|receipt| receipt.request_id == receipt_id)
+            {
+                return Ok(!receipt.applied);
+            }
+            while saved.agents.control_requests.len() >= 128 {
+                let index = saved
+                    .agents
+                    .control_requests
+                    .iter()
+                    .position(|receipt| receipt.applied)
+                    .ok_or("Too many pending team controls")?;
+                saved.agents.control_requests.remove(index);
+            }
+            saved.agents.control_requests.push(AgentControlReceipt {
+                request_id: receipt_id.clone(),
+                digest,
+                applied: false,
+            });
+            Ok(true)
         })?;
-        if !pending{return Ok(json!({"stopped":true,"replayed":true}));}
-        let root=self.bindings.selected_project_root(&self.config,task)?;
-        let account=before.selection.account_fingerprint;
-        let mut queue=vec![(task.clone(),None::<String>)];let mut seen=std::collections::HashSet::new();let mut count=0;
-        while let Some((member,parent))=queue.pop(){
-            if !seen.insert(member.stable_key().to_owned()) {continue;}
-            if self.bindings.selected_project_root(&self.config,&member)?!=root {continue;}
-            let (config,member_store)=self.store(&member)?;let saved=member_store.load(&member)?;
-            if saved.agents.parent_task_key!=parent||saved.selection.account_fingerprint!=account {continue;}
+        if !pending {
+            return Ok(json!({"stopped":true,"replayed":true}));
+        }
+        let root = self.bindings.selected_project_root(&self.config, task)?;
+        let account = before.selection.account_fingerprint;
+        let mut queue = vec![(task.clone(), None::<String>)];
+        let mut seen = std::collections::HashSet::new();
+        let mut count = 0;
+        while let Some((member, parent)) = queue.pop() {
+            if !seen.insert(member.stable_key().to_owned()) {
+                continue;
+            }
+            if self.bindings.selected_project_root(&self.config, &member)? != root {
+                continue;
+            }
+            let (config, member_store) = self.store(&member)?;
+            let saved = member_store.load(&member)?;
+            if saved.agents.parent_task_key != parent
+                || saved.selection.account_fingerprint != account
+            {
+                continue;
+            }
             // Stop the coordinator before following its children; it cannot
             // dispatch another assignment while this bounded fan-out settles.
-            let command_id=format!("team-stop-{:x}",Sha256::digest(format!("{request_id}:{}",member.stable_key()).as_bytes()));
-            member_store.pause_goal_for_agent_stop(&member,&command_id,crate::markdown_chat::now_ms())?;
-            let chat=self.chats.chat(&config,Some(&member),&crate::exec_sessions::SessionState::new())?;
+            let command_id = format!(
+                "team-stop-{:x}",
+                Sha256::digest(format!("{request_id}:{}", member.stable_key()).as_bytes())
+            );
+            member_store.pause_goal_for_agent_stop(
+                &member,
+                &command_id,
+                crate::markdown_chat::now_ms(),
+            )?;
+            let chat = self.chats.chat(
+                &config,
+                Some(&member),
+                &crate::exec_sessions::SessionState::new(),
+            )?;
             chat.request_agent_stop(command_id).await?;
-            self.supervisor.discard_queued_work(&member).await;count+=1;
-            for child in saved.agents.children {if let Some(identity)=ConversationIdentity::from_stable_keys(child.task_key.clone(),child.task_key){queue.push((identity,Some(member.stable_key().into())));}}
+            self.supervisor.discard_queued_work(&member).await;
+            count += 1;
+            for child in saved.agents.children {
+                if let Some(identity) =
+                    ConversationIdentity::from_stable_keys(child.task_key.clone(), child.task_key)
+                {
+                    queue.push((identity, Some(member.stable_key().into())));
+                }
+            }
         }
-        store.mutate(task,|saved|{if let Some(receipt)=saved.agents.control_requests.iter_mut().find(|receipt|receipt.request_id==receipt_id){receipt.applied=true;}Ok(())})?;
-        self.supervisor.notify();Ok(json!({"stopped":true,"stoppedChats":count,"replayed":false}))
+        store.mutate(task, |saved| {
+            if let Some(receipt) = saved
+                .agents
+                .control_requests
+                .iter_mut()
+                .find(|receipt| receipt.request_id == receipt_id)
+            {
+                receipt.applied = true;
+            }
+            Ok(())
+        })?;
+        self.supervisor.notify();
+        Ok(json!({"stopped":true,"stoppedChats":count,"replayed":false}))
     }
     pub fn full_development_access(&self, task: &ConversationIdentity) -> Result<bool, String> {
         AgentRequestSnapshot::new(self).full_development_access(task)
     }
 
     /// Owner-only settings surface: changes authority, never goals or Send receipts.
-    pub async fn set_full_development_access(&self, task:&ConversationIdentity, enabled:bool, request_id:&str)->Result<(),String>{
-        if enabled { self.require_enabled()?; }
-        let _guard=CONTROL_LOCK.lock().await;
-        let _spawn_guard=SPAWN_LOCK.lock().await;
-        let (_,store)=self.store(task)?;
-        let receipt_id=format!("dev-access-{:x}",Sha256::digest(request_id.as_bytes()));let digest=format!("{:x}",Sha256::digest(enabled.to_string().as_bytes()));
+    pub async fn set_full_development_access(
+        &self,
+        task: &ConversationIdentity,
+        enabled: bool,
+        request_id: &str,
+    ) -> Result<(), String> {
+        if enabled {
+            self.require_enabled()?;
+        }
+        let _guard = CONTROL_LOCK.lock().await;
+        let _spawn_guard = SPAWN_LOCK.lock().await;
+        let (_, store) = self.store(task)?;
+        let receipt_id = format!("dev-access-{:x}", Sha256::digest(request_id.as_bytes()));
+        let digest = format!("{:x}", Sha256::digest(enabled.to_string().as_bytes()));
         let pending=store.mutate(task,|state|{
             if state.agents.parent_task_key.is_some(){return Err("Only the owner of the root task can change team development access".into());}
             if let Some(receipt)=state.agents.control_requests.iter().find(|receipt|receipt.request_id==receipt_id){
@@ -317,29 +450,75 @@ impl AgentRuntime {
             state.agents.control_requests.push(AgentControlReceipt{request_id:receipt_id.clone(),digest:digest.clone(),applied:false});
             state.agents.full_development_access=enabled;Ok(true)
         })?;
-        if !pending{return Ok(());}
-        let root=self.bindings.selected_project_root(&self.config,task)?;
-        let account=store.load(task)?.selection.account_fingerprint;
-        let mut queue=vec![(task.clone(),None::<String>)];let mut seen=std::collections::HashSet::new();
-        while let Some((member,parent))=queue.pop(){
-            if !seen.insert(member.stable_key().to_owned()) {continue;}
-            if self.bindings.selected_project_root(&self.config,&member)?!=root {continue;}
-            let (config,member_store)=self.store(&member)?;let saved=member_store.load(&member)?;
-            if saved.selection.account_fingerprint!=account || saved.agents.parent_task_key!=parent {continue;}
-            for child in saved.agents.children {
-                if let Some(identity)=ConversationIdentity::from_stable_keys(child.task_key.clone(),child.task_key){queue.push((identity,Some(member.stable_key().to_owned())));}
-            }
-            let chat=self.chats.chat(&config,Some(&member),&crate::exec_sessions::SessionState::new())?;
-            if chat.agent_stop_requested().await? || saved.goal.as_ref().is_some_and(|goal|goal.status!=GoalStatus::Active) {continue;}
-            let notice=if enabled {FULL_DEVELOPMENT_BRIEF}else{"The owner revoked the blanket development-access override. Read agent_status and get_agent_brief for current assignment authority before more development. Existing goals, pauses and stops remain unchanged."};
-            chat.append_worker_instruction(receipt_id.clone(),notice.into()).await?;
+        if !pending {
+            return Ok(());
         }
-        store.mutate(task,|state|{if let Some(receipt)=state.agents.control_requests.iter_mut().find(|receipt|receipt.request_id==receipt_id){receipt.applied=true;}Ok(())})?;
-        self.supervisor.notify();Ok(())
+        let root = self.bindings.selected_project_root(&self.config, task)?;
+        let account = store.load(task)?.selection.account_fingerprint;
+        let mut queue = vec![(task.clone(), None::<String>)];
+        let mut seen = std::collections::HashSet::new();
+        while let Some((member, parent)) = queue.pop() {
+            if !seen.insert(member.stable_key().to_owned()) {
+                continue;
+            }
+            if self.bindings.selected_project_root(&self.config, &member)? != root {
+                continue;
+            }
+            let (config, member_store) = self.store(&member)?;
+            let saved = member_store.load(&member)?;
+            if saved.selection.account_fingerprint != account
+                || saved.agents.parent_task_key != parent
+            {
+                continue;
+            }
+            for child in saved.agents.children {
+                if let Some(identity) =
+                    ConversationIdentity::from_stable_keys(child.task_key.clone(), child.task_key)
+                {
+                    queue.push((identity, Some(member.stable_key().to_owned())));
+                }
+            }
+            let chat = self.chats.chat(
+                &config,
+                Some(&member),
+                &crate::exec_sessions::SessionState::new(),
+            )?;
+            if chat.agent_stop_requested().await?
+                || saved
+                    .goal
+                    .as_ref()
+                    .is_some_and(|goal| goal.status != GoalStatus::Active)
+            {
+                continue;
+            }
+            let notice = if enabled {
+                FULL_DEVELOPMENT_BRIEF
+            } else {
+                "The owner revoked the blanket development-access override. Read agent_status and get_agent_brief for current assignment authority before more development. Existing goals, pauses and stops remain unchanged."
+            };
+            chat.append_worker_instruction(receipt_id.clone(), notice.into())
+                .await?;
+        }
+        store.mutate(task, |state| {
+            if let Some(receipt) = state
+                .agents
+                .control_requests
+                .iter_mut()
+                .find(|receipt| receipt.request_id == receipt_id)
+            {
+                receipt.applied = true;
+            }
+            Ok(())
+        })?;
+        self.supervisor.notify();
+        Ok(())
     }
     pub(crate) fn require_enabled(&self) -> Result<(), String> {
-        if self.config.markdown_chat.features.agent_teams { Ok(()) }
-        else { Err("Enable Agent teams in settings before using agent tools".into()) }
+        if self.config.markdown_chat.features.agent_teams {
+            Ok(())
+        } else {
+            Err("Enable Agent teams in settings before using agent tools".into())
+        }
     }
 
     pub(crate) fn new(
@@ -372,7 +551,9 @@ impl AgentRuntime {
         task: &ConversationIdentity,
         enabled: bool,
     ) -> Result<(), String> {
-        if enabled { self.require_enabled()?; }
+        if enabled {
+            self.require_enabled()?;
+        }
         self.store(task)?.1.mutate(task, |state| {
             state.agents.allow_delegation = enabled;
             state.agents.delegation_disabled = !enabled;
@@ -391,25 +572,60 @@ impl AgentRuntime {
         let _guard = SPAWN_LOCK.lock().await;
         let (_, store) = self.store(parent)?;
         let saved = store.load(parent)?;
-        let (parent_config,_)=self.store(parent)?;
-        let parent_chat=self.chats.chat(&parent_config,Some(parent),&crate::exec_sessions::SessionState::new())?;
-        if parent_chat.agent_stop_requested().await? {return Err("Resume the coordinating chat before creating more workers".into());}
-        if !saved.agents.children.iter().any(|child|child.request_id==request.request_id){
-            let mut ancestor=saved.agents.parent_task_key.clone();let mut depth=0;
-            while let Some(key)=ancestor {depth+=1;if depth>=MAX_DELEGATION_DEPTH{return Err("Delegate through the main coordinator or a lead worker; maximum team depth is two worker levels".into());}let identity=ConversationIdentity::from_stable_keys(key.clone(),key).ok_or("Invalid team parent")?;let owner=self.store(&identity)?.1.load(&identity)?;if owner.agents.delegation_disabled{return Err("Delegation is disabled by the coordinating task".into());}ancestor=owner.agents.parent_task_key;}
+        let (parent_config, _) = self.store(parent)?;
+        let parent_chat = self.chats.chat(
+            &parent_config,
+            Some(parent),
+            &crate::exec_sessions::SessionState::new(),
+        )?;
+        if parent_chat.agent_stop_requested().await? {
+            return Err("Resume the coordinating chat before creating more workers".into());
         }
-        if !owner_requested && !(saved.agents.delegation_enabled_with_default(self.config.markdown_chat.features.default_delegation) || !saved.agents.delegation_disabled && self.full_development_access(parent)?) {
+        if !saved
+            .agents
+            .children
+            .iter()
+            .any(|child| child.request_id == request.request_id)
+        {
+            let mut ancestor = saved.agents.parent_task_key.clone();
+            let mut depth = 0;
+            while let Some(key) = ancestor {
+                depth += 1;
+                if depth >= MAX_DELEGATION_DEPTH {
+                    return Err("Delegate through the main coordinator or a lead worker; maximum team depth is two worker levels".into());
+                }
+                let identity = ConversationIdentity::from_stable_keys(key.clone(), key)
+                    .ok_or("Invalid team parent")?;
+                let owner = self.store(&identity)?.1.load(&identity)?;
+                if owner.agents.delegation_disabled {
+                    return Err("Delegation is disabled by the coordinating task".into());
+                }
+                ancestor = owner.agents.parent_task_key;
+            }
+        }
+        if !owner_requested
+            && !(saved.agents.delegation_enabled_with_default(
+                self.config.markdown_chat.features.default_delegation,
+            ) || !saved.agents.delegation_disabled && self.full_development_access(parent)?)
+        {
             return Err("Agent creation is disabled for this chat. The user can enable it with the Agents button.".into());
         }
         // Delegation never expands a worker's read-only authority.
         if let Some(parent_key) = &saved.agents.parent_task_key {
-            let owner = ConversationIdentity::from_stable_keys(parent_key.clone(), parent_key.clone())
-                .ok_or("Invalid parent task")?;
+            let owner =
+                ConversationIdentity::from_stable_keys(parent_key.clone(), parent_key.clone())
+                    .ok_or("Invalid parent task")?;
             let owner_state = self.store(&owner)?.1.load(&owner)?;
-            let assignment = owner_state.agents.children.iter()
+            let assignment = owner_state
+                .agents
+                .children
+                .iter()
                 .find(|child| child.task_key == parent.stable_key())
                 .ok_or("Worker is missing from its parent team")?;
-            if assignment.read_only && !self.full_development_access(parent)? && request.workers.iter().any(|worker| !worker.read_only) {
+            if assignment.read_only
+                && !self.full_development_access(parent)?
+                && request.workers.iter().any(|worker| !worker.read_only)
+            {
                 return Err("Read-only workers may delegate only read-only assignments".into());
             }
         }
@@ -422,8 +638,14 @@ impl AgentRuntime {
             Sha256::digest(serde_json::to_vec(&request).map_err(|e| e.to_string())?)
         );
         let now = crate::markdown_chat::now_ms();
-        let full_development_access=self.full_development_access(parent)?;
-        if full_development_access {let mut effective=request.clone();for worker in &mut effective.workers {worker.read_only=false;}validate_request(&effective)?;}
+        let full_development_access = self.full_development_access(parent)?;
+        if full_development_access {
+            let mut effective = request.clone();
+            for worker in &mut effective.workers {
+                worker.read_only = false;
+            }
+            validate_request(&effective)?;
+        }
         let children = store.mutate(parent, |state| {
             let previous: Vec<_> = state
                 .agents
@@ -440,7 +662,7 @@ impl AgentRuntime {
                 }
                 return Ok(previous);
             }
-            if state.agents.children.len()+request.workers.len()>MAX_RECORDED_CHILDREN {
+            if state.agents.children.len() + request.workers.len() > MAX_RECORDED_CHILDREN {
                 return Err("This team has reached its retained worker history limit".into());
             }
             if owner_requested {
@@ -456,7 +678,7 @@ impl AgentRuntime {
                 ))
                 .ok_or("Invalid worker identity")?;
                 let child = AgentChild {
-                    retired_at_ms:None,
+                    retired_at_ms: None,
                     task_key: identity.stable_key().into(),
                     request_id: request.request_id.clone(),
                     request_digest: digest.clone(),
@@ -515,9 +737,15 @@ impl AgentRuntime {
                 .effort
                 .as_deref()
                 .ok_or("Select an effort before creating agents")?;
-            let catalog_revision = saved.selection.catalog_revision.as_deref()
+            let catalog_revision = saved
+                .selection
+                .catalog_revision
+                .as_deref()
                 .ok_or("Select a model and effort before creating agents")?;
-            let account_fingerprint = saved.selection.account_fingerprint.as_deref()
+            let account_fingerprint = saved
+                .selection
+                .account_fingerprint
+                .as_deref()
                 .ok_or("Verify the ChatGPT account before creating agents")?;
             let destination = self
                 .config
@@ -527,8 +755,10 @@ impl AgentRuntime {
                 .clone()
                 .unwrap_or_else(|| "https://chatgpt.com/new".into());
             for (child, task) in pending {
-                let mut effective_child=child.clone();
-                if self.full_development_access(parent)? {effective_child.read_only=false;}
+                let mut effective_child = child.clone();
+                if self.full_development_access(parent)? {
+                    effective_child.read_only = false;
+                }
                 // Inherit the already validated workspace, including a managed
                 // worktree outside the access root. Selecting its path as a new
                 // source project incorrectly rejects that legitimate worktree.
@@ -570,8 +800,11 @@ impl AgentRuntime {
                         state.agents.parent_task_key = Some(parent.stable_key().into());
                         state.agents.role = Some(child.role.clone());
                         state.agents.scope = Some(child.scope.clone());
-                        state.agents.allow_delegation = (saved.agents.allow_delegation || full_development_access) && !saved.agents.delegation_disabled;
-                        state.conversation_recovery.enabled = self.config.markdown_chat.features.conversation_recovery;
+                        state.agents.allow_delegation = (saved.agents.allow_delegation
+                            || full_development_access)
+                            && !saved.agents.delegation_disabled;
+                        state.conversation_recovery.enabled =
+                            self.config.markdown_chat.features.conversation_recovery;
                         Ok(())
                     })?;
                 }
@@ -659,10 +892,15 @@ impl AgentRuntime {
     }
 
     pub async fn status(&self, task: &ConversationIdentity) -> Result<Value, String> {
-        self.status_with_snapshot(task, &mut AgentRequestSnapshot::new(self)).await
+        self.status_with_snapshot(task, &mut AgentRequestSnapshot::new(self))
+            .await
     }
 
-    async fn status_with_snapshot(&self, task: &ConversationIdentity, snapshot: &mut AgentRequestSnapshot<'_>) -> Result<Value, String> {
+    async fn status_with_snapshot(
+        &self,
+        task: &ConversationIdentity,
+        snapshot: &mut AgentRequestSnapshot<'_>,
+    ) -> Result<Value, String> {
         let own = snapshot.state(task)?;
         let parent = own
             .agents
@@ -674,7 +912,11 @@ impl AgentRuntime {
         let mut team = snapshot.state(&parent)?.agents.clone();
         let full_development_access = snapshot.full_development_access(task)?;
         for child in &own.agents.children {
-            if !team.children.iter().any(|known| known.task_key == child.task_key) {
+            if !team
+                .children
+                .iter()
+                .any(|known| known.task_key == child.task_key)
+            {
                 team.children.push(child.clone());
             }
         }
@@ -796,22 +1038,42 @@ impl AgentRuntime {
             Ok(())
         })?;
         let saved = self.store(task)?.1.load(task)?;
-        let parent = saved.agents.parent_task_key.ok_or("This chat has no coordinator")?;
+        let parent = saved
+            .agents
+            .parent_task_key
+            .ok_or("This chat has no coordinator")?;
         // A repeated report is a retry only within the same assignment. Reused
         // workers often produce the same verification result for a later goal.
-        let request_id = format!("report-{:x}", Sha256::digest(
-            serde_json::to_vec(&(saved.goal.as_ref().map(|goal| goal.revision), report))
-                .map_err(|error| error.to_string())?
-        ));
+        let request_id = format!(
+            "report-{:x}",
+            Sha256::digest(
+                serde_json::to_vec(&(saved.goal.as_ref().map(|goal| goal.revision), report))
+                    .map_err(|error| error.to_string())?
+            )
+        );
         // Keep complete evidence in agent_status and send a bounded notification.
         let mut end = report.len().min(5400);
-        while !report.is_char_boundary(end) { end -= 1; }
-        let message = format!("Worker milestone report:\n\n{}\n\nRead agent_status(includeReports=true) for the complete saved report.", &report[..end]);
-        let notification = self.message(task, AgentMessageRequest {
-            request_id, recipient_task_key: parent, message,
-        }).await;
-        Ok(json!({"reported":true,"parentNotified":notification.is_ok(),
-            "notification":notification.as_ref().ok(),"notificationError":notification.as_ref().err()}))
+        while !report.is_char_boundary(end) {
+            end -= 1;
+        }
+        let message = format!(
+            "Worker milestone report:\n\n{}\n\nRead agent_status(includeReports=true) for the complete saved report.",
+            &report[..end]
+        );
+        let notification = self
+            .message(
+                task,
+                AgentMessageRequest {
+                    request_id,
+                    recipient_task_key: parent,
+                    message,
+                },
+            )
+            .await;
+        Ok(
+            json!({"reported":true,"parentNotified":notification.is_ok(),
+            "notification":notification.as_ref().ok(),"notificationError":notification.as_ref().err()}),
+        )
     }
 
     /// Peer communication is scoped to a verified parent/child team; it never
@@ -847,10 +1109,17 @@ impl AgentRuntime {
         let parent = ConversationIdentity::from_stable_keys(parent_key.into(), parent_key.into())
             .ok_or("Invalid parent identity")?;
         let mut team = self.store(&parent)?.1.load(&parent)?.agents;
-        let recipient_is_child = state.agents.children.iter()
+        let recipient_is_child = state
+            .agents
+            .children
+            .iter()
             .any(|child| child.task_key == request.recipient_task_key);
         for child in &state.agents.children {
-            if !team.children.iter().any(|known| known.task_key == child.task_key) {
+            if !team
+                .children
+                .iter()
+                .any(|known| known.task_key == child.task_key)
+            {
                 team.children.push(child.clone());
             }
         }
@@ -878,7 +1147,12 @@ impl AgentRuntime {
         let (config, recipient_store) = self.store(&recipient)?;
         let target = recipient_store.load(&recipient)?;
         if recipient.stable_key() != parent_key
-            && target.agents.parent_task_key.as_deref() != Some(if recipient_is_child {sender.stable_key()} else {parent_key})
+            && target.agents.parent_task_key.as_deref()
+                != Some(if recipient_is_child {
+                    sender.stable_key()
+                } else {
+                    parent_key
+                })
         {
             return Err("Recipient ownership changed; refresh agent_status".into());
         }
@@ -967,7 +1241,9 @@ impl AgentRuntime {
             Ok(())
         })?;
         self.supervisor.notify();
-        Ok(json!({"delivered":true,"replayed":false,"recipientTaskKey":request.recipient_task_key,"requestId":request.request_id,"messageId":command_id,"channel":"agent_message"}))
+        Ok(
+            json!({"delivered":true,"replayed":false,"recipientTaskKey":request.recipient_task_key,"requestId":request.request_id,"messageId":command_id,"channel":"agent_message"}),
+        )
     }
 
     pub async fn control(
@@ -989,8 +1265,15 @@ impl AgentRuntime {
             request.action,
             AgentControlAction::Message | AgentControlAction::SetGoal
         );
-        if request.scope.as_ref().is_some_and(|scope|request.action!=AgentControlAction::SetGoal||scope.trim().is_empty()||scope.len()>1000){
-            return Err("A new owned scope is supported only with set_goal and must contain 1–1000 bytes".into());
+        if request.scope.as_ref().is_some_and(|scope| {
+            request.action != AgentControlAction::SetGoal
+                || scope.trim().is_empty()
+                || scope.len() > 1000
+        }) {
+            return Err(
+                "A new owned scope is supported only with set_goal and must contain 1–1000 bytes"
+                    .into(),
+            );
         }
         if needs_content
             && request
@@ -1027,14 +1310,28 @@ impl AgentRuntime {
                 .ok_or("Invalid worker identity")?;
         let (config, store) = self.store(&task)?;
         let state = store.load(&task)?;
-        if request.scope.is_some()&&state.pairing.creating_chat {
+        if request.scope.is_some() && state.pairing.creating_chat {
             return Err("Wait for worker setup before changing its owned scope".into());
         }
         if request.scope.is_some() {
-            for sibling in parent_state.agents.children.iter().filter(|sibling|sibling.request_id==child.request_id && sibling.task_key!=child.task_key) {
-                let sibling_task=ConversationIdentity::from_stable_keys(sibling.task_key.clone(),sibling.task_key.clone()).ok_or("Invalid worker setup batch")?;
-                if self.store(&sibling_task)?.1.load(&sibling_task)?.pairing.creating_chat {
-                    return Err("Wait for this worker setup batch before changing its owned scope".into());
+            for sibling in parent_state.agents.children.iter().filter(|sibling| {
+                sibling.request_id == child.request_id && sibling.task_key != child.task_key
+            }) {
+                let sibling_task = ConversationIdentity::from_stable_keys(
+                    sibling.task_key.clone(),
+                    sibling.task_key.clone(),
+                )
+                .ok_or("Invalid worker setup batch")?;
+                if self
+                    .store(&sibling_task)?
+                    .1
+                    .load(&sibling_task)?
+                    .pairing
+                    .creating_chat
+                {
+                    return Err(
+                        "Wait for this worker setup batch before changing its owned scope".into(),
+                    );
                 }
             }
         }
@@ -1050,10 +1347,13 @@ impl AgentRuntime {
         // Auto mode authorizes development, but do not mutate pending setup
         // specs: their original request digest must remain replayable. Transfer
         // an auditor to editing only with an explicit new goal and owned scope.
-        let development_assignment = self.full_development_access(parent)? || request.action == AgentControlAction::SetGoal
-            && request.scope.is_some()
-            && parent_state.goal.as_ref().is_some_and(|goal|
-                goal.status == GoalStatus::Active && goal.markdown.starts_with("Auto mode\n\nObjective:\n"));
+        let development_assignment = self.full_development_access(parent)?
+            || request.action == AgentControlAction::SetGoal
+                && request.scope.is_some()
+                && parent_state.goal.as_ref().is_some_and(|goal| {
+                    goal.status == GoalStatus::Active
+                        && goal.markdown.starts_with("Auto mode\n\nObjective:\n")
+                });
         if self.bindings.selected_project_root(&self.config, parent)?
             != self.bindings.selected_project_root(&self.config, &task)?
         {
@@ -1103,21 +1403,74 @@ impl AgentRuntime {
         if request.action != AgentControlAction::Message && request.expected_revision.is_none() {
             return Err("Read agent_status and supply the worker's expectedRevision".into());
         }
-        if matches!(request.action,AgentControlAction::SetGoal|AgentControlAction::Resume) {
-            let parent_config=self.store(parent)?.0;
-            if self.chats.chat(&parent_config,Some(parent),&crate::exec_sessions::SessionState::new())?.agent_stop_requested().await? {return Err("Resume the coordinator before assigning more work".into());}
-            if child.retired_at_ms.is_some(){return Err("This worker is archived; restore it explicitly before assigning more work".into());}
+        if matches!(
+            request.action,
+            AgentControlAction::SetGoal | AgentControlAction::Resume
+        ) {
+            let parent_config = self.store(parent)?.0;
+            if self
+                .chats
+                .chat(
+                    &parent_config,
+                    Some(parent),
+                    &crate::exec_sessions::SessionState::new(),
+                )?
+                .agent_stop_requested()
+                .await?
+            {
+                return Err("Resume the coordinator before assigning more work".into());
+            }
+            if child.retired_at_ms.is_some() {
+                return Err(
+                    "This worker is archived; restore it explicitly before assigning more work"
+                        .into(),
+                );
+            }
         }
-        if request.action==AgentControlAction::Retire {
-            if !state.goal.as_ref().is_some_and(|goal|goal.revision==request.expected_revision.unwrap()&&goal.status==GoalStatus::Completed){return Err("Retire only the exact completed assignment; active or changed goals are preserved".into());}
-            if crate::exec_sessions::conversation_has_running_commands(&task)||self.supervisor.queue_position(&task).await.is_some()||self.supervisor.live_state(&task).await.is_some_and(|live|matches!(live.phase,AutomationActionStatus::Queued|AutomationActionStatus::Navigating|AutomationActionStatus::Sending|AutomationActionStatus::Generating))||!chat.read(false).await?.text.is_empty(){return Err("Worker has commands, queued work or unread messages; review them before retirement".into());}
-            let mut descendants=state.agents.children.clone();let mut seen=std::collections::HashSet::new();
-            while let Some(child)=descendants.pop(){
-                if child.retired_at_ms.is_none(){return Err("Retire completed child workers before retiring their lead".into());}
-                if !seen.insert(child.task_key.clone()){return Err("Worker hierarchy changed; refresh agent_status before retirement".into());}
-                let identity=ConversationIdentity::from_stable_keys(child.task_key.clone(),child.task_key).ok_or("Invalid worker descendant")?;
-                let saved=self.store(&identity)?.1.load(&identity)?;
-                if !saved.goal.as_ref().is_some_and(|goal|goal.status==GoalStatus::Completed){return Err("Worker still coordinates unfinished descendants; reuse it until their work is reviewed".into());}
+        if request.action == AgentControlAction::Retire {
+            if !state.goal.as_ref().is_some_and(|goal| {
+                goal.revision == request.expected_revision.unwrap()
+                    && goal.status == GoalStatus::Completed
+            }) {
+                return Err("Retire only the exact completed assignment; active or changed goals are preserved".into());
+            }
+            if crate::exec_sessions::conversation_has_running_commands(&task)
+                || self.supervisor.queue_position(&task).await.is_some()
+                || self.supervisor.live_state(&task).await.is_some_and(|live| {
+                    matches!(
+                        live.phase,
+                        AutomationActionStatus::Queued
+                            | AutomationActionStatus::Navigating
+                            | AutomationActionStatus::Sending
+                            | AutomationActionStatus::Generating
+                    )
+                })
+                || !chat.read(false).await?.text.is_empty()
+            {
+                return Err("Worker has commands, queued work or unread messages; review them before retirement".into());
+            }
+            let mut descendants = state.agents.children.clone();
+            let mut seen = std::collections::HashSet::new();
+            while let Some(child) = descendants.pop() {
+                if child.retired_at_ms.is_none() {
+                    return Err("Retire completed child workers before retiring their lead".into());
+                }
+                if !seen.insert(child.task_key.clone()) {
+                    return Err(
+                        "Worker hierarchy changed; refresh agent_status before retirement".into(),
+                    );
+                }
+                let identity =
+                    ConversationIdentity::from_stable_keys(child.task_key.clone(), child.task_key)
+                        .ok_or("Invalid worker descendant")?;
+                let saved = self.store(&identity)?.1.load(&identity)?;
+                if !saved
+                    .goal
+                    .as_ref()
+                    .is_some_and(|goal| goal.status == GoalStatus::Completed)
+                {
+                    return Err("Worker still coordinates unfinished descendants; reuse it until their work is reviewed".into());
+                }
                 descendants.extend(saved.agents.children);
             }
         }
@@ -1149,12 +1502,20 @@ impl AgentRuntime {
             "parent-control-{:x}",
             Sha256::digest(format!("{}:{}", parent.stable_key(), request.request_id).as_bytes())
         );
-        if request.action==AgentControlAction::Retire {
+        if request.action == AgentControlAction::Retire {
             chat.request_agent_stop(command_id.clone()).await?;
-            chat.set_owner_organization(None,Some(true)).await?;
-            parent_store.mutate(parent,|saved|{
-                let child=saved.agents.children.iter_mut().find(|child|child.task_key==task.stable_key()).ok_or("Worker ownership changed")?;
-                child.retired_at_ms.get_or_insert(crate::markdown_chat::now_ms());Ok(())
+            chat.set_owner_organization(None, Some(true)).await?;
+            parent_store.mutate(parent, |saved| {
+                let child = saved
+                    .agents
+                    .children
+                    .iter_mut()
+                    .find(|child| child.task_key == task.stable_key())
+                    .ok_or("Worker ownership changed")?;
+                child
+                    .retired_at_ms
+                    .get_or_insert(crate::markdown_chat::now_ms());
+                Ok(())
             })?;
             self.supervisor.discard_queued_work(&task).await;
         } else if request.action == AgentControlAction::Message {
@@ -1166,8 +1527,12 @@ impl AgentRuntime {
                 AgentControlAction::SetGoal => {
                     let mut reassigned = child.clone();
                     reassigned.goal = request.content.clone().unwrap();
-                    if let Some(scope)=&request.scope {reassigned.scope=scope.clone();}
-                    if development_assignment {reassigned.read_only=false;}
+                    if let Some(scope) = &request.scope {
+                        reassigned.scope = scope.clone();
+                    }
+                    if development_assignment {
+                        reassigned.read_only = false;
+                    }
                     OwnerGoalCommand::Set {
                         markdown: worker_goal(&reassigned, parent.stable_key()),
                     }
@@ -1184,12 +1549,22 @@ impl AgentRuntime {
             if receipt.replayed {
                 return Err("The goal change was recorded before an interrupted control. Read agent_status and use a fresh requestId for any remaining explicit action; it was not replayed.".into());
             }
-            if let Some(scope)=&request.scope {
-                store.mutate(&task,|s|{s.agents.scope=Some(scope.clone());Ok(())})?;
-                parent_store.mutate(parent,|s|{
-                    let assignment=s.agents.children.iter_mut().find(|worker|worker.task_key==task.stable_key()).ok_or("Worker assignment disappeared")?;
-                    assignment.scope=scope.clone();
-                    if development_assignment {assignment.read_only=false;}
+            if let Some(scope) = &request.scope {
+                store.mutate(&task, |s| {
+                    s.agents.scope = Some(scope.clone());
+                    Ok(())
+                })?;
+                parent_store.mutate(parent, |s| {
+                    let assignment = s
+                        .agents
+                        .children
+                        .iter_mut()
+                        .find(|worker| worker.task_key == task.stable_key())
+                        .ok_or("Worker assignment disappeared")?;
+                    assignment.scope = scope.clone();
+                    if development_assignment {
+                        assignment.read_only = false;
+                    }
                     Ok(())
                 })?;
             }
@@ -1335,10 +1710,22 @@ mod tests {
     use super::*;
     #[test]
     fn delegation_defaults_off_and_explicit_stops_and_worker_boundaries_persist() {
-        let worker: WorkerSpec = serde_json::from_value(json!({"role":"Inspector","goal":"Verify behavior","scope":"tests"})).unwrap();
-        assert!(!worker.read_only, "authorized workers should implement by default");
-        let inspector: WorkerSpec = serde_json::from_value(json!({"role":"Inspector","goal":"Verify behavior","scope":"tests","readOnly":true})).unwrap();
-        assert!(inspector.read_only, "explicit audit-only assignments stay read-only");
+        let worker: WorkerSpec = serde_json::from_value(
+            json!({"role":"Inspector","goal":"Verify behavior","scope":"tests"}),
+        )
+        .unwrap();
+        assert!(
+            !worker.read_only,
+            "authorized workers should implement by default"
+        );
+        let inspector: WorkerSpec = serde_json::from_value(
+            json!({"role":"Inspector","goal":"Verify behavior","scope":"tests","readOnly":true}),
+        )
+        .unwrap();
+        assert!(
+            inspector.read_only,
+            "explicit audit-only assignments stay read-only"
+        );
         let legacy = serde_json::json!({"allowDelegation":false});
         let mut parent: AgentTeamState = serde_json::from_value(legacy).unwrap();
         assert!(!parent.delegation_enabled());
@@ -1406,50 +1793,159 @@ mod tests {
 
     #[tokio::test]
     async fn default_delegation_creates_implementers_without_overriding_explicit_limits() {
-        let root=tempfile::tempdir().unwrap();let project=root.path().join("project");
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
         std::fs::create_dir_all(&project).unwrap();
-        let mut config=crate::config::default_config(root.path().to_owned());
-        config.markdown_chat.features.agent_teams=true;
-        config.markdown_chat.automation.connector_name="Codexify".into();
-        config.memory.dir=Some(root.path().join("metadata").display().to_string());
-        let config=Arc::new(config);let bindings=Arc::new(ProjectBindingStore::new(root.path().join("bindings")));
-        let parent=ConversationIdentity::from_openai_session("default-delegation-parent").unwrap();
-        bindings.select_project_root(&crate::tools::set_project_root::selection_config(&config,Some(false)),&parent,&project.to_string_lossy()).await.unwrap();
+        let mut config = crate::config::default_config(root.path().to_owned());
+        config.markdown_chat.features.agent_teams = true;
+        config.markdown_chat.automation.connector_name = "Codexify".into();
+        config.memory.dir = Some(root.path().join("metadata").display().to_string());
+        let config = Arc::new(config);
+        let bindings = Arc::new(ProjectBindingStore::new(root.path().join("bindings")));
+        let parent =
+            ConversationIdentity::from_openai_session("default-delegation-parent").unwrap();
+        bindings
+            .select_project_root(
+                &crate::tools::set_project_root::selection_config(&config, Some(false)),
+                &parent,
+                &project.to_string_lossy(),
+            )
+            .await
+            .unwrap();
         let catalog=serde_json::from_value(json!({"protocolVersion":1,"build":format!("fixture{}",PROTOCOL_BUILD_SUFFIX),"accountFingerprint":"default-account","catalogRevision":"default-catalog","models":[]})).unwrap();
-        let supervisor=AgentAutomationSupervisor::new(config.markdown_chat.automation.clone(),Arc::new(Executor{catalog,sent:Mutex::default()}));
-        let runtime=AgentRuntime::new(config.clone(),Arc::default(),bindings.clone(),Arc::new(ConversationContinuationStore::new(root.path().join("continuations.json")).unwrap()),supervisor.clone());
-        runtime.store(&parent).unwrap().1.set_selection(&parent,"fixture-model","high","default-catalog","default-account",1).unwrap();
+        let supervisor = AgentAutomationSupervisor::new(
+            config.markdown_chat.automation.clone(),
+            Arc::new(Executor {
+                catalog,
+                sent: Mutex::default(),
+            }),
+        );
+        let runtime = AgentRuntime::new(
+            config.clone(),
+            Arc::default(),
+            bindings.clone(),
+            Arc::new(
+                ConversationContinuationStore::new(root.path().join("continuations.json")).unwrap(),
+            ),
+            supervisor.clone(),
+        );
+        runtime
+            .store(&parent)
+            .unwrap()
+            .1
+            .set_selection(
+                &parent,
+                "fixture-model",
+                "high",
+                "default-catalog",
+                "default-account",
+                1,
+            )
+            .unwrap();
         let request:SpawnWorkersRequest=serde_json::from_value(json!({"requestId":"default-workers","workers":[
             {"role":"Implementer","goal":"Implement and verify the module","scope":"src/module.rs"},
             {"role":"Auditor","goal":"Inspect the independent ABI","scope":"tests/abi.rs","readOnly":true}
         ]})).unwrap();
-        let mut disabled=runtime.clone();let mut disabled_config=(*config).clone();
-        disabled_config.markdown_chat.features.default_delegation=false;disabled.config=Arc::new(disabled_config);
-        assert!(disabled.spawn(&parent,request.clone(),false).await.unwrap_err().contains("disabled"));
-        assert!(runtime.store(&parent).unwrap().1.load(&parent).unwrap().agents.children.is_empty());
-        let team=runtime.spawn(&parent,request.clone(),false).await.unwrap();
-        assert_eq!(team["allowDelegation"],true);assert_eq!(team["fullDevelopmentAccess"],false);
-        assert_eq!(team["workers"][0]["readOnly"],false);assert_eq!(team["workers"][1]["readOnly"],true);
-        assert_eq!(supervisor.queued_count().await,2);
-        let saved=runtime.store(&parent).unwrap().1.load(&parent).unwrap();
-        assert!(!saved.agents.allow_delegation,"inherited defaults must not become saved explicit grants");
-        assert_eq!(disabled.status(&parent).await.unwrap()["allowDelegation"],false);
-        let editor=ConversationIdentity::from_stable_keys(saved.agents.children[0].task_key.clone(),saved.agents.children[0].task_key.clone()).unwrap();
-        let editor_state=runtime.store(&editor).unwrap().1.load(&editor).unwrap();
-        let goal=editor_state.goal.unwrap().markdown;
-        assert!(goal.contains("implement, edit, build, test and debug"));assert!(!goal.contains("Inspect and test only"));
-        assert_eq!(bindings.selected_project_root(&config,&editor).unwrap(),bindings.selected_project_root(&config,&parent).unwrap());
-        let auditor=ConversationIdentity::from_stable_keys(saved.agents.children[1].task_key.clone(),saved.agents.children[1].task_key.clone()).unwrap();
+        let mut disabled = runtime.clone();
+        let mut disabled_config = (*config).clone();
+        disabled_config.markdown_chat.features.default_delegation = false;
+        disabled.config = Arc::new(disabled_config);
+        assert!(
+            disabled
+                .spawn(&parent, request.clone(), false)
+                .await
+                .unwrap_err()
+                .contains("disabled")
+        );
+        assert!(
+            runtime
+                .store(&parent)
+                .unwrap()
+                .1
+                .load(&parent)
+                .unwrap()
+                .agents
+                .children
+                .is_empty()
+        );
+        let team = runtime
+            .spawn(&parent, request.clone(), false)
+            .await
+            .unwrap();
+        assert_eq!(team["allowDelegation"], true);
+        assert_eq!(team["fullDevelopmentAccess"], false);
+        assert_eq!(team["workers"][0]["readOnly"], false);
+        assert_eq!(team["workers"][1]["readOnly"], true);
+        assert_eq!(supervisor.queued_count().await, 2);
+        let saved = runtime.store(&parent).unwrap().1.load(&parent).unwrap();
+        assert!(
+            !saved.agents.allow_delegation,
+            "inherited defaults must not become saved explicit grants"
+        );
+        assert_eq!(
+            disabled.status(&parent).await.unwrap()["allowDelegation"],
+            false
+        );
+        let editor = ConversationIdentity::from_stable_keys(
+            saved.agents.children[0].task_key.clone(),
+            saved.agents.children[0].task_key.clone(),
+        )
+        .unwrap();
+        let editor_state = runtime.store(&editor).unwrap().1.load(&editor).unwrap();
+        let goal = editor_state.goal.unwrap().markdown;
+        assert!(goal.contains("implement, edit, build, test and debug"));
+        assert!(!goal.contains("Inspect and test only"));
+        assert_eq!(
+            bindings.selected_project_root(&config, &editor).unwrap(),
+            bindings.selected_project_root(&config, &parent).unwrap()
+        );
+        let auditor = ConversationIdentity::from_stable_keys(
+            saved.agents.children[1].task_key.clone(),
+            saved.agents.children[1].task_key.clone(),
+        )
+        .unwrap();
         let nested:SpawnWorkersRequest=serde_json::from_value(json!({"requestId":"auditor-editor","workers":[{"role":"Editor","goal":"Implement owned code","scope":"src/other.rs"}]})).unwrap();
-        assert!(runtime.spawn(&auditor,nested,false).await.unwrap_err().contains("Read-only"));
-        runtime.set_delegation(&parent,false).await.unwrap();
-        assert_eq!(runtime.status(&parent).await.unwrap()["allowDelegation"],false);
-        assert!(runtime.spawn(&parent,request.clone(),false).await.unwrap_err().contains("disabled"));
-        runtime.set_delegation(&parent,true).await.unwrap();
-        let chat=runtime.chats.chat(&runtime.store(&parent).unwrap().0,Some(&parent),&crate::exec_sessions::SessionState::new()).unwrap();
+        assert!(
+            runtime
+                .spawn(&auditor, nested, false)
+                .await
+                .unwrap_err()
+                .contains("Read-only")
+        );
+        runtime.set_delegation(&parent, false).await.unwrap();
+        assert_eq!(
+            runtime.status(&parent).await.unwrap()["allowDelegation"],
+            false
+        );
+        assert!(
+            runtime
+                .spawn(&parent, request.clone(), false)
+                .await
+                .unwrap_err()
+                .contains("disabled")
+        );
+        runtime.set_delegation(&parent, true).await.unwrap();
+        let chat = runtime
+            .chats
+            .chat(
+                &runtime.store(&parent).unwrap().0,
+                Some(&parent),
+                &crate::exec_sessions::SessionState::new(),
+            )
+            .unwrap();
         chat.request_agent_stop("owner-stop".into()).await.unwrap();
-        assert!(runtime.spawn(&parent,request,false).await.unwrap_err().contains("Resume"));
-        assert_eq!(supervisor.queued_count().await,2,"denials must not queue additional work");
+        assert!(
+            runtime
+                .spawn(&parent, request, false)
+                .await
+                .unwrap_err()
+                .contains("Resume")
+        );
+        assert_eq!(
+            supervisor.queued_count().await,
+            2,
+            "denials must not queue additional work"
+        );
     }
 
     #[tokio::test]
@@ -1465,99 +1961,198 @@ mod tests {
         let config = Arc::new(config);
         let bindings = Arc::new(ProjectBindingStore::new(root.path().join("bindings")));
         let parent = ConversationIdentity::from_openai_session("status-coordinator").unwrap();
-        let selected = bindings.select_project_root(
-            &crate::tools::set_project_root::selection_config(&config, Some(false)),
-            &parent, &project.to_string_lossy(),
-        ).await.unwrap();
+        let selected = bindings
+            .select_project_root(
+                &crate::tools::set_project_root::selection_config(&config, Some(false)),
+                &parent,
+                &project.to_string_lossy(),
+            )
+            .await
+            .unwrap();
         let catalog = serde_json::from_value(json!({"protocolVersion":1,"build":format!("fixture{}",PROTOCOL_BUILD_SUFFIX),"accountFingerprint":"status-account","catalogRevision":"status-catalog","models":[]})).unwrap();
         let supervisor = AgentAutomationSupervisor::new(
             config.markdown_chat.automation.clone(),
-            Arc::new(Executor {catalog, sent:Mutex::default()}),
+            Arc::new(Executor {
+                catalog,
+                sent: Mutex::default(),
+            }),
         );
         let runtime = AgentRuntime::new(
-            config.clone(), Arc::default(), bindings.clone(),
-            Arc::new(ConversationContinuationStore::new(root.path().join("continuations.json")).unwrap()),
+            config.clone(),
+            Arc::default(),
+            bindings.clone(),
+            Arc::new(
+                ConversationContinuationStore::new(root.path().join("continuations.json")).unwrap(),
+            ),
             supervisor,
         );
         let mut tasks = Vec::new();
         let mut children = Vec::new();
         for index in 0..12 {
-            let task = ConversationIdentity::from_openai_session(&format!("status-worker-{index}")).unwrap();
-            bindings.resume_workspace(&config,&task,&selected.project_root.to_string_lossy()).await.unwrap();
-            runtime.store(&task).unwrap().1.mutate(&task,|saved|{
-                saved.selection.model=Some("fixture-model".into());
-                saved.selection.effort=Some("high".into());
-                saved.selection.catalog_revision=Some("status-catalog".into());
-                saved.selection.account_fingerprint=Some("status-account".into());
-                saved.agents.parent_task_key=Some(parent.stable_key().into());
-                Ok(())
-            }).unwrap();
+            let task = ConversationIdentity::from_openai_session(&format!("status-worker-{index}"))
+                .unwrap();
+            bindings
+                .resume_workspace(&config, &task, &selected.project_root.to_string_lossy())
+                .await
+                .unwrap();
+            runtime
+                .store(&task)
+                .unwrap()
+                .1
+                .mutate(&task, |saved| {
+                    saved.selection.model = Some("fixture-model".into());
+                    saved.selection.effort = Some("high".into());
+                    saved.selection.catalog_revision = Some("status-catalog".into());
+                    saved.selection.account_fingerprint = Some("status-account".into());
+                    saved.agents.parent_task_key = Some(parent.stable_key().into());
+                    Ok(())
+                })
+                .unwrap();
             children.push(AgentChild {
-                retired_at_ms:None, task_key:task.stable_key().into(),
-                request_id:format!("status-worker-{index}"), request_digest:"a".repeat(64),
-                role:format!("Worker {index}"), scope:format!("module-{index}/**"),
-                goal:format!("Implement module {index}"), read_only:true, created_at_ms:1,
+                retired_at_ms: None,
+                task_key: task.stable_key().into(),
+                request_id: format!("status-worker-{index}"),
+                request_digest: "a".repeat(64),
+                role: format!("Worker {index}"),
+                scope: format!("module-{index}/**"),
+                goal: format!("Implement module {index}"),
+                read_only: true,
+                created_at_ms: 1,
             });
             tasks.push(task);
         }
         let store = runtime.store(&parent).unwrap().1;
-        store.mutate(&parent,|saved|{
-            saved.selection.model=Some("fixture-model".into());
-            saved.selection.effort=Some("high".into());
-            saved.selection.catalog_revision=Some("status-catalog".into());
-            saved.selection.account_fingerprint=Some("status-account".into());
-            saved.agents.full_development_access=true;
-            saved.agents.children=children;
-            Ok(())
-        }).unwrap();
+        store
+            .mutate(&parent, |saved| {
+                saved.selection.model = Some("fixture-model".into());
+                saved.selection.effort = Some("high".into());
+                saved.selection.catalog_revision = Some("status-catalog".into());
+                saved.selection.account_fingerprint = Some("status-account".into());
+                saved.agents.full_development_access = true;
+                saved.agents.children = children;
+                Ok(())
+            })
+            .unwrap();
         let mut snapshot = AgentRequestSnapshot::new(&runtime);
-        let granted = runtime.status_with_snapshot(&parent,&mut snapshot).await.unwrap();
-        assert_eq!(granted["fullDevelopmentAccess"],true);
-        assert_eq!(granted["capacity"]["active"],12);
+        let granted = runtime
+            .status_with_snapshot(&parent, &mut snapshot)
+            .await
+            .unwrap();
+        assert_eq!(granted["fullDevelopmentAccess"], true);
+        assert_eq!(granted["capacity"]["active"], 12);
         assert!(granted["capacity"]["limit"].is_null());
-        assert!(granted["workers"].as_array().unwrap().iter().all(|worker|worker["readOnly"]==false));
-        assert_eq!(snapshot.workspace_loads.values().sum::<usize>(),13,"one workspace resolution per observed task, shared by rows, ancestry and capacity");
-        assert_eq!(snapshot.state_loads.values().sum::<usize>(),13,"one automation-state read per observed task, including the coordinator");
-        assert!(snapshot.workspace_loads.values().chain(snapshot.state_loads.values()).all(|loads|*loads==1));
-        eprintln!("12-worker status: {} workspace resolutions, {} automation-state loads",snapshot.workspace_loads.values().sum::<usize>(),snapshot.state_loads.values().sum::<usize>());
+        assert!(
+            granted["workers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|worker| worker["readOnly"] == false)
+        );
+        assert_eq!(
+            snapshot.workspace_loads.values().sum::<usize>(),
+            13,
+            "one workspace resolution per observed task, shared by rows, ancestry and capacity"
+        );
+        assert_eq!(
+            snapshot.state_loads.values().sum::<usize>(),
+            13,
+            "one automation-state read per observed task, including the coordinator"
+        );
+        assert!(
+            snapshot
+                .workspace_loads
+                .values()
+                .chain(snapshot.state_loads.values())
+                .all(|loads| *loads == 1)
+        );
+        eprintln!(
+            "12-worker status: {} workspace resolutions, {} automation-state loads",
+            snapshot.workspace_loads.values().sum::<usize>(),
+            snapshot.state_loads.values().sum::<usize>()
+        );
 
         // No lifetime/TTL cache may survive a status request. Owner revocation
         // must immediately affect both caller authority and every worker row.
-        store.mutate(&parent,|saved|{saved.agents.full_development_access=false;Ok(())}).unwrap();
+        store
+            .mutate(&parent, |saved| {
+                saved.agents.full_development_access = false;
+                Ok(())
+            })
+            .unwrap();
         let revoked = runtime.status(&parent).await.unwrap();
-        assert_eq!(revoked["fullDevelopmentAccess"],false);
+        assert_eq!(revoked["fullDevelopmentAccess"], false);
         assert!(revoked["developmentInstructions"].is_null());
-        assert_eq!(revoked["allowDelegation"],true,"revoking the blanket edit override does not disable configured delegation");
-        assert!(revoked["workers"].as_array().unwrap().iter().all(|worker|worker["readOnly"]==true));
+        assert_eq!(
+            revoked["allowDelegation"], true,
+            "revoking the blanket edit override does not disable configured delegation"
+        );
+        assert!(
+            revoked["workers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|worker| worker["readOnly"] == true)
+        );
 
-        store.mutate(&parent,|saved|{saved.agents.full_development_access=true;Ok(())}).unwrap();
-        runtime.store(&tasks[0]).unwrap().1.mutate(&tasks[0],|saved|{
-            saved.selection.account_fingerprint=Some("another-account".into());Ok(())
-        }).unwrap();
+        store
+            .mutate(&parent, |saved| {
+                saved.agents.full_development_access = true;
+                Ok(())
+            })
+            .unwrap();
+        runtime
+            .store(&tasks[0])
+            .unwrap()
+            .1
+            .mutate(&tasks[0], |saved| {
+                saved.selection.account_fingerprint = Some("another-account".into());
+                Ok(())
+            })
+            .unwrap();
         let foreign_project = project.parent().unwrap().join("foreign-project");
         std::fs::create_dir_all(&foreign_project).unwrap();
-        let foreign_parent = ConversationIdentity::from_openai_session("foreign-status-parent").unwrap();
-        bindings.select_project_root(
-            &crate::tools::set_project_root::selection_config(&config,Some(false)),
-            &foreign_parent,&foreign_project.to_string_lossy(),
-        ).await.unwrap();
-        runtime.store(&foreign_parent).unwrap().1.mutate(&foreign_parent,|saved|{
-            saved.selection.model=Some("fixture-model".into());
-            saved.selection.effort=Some("high".into());
-            saved.selection.catalog_revision=Some("status-catalog".into());
-            saved.selection.account_fingerprint=Some("status-account".into());
-            saved.agents.full_development_access=true;
-            saved.agents.children=store.load(&parent)?.agents.children;
-            Ok(())
-        }).unwrap();
-        runtime.store(&tasks[1]).unwrap().1.mutate(&tasks[1],|saved|{
-            saved.agents.parent_task_key=Some(foreign_parent.stable_key().into());Ok(())
-        }).unwrap();
+        let foreign_parent =
+            ConversationIdentity::from_openai_session("foreign-status-parent").unwrap();
+        bindings
+            .select_project_root(
+                &crate::tools::set_project_root::selection_config(&config, Some(false)),
+                &foreign_parent,
+                &foreign_project.to_string_lossy(),
+            )
+            .await
+            .unwrap();
+        runtime
+            .store(&foreign_parent)
+            .unwrap()
+            .1
+            .mutate(&foreign_parent, |saved| {
+                saved.selection.model = Some("fixture-model".into());
+                saved.selection.effort = Some("high".into());
+                saved.selection.catalog_revision = Some("status-catalog".into());
+                saved.selection.account_fingerprint = Some("status-account".into());
+                saved.agents.full_development_access = true;
+                saved.agents.children = store.load(&parent)?.agents.children;
+                Ok(())
+            })
+            .unwrap();
+        runtime
+            .store(&tasks[1])
+            .unwrap()
+            .1
+            .mutate(&tasks[1], |saved| {
+                saved.agents.parent_task_key = Some(foreign_parent.stable_key().into());
+                Ok(())
+            })
+            .unwrap();
         let bounded = runtime.status(&parent).await.unwrap();
-        assert_eq!(bounded["fullDevelopmentAccess"],true);
-        for (index,worker) in bounded["workers"].as_array().unwrap().iter().enumerate() {
-            assert_eq!(worker["readOnly"],index<2,"account and project boundaries must still deny inherited development access");
-            assert_eq!(worker["scope"],format!("module-{index}/**"));
+        assert_eq!(bounded["fullDevelopmentAccess"], true);
+        for (index, worker) in bounded["workers"].as_array().unwrap().iter().enumerate() {
+            assert_eq!(
+                worker["readOnly"],
+                index < 2,
+                "account and project boundaries must still deny inherited development access"
+            );
+            assert_eq!(worker["scope"], format!("module-{index}/**"));
         }
     }
 
@@ -1579,11 +2174,28 @@ mod tests {
         if managed {
             for args in [
                 vec!["init", "--quiet"],
-                vec!["-c", "user.name=Codexify Tests", "-c", "user.email=codexify@example.invalid",
-                    "commit", "--allow-empty", "--quiet", "-m", "fixture"],
+                vec![
+                    "-c",
+                    "user.name=Codexify Tests",
+                    "-c",
+                    "user.email=codexify@example.invalid",
+                    "commit",
+                    "--allow-empty",
+                    "--quiet",
+                    "-m",
+                    "fixture",
+                ],
             ] {
-                let output = std::process::Command::new("git").args(args).current_dir(&source).output().unwrap();
-                assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+                let output = std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(&source)
+                    .output()
+                    .unwrap();
+                assert!(
+                    output.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
             }
         }
         let mut config = crate::config::default_config(access.clone());
@@ -1610,7 +2222,11 @@ mod tests {
             .unwrap();
         assert_eq!(selected.managed_worktree, managed);
         if managed {
-            assert!(!selected.project_root.starts_with(std::fs::canonicalize(&access).unwrap()));
+            assert!(
+                !selected
+                    .project_root
+                    .starts_with(std::fs::canonicalize(&access).unwrap())
+            );
         }
         let expected_workspace = std::fs::canonicalize(selected.project_root).unwrap();
         let catalog:CapabilityCatalog=serde_json::from_value(json!({"protocolVersion":1,"build":format!("fixture{}",PROTOCOL_BUILD_SUFFIX),"accountFingerprint":"team-account","catalogRevision":"catalog","models":[{"id":"discovered-model","label":"Discovered model","efforts":[{"id":"high","label":"High","available":true,"reason":null}]}]})).unwrap();
@@ -1647,19 +2263,50 @@ mod tests {
         let mut disabled_config = (*config).clone();
         disabled_config.markdown_chat.features = Default::default();
         disabled.config = Arc::new(disabled_config);
-        assert!(disabled.spawn(&parent, request.clone(), true).await.unwrap_err().contains("Enable Agent teams"));
-        assert!(disabled.set_delegation(&parent,true).await.is_err());
-        assert!(disabled.set_full_development_access(&parent,true,"disabled-access").await.is_err());
+        assert!(
+            disabled
+                .spawn(&parent, request.clone(), true)
+                .await
+                .unwrap_err()
+                .contains("Enable Agent teams")
+        );
+        assert!(disabled.set_delegation(&parent, true).await.is_err());
+        assert!(
+            disabled
+                .set_full_development_access(&parent, true, "disabled-access")
+                .await
+                .is_err()
+        );
         assert!(store.load(&parent).unwrap().agents.children.is_empty());
-        assert_eq!(supervisor.queued_count().await,0);
+        assert_eq!(supervisor.queued_count().await, 0);
         runtime.set_delegation(&parent, true).await.unwrap();
         // Reservations persist if initialization fails. They must remain
         // inspectable and replayable without inventing bindings or new workers.
-        assert!(runtime.spawn(&parent, request.clone(), false).await.is_err());
+        assert!(
+            runtime
+                .spawn(&parent, request.clone(), false)
+                .await
+                .is_err()
+        );
         let reserved = runtime.status(&parent).await.unwrap();
         assert_eq!(reserved["workers"].as_array().unwrap().len(), 5);
-        assert!(reserved["workers"].as_array().unwrap().iter().all(|worker| worker["action"] == "reserved"));
-        store.set_selection(&parent, "discovered-model", "high", "catalog", "team-account", 1).unwrap();
+        assert!(
+            reserved["workers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|worker| worker["action"] == "reserved")
+        );
+        store
+            .set_selection(
+                &parent,
+                "discovered-model",
+                "high",
+                "catalog",
+                "team-account",
+                1,
+            )
+            .unwrap();
         assert_eq!(supervisor.queued_count().await, 0);
         // A user-requested agent tool call works without opening the Agents tab.
         let team = runtime
@@ -1697,7 +2344,7 @@ mod tests {
             assert_eq!(state.goal.unwrap().status, GoalStatus::Active);
             assert!(state.agents.allow_delegation);
             assert!(state.conversation_recovery.enabled);
-            runtime.set_delegation(&identity,false).await.unwrap();
+            runtime.set_delegation(&identity, false).await.unwrap();
             runtime
                 .report(&identity, "Read-only checks passed; no source changes.")
                 .await
@@ -1920,8 +2567,17 @@ mod tests {
                 .count(),
             1
         );
-        assert!(target.widget_page(None,None).await.unwrap().messages.iter()
-            .any(|message| message.markdown.contains("Do not acknowledge informational reports")));
+        assert!(
+            target
+                .widget_page(None, None)
+                .await
+                .unwrap()
+                .messages
+                .iter()
+                .any(|message| message
+                    .markdown
+                    .contains("Do not acknowledge informational reports"))
+        );
         let mut bad = peer.clone();
         bad.message = "Different content".into();
         assert!(runtime.message(&sibling, bad).await.is_err());
@@ -1942,21 +2598,17 @@ mod tests {
         runtime.message(&sibling, parent_message).await.unwrap();
         let team = runtime.status(&parent).await.unwrap();
         assert!(team["workers"][0]["canControl"].as_bool().unwrap());
-        assert!(
-            team["workers"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .all(|worker| {
-                    if worker["taskKey"] == identity.stable_key() {
-                        // A new assignment must not display the previous job's
-                        // successful report as evidence for its active goal.
-                        worker["report"].is_null() && worker["reportedAtMs"].is_null()
-                    } else {
-                        worker["report"].as_str().is_some_and(|report| report.contains("passed"))
-                    }
-                })
-        );
+        assert!(team["workers"].as_array().unwrap().iter().all(|worker| {
+            if worker["taskKey"] == identity.stable_key() {
+                // A new assignment must not display the previous job's
+                // successful report as evidence for its active goal.
+                worker["report"].is_null() && worker["reportedAtMs"].is_null()
+            } else {
+                worker["report"]
+                    .as_str()
+                    .is_some_and(|report| report.contains("passed"))
+            }
+        }));
         // Explicit delegation permission carries into descendants, but cannot
         // turn a read-only assignment into an editor through nested workers.
         runtime.set_delegation(&recipient, true).await.unwrap();
@@ -1969,149 +2621,599 @@ mod tests {
                 read_only: false,
             }],
         };
-        assert!(runtime.spawn(&recipient, nested.clone(), false).await.unwrap_err().contains("Read-only"));
+        assert!(
+            runtime
+                .spawn(&recipient, nested.clone(), false)
+                .await
+                .unwrap_err()
+                .contains("Read-only")
+        );
         nested.workers[0].read_only = true;
         let queued_before = supervisor.queued_count().await;
-        let status = runtime.spawn(&recipient, nested.clone(), false).await.unwrap();
-        let owned = status["workers"].as_array().unwrap().iter()
-            .find(|worker| worker["role"] == "Nested verifier").unwrap();
+        let status = runtime
+            .spawn(&recipient, nested.clone(), false)
+            .await
+            .unwrap();
+        let owned = status["workers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|worker| worker["role"] == "Nested verifier")
+            .unwrap();
         assert_eq!(owned["canControl"], true);
         let key = owned["taskKey"].as_str().unwrap().to_owned();
         let nested_task = ConversationIdentity::from_stable_keys(key.clone(), key).unwrap();
-        assert!(runtime.store(&nested_task).unwrap().1.load(&nested_task).unwrap().agents.delegation_enabled());
+        assert!(
+            runtime
+                .store(&nested_task)
+                .unwrap()
+                .1
+                .load(&nested_task)
+                .unwrap()
+                .agents
+                .delegation_enabled()
+        );
         assert_eq!(supervisor.queued_count().await, queued_before + 1);
         runtime.spawn(&recipient, nested, false).await.unwrap();
         assert_eq!(supervisor.queued_count().await, queued_before + 1);
         // Report delivery is immediate and idempotent, without a project file.
-        let goal=store.set_goal(&parent,"Coordinate and verify the project",crate::markdown_chat::now_ms()).unwrap();
-        store.run_goal(&parent,goal.revision,crate::markdown_chat::now_ms()).unwrap();
-        let (config,_)=runtime.store(&parent).unwrap();
-        let parent_chat=runtime.chats.chat(&config,Some(&parent),&crate::exec_sessions::SessionState::new()).unwrap();
+        let goal = store
+            .set_goal(
+                &parent,
+                "Coordinate and verify the project",
+                crate::markdown_chat::now_ms(),
+            )
+            .unwrap();
+        store
+            .run_goal(&parent, goal.revision, crate::markdown_chat::now_ms())
+            .unwrap();
+        let (config, _) = runtime.store(&parent).unwrap();
+        let parent_chat = runtime
+            .chats
+            .chat(
+                &config,
+                Some(&parent),
+                &crate::exec_sessions::SessionState::new(),
+            )
+            .unwrap();
         parent_chat.ensure().await.unwrap();
-        let evidence="New evidence: updated shader contracts verified, no source edits.";
-        let report=runtime.report(&recipient,evidence).await.unwrap();
-        assert_eq!(report["parentNotified"],true);
-        runtime.report(&recipient,evidence).await.unwrap();
-        assert_eq!(parent_chat.widget_page(None,None).await.unwrap().messages.iter().filter(|m|m.markdown.contains(evidence)).count(),1);
+        let evidence = "New evidence: updated shader contracts verified, no source edits.";
+        let report = runtime.report(&recipient, evidence).await.unwrap();
+        assert_eq!(report["parentNotified"], true);
+        runtime.report(&recipient, evidence).await.unwrap();
+        assert_eq!(
+            parent_chat
+                .widget_page(None, None)
+                .await
+                .unwrap()
+                .messages
+                .iter()
+                .filter(|m| m.markdown.contains(evidence))
+                .count(),
+            1
+        );
         assert!(!source.join("agents.txt").exists());
-        parent_chat.request_agent_stop("message-pause".into()).await.unwrap();
-        let report=runtime.report(&recipient,"Evidence saved while coordinator is stopped").await.unwrap();
-        assert_eq!(report["reported"],true);
-        assert_eq!(report["parentNotified"],false);
+        parent_chat
+            .request_agent_stop("message-pause".into())
+            .await
+            .unwrap();
+        let report = runtime
+            .report(&recipient, "Evidence saved while coordinator is stopped")
+            .await
+            .unwrap();
+        assert_eq!(report["reported"], true);
+        assert_eq!(report["parentNotified"], false);
         parent_chat.resume_agent().await.unwrap();
         // The fake executor records submissions without completing real browser
         // pairing. Scope changes must reject that in-progress setup first.
-        let revision=runtime.store(&recipient).unwrap().1.load(&recipient).unwrap().goal.unwrap().revision;
-        let early=AgentControlRequest{request_id:"early-scope".into(),worker_task_key:recipient.stable_key().into(),action:AgentControlAction::SetGoal,expected_revision:Some(revision),content:Some("Next assignment".into()),scope:Some("new owned scope".into())};
-        assert!(runtime.control(&parent,early.clone()).await.unwrap_err().contains("setup"));
-        runtime.store(&recipient).unwrap().1.mutate(&recipient,|s|{s.pairing.creating_chat=false;Ok(())}).unwrap();
-        assert!(runtime.control(&parent,early).await.unwrap_err().contains("setup batch"));
+        let revision = runtime
+            .store(&recipient)
+            .unwrap()
+            .1
+            .load(&recipient)
+            .unwrap()
+            .goal
+            .unwrap()
+            .revision;
+        let early = AgentControlRequest {
+            request_id: "early-scope".into(),
+            worker_task_key: recipient.stable_key().into(),
+            action: AgentControlAction::SetGoal,
+            expected_revision: Some(revision),
+            content: Some("Next assignment".into()),
+            scope: Some("new owned scope".into()),
+        };
+        assert!(
+            runtime
+                .control(&parent, early.clone())
+                .await
+                .unwrap_err()
+                .contains("setup")
+        );
+        runtime
+            .store(&recipient)
+            .unwrap()
+            .1
+            .mutate(&recipient, |s| {
+                s.pairing.creating_chat = false;
+                Ok(())
+            })
+            .unwrap();
+        assert!(
+            runtime
+                .control(&parent, early)
+                .await
+                .unwrap_err()
+                .contains("setup batch")
+        );
         for child in &children {
-            let task=ConversationIdentity::from_stable_keys(child.task_key.clone(),child.task_key.clone()).unwrap();
-            runtime.store(&task).unwrap().1.mutate(&task,|s|{s.pairing.creating_chat=false;Ok(())}).unwrap();
+            let task = ConversationIdentity::from_stable_keys(
+                child.task_key.clone(),
+                child.task_key.clone(),
+            )
+            .unwrap();
+            runtime
+                .store(&task)
+                .unwrap()
+                .1
+                .mutate(&task, |s| {
+                    s.pairing.creating_chat = false;
+                    Ok(())
+                })
+                .unwrap();
         }
-        runtime.control(&parent,AgentControlRequest{request_id:"reassign-scope".into(),worker_task_key:recipient.stable_key().into(),action:AgentControlAction::SetGoal,expected_revision:Some(revision),content:Some("Verify the next independent material ABI boundary".into()),scope:Some("subsystem-2 material ABI acceptance tests".into())}).await.unwrap();
-        let reassigned=runtime.store(&recipient).unwrap().1.load(&recipient).unwrap();
-        assert_eq!(reassigned.agents.scope.as_deref(),Some("subsystem-2 material ABI acceptance tests"));
-        assert!(reassigned.agents.latest_report.is_none(),"new assignments must not inherit the previous assignment's evidence");
+        runtime
+            .control(
+                &parent,
+                AgentControlRequest {
+                    request_id: "reassign-scope".into(),
+                    worker_task_key: recipient.stable_key().into(),
+                    action: AgentControlAction::SetGoal,
+                    expected_revision: Some(revision),
+                    content: Some("Verify the next independent material ABI boundary".into()),
+                    scope: Some("subsystem-2 material ABI acceptance tests".into()),
+                },
+            )
+            .await
+            .unwrap();
+        let reassigned = runtime
+            .store(&recipient)
+            .unwrap()
+            .1
+            .load(&recipient)
+            .unwrap();
+        assert_eq!(
+            reassigned.agents.scope.as_deref(),
+            Some("subsystem-2 material ABI acceptance tests")
+        );
+        assert!(
+            reassigned.agents.latest_report.is_none(),
+            "new assignments must not inherit the previous assignment's evidence"
+        );
         assert!(reassigned.agents.report_at_ms.is_none());
-        assert!(reassigned.goal.unwrap().markdown.contains("Inspect and test only"));
-        let report=runtime.report(&recipient,evidence).await.unwrap();
-        assert_eq!(report["parentNotified"],true);
-        assert_eq!(report["notification"]["replayed"],false,"the same evidence on a fresh assignment must notify the coordinator");
-        runtime.report(&recipient,evidence).await.unwrap();
-        assert_eq!(parent_chat.widget_page(None,None).await.unwrap().messages.iter().filter(|message|message.markdown.contains(evidence)).count(),2,"retries stay idempotent within each assignment");
-        let parent_revision=store.load(&parent).unwrap().goal.unwrap().revision;
-        store.start_auto_mode(&parent,"auto-development",parent_revision,"Auto mode\n\nObjective:\nImplement verified improvements".into(),crate::markdown_chat::now_ms()).unwrap();
-        assert!(store.load(&parent).unwrap().agents.children.iter().find(|worker|worker.task_key==recipient.stable_key()).unwrap().read_only);
-        let revision=runtime.store(&recipient).unwrap().1.load(&recipient).unwrap().goal.unwrap().revision;
-        runtime.control(&parent,AgentControlRequest{request_id:"auto-development-scope".into(),worker_task_key:recipient.stable_key().into(),action:AgentControlAction::SetGoal,expected_revision:Some(revision),content:Some("Implement and verify the material ABI fix".into()),scope:Some("subsystem-2 material ABI implementation".into())}).await.unwrap();
-        assert!(!store.load(&parent).unwrap().agents.children.iter().find(|worker|worker.task_key==recipient.stable_key()).unwrap().read_only);
-        assert!(!runtime.store(&recipient).unwrap().1.load(&recipient).unwrap().goal.unwrap().markdown.contains("Inspect and test only"));
-        let reply=runtime.message(&recipient,AgentMessageRequest{request_id:"nested-owned-message".into(),recipient_task_key:nested_task.stable_key().into(),message:"Verify the ABI boundary while I implement the parent scope.".into()}).await.unwrap();
-        assert_eq!(reply["channel"],"agent_message");
-        let (nested_config,_)=runtime.store(&nested_task).unwrap();
-        let nested_chat=runtime.chats.chat(&nested_config,Some(&nested_task),&crate::exec_sessions::SessionState::new()).unwrap();
-        assert!(nested_chat.widget_page(None,None).await.unwrap().messages.iter().any(|message|message.markdown.contains("Verify the ABI boundary")));
+        assert!(
+            reassigned
+                .goal
+                .unwrap()
+                .markdown
+                .contains("Inspect and test only")
+        );
+        let report = runtime.report(&recipient, evidence).await.unwrap();
+        assert_eq!(report["parentNotified"], true);
+        assert_eq!(
+            report["notification"]["replayed"], false,
+            "the same evidence on a fresh assignment must notify the coordinator"
+        );
+        runtime.report(&recipient, evidence).await.unwrap();
+        assert_eq!(
+            parent_chat
+                .widget_page(None, None)
+                .await
+                .unwrap()
+                .messages
+                .iter()
+                .filter(|message| message.markdown.contains(evidence))
+                .count(),
+            2,
+            "retries stay idempotent within each assignment"
+        );
+        let parent_revision = store.load(&parent).unwrap().goal.unwrap().revision;
+        store
+            .start_auto_mode(
+                &parent,
+                "auto-development",
+                parent_revision,
+                "Auto mode\n\nObjective:\nImplement verified improvements".into(),
+                crate::markdown_chat::now_ms(),
+            )
+            .unwrap();
+        assert!(
+            store
+                .load(&parent)
+                .unwrap()
+                .agents
+                .children
+                .iter()
+                .find(|worker| worker.task_key == recipient.stable_key())
+                .unwrap()
+                .read_only
+        );
+        let revision = runtime
+            .store(&recipient)
+            .unwrap()
+            .1
+            .load(&recipient)
+            .unwrap()
+            .goal
+            .unwrap()
+            .revision;
+        runtime
+            .control(
+                &parent,
+                AgentControlRequest {
+                    request_id: "auto-development-scope".into(),
+                    worker_task_key: recipient.stable_key().into(),
+                    action: AgentControlAction::SetGoal,
+                    expected_revision: Some(revision),
+                    content: Some("Implement and verify the material ABI fix".into()),
+                    scope: Some("subsystem-2 material ABI implementation".into()),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(
+            !store
+                .load(&parent)
+                .unwrap()
+                .agents
+                .children
+                .iter()
+                .find(|worker| worker.task_key == recipient.stable_key())
+                .unwrap()
+                .read_only
+        );
+        assert!(
+            !runtime
+                .store(&recipient)
+                .unwrap()
+                .1
+                .load(&recipient)
+                .unwrap()
+                .goal
+                .unwrap()
+                .markdown
+                .contains("Inspect and test only")
+        );
+        let reply = runtime
+            .message(
+                &recipient,
+                AgentMessageRequest {
+                    request_id: "nested-owned-message".into(),
+                    recipient_task_key: nested_task.stable_key().into(),
+                    message: "Verify the ABI boundary while I implement the parent scope.".into(),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(reply["channel"], "agent_message");
+        let (nested_config, _) = runtime.store(&nested_task).unwrap();
+        let nested_chat = runtime
+            .chats
+            .chat(
+                &nested_config,
+                Some(&nested_task),
+                &crate::exec_sessions::SessionState::new(),
+            )
+            .unwrap();
+        assert!(
+            nested_chat
+                .widget_page(None, None)
+                .await
+                .unwrap()
+                .messages
+                .iter()
+                .any(|message| message.markdown.contains("Verify the ABI boundary"))
+        );
         // Owner-granted development access overrides legacy audit flags across
         // descendants without modifying setup digests, goals or Send ledgers.
-        let before=runtime.store(&nested_task).unwrap().1.load(&nested_task).unwrap();
+        let before = runtime
+            .store(&nested_task)
+            .unwrap()
+            .1
+            .load(&nested_task)
+            .unwrap();
         assert!(!runtime.full_development_access(&nested_task).unwrap());
-        runtime.set_full_development_access(&parent,true,"owner-development-1").await.unwrap();
-        runtime.set_full_development_access(&parent,true,"owner-development-1").await.unwrap();
+        runtime
+            .set_full_development_access(&parent, true, "owner-development-1")
+            .await
+            .unwrap();
+        runtime
+            .set_full_development_access(&parent, true, "owner-development-1")
+            .await
+            .unwrap();
         assert!(runtime.full_development_access(&recipient).unwrap());
         assert!(runtime.full_development_access(&nested_task).unwrap());
-        let after=runtime.store(&nested_task).unwrap().1.load(&nested_task).unwrap();
-        assert_eq!(after.goal,before.goal);assert_eq!(after.action,before.action);assert_eq!(after.pairing,before.pairing);
-        assert!(runtime.set_full_development_access(&recipient,true,"worker-escalation").await.is_err());
-        let page=nested_chat.widget_page(None,None).await.unwrap();
-        assert_eq!(page.messages.iter().filter(|message|message.markdown.contains("supersedes older audit-only")).count(),1);
-        let new=runtime.spawn(&parent,SpawnWorkersRequest{request_id:"development-inheritance".into(),workers:vec![WorkerSpec{role:"Independent implementer".into(),goal:"Implement and verify the owned module".into(),scope:"output/development-inheritance/**".into(),read_only:true}]},true).await.unwrap();
-        let editor=new["workers"].as_array().unwrap().iter().find(|worker|worker["role"]=="Independent implementer").unwrap();
-        assert_eq!(editor["readOnly"],false);
-        runtime.set_full_development_access(&parent,false,"owner-development-2").await.unwrap();
+        let after = runtime
+            .store(&nested_task)
+            .unwrap()
+            .1
+            .load(&nested_task)
+            .unwrap();
+        assert_eq!(after.goal, before.goal);
+        assert_eq!(after.action, before.action);
+        assert_eq!(after.pairing, before.pairing);
+        assert!(
+            runtime
+                .set_full_development_access(&recipient, true, "worker-escalation")
+                .await
+                .is_err()
+        );
+        let page = nested_chat.widget_page(None, None).await.unwrap();
+        assert_eq!(
+            page.messages
+                .iter()
+                .filter(|message| message.markdown.contains("supersedes older audit-only"))
+                .count(),
+            1
+        );
+        let new = runtime
+            .spawn(
+                &parent,
+                SpawnWorkersRequest {
+                    request_id: "development-inheritance".into(),
+                    workers: vec![WorkerSpec {
+                        role: "Independent implementer".into(),
+                        goal: "Implement and verify the owned module".into(),
+                        scope: "output/development-inheritance/**".into(),
+                        read_only: true,
+                    }],
+                },
+                true,
+            )
+            .await
+            .unwrap();
+        let editor = new["workers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|worker| worker["role"] == "Independent implementer")
+            .unwrap();
+        assert_eq!(editor["readOnly"], false);
+        runtime
+            .set_full_development_access(&parent, false, "owner-development-2")
+            .await
+            .unwrap();
         assert!(!runtime.full_development_access(&nested_task).unwrap());
-        runtime.set_full_development_access(&parent,true,"owner-development-1").await.unwrap();
-        assert!(!runtime.full_development_access(&nested_task).unwrap(),"a replay must not undo a later owner revocation");
-        assert!(runtime.set_full_development_access(&parent,false,"owner-development-1").await.is_err());
-        let child_count=store.load(&parent).unwrap().agents.children.len();
+        runtime
+            .set_full_development_access(&parent, true, "owner-development-1")
+            .await
+            .unwrap();
+        assert!(
+            !runtime.full_development_access(&nested_task).unwrap(),
+            "a replay must not undo a later owner revocation"
+        );
+        assert!(
+            runtime
+                .set_full_development_access(&parent, false, "owner-development-1")
+                .await
+                .is_err()
+        );
+        let child_count = store.load(&parent).unwrap().agents.children.len();
         // Multiple full batches exceed both the former six-project and
         // 32-direct-worker caps, without replaying reservations or setup sends.
         for batch in 0..5 {
-            let request=SpawnWorkersRequest{request_id:format!("expanded-team-{batch}"),workers:(0..8).map(|index|WorkerSpec{role:format!("Extra lead {batch}-{index}"),goal:"Independent implementation".into(),scope:format!("extra-{batch}-{index}/**"),read_only:false}).collect()};
-            runtime.spawn(&parent,request.clone(),true).await.unwrap();
-            let queued=supervisor.queued_count().await;
-            runtime.spawn(&parent,request,true).await.unwrap();
-            assert_eq!(supervisor.queued_count().await,queued,"a replay must not queue another setup");
-            assert_eq!(store.load(&parent).unwrap().agents.children.len(),child_count+(batch+1)*8);
+            let request = SpawnWorkersRequest {
+                request_id: format!("expanded-team-{batch}"),
+                workers: (0..8)
+                    .map(|index| WorkerSpec {
+                        role: format!("Extra lead {batch}-{index}"),
+                        goal: "Independent implementation".into(),
+                        scope: format!("extra-{batch}-{index}/**"),
+                        read_only: false,
+                    })
+                    .collect(),
+            };
+            runtime.spawn(&parent, request.clone(), true).await.unwrap();
+            let queued = supervisor.queued_count().await;
+            runtime.spawn(&parent, request, true).await.unwrap();
+            assert_eq!(
+                supervisor.queued_count().await,
+                queued,
+                "a replay must not queue another setup"
+            );
+            assert_eq!(
+                store.load(&parent).unwrap().agents.children.len(),
+                child_count + (batch + 1) * 8
+            );
         }
-        let expanded=runtime.status(&parent).await.unwrap();
-        assert!(expanded["capacity"]["active"].as_u64().unwrap()>32);
+        let expanded = runtime.status(&parent).await.unwrap();
+        assert!(expanded["capacity"]["active"].as_u64().unwrap() > 32);
         assert!(expanded["capacity"]["limit"].is_null());
-        assert_eq!(expanded["capacity"]["maxWorkersPerRequest"],8);
-        let paused_revision=child_store.load(&identity).unwrap().goal.unwrap().revision;
-        runtime.control(&parent,control("resume-expanded-team",AgentControlAction::Resume,Some(paused_revision),None)).await.unwrap();
-        assert_eq!(child_store.load(&identity).unwrap().goal.unwrap().status,GoalStatus::Active);
+        assert_eq!(expanded["capacity"]["maxWorkersPerRequest"], 8);
+        let paused_revision = child_store.load(&identity).unwrap().goal.unwrap().revision;
+        runtime
+            .control(
+                &parent,
+                control(
+                    "resume-expanded-team",
+                    AgentControlAction::Resume,
+                    Some(paused_revision),
+                    None,
+                ),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            child_store.load(&identity).unwrap().goal.unwrap().status,
+            GoalStatus::Active
+        );
         assert!(!chat.agent_stop_requested().await.unwrap());
-        let leaf_spawn=SpawnWorkersRequest{request_id:"excess-depth".into(),workers:vec![WorkerSpec{role:"Too deep".into(),goal:"Do independent work".into(),scope:"deep/**".into(),read_only:true}]};
-        assert!(runtime.spawn(&nested_task,leaf_spawn,false).await.is_err());
-        let key=editor["taskKey"].as_str().unwrap().to_owned();
-        let editor_task=ConversationIdentity::from_stable_keys(key.clone(),key).unwrap();
-        let (editor_config,editor_store)=runtime.store(&editor_task).unwrap();
-        let editor_chat=runtime.chats.chat(&editor_config,Some(&editor_task),&crate::exec_sessions::SessionState::new()).unwrap();
-        let revision=editor_store.load(&editor_task).unwrap().goal.unwrap().revision;
-        let retire=AgentControlRequest{request_id:"retire-completed-worker".into(),worker_task_key:editor_task.stable_key().into(),action:AgentControlAction::Retire,expected_revision:Some(revision),content:None,scope:None};
-        assert!(runtime.control(&parent,retire.clone()).await.unwrap_err().contains("completed"));
+        let leaf_spawn = SpawnWorkersRequest {
+            request_id: "excess-depth".into(),
+            workers: vec![WorkerSpec {
+                role: "Too deep".into(),
+                goal: "Do independent work".into(),
+                scope: "deep/**".into(),
+                read_only: true,
+            }],
+        };
+        assert!(
+            runtime
+                .spawn(&nested_task, leaf_spawn, false)
+                .await
+                .is_err()
+        );
+        let key = editor["taskKey"].as_str().unwrap().to_owned();
+        let editor_task = ConversationIdentity::from_stable_keys(key.clone(), key).unwrap();
+        let (editor_config, editor_store) = runtime.store(&editor_task).unwrap();
+        let editor_chat = runtime
+            .chats
+            .chat(
+                &editor_config,
+                Some(&editor_task),
+                &crate::exec_sessions::SessionState::new(),
+            )
+            .unwrap();
+        let revision = editor_store
+            .load(&editor_task)
+            .unwrap()
+            .goal
+            .unwrap()
+            .revision;
+        let retire = AgentControlRequest {
+            request_id: "retire-completed-worker".into(),
+            worker_task_key: editor_task.stable_key().into(),
+            action: AgentControlAction::Retire,
+            expected_revision: Some(revision),
+            content: None,
+            scope: None,
+        };
+        assert!(
+            runtime
+                .control(&parent, retire.clone())
+                .await
+                .unwrap_err()
+                .contains("completed")
+        );
         supervisor.discard_queued_actions(&editor_task).await;
-        editor_store.mutate(&editor_task,|saved|{saved.pairing.creating_chat=false;Ok(())}).unwrap();
+        editor_store
+            .mutate(&editor_task, |saved| {
+                saved.pairing.creating_chat = false;
+                Ok(())
+            })
+            .unwrap();
         editor_chat.read(true).await.unwrap();
-        runtime.report(&editor_task,"Implemented module. Strict tests passed. No remaining work in this assignment.").await.unwrap();
-        editor_store.finish_goal(&editor_task,revision,GoalFinish::Completed{summary:Some("Implemented and verified module; next steps: none.".into())},crate::markdown_chat::now_ms()).unwrap();
+        runtime
+            .report(
+                &editor_task,
+                "Implemented module. Strict tests passed. No remaining work in this assignment.",
+            )
+            .await
+            .unwrap();
+        editor_store
+            .finish_goal(
+                &editor_task,
+                revision,
+                GoalFinish::Completed {
+                    summary: Some("Implemented and verified module; next steps: none.".into()),
+                },
+                crate::markdown_chat::now_ms(),
+            )
+            .unwrap();
         assert!(editor_chat.read(false).await.unwrap().text.is_empty());
-        runtime.set_full_development_access(&parent,true,"owner-development-3").await.unwrap();
+        runtime
+            .set_full_development_access(&parent, true, "owner-development-3")
+            .await
+            .unwrap();
         assert!(runtime.full_development_access(&editor_task).unwrap());
-        assert!(editor_chat.read(false).await.unwrap().text.is_empty(),"permission changes must not wake completed workers or block retirement");
-        runtime.control(&parent,retire.clone()).await.unwrap();
-        assert_eq!(runtime.control(&parent,retire).await.unwrap()["replayed"],true);
-        assert!(editor_chat.owner_summary().await.unwrap().archived_at_ms.is_some());
+        assert!(
+            editor_chat.read(false).await.unwrap().text.is_empty(),
+            "permission changes must not wake completed workers or block retirement"
+        );
+        runtime.control(&parent, retire.clone()).await.unwrap();
+        assert_eq!(
+            runtime.control(&parent, retire).await.unwrap()["replayed"],
+            true
+        );
+        assert!(
+            editor_chat
+                .owner_summary()
+                .await
+                .unwrap()
+                .archived_at_ms
+                .is_some()
+        );
         assert!(editor_chat.agent_stop_requested().await.unwrap());
-        assert_eq!(editor_store.load(&editor_task).unwrap().goal.unwrap().status,GoalStatus::Completed);
-        assert!(editor_store.load(&editor_task).unwrap().agents.latest_report.unwrap().contains("Strict tests passed"));
-        assert!(store.load(&parent).unwrap().agents.children.iter().find(|child|child.task_key==editor_task.stable_key()).unwrap().retired_at_ms.is_some());
-        assert!(runtime.stop_team(&recipient,"not-a-main").await.is_err());
-        let stopped=runtime.stop_team(&parent,"stop-all-fixture").await.unwrap();
-        assert!(stopped["stoppedChats"].as_u64().unwrap()>=3);
+        assert_eq!(
+            editor_store
+                .load(&editor_task)
+                .unwrap()
+                .goal
+                .unwrap()
+                .status,
+            GoalStatus::Completed
+        );
+        assert!(
+            editor_store
+                .load(&editor_task)
+                .unwrap()
+                .agents
+                .latest_report
+                .unwrap()
+                .contains("Strict tests passed")
+        );
+        assert!(
+            store
+                .load(&parent)
+                .unwrap()
+                .agents
+                .children
+                .iter()
+                .find(|child| child.task_key == editor_task.stable_key())
+                .unwrap()
+                .retired_at_ms
+                .is_some()
+        );
+        assert!(runtime.stop_team(&recipient, "not-a-main").await.is_err());
+        let stopped = runtime
+            .stop_team(&parent, "stop-all-fixture")
+            .await
+            .unwrap();
+        assert!(stopped["stoppedChats"].as_u64().unwrap() >= 3);
         assert!(parent_chat.agent_stop_requested().await.unwrap());
         assert!(nested_chat.agent_stop_requested().await.unwrap());
-        assert_eq!(store.load(&parent).unwrap().goal.unwrap().status,GoalStatus::Configured);
-        assert_eq!(editor_store.load(&editor_task).unwrap().goal.unwrap().status,GoalStatus::Completed);
-        assert!(nested_chat.agent_stop_requested().await.unwrap(),"queued setup remains fenced by the explicit stop");
+        assert_eq!(
+            store.load(&parent).unwrap().goal.unwrap().status,
+            GoalStatus::Configured
+        );
+        assert_eq!(
+            editor_store
+                .load(&editor_task)
+                .unwrap()
+                .goal
+                .unwrap()
+                .status,
+            GoalStatus::Completed
+        );
+        assert!(
+            nested_chat.agent_stop_requested().await.unwrap(),
+            "queued setup remains fenced by the explicit stop"
+        );
         parent_chat.resume_agent().await.unwrap();
-        let revision=store.load(&parent).unwrap().goal.unwrap().revision;
-        store.run_goal(&parent,revision,crate::markdown_chat::now_ms()).unwrap();
-        assert_eq!(runtime.stop_team(&parent,"stop-all-fixture").await.unwrap()["replayed"],true);
-        assert!(!parent_chat.agent_stop_requested().await.unwrap(),"a replay cannot undo a later explicit resume");
-
-
+        let revision = store.load(&parent).unwrap().goal.unwrap().revision;
+        store
+            .run_goal(&parent, revision, crate::markdown_chat::now_ms())
+            .unwrap();
+        assert_eq!(
+            runtime
+                .stop_team(&parent, "stop-all-fixture")
+                .await
+                .unwrap()["replayed"],
+            true
+        );
+        assert!(
+            !parent_chat.agent_stop_requested().await.unwrap(),
+            "a replay cannot undo a later explicit resume"
+        );
     }
 }

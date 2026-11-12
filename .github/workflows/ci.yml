@@ -54,7 +54,10 @@ jobs:
           cd browser-companion
           bun x --no-install patchright install-deps chromium
           bun run install:chrome
-          CODEXIFY_TEST_BROWSER_COMPANION_CHROME=1 xvfb-run -a bun test ./tests/chrome-surface.test.ts ./tests/capability-discovery.test.ts ./tests/account-settings.test.ts
+          CODEXIFY_TEST_BROWSER_COMPANION_CHROME=1 xvfb-run -a bun test ./tests/chrome-surface.test.ts ./tests/capability-discovery.test.ts ./tests/picker-layouts.test.ts ./tests/account-settings.test.ts
+          CODEXIFY_TEST_BROWSER_COMPANION_CHROME=1 xvfb-run -a bun test ./tests/conversation-approval.test.ts
+          CODEXIFY_TEST_BROWSER_COMPANION_CHROME=1 xvfb-run -a bun test ./tests/conversation-unavailable.test.ts -t 'transcript API 429s'
+          CODEXIFY_TEST_BROWSER_COMPANION_CHROME=1 xvfb-run -a bun test ./tests/pairing-submit.test.ts -t 'offline Stop resumes the captured|late Stop dialog during message preparation|Japanese lazy picker|conversation length|conversation-length|task continuation|re-pairing sends'
           bun run package
           bun run smoke:package
 
@@ -168,7 +171,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-14, windows-latest]
+        os: [macos-15, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5

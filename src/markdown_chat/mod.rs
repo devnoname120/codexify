@@ -34,8 +34,9 @@ pub const DEFAULT_OWNER_CHAT_PORT: u16 = 3120;
 pub const MAX_UNREAD_BYTES: usize = 16 * 1024 * 1024;
 pub const USER_MESSAGE_FIELD: &str = "new_chat_message_from_user";
 pub const AWAY_AFTER_MS: u64 = 180_000;
-pub const OFFLINE_AFTER_MS: u64 = 300_000;
-pub const AUTOMATION_OFFLINE_AFTER_MS: u64 = OFFLINE_AFTER_MS - 60_000;
+pub const DEFAULT_OFFLINE_TIMEOUT_MINUTES: u64 = 5;
+pub const OFFLINE_AFTER_MS: u64 = DEFAULT_OFFLINE_TIMEOUT_MINUTES * 60_000;
+pub const AUTOMATION_OFFLINE_AFTER_MS: u64 = OFFLINE_AFTER_MS;
 pub const PAIRING_PRESENCE_GRACE_MS: u64 = 5_000;
 pub const DEFAULT_AUTOMATION_DESCRIPTOR_PATH: &str = "~/.codexify/browser/descriptor.json";
 pub const DEFAULT_AUTOMATION_CONNECTOR_NAME: &str = "";
@@ -166,6 +167,7 @@ pub struct AgentAutomationConfig {
     pub browser_action_lanes: usize,
     pub auto_approve_tool_calls: bool,
     pub automatic_retries: bool,
+    pub new_conversation_on_load_rate_limit: bool,
     pub retry_timings: RetryTimings,
     pub chatgpt_project_url: Option<String>,
     #[serde(deserialize_with = "deserialize_request_block_list")]
@@ -188,12 +190,13 @@ impl Default for AgentAutomationConfig {
             browser_action_lanes: 2,
             auto_approve_tool_calls: true,
             automatic_retries: true,
+            new_conversation_on_load_rate_limit: false,
             retry_timings: RetryTimings::default(),
             chatgpt_project_url: None,
             request_block_list: vec![
                 r"^https?://(www\.)?chatgpt\.com/.*/rgstr".into(),
-                r"^https?://(www\.)?chatgpt\.com/backend-api/.*/conversations".into(),
-                r"^https?://(www\.)?chatgpt\.com/backend-api/conversations".into(),
+                r"^https?://(www\.)?chatgpt\.com/backend-api/.*/conversations(?:\?|$)".into(),
+                r"^https?://(www\.)?chatgpt\.com/backend-api/conversations(?:\?|$)".into(),
                 r"^https?://(www\.)?chatgpt\.com/backend-api/sidebar".into(),
                 r"^https?://(www\.)?chatgpt\.com/backend-api/.*/sidebar".into(),
             ],
@@ -295,7 +298,19 @@ fn deserialize_request_block_list<'de, D>(deserializer: D) -> Result<Vec<String>
 where
     D: serde::Deserializer<'de>,
 {
-    Option::<Vec<String>>::deserialize(deserializer).map(Option::unwrap_or_default)
+    let mut patterns = Option::<Vec<String>>::deserialize(deserializer)?.unwrap_or_default();
+    for pattern in &mut patterns {
+        // These shipped list filters predate /conversations/<id>. Upgrade only
+        // the exact legacy defaults, retaining every custom expression.
+        if matches!(
+            pattern.as_str(),
+            r"^https?://(www\.)?chatgpt\.com/backend-api/.*/conversations"
+                | r"^https?://(www\.)?chatgpt\.com/backend-api/conversations"
+        ) {
+            pattern.push_str(r"(?:\?|$)");
+        }
+    }
+    Ok(patterns)
 }
 
 pub(crate) fn now_ms() -> u64 {
@@ -320,6 +335,7 @@ pub struct MarkdownChatConfig {
     pub enabled: bool,
     pub port: Option<u16>,
     pub max_wait_ms: u64,
+    pub offline_timeout_minutes: u64,
     pub default_message_mode: MessageMode,
     pub rollout_reminder_interval: u64,
     pub rollout_enabled: bool,
@@ -339,6 +355,7 @@ impl Default for MarkdownChatConfig {
             enabled: true,
             port: Some(DEFAULT_OWNER_CHAT_PORT),
             max_wait_ms: DEFAULT_MAX_WAIT_MS,
+            offline_timeout_minutes: DEFAULT_OFFLINE_TIMEOUT_MINUTES,
             default_message_mode: MessageMode::Queue,
             rollout_reminder_interval: rollout::DEFAULT_REMINDER_INTERVAL,
             rollout_enabled: true,
@@ -481,7 +498,16 @@ impl NotificationsConfig {
 }
 
 impl MarkdownChatConfig {
+    pub fn offline_after_ms(&self) -> u64 {
+        self.offline_timeout_minutes.saturating_mul(60_000)
+    }
+
     pub fn validate(&self) -> Result<(), String> {
+        if !(1..=1440).contains(&self.offline_timeout_minutes) {
+            return Err(
+                "agentChat.offlineTimeoutMinutes must be a whole number between 1 and 1440".into(),
+            );
+        }
         if self.port == Some(0) {
             return Err("agentChat.port must be between 1 and 65535, or null".into());
         }
@@ -501,6 +527,7 @@ impl MarkdownChatConfig {
 }
 
 pub struct MarkdownChatStore {
+    offline_after_ms: u64,
     channels: Mutex<HashMap<PathBuf, Arc<ChatFile>>>,
     activity: Mutex<HashMap<String, AgentActivityState>>,
     offline_monitors: Mutex<HashMap<PathBuf, Arc<tokio::sync::Notify>>>,
@@ -528,6 +555,7 @@ impl Default for MarkdownChatStore {
             .as_nanos();
         Self {
             channels: Mutex::new(HashMap::new()),
+            offline_after_ms: OFFLINE_AFTER_MS,
             activity: Mutex::new(HashMap::new()),
             offline_monitors: Mutex::new(HashMap::new()),
             transport_namespace: format!("{}-{timestamp}", std::process::id()),
@@ -536,6 +564,13 @@ impl Default for MarkdownChatStore {
 }
 
 impl MarkdownChatStore {
+    pub(crate) fn with_offline_timeout(offline_after_ms: u64) -> Self {
+        Self {
+            offline_after_ms,
+            ..Self::default()
+        }
+    }
+
     fn owner(&self, conversation: Option<&ConversationIdentity>, session: &SessionState) -> String {
         match conversation {
             Some(identity) => identity.stable_key().to_string(),
@@ -601,7 +636,11 @@ impl MarkdownChatStore {
                 .map_err(|_| "Cannot resolve the Markdown chat directory")?
                 .join(path)
         };
-        self.chat_at_path(path, conversation.is_some())
+        self.chat_at_path_with_timeout(
+            path,
+            conversation.is_some(),
+            config.markdown_chat.offline_after_ms(),
+        )
     }
 
     pub(crate) fn chat_at_path(
@@ -609,14 +648,29 @@ impl MarkdownChatStore {
         path: PathBuf,
         persistent: bool,
     ) -> Result<Arc<ChatFile>, String> {
+        self.chat_at_path_with_timeout(path, persistent, self.offline_after_ms)
+    }
+
+    fn chat_at_path_with_timeout(
+        &self,
+        path: PathBuf,
+        persistent: bool,
+        offline_after_ms: u64,
+    ) -> Result<Arc<ChatFile>, String> {
         let mut channels = self
             .channels
             .lock()
             .map_err(|_| "Markdown chat store is unavailable")?;
         let chat = channels
             .entry(path.clone())
-            .or_insert_with(|| Arc::new(ChatFile::new(path, persistent)))
+            .or_insert_with(|| {
+                let chat = ChatFile::new(path, persistent);
+                chat.set_offline_timeout(offline_after_ms);
+                Arc::new(chat)
+            })
             .clone();
+        // Configure existing channels too, before any new queue monitor can run.
+        chat.set_offline_timeout(offline_after_ms);
         drop(channels);
         chat.start_queue_monitor();
         Ok(chat)
@@ -642,7 +696,8 @@ impl MarkdownChatStore {
                 let config = config.clone();
                 let monitor_wake = wake.clone();
                 tokio::spawn(async move {
-                    offline::monitor(chat, monitor_wake, OFFLINE_AFTER_MS, move || {
+                    let offline_after_ms = config.offline_after_ms();
+                    offline::monitor(chat, monitor_wake, offline_after_ms, move || {
                         let config = config.clone();
                         let workspace = workspace.clone();
                         async move {
@@ -650,7 +705,7 @@ impl MarkdownChatStore {
                                 &config,
                                 notification::NotificationEvent::Offline,
                                 &workspace,
-                                offline::MESSAGE.to_string(),
+                                offline::message(offline_after_ms),
                                 &tokio_util::sync::CancellationToken::new(),
                             )
                             .await
@@ -711,29 +766,66 @@ mod tests {
     fn browser_simplicity_levels_preserve_legacy_choices_and_validate_values() {
         for (value, expected) in [
             (serde_json::json!({}), BrowserSimplicity::Off),
-            (serde_json::json!({"minimalUi":false}), BrowserSimplicity::Off),
-            (serde_json::json!({"minimalUi":true}), BrowserSimplicity::Simplified),
-            (serde_json::json!({"minimalUi":true,"browserSimplicity":"off"}), BrowserSimplicity::Off),
-            (serde_json::json!({"minimalUi":false,"browserSimplicity":"bones"}), BrowserSimplicity::Bones),
-            (serde_json::json!({"browserSimplicity":"simplified"}), BrowserSimplicity::Simplified),
+            (
+                serde_json::json!({"minimalUi":false}),
+                BrowserSimplicity::Off,
+            ),
+            (
+                serde_json::json!({"minimalUi":true}),
+                BrowserSimplicity::Simplified,
+            ),
+            (
+                serde_json::json!({"minimalUi":true,"browserSimplicity":"off"}),
+                BrowserSimplicity::Off,
+            ),
+            (
+                serde_json::json!({"minimalUi":false,"browserSimplicity":"bones"}),
+                BrowserSimplicity::Bones,
+            ),
+            (
+                serde_json::json!({"browserSimplicity":"simplified"}),
+                BrowserSimplicity::Simplified,
+            ),
         ] {
             let config: AgentAutomationConfig = serde_json::from_value(value).unwrap();
             assert_eq!(config.effective_browser_simplicity(), expected);
-            let restored: AgentAutomationConfig = serde_json::from_value(serde_json::to_value(config).unwrap()).unwrap();
+            let restored: AgentAutomationConfig =
+                serde_json::from_value(serde_json::to_value(config).unwrap()).unwrap();
             assert_eq!(restored.effective_browser_simplicity(), expected);
         }
-        for invalid in [serde_json::json!(true), serde_json::json!("fast"), serde_json::json!(3), serde_json::json!({})] {
-            assert!(serde_json::from_value::<AgentAutomationConfig>(serde_json::json!({"browserSimplicity":invalid})).is_err());
+        for invalid in [
+            serde_json::json!(true),
+            serde_json::json!("fast"),
+            serde_json::json!(3),
+            serde_json::json!({}),
+        ] {
+            assert!(
+                serde_json::from_value::<AgentAutomationConfig>(
+                    serde_json::json!({"browserSimplicity":invalid})
+                )
+                .is_err()
+            );
         }
     }
 
     #[test]
     fn added_features_are_opt_in_for_new_and_partial_configurations() {
-        for value in [serde_json::json!({}), serde_json::json!({"features":{},"automation":{"retryTimings":{}}})] {
+        for value in [
+            serde_json::json!({}),
+            serde_json::json!({"features":{},"automation":{"retryTimings":{}}}),
+        ] {
             let config: MarkdownChatConfig = serde_json::from_value(value).unwrap();
             assert_eq!(config.features, ChatFeatures::default());
             assert!(config.features.default_delegation);
-            assert!(serde_json::to_value(&config.features).unwrap().as_object().unwrap().iter().filter(|(key,_)|key.as_str()!="defaultDelegation").all(|(_,value)|value == false));
+            assert!(
+                serde_json::to_value(&config.features)
+                    .unwrap()
+                    .as_object()
+                    .unwrap()
+                    .iter()
+                    .filter(|(key, _)| key.as_str() != "defaultDelegation")
+                    .all(|(_, value)| value == false)
+            );
             assert!(!config.automation.minimal_ui);
             assert!(!config.automation.recovery_enhancements);
             assert!(!config.automation.retry_timings.infinite_retries);
@@ -741,16 +833,30 @@ mod tests {
         }
         let mut config: MarkdownChatConfig = serde_json::from_value(serde_json::json!({
             "features":{"agentTeams":true},"automation":{"minimalUi":true}
-        })).unwrap();
+        }))
+        .unwrap();
         assert!(config.features.agent_teams && config.automation.minimal_ui);
         assert!(!config.features.auto_mode && !config.features.conversation_recovery);
         config.features.agent_teams = false;
-        assert!(!serde_json::from_value::<MarkdownChatConfig>(serde_json::to_value(config).unwrap()).unwrap().features.agent_teams);
-        let disabled: MarkdownChatConfig=serde_json::from_value(serde_json::json!({"features":{"agentTeams":true,"defaultDelegation":false}})).unwrap();
+        assert!(
+            !serde_json::from_value::<MarkdownChatConfig>(serde_json::to_value(config).unwrap())
+                .unwrap()
+                .features
+                .agent_teams
+        );
+        let disabled: MarkdownChatConfig = serde_json::from_value(
+            serde_json::json!({"features":{"agentTeams":true,"defaultDelegation":false}}),
+        )
+        .unwrap();
         assert!(!disabled.features.default_delegation);
-        let saved=serde_json::to_value(disabled).unwrap();
-        assert_eq!(saved["features"]["defaultDelegation"],false);
-        assert!(!serde_json::from_value::<MarkdownChatConfig>(saved).unwrap().features.default_delegation);
+        let saved = serde_json::to_value(disabled).unwrap();
+        assert_eq!(saved["features"]["defaultDelegation"], false);
+        assert!(
+            !serde_json::from_value::<MarkdownChatConfig>(saved)
+                .unwrap()
+                .features
+                .default_delegation
+        );
     }
     #[test]
     fn retry_timings_default_and_partial_configuration() {
@@ -825,6 +931,51 @@ mod tests {
     }
 
     #[test]
+    fn conversation_list_filters_allow_individual_chats_and_upgrade_only_legacy_defaults() {
+        let defaults = AgentAutomationConfig::default();
+        let patterns: Vec<_> = defaults
+            .request_block_list
+            .iter()
+            .map(|value| regex::Regex::new(value).unwrap())
+            .collect();
+        for url in [
+            "https://chatgpt.com/backend-api/conversations",
+            "https://chatgpt.com/backend-api/conversations?limit=20",
+            "https://chatgpt.com/backend-api/gizmos/project/conversations?limit=50",
+        ] {
+            assert!(
+                patterns.iter().any(|pattern| pattern.is_match(url)),
+                "list must remain blocked: {url}"
+            );
+        }
+        for url in [
+            "https://chatgpt.com/backend-api/conversations/chat-id?num_turns=10",
+            "https://chatgpt.com/backend-api/gizmos/project/conversations/chat-id",
+            "https://chatgpt.com/backend-api/conversation",
+        ] {
+            assert!(
+                !patterns.iter().any(|pattern| pattern.is_match(url)),
+                "chat must remain available: {url}"
+            );
+        }
+        let config: AgentAutomationConfig =
+            serde_json::from_value(serde_json::json!({"requestBlockList":[
+                r"^https?://(www\.)?chatgpt\.com/backend-api/.*/conversations",
+                r"^https?://(www\.)?chatgpt\.com/backend-api/conversations",
+                r"^https://example\.com/conversations"
+            ]}))
+            .unwrap();
+        assert_eq!(
+            &config.request_block_list[..2],
+            &defaults.request_block_list[1..3]
+        );
+        assert_eq!(
+            config.request_block_list[2],
+            r"^https://example\.com/conversations"
+        );
+    }
+
+    #[test]
     fn request_block_list_defaults_and_configuration_bounds() {
         for (value, expected_len) in [
             (serde_json::json!({}), 5),
@@ -861,10 +1012,11 @@ mod tests {
 
     #[test]
     fn browser_action_lanes_default_to_two_and_are_bounded() {
-        assert_eq!(AgentAutomationConfig::default().browser_action_lanes,2);
-        for lanes in [0,1,2,4,5] {
-            let config:AgentAutomationConfig=serde_json::from_value(serde_json::json!({"browserActionLanes":lanes})).unwrap();
-            assert_eq!(config.validate().is_ok(),(1..=4).contains(&lanes));
+        assert_eq!(AgentAutomationConfig::default().browser_action_lanes, 2);
+        for lanes in [0, 1, 2, 4, 5] {
+            let config: AgentAutomationConfig =
+                serde_json::from_value(serde_json::json!({"browserActionLanes":lanes})).unwrap();
+            assert_eq!(config.validate().is_ok(), (1..=4).contains(&lanes));
         }
     }
 

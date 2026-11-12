@@ -185,7 +185,7 @@ explicit settings are preserved. Its listener and timeout can be configured:
 port `3120`. Set it to `null` to use an OS-assigned port instead. It must differ
 from the main top-level `port` when agent chat is enabled.
 
-`agentChat.maxWaitMs` controls the server-side `chat_await` and `turn_completed` timeout in milliseconds.
+`agentChat.maxWaitMs` controls the server-side `chat_await`, `turn_completed`, and `ticket_wait` timeout in milliseconds.
 It defaults to `55000` (55 seconds) and accepts values from `1000` to `300000`.
 Existing explicit values remain in effect; omit the setting to use the default.
 

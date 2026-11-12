@@ -32,261 +32,6 @@ impl ConversationRecoveryState {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::agent_automation::{AutomationActionKind, AutomationActionState};
-    fn fixture() -> (
-        tempfile::TempDir,
-        AgentAutomationStore,
-        ConversationIdentity,
-    ) {
-        let root = tempfile::tempdir().unwrap();
-        let mut config = crate::config::default_config(root.path().into());
-        config.markdown_chat.automation.retry_timings.infinite_retries = true;
-        let store = AgentAutomationStore::for_config(&config).unwrap();
-        let task = ConversationIdentity::from_openai_session("recovery-test").unwrap();
-        store
-            .set_goal(&task, "Preserve this goal and its progress", 1)
-            .unwrap();
-        store.run_goal(&task, 1, 2).unwrap();
-        let pair = store
-            .issue_pairing(&task, "https://chatgpt.com/c/broken", 0, 3)
-            .unwrap();
-        store
-            .record_pairing_canonical_url(&task, pair.generation, "https://chatgpt.com/c/broken", 4)
-            .unwrap();
-        store
-            .verify_pairing(&task, pair.generation, 0, &pair.reference, 5)
-            .unwrap();
-        store
-            .set_conversation_recovery_enabled(&task, true)
-            .unwrap();
-        (root, store, task)
-    }
-    fn fail(store: &AgentAutomationStore, task: &ConversationIdentity, id: &str, now: u64) {
-        store
-            .mutate(task, |state| {
-                state.action = AutomationActionState {
-                    id: Some(id.into()),
-                    kind: Some(AutomationActionKind::OfflineGoal),
-                    pairing_generation: Some(state.pairing.generation),
-                    goal_revision: Some(1),
-                    status: AutomationActionStatus::ConversationUnavailable,
-                    send_accepted: Some(false),
-                    last_error: Some(UNAVAILABLE_CONVERSATION_MESSAGE.into()),
-                    updated_at_ms: Some(now),
-                    ..Default::default()
-                };
-                Ok(())
-            })
-            .unwrap();
-    }
-    #[test]
-    fn replacement_requires_three_distinct_failed_loads_and_preserves_the_goal() {
-        let (_root, store, task) = fixture();
-        fail(&store, &task, "failure-one", 100);
-        for now in [100, 300, 90_000] {
-            assert_eq!(
-                store
-                    .observe_unavailable_conversation(&task, now)
-                    .unwrap()
-                    .failure_count,
-                1
-            );
-        }
-        assert!(
-            store
-                .reserve_conversation_recovery(&task, "failure-one", 90_000, true)
-                .is_err()
-        );
-        fail(&store, &task, "failure-two", 95_000);
-        store
-            .observe_unavailable_conversation(&task, 95_000)
-            .unwrap();
-        assert!(
-            store
-                .reserve_conversation_recovery(&task, "failure-two", 95_000, true)
-                .is_err()
-        );
-        fail(&store, &task, "failure-three", 100_000);
-        store
-            .observe_unavailable_conversation(&task, 100_000)
-            .unwrap();
-        assert!(
-            store
-                .reserve_conversation_recovery(&task, "stale-action", 100_001, true)
-                .is_err()
-        );
-        assert_eq!(
-            store
-                .reserve_conversation_recovery(&task, "failure-three", 100_001, true)
-                .unwrap(),
-            "https://chatgpt.com/c/broken"
-        );
-        let saved = store.load(&task).unwrap();
-        assert_eq!(saved.conversation_recovery.failed_chat_count, 1);
-        assert_eq!(
-            saved.goal.unwrap().markdown,
-            "Preserve this goal and its progress"
-        );
-        assert_eq!(
-            saved.pairing.canonical_url.as_deref(),
-            Some("https://chatgpt.com/c/broken")
-        );
-    }
-    #[test]
-    fn initial_setup_retry_does_not_delay_first_real_replacement_but_replacement_cooldown_remains() {
-        let (_root, store, task) = fixture();
-        store.mutate(&task, |s| {
-            s.conversation_recovery.last_recovery_at_ms = Some(95_000);
-            Ok(())
-        }).unwrap();
-        for (id, now) in [("first", 10_000), ("second", 45_000)] {
-            fail(&store, &task, id, now);
-            let recovery = store.observe_unavailable_conversation(&task, now).unwrap();
-            assert!(!recovery.automatic_replacement_due(100_000));
-        }
-        fail(&store, &task, "third", 70_000);
-        let recovery = store.observe_unavailable_conversation(&task, 70_000).unwrap();
-        assert!(recovery.automatic_replacement_due(100_000));
-        store.reserve_conversation_recovery(&task, "third", 100_000, true).unwrap();
-        for (id, now) in [("fourth", 110_000), ("fifth", 145_000), ("sixth", 180_000)] {
-            fail(&store, &task, id, now);
-            store.observe_unavailable_conversation(&task, now).unwrap();
-        }
-        let mut recovery = store.load(&task).unwrap().conversation_recovery;
-        assert_eq!(recovery.failed_chat_count, 1);
-        assert!(!recovery.automatic_replacement_due(200_000));
-        assert!(store.reserve_conversation_recovery(&task, "sixth", 200_000, true).is_err());
-        assert!(recovery.automatic_replacement_due(1_900_000));
-        recovery.enabled = false;
-        assert!(!recovery.automatic_replacement_due(1_900_000));
-    }
-    #[test]
-    fn a_success_resets_failure_evidence_and_uncertain_sends_are_never_replaced() {
-        let (_root, store, task) = fixture();
-        fail(&store, &task, "first", 100);
-        store.observe_unavailable_conversation(&task, 100).unwrap();
-        store
-            .mutate(&task, |s| {
-                s.action.status = AutomationActionStatus::Idle;
-                s.action.send_accepted = Some(true);
-                Ok(())
-            })
-            .unwrap();
-        assert_eq!(
-            store
-                .observe_unavailable_conversation(&task, 200)
-                .unwrap()
-                .failure_count,
-            0
-        );
-        fail(&store, &task, "second", 300);
-        assert_eq!(
-            store
-                .observe_unavailable_conversation(&task, 300)
-                .unwrap()
-                .failure_count,
-            1
-        );
-        for accepted in [None, Some(true)] {
-            store
-                .mutate(&task, |s| {
-                    s.action.send_accepted = accepted;
-                    Ok(())
-                })
-                .unwrap();
-            assert!(
-                store
-                    .reserve_conversation_recovery(&task, "second", 1_000_000, false)
-                    .is_err()
-            );
-        }
-        store.stop_goal(&task, 1, 1_000_001).unwrap();
-        assert!(!unavailable_conversation(&store.load(&task).unwrap()));
-    }
-    #[test]
-    fn infinite_retries_survive_large_counters_but_preserve_pause_and_send_safety() {
-        let (_root, store, task) = fixture();
-        store
-            .mutate(&task, |s| {
-                s.action = AutomationActionState {
-                    id: Some("unsent".into()),
-                    kind: Some(AutomationActionKind::OfflineChat),
-                    pairing_generation: Some(1),
-                    status: AutomationActionStatus::Failed,
-                    send_accepted: Some(false),
-                    updated_at_ms: Some(100),
-                    automatic_retry_attempts: u32::MAX,
-                    last_error: Some("Transient editor failure".into()),
-                    ..Default::default()
-                };
-                Ok(())
-            })
-            .unwrap();
-        let state = store.load(&task).unwrap();
-        assert!(state.retry_timings.infinite_retries);
-        assert!(state.automatic_retry_at_ms().is_some());
-        let mut finite = state.clone();
-        finite.retry_timings.infinite_retries = false;
-        assert!(finite.automatic_retry_at_ms().is_none());
-        let mut paused = state.clone();
-        paused.action.automatic_retry_paused = true;
-        assert!(paused.automatic_retry_at_ms().is_none());
-        for accepted in [None, Some(true)] {
-            let mut uncertain = state.clone();
-            uncertain.action.send_accepted = accepted;
-            assert!(uncertain.automatic_retry_at_ms().is_none());
-        }
-    }
-
-    #[test]
-    fn interrupted_creation_is_retryable_only_before_any_action_was_queued() {
-        let (_root, store, task) = fixture();
-        fail(&store, &task, "broken-load", 10);
-        store
-            .reserve_conversation_recovery(&task, "broken-load", 20, false)
-            .unwrap();
-        let issue = store
-            .issue_creation_pairing(&task, "https://chatgpt.com/new", 1, 30)
-            .unwrap();
-        let preparing = store.load(&task).unwrap();
-        assert!(preparing.pairing.creating_chat);
-        assert!(preparing.pairing.pending.is_some());
-        assert!(!interrupted_replacement_creation(&preparing));
-        store
-            .invalidate_pairing(&task, issue.generation, 40)
-            .unwrap();
-        let interrupted = store.load(&task).unwrap();
-        assert!(interrupted_replacement_creation(&interrupted));
-        store
-            .record_interrupted_replacement_retry(&task, 50)
-            .unwrap();
-        assert_eq!(
-            store
-                .load(&task)
-                .unwrap()
-                .conversation_recovery
-                .failed_chat_count,
-            1
-        );
-        for accepted in [None, Some(false), Some(true)] {
-            let mut queued = interrupted.clone();
-            queued.action.id = Some("a-browser-action-existed".into());
-            queued.action.send_accepted = accepted;
-            assert!(!interrupted_replacement_creation(&queued));
-        }
-        let mut uncertain = interrupted.clone();
-        uncertain.action.last_error =
-            Some("Pairing verification was interrupted; pair this conversation again".into());
-        assert!(!interrupted_replacement_creation(&uncertain));
-        let mut stopped = interrupted;
-        stopped.goal.as_mut().unwrap().status = GoalStatus::Configured;
-        assert!(!interrupted_replacement_creation(&stopped));
-    }
-}
-
 pub fn unavailable_conversation(state: &AutomationTaskState) -> bool {
     state.action.status == AutomationActionStatus::ConversationUnavailable
         && state.action.last_error.as_deref() == Some(UNAVAILABLE_CONVERSATION_MESSAGE)
@@ -443,5 +188,275 @@ impl AgentAutomationStore {
             recovery.first_failure_at_ms = None;
             Ok(url)
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent_automation::{AutomationActionKind, AutomationActionState};
+    fn fixture() -> (
+        tempfile::TempDir,
+        AgentAutomationStore,
+        ConversationIdentity,
+    ) {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = crate::config::default_config(root.path().into());
+        config
+            .markdown_chat
+            .automation
+            .retry_timings
+            .infinite_retries = true;
+        let store = AgentAutomationStore::for_config(&config).unwrap();
+        let task = ConversationIdentity::from_openai_session("recovery-test").unwrap();
+        store
+            .set_goal(&task, "Preserve this goal and its progress", 1)
+            .unwrap();
+        store.run_goal(&task, 1, 2).unwrap();
+        let pair = store
+            .issue_pairing(&task, "https://chatgpt.com/c/broken", 0, 3)
+            .unwrap();
+        store
+            .record_pairing_canonical_url(&task, pair.generation, "https://chatgpt.com/c/broken", 4)
+            .unwrap();
+        store
+            .verify_pairing(&task, pair.generation, 0, &pair.reference, 5)
+            .unwrap();
+        store
+            .set_conversation_recovery_enabled(&task, true)
+            .unwrap();
+        (root, store, task)
+    }
+    fn fail(store: &AgentAutomationStore, task: &ConversationIdentity, id: &str, now: u64) {
+        store
+            .mutate(task, |state| {
+                state.action = AutomationActionState {
+                    id: Some(id.into()),
+                    kind: Some(AutomationActionKind::OfflineGoal),
+                    pairing_generation: Some(state.pairing.generation),
+                    goal_revision: Some(1),
+                    status: AutomationActionStatus::ConversationUnavailable,
+                    send_accepted: Some(false),
+                    last_error: Some(UNAVAILABLE_CONVERSATION_MESSAGE.into()),
+                    updated_at_ms: Some(now),
+                    ..Default::default()
+                };
+                Ok(())
+            })
+            .unwrap();
+    }
+    #[test]
+    fn replacement_requires_three_distinct_failed_loads_and_preserves_the_goal() {
+        let (_root, store, task) = fixture();
+        fail(&store, &task, "failure-one", 100);
+        for now in [100, 300, 90_000] {
+            assert_eq!(
+                store
+                    .observe_unavailable_conversation(&task, now)
+                    .unwrap()
+                    .failure_count,
+                1
+            );
+        }
+        assert!(
+            store
+                .reserve_conversation_recovery(&task, "failure-one", 90_000, true)
+                .is_err()
+        );
+        fail(&store, &task, "failure-two", 95_000);
+        store
+            .observe_unavailable_conversation(&task, 95_000)
+            .unwrap();
+        assert!(
+            store
+                .reserve_conversation_recovery(&task, "failure-two", 95_000, true)
+                .is_err()
+        );
+        fail(&store, &task, "failure-three", 100_000);
+        store
+            .observe_unavailable_conversation(&task, 100_000)
+            .unwrap();
+        assert!(
+            store
+                .reserve_conversation_recovery(&task, "stale-action", 100_001, true)
+                .is_err()
+        );
+        assert_eq!(
+            store
+                .reserve_conversation_recovery(&task, "failure-three", 100_001, true)
+                .unwrap(),
+            "https://chatgpt.com/c/broken"
+        );
+        let saved = store.load(&task).unwrap();
+        assert_eq!(saved.conversation_recovery.failed_chat_count, 1);
+        assert_eq!(
+            saved.goal.unwrap().markdown,
+            "Preserve this goal and its progress"
+        );
+        assert_eq!(
+            saved.pairing.canonical_url.as_deref(),
+            Some("https://chatgpt.com/c/broken")
+        );
+    }
+    #[test]
+    fn initial_setup_retry_does_not_delay_first_real_replacement_but_replacement_cooldown_remains()
+    {
+        let (_root, store, task) = fixture();
+        store
+            .mutate(&task, |s| {
+                s.conversation_recovery.last_recovery_at_ms = Some(95_000);
+                Ok(())
+            })
+            .unwrap();
+        for (id, now) in [("first", 10_000), ("second", 45_000)] {
+            fail(&store, &task, id, now);
+            let recovery = store.observe_unavailable_conversation(&task, now).unwrap();
+            assert!(!recovery.automatic_replacement_due(100_000));
+        }
+        fail(&store, &task, "third", 70_000);
+        let recovery = store
+            .observe_unavailable_conversation(&task, 70_000)
+            .unwrap();
+        assert!(recovery.automatic_replacement_due(100_000));
+        store
+            .reserve_conversation_recovery(&task, "third", 100_000, true)
+            .unwrap();
+        for (id, now) in [("fourth", 110_000), ("fifth", 145_000), ("sixth", 180_000)] {
+            fail(&store, &task, id, now);
+            store.observe_unavailable_conversation(&task, now).unwrap();
+        }
+        let mut recovery = store.load(&task).unwrap().conversation_recovery;
+        assert_eq!(recovery.failed_chat_count, 1);
+        assert!(!recovery.automatic_replacement_due(200_000));
+        assert!(
+            store
+                .reserve_conversation_recovery(&task, "sixth", 200_000, true)
+                .is_err()
+        );
+        assert!(recovery.automatic_replacement_due(1_900_000));
+        recovery.enabled = false;
+        assert!(!recovery.automatic_replacement_due(1_900_000));
+    }
+    #[test]
+    fn a_success_resets_failure_evidence_and_uncertain_sends_are_never_replaced() {
+        let (_root, store, task) = fixture();
+        fail(&store, &task, "first", 100);
+        store.observe_unavailable_conversation(&task, 100).unwrap();
+        store
+            .mutate(&task, |s| {
+                s.action.status = AutomationActionStatus::Idle;
+                s.action.send_accepted = Some(true);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(
+            store
+                .observe_unavailable_conversation(&task, 200)
+                .unwrap()
+                .failure_count,
+            0
+        );
+        fail(&store, &task, "second", 300);
+        assert_eq!(
+            store
+                .observe_unavailable_conversation(&task, 300)
+                .unwrap()
+                .failure_count,
+            1
+        );
+        for accepted in [None, Some(true)] {
+            store
+                .mutate(&task, |s| {
+                    s.action.send_accepted = accepted;
+                    Ok(())
+                })
+                .unwrap();
+            assert!(
+                store
+                    .reserve_conversation_recovery(&task, "second", 1_000_000, false)
+                    .is_err()
+            );
+        }
+        store.stop_goal(&task, 1, 1_000_001).unwrap();
+        assert!(!unavailable_conversation(&store.load(&task).unwrap()));
+    }
+    #[test]
+    fn infinite_retries_survive_large_counters_but_preserve_pause_and_send_safety() {
+        let (_root, store, task) = fixture();
+        store
+            .mutate(&task, |s| {
+                s.action = AutomationActionState {
+                    id: Some("unsent".into()),
+                    kind: Some(AutomationActionKind::OfflineChat),
+                    pairing_generation: Some(1),
+                    status: AutomationActionStatus::Failed,
+                    send_accepted: Some(false),
+                    updated_at_ms: Some(100),
+                    automatic_retry_attempts: u32::MAX,
+                    last_error: Some("Transient editor failure".into()),
+                    ..Default::default()
+                };
+                Ok(())
+            })
+            .unwrap();
+        let state = store.load(&task).unwrap();
+        assert!(state.retry_timings.infinite_retries);
+        assert!(state.automatic_retry_at_ms().is_some());
+        let mut finite = state.clone();
+        finite.retry_timings.infinite_retries = false;
+        assert!(finite.automatic_retry_at_ms().is_none());
+        let mut paused = state.clone();
+        paused.action.automatic_retry_paused = true;
+        assert!(paused.automatic_retry_at_ms().is_none());
+        for accepted in [None, Some(true)] {
+            let mut uncertain = state.clone();
+            uncertain.action.send_accepted = accepted;
+            assert!(uncertain.automatic_retry_at_ms().is_none());
+        }
+    }
+
+    #[test]
+    fn interrupted_creation_is_retryable_only_before_any_action_was_queued() {
+        let (_root, store, task) = fixture();
+        fail(&store, &task, "broken-load", 10);
+        store
+            .reserve_conversation_recovery(&task, "broken-load", 20, false)
+            .unwrap();
+        let issue = store
+            .issue_creation_pairing(&task, "https://chatgpt.com/new", 1, 30)
+            .unwrap();
+        let preparing = store.load(&task).unwrap();
+        assert!(preparing.pairing.creating_chat);
+        assert!(preparing.pairing.pending.is_some());
+        assert!(!interrupted_replacement_creation(&preparing));
+        store
+            .invalidate_pairing(&task, issue.generation, 40)
+            .unwrap();
+        let interrupted = store.load(&task).unwrap();
+        assert!(interrupted_replacement_creation(&interrupted));
+        store
+            .record_interrupted_replacement_retry(&task, 50)
+            .unwrap();
+        assert_eq!(
+            store
+                .load(&task)
+                .unwrap()
+                .conversation_recovery
+                .failed_chat_count,
+            1
+        );
+        for accepted in [None, Some(false), Some(true)] {
+            let mut queued = interrupted.clone();
+            queued.action.id = Some("a-browser-action-existed".into());
+            queued.action.send_accepted = accepted;
+            assert!(!interrupted_replacement_creation(&queued));
+        }
+        let mut uncertain = interrupted.clone();
+        uncertain.action.last_error =
+            Some("Pairing verification was interrupted; pair this conversation again".into());
+        assert!(!interrupted_replacement_creation(&uncertain));
+        let mut stopped = interrupted;
+        stopped.goal.as_mut().unwrap().status = GoalStatus::Configured;
+        assert!(!interrupted_replacement_creation(&stopped));
     }
 }

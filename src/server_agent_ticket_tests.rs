@@ -6,6 +6,7 @@ fn ticket_test_config(root: &std::path::Path, enabled: bool) -> AppConfig {
         serde_json::to_vec(&json!({
             "schemaVersion": 1,
             "workDir": root,
+            "memory": { "dir": root.join("test-state") },
             "experimental": {"agentTickets": enabled},
             "codexMcp": { "enabled": false }
         }))
@@ -16,6 +17,129 @@ fn ticket_test_config(root: &std::path::Path, enabled: bool) -> AppConfig {
     let mut config = crate::config::load_config(cli).unwrap();
     config.work_dir = std::fs::canonicalize(&config.work_dir).unwrap();
     config
+}
+
+#[tokio::test]
+async fn ticket_test_configuration_keeps_chat_state_inside_the_fixture() {
+    for enabled in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().canonicalize().unwrap();
+        let mut handler =
+            handler_with_tools(&workspace, Vec::new(), crate::types::ToolLogLevel::Info);
+        handler.config = Arc::new(ticket_test_config(&workspace, enabled));
+        // Fail before creating state if replacing the fixture config restores
+        // the default storage in the user's real home directory.
+        assert!(crate::memory::task_state_dir(&handler.config).starts_with(&workspace));
+        let identity = ConversationIdentity::from_openai_session("wait-mcp").unwrap();
+        bind_fixture_workspace(&handler, Some(&identity)).await;
+        let effective = handler
+            .project_bindings
+            .effective_config(&handler.config, &identity)
+            .unwrap();
+        let chat = handler
+            .markdown_chat
+            .chat(&effective, Some(&identity), &handler.session)
+            .unwrap();
+        let path = chat.path().to_path_buf();
+        assert!(path.starts_with(&workspace));
+        chat.ensure().await.unwrap();
+        chat.warn_ticket_rejection().await.unwrap();
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains(crate::agent_tickets::WARNING)
+        );
+        drop(chat);
+        drop(handler);
+        root.close().unwrap();
+        assert!(
+            !path.exists(),
+            "dropping the fixture must remove its chat state"
+        );
+    }
+}
+
+#[tokio::test]
+async fn host_issued_browser_ticket_resets_only_the_intended_branch_through_real_mcp_dispatch() {
+    let root = tempfile::tempdir().unwrap();
+    let calls = Arc::new(AtomicU64::new(0));
+    let store = Arc::new(AgentTicketStore::persistent(root.path().join("tickets")));
+    let mut handler = handler_with_tools(
+        root.path(),
+        vec![Box::new(TicketProbe {
+            name: "ticket_probe",
+            calls: calls.clone(),
+            private: false,
+        })],
+        crate::types::ToolLogLevel::Info,
+    );
+    handler.config = Arc::new(ticket_test_config(root.path(), true));
+    handler.agent_tickets = store.clone();
+    let (server_transport, client_transport) = tokio::io::duplex(64 * 1024);
+    let server = tokio::spawn(async move {
+        handler
+            .serve(server_transport)
+            .await
+            .unwrap()
+            .waiting()
+            .await
+            .unwrap();
+    });
+    let client = ().serve(client_transport).await.unwrap();
+    let request = |session: &str, ticket: Option<&str>| {
+        let mut value =
+            serde_json::to_value(ticket_request("ticket_probe", ticket, json!({}))).unwrap();
+        value["_meta"] = json!({"openai/session":session});
+        serde_json::from_value::<CallToolRequestParams>(value).unwrap()
+    };
+    let result = client
+        .call_tool(request("host-ticket-chat", None))
+        .await
+        .unwrap();
+    let old = next_ticket(&result);
+    let identity = ConversationIdentity::from_openai_session("host-ticket-chat").unwrap();
+    let ticket = store
+        .issue_browser_ticket(crate::agent_tickets::BrowserTicketScope {
+            task_key: identity.stable_key().into(),
+            owner_generation: 0,
+            conversation_key: Some(identity.stable_key().into()),
+        })
+        .unwrap();
+    assert_ticket_rejected(
+        &client
+            .call_tool(request("other-chat", Some(&ticket)))
+            .await
+            .unwrap(),
+    );
+    let resumed = client
+        .call_tool(request("host-ticket-chat", Some(&ticket)))
+        .await
+        .unwrap();
+    assert_ne!(resumed.is_error, Some(true));
+    let next = next_ticket(&resumed);
+    assert_ticket_rejected(
+        &client
+            .call_tool(request("host-ticket-chat", Some(&old)))
+            .await
+            .unwrap(),
+    );
+    assert_ticket_rejected(
+        &client
+            .call_tool(request("host-ticket-chat", Some(&ticket)))
+            .await
+            .unwrap(),
+    );
+    assert_ne!(
+        client
+            .call_tool(request("host-ticket-chat", Some(&next)))
+            .await
+            .unwrap()
+            .is_error,
+        Some(true)
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+    client.cancel().await.unwrap();
+    server.abort();
 }
 
 #[test]
@@ -52,6 +176,257 @@ fn agent_tickets_only_augment_enabled_model_tool_schemas() {
             .get("new_codexify_ticket")
             .is_none()
     );
+}
+
+#[test]
+fn ticket_wait_is_read_only_ticketless_and_advertises_only_ticket_recovery_fields() {
+    let root = tempfile::tempdir().unwrap();
+    let config = ticket_test_config(root.path(), true);
+    let tools = crate::registry::load_tools_for_config(&config);
+    let tool = tools
+        .iter()
+        .find(|tool| tool.name() == TicketWait::NAME)
+        .unwrap();
+    let advertised = advertised_tool(tool.as_ref(), &config);
+    assert_eq!(advertised.annotations.unwrap().read_only_hint, Some(true));
+    assert_eq!(advertised.input_schema["additionalProperties"], false);
+    assert!(
+        advertised.input_schema["properties"]
+            .as_object()
+            .unwrap()
+            .is_empty()
+    );
+    let properties = &advertised.output_schema.unwrap()["properties"];
+    assert!(properties.get("new_codexify_ticket").is_some());
+    for unrelated in [
+        crate::markdown_chat::USER_MESSAGE_FIELD,
+        crate::markdown_chat::rollout::REMINDER_FIELD,
+        crate::agent_automation::turn_renewal::NOTICE_FIELD,
+        WORKSPACE_CHANGE_FIELD,
+    ] {
+        assert!(properties.get(unrelated).is_none());
+    }
+    assert!(!counts_rollout_work(TicketWait::NAME));
+    assert!(
+        !crate::registry::load_tools_for_config(&ticket_test_config(root.path(), false))
+            .iter()
+            .any(|tool| tool.name() == TicketWait::NAME)
+    );
+    assert!(
+        advertised
+            .description
+            .unwrap()
+            .contains("MUST call ticket_wait again")
+    );
+    for instruction in [
+        crate::agent_tickets::INSTRUCTIONS,
+        crate::agent_tickets::REJECTED,
+    ] {
+        assert!(instruction.contains("ticket_wait"));
+        assert!(!instruction.contains("Stop this agent branch"));
+        assert!(!instruction.contains("Only the user may recover"));
+    }
+}
+
+#[tokio::test]
+async fn ticket_wait_recovers_through_mcp_without_touching_presence_messages_or_work_counters() {
+    let root = tempfile::tempdir().unwrap();
+    let calls = Arc::new(AtomicU64::new(0));
+    let mut handler = handler_with_tools(
+        root.path(),
+        vec![
+            Box::new(TicketWait),
+            Box::new(TicketProbe {
+                name: "ticket_probe",
+                calls: calls.clone(),
+                private: false,
+            }),
+        ],
+        crate::types::ToolLogLevel::Info,
+    );
+    let mut config = ticket_test_config(root.path(), true);
+    config.markdown_chat.max_wait_ms = 20;
+    handler.config = Arc::new(config);
+    let identity = ConversationIdentity::from_openai_session("wait-mcp").unwrap();
+    bind_fixture_workspace(&handler, Some(&identity)).await;
+    let effective = handler
+        .project_bindings
+        .effective_config(&handler.config, &identity)
+        .unwrap();
+    let chat = handler
+        .markdown_chat
+        .chat(&effective, Some(&identity), &handler.session)
+        .unwrap();
+    let tickets = root.path().join("tickets");
+    handler.agent_tickets = Arc::new(AgentTicketStore::persistent(tickets.clone()));
+    let (server_transport, client_transport) = tokio::io::duplex(64 * 1024);
+    let server = tokio::spawn(async move {
+        handler
+            .serve(server_transport)
+            .await
+            .unwrap()
+            .waiting()
+            .await
+            .unwrap();
+    });
+    let client = ().serve(client_transport).await.unwrap();
+    let request = |name: &str, ticket: Option<&str>| {
+        let mut value = serde_json::to_value(ticket_request(name, ticket, json!({}))).unwrap();
+        value["_meta"] = json!({"openai/session":"wait-mcp"});
+        serde_json::from_value::<CallToolRequestParams>(value).unwrap()
+    };
+    let initial = client
+        .call_tool(request("ticket_probe", None))
+        .await
+        .unwrap();
+    let current = next_ticket(&initial);
+    let path = tickets.join(format!("{}.ticket", identity.stable_key()));
+    let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+    let before = chat.widget_page(None, None).await.unwrap();
+    assert_ticket_rejected(
+        &client
+            .call_tool(request("ticket_probe", Some("staletkt")))
+            .await
+            .unwrap(),
+    );
+    for _ in 0..2 {
+        let result = client
+            .call_tool(request("ticket_wait", None))
+            .await
+            .unwrap();
+        assert_ne!(result.is_error, Some(true));
+        let body = result.structured_content.as_ref().unwrap();
+        assert_eq!(body["status"], "waiting");
+        assert_eq!(body["required_next_action"], "ticket_wait");
+        assert_eq!(body["assistant_turn_may_end"], false);
+        assert!(body.get("new_codexify_ticket").is_none());
+        assert!(body.get(crate::markdown_chat::USER_MESSAGE_FIELD).is_none());
+        assert!(
+            body["content"]
+                .as_str()
+                .unwrap()
+                .contains("Do not run other tools")
+        );
+    }
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().modified().unwrap(),
+        modified
+    );
+    let after = chat.widget_page(None, None).await.unwrap();
+    assert_eq!(after.last_agent_call_at_ms, before.last_agent_call_at_ms);
+    assert_eq!(after.total_tool_calls, before.total_tool_calls);
+    assert_eq!(after.delivered_through, before.delivered_through);
+    assert_eq!(after.read_through, before.read_through);
+    assert!(chat.rollout_reminder(2).await.unwrap().is_none());
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    // The working branch's ticket is still accepted after the other branch waited.
+    let continued = client
+        .call_tool(request("ticket_probe", Some(&current)))
+        .await
+        .unwrap();
+    let old = next_ticket(&continued);
+    std::fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_modified(
+            std::time::SystemTime::now()
+                - Duration::from_millis(crate::markdown_chat::OFFLINE_AFTER_MS + 1),
+        )
+        .unwrap();
+    let renewed = client
+        .call_tool(request("ticket_wait", None))
+        .await
+        .unwrap();
+    assert_ne!(renewed.is_error, Some(true));
+    let next = next_ticket(&renewed);
+    assert_ne!(next, old);
+    assert_eq!(
+        renewed.structured_content.as_ref().unwrap()["status"],
+        "renewed"
+    );
+    assert_eq!(
+        renewed.structured_content.as_ref().unwrap()["required_next_action"],
+        "rollout_read"
+    );
+    assert_ticket_rejected(
+        &client
+            .call_tool(request("ticket_probe", Some(&old)))
+            .await
+            .unwrap(),
+    );
+    assert_ne!(
+        client
+            .call_tool(request("ticket_probe", Some(&next)))
+            .await
+            .unwrap()
+            .is_error,
+        Some(true)
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+    client.cancel().await.unwrap();
+    server.abort();
+}
+
+#[tokio::test]
+async fn ticket_wait_can_renew_before_setup_without_authorizing_project_tools() {
+    let root = tempfile::tempdir().unwrap();
+    let calls = Arc::new(AtomicU64::new(0));
+    let mut handler = handler_with_tools(
+        root.path(),
+        vec![
+            Box::new(TicketWait),
+            Box::new(TicketProbe {
+                name: "ticket_probe",
+                calls: calls.clone(),
+                private: false,
+            }),
+        ],
+        crate::types::ToolLogLevel::Info,
+    );
+    let mut config = ticket_test_config(root.path(), true);
+    config.conversation_auth_token = Some("a".repeat(64).into());
+    handler.config = Arc::new(config);
+    let (server_transport, client_transport) = tokio::io::duplex(64 * 1024);
+    let server = tokio::spawn(async move {
+        handler
+            .serve(server_transport)
+            .await
+            .unwrap()
+            .waiting()
+            .await
+            .unwrap();
+    });
+    let client = ().serve(client_transport).await.unwrap();
+    let request = |name: &str, ticket: Option<&str>| {
+        let mut value = serde_json::to_value(ticket_request(name, ticket, json!({}))).unwrap();
+        value["_meta"] = json!({"openai/session":"wait-before-setup"});
+        serde_json::from_value::<CallToolRequestParams>(value).unwrap()
+    };
+    let result = client
+        .call_tool(request("ticket_wait", None))
+        .await
+        .unwrap();
+    assert_ne!(result.is_error, Some(true));
+    assert_eq!(
+        result.structured_content.as_ref().unwrap()["required_next_action"],
+        "setup"
+    );
+    let ticket = next_ticket(&result);
+    let unauthorized = client
+        .call_tool(request("ticket_probe", Some(&ticket)))
+        .await
+        .unwrap();
+    assert_eq!(unauthorized.is_error, Some(true));
+    assert!(unauthorized.content.iter().any(|content| {
+        content
+            .as_text()
+            .is_some_and(|text| text.text.contains("has not completed connector setup"))
+    }));
+    next_ticket(&unauthorized);
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    client.cancel().await.unwrap();
+    server.abort();
 }
 
 struct TicketProbe {

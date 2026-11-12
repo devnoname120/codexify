@@ -72,18 +72,40 @@ pub(crate) async fn stage<F: Future>(name: &'static str, work: F) -> F::Output {
     result
 }
 
-pub(crate) fn worker_started(pid: Option<u32>) {
-    worker_observer()(pid);
+pub(crate) fn worker_started(kind: &'static str, pid: Option<u32>) {
+    worker_observer(kind)(pid);
 }
 
-pub(crate) fn worker_observer() -> impl Fn(Option<u32>) + Send + 'static {
+pub(crate) fn worker_observer(kind: &'static str) -> impl Fn(Option<u32>) + Send + 'static {
     let call = ACTIVE_CALL.try_with(Clone::clone).ok();
     move |pid| {
         if let Some((logger, call_id)) = &call {
             let _ = logger.write_event(
                 &json!({"schema_version":SCHEMA_VERSION,"timestamp":timestamp(),
-            "event":"tool_worker","run_id":logger.run_id,"call_id":call_id,"process_id":pid}),
+            "event":"tool_worker","run_id":logger.run_id,"call_id":call_id,
+            "worker_kind":kind,"process_id":pid}),
             );
+        }
+    }
+}
+
+/// Capture the tool call before spawning the waiter: task locals do not follow
+/// tokio::spawn, and resident commands can finish after the tool has yielded.
+pub(crate) fn worker_exit_observer(
+    kind: &'static str,
+    pid: Option<u32>,
+) -> impl FnOnce(&io::Result<std::process::ExitStatus>) + Send + 'static {
+    let call = ACTIVE_CALL.try_with(Clone::clone).ok();
+    move |result| {
+        if let Some((logger, call_id)) = &call {
+            let _ = logger.write_event(&json!({
+                "schema_version":SCHEMA_VERSION,"timestamp":timestamp(),
+                "event":"tool_worker_exit","run_id":logger.run_id,"call_id":call_id,
+                "worker_kind":kind,"process_id":pid,
+                "exit_code":result.as_ref().ok().and_then(|value| value.code()),
+                "success":result.as_ref().ok().map(|value| value.success()),
+                "wait_error":result.as_ref().err().map(ToString::to_string),
+            }));
         }
     }
 }
@@ -654,7 +676,7 @@ mod tests {
         let logger = Arc::new(AuditLogger::open(&config).unwrap().unwrap());
         observe(Some(logger), 42, async {
             stage("filesystem_queue", async {}).await;
-            worker_started(Some(123));
+            worker_started("git", Some(123));
         })
         .await;
         let text = std::fs::read_to_string(config.audit.log_file.unwrap()).unwrap();
@@ -668,13 +690,52 @@ mod tests {
         assert!(events.iter().any(|event| event["event"] == "tool_stage"
             && event["phase"] == "finish"
             && event.get("duration_ms").is_some()));
-        assert!(
-            events
-                .iter()
-                .any(|event| event["event"] == "tool_worker" && event["process_id"] == 123)
-        );
+        assert!(events.iter().any(|event| event["event"] == "tool_worker"
+            && event["process_id"] == 123
+            && event["worker_kind"] == "git"));
         assert!(!text.contains("arguments"));
         assert!(!text.contains("output"));
+    }
+
+    #[tokio::test]
+    async fn resident_exec_records_its_own_worker_and_exit_after_the_call_scope_ends() {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = default_config(root.path().into());
+        config.audit.log_file = Some(root.path().join("audit.jsonl"));
+        let logger = Arc::new(AuditLogger::open(&config).unwrap().unwrap());
+        let state = crate::exec_sessions::SessionState::new();
+        let command = if cfg!(windows) {
+            "Start-Sleep -Milliseconds 150; exit 37"
+        } else {
+            "sleep 0.15; exit 37"
+        };
+        let session = observe(Some(logger), 42, async {
+            crate::exec_sessions::start_exec_session(&state, &config, command, root.path(), None)
+                .unwrap()
+        })
+        .await;
+        let (_, finished, _) = session.yield_output_with_metadata(15_000).await;
+        assert!(finished);
+        assert_eq!(session.exit_code(), Some(37));
+        let text = std::fs::read_to_string(config.audit.log_file.unwrap()).unwrap();
+        let events: Vec<Value> = text
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        for event in ["tool_worker", "tool_worker_exit"] {
+            let record = events.iter().find(|value| value["event"] == event).unwrap();
+            assert_eq!(record["worker_kind"], "exec");
+            assert_eq!(record["call_id"], 42);
+            assert_eq!(record["process_id"], session.pid.unwrap());
+        }
+        let exit = events
+            .iter()
+            .find(|value| value["event"] == "tool_worker_exit")
+            .unwrap();
+        assert_eq!(exit["exit_code"], 37);
+        assert_eq!(exit["success"], false);
+        assert!(!text.contains("Start-Sleep"));
+        assert!(!text.contains("sleep 0.15"));
     }
 
     #[test]

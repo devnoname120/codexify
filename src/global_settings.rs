@@ -115,6 +115,26 @@ pub(crate) fn schema_versions(config: &AppConfig) -> Result<(String, String), St
 pub(crate) fn schema_revision(config: &AppConfig) -> Result<String, String> {
     schema_versions(config).map(|v| v.0)
 }
+
+/// A replacement must be created after discovery has caught up, including the
+/// debounce window between saving settings and starting the browser refresh.
+pub(crate) fn automation_schema_refresh_ready(config: &AppConfig) -> bool {
+    if config.loaded_config_path.is_none() {
+        return true;
+    }
+    if read_refresh_intent().is_some_and(|intent| {
+        intent["targetVersion"] == env!("CARGO_PKG_VERSION") && intent["phase"] != "completed"
+    }) {
+        return false;
+    }
+    let Some(intent) = read_schema_intent(config) else {
+        return true;
+    };
+    matches!(
+        intent["phase"].as_str(),
+        Some("idle" | "completed" | "cancelled")
+    ) && schema_revision(config).is_ok_and(|revision| intent["observedRevision"] == revision)
+}
 pub(crate) fn schema_intent_path(config: &AppConfig) -> Result<PathBuf, String> {
     Ok(config
         .loaded_config_path
@@ -630,28 +650,67 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("config.json");
         let limits = json!([{"model":"gpt-6-sol","effort":"high","minutes":42,"enabled":false}]);
-        std::fs::write(&path, json!({"workDir":root.path(),"codexMcp":{"enabled":false},
+        std::fs::write(
+            &path,
+            json!({"workDir":root.path(),"codexMcp":{"enabled":false},
             "agentChat":{"turnRenewal":{"enabled":false,"limits":limits}},
-            "exec":{"maxSessions":6}}).to_string()).unwrap();
+            "exec":{"maxSessions":6}})
+            .to_string(),
+        )
+        .unwrap();
         let mut config = crate::config::default_config(root.path().to_owned());
         config.loaded_config_path = Some(path.clone());
         let before = snapshot(&config).unwrap();
         assert_eq!(before["fastSetup"]["applied"], false);
         let changes = before["fastSetup"]["changes"].as_object().unwrap().clone();
-        let saved = save(&config, before["revision"].as_str().unwrap(), None, Some(changes.clone())).unwrap();
+        let saved = save(
+            &config,
+            before["revision"].as_str().unwrap(),
+            None,
+            Some(changes.clone()),
+        )
+        .unwrap();
         assert_eq!(saved["fastSetup"]["applied"], true);
         assert_eq!(saved["restartRequired"], true);
         assert_eq!(saved["schemaRefreshRequired"], true);
-        assert_eq!(saved["document"]["agentChat"]["turnRenewal"]["limits"], limits);
+        assert_eq!(
+            saved["document"]["agentChat"]["turnRenewal"]["limits"],
+            limits
+        );
         assert_eq!(saved["document"]["exec"]["maxSessions"], 6);
-        assert_eq!(saved["document"]["agentChat"]["defaultMessageMode"], "steer");
-        assert_eq!(saved["document"]["agentChat"]["features"]["externalAgentControl"], Value::Null);
+        assert_eq!(
+            saved["document"]["agentChat"]["defaultMessageMode"],
+            "steer"
+        );
+        assert_eq!(
+            saved["document"]["agentChat"]["features"]["externalAgentControl"],
+            Value::Null
+        );
         let saved_bytes = std::fs::read(&path).unwrap();
-        assert!(save(&config, before["revision"].as_str().unwrap(), None, Some(changes.clone())).is_err());
+        assert!(
+            save(
+                &config,
+                before["revision"].as_str().unwrap(),
+                None,
+                Some(changes.clone())
+            )
+            .is_err()
+        );
         assert_eq!(std::fs::read(&path).unwrap(), saved_bytes);
         let mut invalid = changes;
-        invalid.insert("agentChat.automation.browserSimplicity".into(), json!("too-fast"));
-        assert!(save(&config, saved["revision"].as_str().unwrap(), None, Some(invalid)).is_err());
+        invalid.insert(
+            "agentChat.automation.browserSimplicity".into(),
+            json!("too-fast"),
+        );
+        assert!(
+            save(
+                &config,
+                saved["revision"].as_str().unwrap(),
+                None,
+                Some(invalid)
+            )
+            .is_err()
+        );
         assert_eq!(std::fs::read(&path).unwrap(), saved_bytes);
     }
 
@@ -663,18 +722,53 @@ mod tests {
         config.loaded_config_path = Some(path.clone());
         std::fs::write(&path, json!({"workDir":root.path(),"codexMcp":{"enabled":false},"agentChat":{"automation":{"minimalUi":true}}}).to_string()).unwrap();
         let mut current = snapshot(&config).unwrap();
-        assert_eq!(current["defaults"]["agentChat"]["automation"]["browserSimplicity"], "simplified");
-        assert_eq!(current["fieldSchema"]["agentChat"]["automation"]["browserSimplicity"], "off");
-        for level in [json!("bones"), json!("simplified"), json!("off"), Value::Null] {
-            current = save(&config,current["revision"].as_str().unwrap(),None,
-                Some(Map::from_iter([("agentChat.automation.browserSimplicity".into(),level.clone())]))).unwrap();
-            assert_eq!(current["document"]["agentChat"]["automation"]["browserSimplicity"],level);
-            assert_eq!(current["document"]["agentChat"]["automation"]["minimalUi"],true);
-            assert_eq!(current["restartRequired"],true);
-            assert_eq!(current["schemaRefreshRequired"],false);
+        assert_eq!(
+            current["defaults"]["agentChat"]["automation"]["browserSimplicity"],
+            "simplified"
+        );
+        assert_eq!(
+            current["fieldSchema"]["agentChat"]["automation"]["browserSimplicity"],
+            "off"
+        );
+        for level in [
+            json!("bones"),
+            json!("simplified"),
+            json!("off"),
+            Value::Null,
+        ] {
+            current = save(
+                &config,
+                current["revision"].as_str().unwrap(),
+                None,
+                Some(Map::from_iter([(
+                    "agentChat.automation.browserSimplicity".into(),
+                    level.clone(),
+                )])),
+            )
+            .unwrap();
+            assert_eq!(
+                current["document"]["agentChat"]["automation"]["browserSimplicity"],
+                level
+            );
+            assert_eq!(
+                current["document"]["agentChat"]["automation"]["minimalUi"],
+                true
+            );
+            assert_eq!(current["restartRequired"], true);
+            assert_eq!(current["schemaRefreshRequired"], false);
         }
-        assert!(save(&config,current["revision"].as_str().unwrap(),None,
-            Some(Map::from_iter([("agentChat.automation.browserSimplicity".into(),json!("fast"))]))).is_err());
+        assert!(
+            save(
+                &config,
+                current["revision"].as_str().unwrap(),
+                None,
+                Some(Map::from_iter([(
+                    "agentChat.automation.browserSimplicity".into(),
+                    json!("fast")
+                )]))
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -683,26 +777,117 @@ mod tests {
         let path = root.path().join("config.json");
         let mut config = crate::config::default_config(root.path().into());
         config.loaded_config_path = Some(path.clone());
-        std::fs::write(&path, json!({"workDir":root.path(),"codexMcp":{"enabled":false}}).to_string()).unwrap();
+        std::fs::write(
+            &path,
+            json!({"workDir":root.path(),"codexMcp":{"enabled":false}}).to_string(),
+        )
+        .unwrap();
         let mut current = snapshot(&config).unwrap();
-        for key in ["agentChat.features.agentTeams", "agentChat.features.externalAgentControl", "agentChat.features.autoMode", "agentChat.features.agentFolders", "agentChat.features.conversationRecovery", "agentChat.automation.minimalUi", "agentChat.automation.recoveryEnhancements", "agentChat.automation.retryTimings.infiniteRetries"] {
-            let pointer = format!("/{}",key.replace('.',"/"));
-            assert_eq!(current["defaults"].pointer(&pointer),Some(&json!(false)),"{key}");
-            assert_eq!(current["fieldSchema"].pointer(&pointer),Some(&json!(false)),"{key}");
-            for enabled in [true,false] {
-                current = save(&config,current["revision"].as_str().unwrap(),None,
-                    Some(Map::from_iter([(key.into(),json!(enabled))]))).unwrap();
-                assert_eq!(current["document"].pointer(&pointer),Some(&json!(enabled)),"{key}");
-                assert_eq!(current["restartRequired"],true,"{key}");
-                assert_eq!(current["schemaRefreshRequired"],(key=="agentChat.features.agentTeams"||key=="agentChat.features.externalAgentControl"),"{key}");
+        for key in [
+            "agentChat.features.agentTeams",
+            "agentChat.features.externalAgentControl",
+            "agentChat.features.autoMode",
+            "agentChat.features.agentFolders",
+            "agentChat.features.conversationRecovery",
+            "agentChat.automation.minimalUi",
+            "agentChat.automation.recoveryEnhancements",
+            "agentChat.automation.retryTimings.infiniteRetries",
+        ] {
+            let pointer = format!("/{}", key.replace('.', "/"));
+            assert_eq!(
+                current["defaults"].pointer(&pointer),
+                Some(&json!(false)),
+                "{key}"
+            );
+            assert_eq!(
+                current["fieldSchema"].pointer(&pointer),
+                Some(&json!(false)),
+                "{key}"
+            );
+            for enabled in [true, false] {
+                current = save(
+                    &config,
+                    current["revision"].as_str().unwrap(),
+                    None,
+                    Some(Map::from_iter([(key.into(), json!(enabled))])),
+                )
+                .unwrap();
+                assert_eq!(
+                    current["document"].pointer(&pointer),
+                    Some(&json!(enabled)),
+                    "{key}"
+                );
+                assert_eq!(current["restartRequired"], true, "{key}");
+                assert_eq!(
+                    current["schemaRefreshRequired"],
+                    (key == "agentChat.features.agentTeams"
+                        || key == "agentChat.features.externalAgentControl"),
+                    "{key}"
+                );
             }
         }
         let mut reset = current["document"].clone();
-        reset["agentChat"].as_object_mut().unwrap().remove("features");
-        current = save(&config,current["revision"].as_str().unwrap(),Some(reset.to_string()),None).unwrap();
+        reset["agentChat"]
+            .as_object_mut()
+            .unwrap()
+            .remove("features");
+        current = save(
+            &config,
+            current["revision"].as_str().unwrap(),
+            Some(reset.to_string()),
+            None,
+        )
+        .unwrap();
         assert!(current["document"]["agentChat"].get("features").is_none());
-        assert_eq!(current["defaults"]["agentChat"]["features"]["agentTeams"],false);
+        assert_eq!(
+            current["defaults"]["agentChat"]["features"]["agentTeams"],
+            false
+        );
     }
+    #[test]
+    fn offline_timeout_is_validated_saved_and_requires_restart() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("config.json");
+        let mut config = crate::config::default_config(root.path().into());
+        config.loaded_config_path = Some(path.clone());
+        std::fs::write(
+            &path,
+            json!({"workDir":root.path(),"codexMcp":{"enabled":false}}).to_string(),
+        )
+        .unwrap();
+        let before = snapshot(&config).unwrap();
+        assert_eq!(before["defaults"]["agentChat"]["offlineTimeoutMinutes"], 5);
+        let saved = save(
+            &config,
+            before["revision"].as_str().unwrap(),
+            None,
+            Some(Map::from_iter([(
+                "agentChat.offlineTimeoutMinutes".into(),
+                json!(10),
+            )])),
+        )
+        .unwrap();
+        assert_eq!(saved["document"]["agentChat"]["offlineTimeoutMinutes"], 10);
+        assert_eq!(saved["restartRequired"], true);
+        assert_eq!(saved["schemaRestartRequired"], false);
+        let persisted = std::fs::read(&path).unwrap();
+        for value in [json!(0), json!(1441), json!(1.5), json!("10")] {
+            assert!(
+                save(
+                    &config,
+                    saved["revision"].as_str().unwrap(),
+                    None,
+                    Some(Map::from_iter([(
+                        "agentChat.offlineTimeoutMinutes".into(),
+                        value
+                    )]))
+                )
+                .is_err()
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), persisted);
+        }
+    }
+
     #[test]
     fn optional_instance_name_can_be_saved_reset_and_kept_during_other_edits() {
         let root = tempfile::tempdir().unwrap();

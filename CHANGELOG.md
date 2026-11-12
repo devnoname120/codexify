@@ -6,6 +6,212 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- Preserve text-only MCP results in response envelopes while bounding the
+  generated structured text and retaining upstream metadata and full user notices.
+
+## [2.3.29] - 2026-11-09
+
+### Added
+
+- Optionally create and automatically pair a replacement ChatGPT conversation
+  when loading an existing conversation returns HTTP 429, including transcript
+  requests. Preserve the task, workspace, goal, pending messages, and model
+  selection, and keep the browser on the replacement through pairing and the
+  first work prompt. Enable `agentChat.automation.newConversationOnLoadRateLimit`
+  to use this recovery; it is disabled by default.
+
+### Fixed
+
+- Give accepted goal continuations at least the configured offline timeout
+  before another recovery attempt. Wait for the final attempt before reporting
+  an exhausted retry budget, and clear stale recovery state when tool activity
+  resumes without replaying accepted messages.
+- Recover pairing when a ChatGPT conversation has selected the correct workspace
+  but has not attached to the intended task. Validate the pending handoff and
+  owner generation before consuming its one-time verification reference.
+- Retain the shared browser during extended replacement verification and retries
+  before the first work prompt is sent, preventing other chats or account
+  maintenance from navigating away during the handoff.
+- Narrow the default conversation-list request filters so individual ChatGPT
+  transcripts remain accessible. Migrate only the exact legacy defaults while
+  retaining custom filters.
+- Preserve the actual creation error when ChatGPT accepts a prompt into a local
+  draft but does not confirm a persistent conversation, instead of reporting a
+  misleading conversation mismatch.
+
+## [2.3.28] - 2026-11-06
+
+### Fixed
+
+- Restore automatic file materialization approval after ChatGPT changed its
+  approval button styling. Validate the controls by structure while preserving
+  connector, account, conversation, and permission-scope checks.
+
+### Changed
+
+- Build and test macOS releases on supported macOS 15 runners after GitHub
+  retired its macOS 14 images.
+
+## [2.3.25] - 2026-10-31
+
+### Fixed
+
+- Wait for ChatGPT's conversation editor to finish rendering before preparing a
+  message. Report a missing editor as an availability problem instead of a
+  sign-in failure, and avoid reloading a page that is still rendering.
+- Recover pairing when an authorized ChatGPT conversation has no workspace
+  attached. Provide a one-time continuation to the existing task, complete
+  verification, and retain queued user messages until pairing succeeds.
+- Preserve a pending pairing handoff when delayed activity arrives from its
+  previous conversation owner.
+
+## [2.3.24] - 2026-10-29
+
+### Fixed
+
+- Retain model-submenu ownership when ChatGPT replaces the opening control,
+  including Japanese effort-only pickers whose model list opens in a portal.
+- Isolate Windows service, update, and diagnostic helpers from the server's
+  console and its control events.
+- Register Windows services using private UTF-8 script files rather than nested
+  encoded launch payloads; migrate recognized older launchers without changing
+  their saved configuration or task settings.
+- Fix Windows PowerShell update-status replacement by passing a typed .NET null
+  backup path. Preserve Unicode in updater scripts, acknowledge worker startup
+  immediately, and report stopped update tasks with their Task Scheduler result
+  instead of retaining an indefinite scheduled state.
+- Keep serving when a Ctrl+C listener cannot be installed, and record Windows
+  console-close events, panic locations, and normal runtime exits for diagnosis.
+
+## [2.3.23] - 2026-10-29
+
+### Fixed
+
+- Recover a Windows service whose server process stays alive but stops answering
+  local health checks, while allowing slow startup and transient failures.
+- Restart unexpectedly terminated Windows supervisors, including zero-code
+  exits, and upgrade recognized older task launchers during service
+  start, restart, or enable so failure recovery also applies after self-update.
+
+## [2.3.22] - 2026-10-29
+
+### Fixed
+
+- Keep the dedicated browser in Chat mode by opting out of ChatGPT's client-side
+  Work rollout, avoiding unsupported Work-mode submissions in projects.
+
+## [2.3.21] - 2026-10-28
+
+### Added
+
+- Configure the offline timeout in Chats & goals with `agentChat.offlineTimeoutMinutes`
+  (1–1440 minutes, default 5; restart to apply). Use the same threshold for presence,
+  queued delivery, goal activity, offline notifications, and automatic offline wake-ups.
+
+### Fixed
+
+- Stop automatic offline wake-ups from using a shorter timeout than the one
+  displayed in the chat interface.
+
+## [2.3.20] - 2026-10-28
+
+### Added
+
+- Show a persistent waiting bar for queued conversations without a goal, with
+  the remaining browser cooldown, live queue position, Do now, and Cancel.
+  Pending requests can also be cancelled before queue admission, and a stopped
+  browser is identified with a Start browser action instead of an invented ETA.
+
+### Fixed
+
+- Renew outdated connector schemas for idle conversations whose previous action
+  no longer has a pairing generation, preserving the queued message through
+  re-pairing and rejecting stale snapshots.
+- Isolate Windows pipe-based command shells and checkpoint helpers from console
+  windows and control events. Audit actual shell launches and exits separately
+  from Git and filesystem workers to diagnose unexpected service termination.
+- Keep a verified subscription plan when returning from billing is deferred by
+  the shared conversation-loading cooldown, instead of discarding the result
+  and reopening billing on a later retry.
+- Allow billing details time to load, retain a verified base-plan fallback while
+  resolving the Pro tier, and retry empty or incomplete results rather than
+  caching a blank plan indefinitely.
+
+## [2.3.19] - 2026-10-27
+
+### Added
+
+- Recover rejected agent tickets with the read-only, ticketless `ticket_wait`
+  tool. Require repeated waits until an exclusive ticket renewal is available,
+  then read the latest progress reports before continuing work. Waiting does
+  not extend the active ticket's lease, consume messages, or count as work.
+- Add thinking time to weekly recap tiles and share cards. Show hours and
+  minutes below 100 hours, and whole hours from 100 hours onward.
+- Start the browser directly from the stopped-browser banner, using the same
+  button styling as Browser settings and removing the redundant instructions.
+
+### Fixed
+
+- Replace ChatGPT conversations that reach the conversation-length limit
+  instead of repeatedly submitting to the full conversation. Preserve the
+  Codexify task, workspace, queued messages, and goal across the handoff.
+- Record the connector schema on each pairing and create a fresh ChatGPT
+  conversation before sending, retrying, or renewing with an outdated schema.
+  Hold messages until the replacement has verified the current tools.
+- Retain the shared browser through re-pairing and its first normal prompt,
+  with bounded timeout and cancellation cleanup, avoiding another page load
+  and cooldown between initialization and continuing the task.
+- Supply a fresh, scoped, single-use agent ticket inline with browser prompts,
+  including initialization, retries, and turn renewals. Preserve in-flight
+  calls and transport idempotency while admitting the new agent branch.
+- Remove read-only-only turn-exit instructions from generated briefs when the
+  read-only annotation override is enabled, including live settings changes.
+- Require the matching browser companion for the updated handoff and ticket
+  protocol so updates cannot retain incompatible automation code.
+
+## [2.3.18] - 2026-10-25
+
+### Fixed
+
+- Expand ChatGPT’s collapsed model panel before selecting a model. Mounted
+  options inside inert or hidden panels no longer cause model discovery and
+  model switching to time out.
+- Require the updated browser companion so an older running companion cannot
+  retain the collapsed-picker regression after updating.
+
+## [2.3.17] - 2026-10-25
+
+### Fixed
+
+- Discover models and verify pairing when ChatGPT mounts its model list only
+  after expanding the effort picker's submenu, including inline and portaled
+  lists. Retain the original model and effort while inspecting capabilities.
+- Recognize uniquely owned localized effort controls, including Japanese labels,
+  and borrow Medium for pairing without assuming fixed slider positions.
+- Report the failed picker stage for discovery and pairing instead of reducing
+  every browser conflict to "state changed". Keep raw page and request data out
+  of diagnostic responses.
+- Acknowledge queued browser actions before waiting for browser ownership or
+  account preflight, so slow preparation remains observable and repeat requests
+  cannot submit another copy of the message.
+- Identify the operation and timeout or connection cause in transport failures,
+  and require the updated browser companion compatibility fingerprint.
+
+## [2.3.16] - 2026-10-25
+
+### Fixed
+
+- Handle Stop confirmations that appear during message preparation, including
+  while selecting a model or connector. Confirm the dialog, allow up to 20 seconds
+  for stopping to finish, then retry only the interrupted pre-Send step without
+  reloading the conversation or duplicating the message.
+- Advance the browser companion compatibility fingerprint so updates cannot
+  reuse a companion that lacks late Stop-confirmation recovery.
+- Remove redundant draft-preservation messages from startup banners and the
+  composer status while retaining the current startup and refresh progress.
+
 ## [2.3.15] - 2026-10-24
 
 ### Fixed
@@ -1104,7 +1310,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   drained through bounded head/tail buffers, while component-only `_meta` remains
   outside the model-visible limit.
 
-[Unreleased]: https://github.com/devnoname120/codexify/compare/v2.3.14...HEAD
+[Unreleased]: https://github.com/devnoname120/codexify/compare/v2.3.29...HEAD
+[2.3.29]: https://github.com/devnoname120/codexify/compare/v2.3.28...v2.3.29
+[2.3.28]: https://github.com/devnoname120/codexify/compare/v2.3.25...v2.3.28
+[2.3.25]: https://github.com/devnoname120/codexify/compare/v2.3.24...v2.3.25
+[2.3.24]: https://github.com/devnoname120/codexify/compare/v2.3.23...v2.3.24
+[2.3.23]: https://github.com/devnoname120/codexify/compare/v2.3.22...v2.3.23
+[2.3.22]: https://github.com/devnoname120/codexify/compare/v2.3.21...v2.3.22
 [2.3.14]: https://github.com/devnoname120/codexify/compare/v2.3.13...v2.3.14
 [2.3.13]: https://github.com/devnoname120/codexify/compare/v2.3.12...v2.3.13
 [2.3.12]: https://github.com/devnoname120/codexify/compare/v2.3.11...v2.3.12

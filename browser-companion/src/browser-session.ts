@@ -3,7 +3,7 @@
 import type { Locator, Page } from "patchright";
 import { BrowserCompanionError, CONVERSATION_UNAVAILABLE_MESSAGE } from "./errors";
 import {uiLabelPattern,uiTemplatePattern} from "./ui-localization";
-import {recordConversationUnavailable,throwIfConversationRateLimited} from "./navigation";
+import {recordConversationUnavailable,throwIfConversationRateLimited,conversationLoadWasRateLimited} from "./navigation";
 import {composerText,isAutomationGoalDraft} from "./composer";
 import {CHATGPT_COMPOSER_SELECTOR} from "./session";
 import {observeReadOnly} from "./observation";
@@ -113,6 +113,23 @@ export async function toolApprovalVisible(page: Page): Promise<boolean> {
     .filter({visible:true}).count().then(count=>count>0).catch(()=>false);
 }
 
+/** A terminal app alert, never a quotation in a user or assistant message. */
+export async function conversationLimitVisible(page:Page):Promise<boolean> {
+  const url=new URL(page.url());
+  if(url.origin!=="https://chatgpt.com"||!/^\/(?:g\/[^/]+\/)?c\/[^/]+\/?$/.test(url.pathname))return false;
+  const alerts=page.locator('[role="alert"], [data-testid="conversation-turn-error"], [data-testid="conversation-error"]')
+    .filter({hasText:/The conversation is too long, please start a new one\.|You've reached the maximum length for this conversation, but you can keep talking by starting a new chat\./i}).filter({visible:true});
+  return alerts.evaluateAll(nodes=>nodes.some(node=>{
+    if(node.closest('[data-user-message-bubble], [data-conversation-role="assistant"], [data-message-author-role], pre, code, [hidden], [inert], [aria-hidden="true"]'))return false;
+    for(let parent:Element|null=node;parent;parent=parent.parentElement)if(getComputedStyle(parent).opacity==="0")return false;
+    return true;
+  }));
+}
+
+export async function throwIfConversationLimit(page:Page):Promise<void> {
+  if(await conversationLimitVisible(page))throw new BrowserCompanionError("ChatGPT conversation reached its length limit. Continuing in a new conversation.","conversation_limit");
+}
+
 export async function throwIfSessionAttention(page: Page,signal?:AbortSignal): Promise<void> {
   const read=<T>(operation:()=>Promise<T>):Promise<T>=>{
     signal?.throwIfAborted();return observeReadOnly(operation(),signal);
@@ -127,10 +144,13 @@ export async function throwIfSessionAttention(page: Page,signal?:AbortSignal): P
   if (await read(()=>subscriptionFailureAlert(page).isVisible().catch(() => false))) {
     throw new BrowserCompanionError("ChatGPT could not load the current subscription.", "failed");
   }
+  await throwIfConversationLimit(page);
   if (await read(()=>conversationUnavailableVisible(page))) {
     signal?.throwIfAborted();
-    throwIfConversationRateLimited(page,true);
     recordConversationUnavailable(page);
+    // A rate-limited transcript load gets native replacement recovery.
+    if(conversationLoadWasRateLimited(page))throw new BrowserCompanionError("ChatGPT conversation loading is temporarily rate limited; wait before retrying","conversation_load_rate_limited");
+    throwIfConversationRateLimited(page,true);
     throw new BrowserCompanionError(CONVERSATION_UNAVAILABLE_MESSAGE, "conversation_unavailable");
   }
   if (await read(()=>page.getByTestId("regenerate-thread-error-button").last().isVisible().catch(() => false))

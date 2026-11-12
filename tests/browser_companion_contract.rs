@@ -90,6 +90,9 @@ fn contract_request(action_id: &str, idempotency_key: &str) -> ExecuteActionRequ
         expected_url: "https://chatgpt.com/c/contract".into(),
         auto_approve_tool_calls: false,
         bypass_conversation_cooldown: false,
+        retain_pairing_window: false,
+        pairing_continuation_of: None,
+        agent_ticket: None,
     }
 }
 
@@ -153,6 +156,9 @@ fn rust_shapes_match_every_golden_protocol_fixture() {
         expected_url: "https://chatgpt.com/c/fixture".into(),
         auto_approve_tool_calls: false,
         bypass_conversation_cooldown: false,
+        retain_pairing_window: false,
+        pairing_continuation_of: None,
+        agent_ticket: None,
     };
     let requests = vec![
         base(
@@ -199,6 +205,40 @@ fn rust_shapes_match_every_golden_protocol_fixture() {
             handoff_id: format!("renew-{}", "a".repeat(64)),
         },
     ));
+    requests.push(base(
+        "fixture-continuation",
+        "fixture-continuation-execute",
+        ActionPrompt::TaskContinuation {},
+    ));
+    let mut retained = base(
+        "fixture-retained",
+        "fixture-retained-execute",
+        ActionPrompt::CreateChat {
+            continuation_token: "A".repeat(43),
+            reference: "A".repeat(43),
+            setup_reference: None,
+        },
+    );
+    retained.model = None;
+    retained.effort = None;
+    retained.url = "https://chatgpt.com/new".into();
+    retained.expected_url = retained.url.clone();
+    retained.retain_pairing_window = true;
+    requests.push(retained);
+    let mut follow_up = base(
+        "fixture-paired-followup",
+        "fixture-paired-followup-execute",
+        ActionPrompt::OfflineGoal { goal_revision: 3 },
+    );
+    follow_up.pairing_continuation_of = Some("fixture-retained".into());
+    requests.push(follow_up);
+    let mut ticketed = base(
+        "fixture-ticket",
+        "fixture-ticket-execute",
+        ActionPrompt::TaskContinuation {},
+    );
+    ticketed.agent_ticket = Some("FreshT_1".into());
+    requests.push(ticketed);
     assert_eq!(
         serde_json::to_value(requests).unwrap(),
         fixture["executeRequests"]
@@ -215,6 +255,60 @@ fn rust_shapes_match_every_golden_protocol_fixture() {
     for event in fixture["events"].as_array().unwrap() {
         let _: CompanionEvent = serde_json::from_value(event.clone()).unwrap();
     }
+}
+
+#[tokio::test]
+#[ignore = "requires CODEXIFY_TEST_BROWSER_COMPANION_BUN; exercised explicitly by CI"]
+async fn rust_client_retains_the_typescript_picker_failure_stage() {
+    let root = tempfile::tempdir().unwrap();
+    let fixture = start_fixture_mode(root.path(), "picker-error");
+    let client = BrowserCompanionClient::from_descriptor_path(&fixture.descriptor).unwrap();
+    let error = client
+        .capabilities(&CancellationToken::new())
+        .await
+        .err()
+        .unwrap();
+    assert!(error.contains("one owned model/effort control"), "{error}");
+    assert!(error.contains("effort_control_lookup"));
+    assert!(error.contains("selector_drift"));
+    assert!(!error.contains("state changed"));
+}
+
+#[tokio::test]
+#[ignore = "requires CODEXIFY_TEST_BROWSER_COMPANION_BUN; exercised explicitly by CI"]
+async fn slow_preflight_is_acknowledged_before_the_rust_transport_deadline() {
+    let root = tempfile::tempdir().unwrap();
+    let fixture = start_fixture_mode(root.path(), "slow-preflight");
+    let client = BrowserCompanionClient::from_descriptor_path_with_timeouts(
+        &fixture.descriptor,
+        Duration::from_millis(500),
+        Duration::from_secs(5),
+    )
+    .unwrap();
+    let cancellation = CancellationToken::new();
+    let request = contract_request("slow-preflight", "slow-preflight-execute");
+    let accepted = client.execute(&request, &cancellation).await.unwrap();
+    assert_eq!(accepted.state, CompanionActionState::Queued);
+    assert!(!accepted.send_accepted);
+    let replay = client.execute(&request, &cancellation).await.unwrap();
+    assert_eq!(replay.last_event_sequence, accepted.last_event_sequence);
+    let mut sends = 0;
+    client
+        .stream_action_events(&request.action_id, 0, &cancellation, |event| {
+            if matches!(event.kind, CompanionEventKind::SendAccepted) {
+                sends += 1;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert_eq!(sends, 1);
+    let terminal = client
+        .action(&request.action_id, &cancellation)
+        .await
+        .unwrap();
+    assert_eq!(terminal.state, CompanionActionState::Idle);
+    assert!(terminal.send_accepted);
 }
 
 #[tokio::test]
@@ -238,6 +332,13 @@ async fn rust_client_round_trips_the_real_typescript_protocol() {
         Some("contract-account")
     );
     assert_eq!(health.active_action_id, None);
+    assert_eq!(
+        client
+            .navigation_available_at("https://chatgpt.com/c/fixture", &cancellation)
+            .await
+            .unwrap(),
+        Some(180_000)
+    );
 
     let login = client.login(&cancellation).await.unwrap();
     assert_eq!(login.status, CompanionSessionStatus::Idle);

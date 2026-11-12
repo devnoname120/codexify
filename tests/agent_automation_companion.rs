@@ -21,7 +21,7 @@ use tokio_util::sync::CancellationToken;
 
 const TOKEN: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 const BUILD: &str =
-    "test-build-v1+protocol.7d1f04ca4cb844940820aeeb703a42c36363cee5e5f7209d46c5907f26c5ce05";
+    "test-build-v1+protocol.36957a042ed31cae11d0401411999119d39c22af98278a46b25c412b0be765c6";
 
 #[derive(Clone, Default)]
 struct FakeState {
@@ -762,6 +762,98 @@ async fn action_attention_uses_the_protocol_delta_bound() {
 }
 
 #[tokio::test]
+async fn controlled_picker_failures_survive_http_without_exposing_unvalidated_response_bodies() {
+    for variant in [
+        "valid",
+        "wrong-build",
+        "unknown-phase",
+        "unknown-code",
+        "extra-field",
+    ] {
+        let mut body = json!({"protocolVersion":PROTOCOL_VERSION,"build":BUILD,"error":{"code":"selector_drift","phase":"model_options","message":"ChatGPT did not expose its model options"}});
+        match variant {
+            "wrong-build" => body["build"] = json!("untrusted-build"),
+            "unknown-phase" => body["error"]["phase"] = json!("private-browser-page"),
+            "unknown-code" => body["error"]["code"] = json!("private-browser-code"),
+            "extra-field" => body["error"]["privatePrompt"] = json!("private page text"),
+            _ => {}
+        }
+        let app = Router::new().route(
+            "/v1/session/capabilities",
+            post(move || async move { (StatusCode::CONFLICT, axum::Json(body)) }),
+        );
+        let (endpoint, task) = spawn_fake(app).await;
+        let root = tempfile::tempdir().unwrap();
+        let path = private_descriptor(root.path(), &endpoint, TOKEN, std::process::id(), BUILD);
+        let client = BrowserCompanionClient::from_descriptor_path(&path).unwrap();
+        let error = client
+            .capabilities(&CancellationToken::new())
+            .await
+            .err()
+            .unwrap();
+        if variant == "valid" {
+            assert!(
+                error.contains("ChatGPT did not expose its model options"),
+                "{error}"
+            );
+            assert!(error.contains("model_options"));
+            assert!(error.contains("selector_drift"));
+        } else {
+            assert_eq!(
+                error,
+                "Browser companion rejected the operation because its state changed"
+            );
+        }
+        assert!(!error.contains("private"));
+        task.abort();
+    }
+}
+
+#[tokio::test]
+async fn transport_errors_identify_operation_and_timeout_without_private_details() {
+    async fn slow_health() -> Response {
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        StatusCode::OK.into_response()
+    }
+    let (endpoint, task) = spawn_fake(Router::new().route("/v1/health", get(slow_health))).await;
+    let root = tempfile::tempdir().unwrap();
+    let path = private_descriptor(root.path(), &endpoint, TOKEN, std::process::id(), BUILD);
+    let client = BrowserCompanionClient::from_descriptor_path_with_timeout(
+        &path,
+        Duration::from_millis(100),
+    )
+    .unwrap();
+    let error = client.health(&CancellationToken::new()).await.unwrap_err();
+    assert!(
+        error.contains("checking browser account/session: timed out after 0.1s"),
+        "{error}"
+    );
+    assert!(!error.contains(&endpoint));
+    assert!(!error.contains(TOKEN));
+    task.abort();
+
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let unavailable = format!("http://{}", listener.local_addr().unwrap());
+    drop(listener);
+    let path = private_descriptor(root.path(), &unavailable, TOKEN, std::process::id(), BUILD);
+    let client = BrowserCompanionClient::from_descriptor_path(&path).unwrap();
+    let error = client
+        .action("private-action-id", &CancellationToken::new())
+        .await
+        .err()
+        .unwrap();
+    assert!(
+        error.contains("reading browser action status: could not connect"),
+        "{error}"
+    );
+    assert!(!error.contains(&unavailable));
+    assert!(!error.contains("private-action-id"));
+    assert!(!error.contains(TOKEN));
+}
+
+#[tokio::test]
 async fn cancellation_and_response_bounds_are_enforced_without_echoing_payloads() {
     async fn slow_health() -> Response {
         tokio::time::sleep(Duration::from_secs(60)).await;
@@ -866,6 +958,9 @@ fn action_request() -> ExecuteActionRequest {
         expected_url: "https://chatgpt.com/c/example".into(),
         auto_approve_tool_calls: false,
         bypass_conversation_cooldown: false,
+        retain_pairing_window: false,
+        pairing_continuation_of: None,
+        agent_ticket: None,
     }
 }
 
@@ -947,6 +1042,17 @@ async fn invalid_action_data_is_rejected_before_network_access() {
     let client = BrowserCompanionClient::from_descriptor_path(&path).unwrap();
 
     let mut invalid = Vec::new();
+    for ticket in ["short", "invalid!"] {
+        let mut request = action_request();
+        request.agent_ticket = Some(ticket.into());
+        invalid.push(request);
+    }
+    let mut request = action_request();
+    request.retain_pairing_window = true;
+    invalid.push(request);
+    let mut request = action_request();
+    request.pairing_continuation_of = Some(request.action_id.clone());
+    invalid.push(request);
     let mut request = action_request();
     request.url = "http://chatgpt.com/c/example".into();
     invalid.push(request);

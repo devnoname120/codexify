@@ -27,7 +27,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 const COMPANION_TOKEN: &str = "YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE";
-const COMPANION_BUILD: &str = "supervisor-fake-build+protocol.7d1f04ca4cb844940820aeeb703a42c36363cee5e5f7209d46c5907f26c5ce05";
+const COMPANION_BUILD: &str = "supervisor-fake-build+protocol.36957a042ed31cae11d0401411999119d39c22af98278a46b25c412b0be765c6";
 
 struct FakeExecutor {
     calls: AtomicUsize,
@@ -157,7 +157,9 @@ impl AutomationExecutor for StopFailureThenSuccessExecutor {
             return Err(AutomationExecutionError {
                 message: message.into(),
                 send_accepted: false,
-                failure_status: self.interference.then_some(AutomationActionStatus::Interference),
+                failure_status: self
+                    .interference
+                    .then_some(AutomationActionStatus::Interference),
             });
         }
         for (index, kind) in [
@@ -784,10 +786,22 @@ async fn conversation_approval_honors_disabled_auto_approval_stopped_agents_and_
                 .await
                 .unwrap();
         }
-        if mode=="completed" {
-            let goal=f.store.set_goal(&f.task,"Finished assignment",103).unwrap();
-            f.store.run_goal(&f.task,goal.revision,104).unwrap();
-            f.store.finish_goal(&f.task,goal.revision,GoalFinish::Completed{summary:Some("Verified; next steps: none".into())},105).unwrap();
+        if mode == "completed" {
+            let goal = f
+                .store
+                .set_goal(&f.task, "Finished assignment", 103)
+                .unwrap();
+            f.store.run_goal(&f.task, goal.revision, 104).unwrap();
+            f.store
+                .finish_goal(
+                    &f.task,
+                    goal.revision,
+                    GoalFinish::Completed {
+                        summary: Some("Verified; next steps: none".into()),
+                    },
+                    105,
+                )
+                .unwrap();
             f.chat.read(true).await.unwrap();
         }
         if mode == "unverified" {
@@ -820,13 +834,87 @@ async fn fixture() -> Fixture {
     fixture_with_queue_limit(64).await
 }
 
+#[tokio::test]
+async fn queued_chat_run_now_prioritizes_one_unsent_request_without_creating_a_goal_or_replaying_it()
+ {
+    let f = fixture().await;
+    let (other, chat) = add_task(&f, "manual-now-other", "https://chatgpt.com/c/other").await;
+    f.chat
+        .append_user("manual-first".into(), "First pending request".into())
+        .await
+        .unwrap();
+    chat.append_user("manual-second".into(), "Second pending request".into())
+        .await
+        .unwrap();
+    f.supervisor.scan_once(1000).await.unwrap();
+    assert_eq!(f.supervisor.queued_count().await, 2);
+    let (target, remaining) = if f.supervisor.queue_position(&f.task).await.unwrap().0 == 2 {
+        (&f.task, &other)
+    } else {
+        (&other, &f.task)
+    };
+    let initial = f.store.load(target).unwrap();
+    let id = initial.action.id.clone().unwrap();
+    assert!(initial.goal.is_none());
+    assert!(initial.can_run_queued_now());
+    assert!(
+        f.supervisor
+            .run_queued_action_now(target, "outdated-action", 1001)
+            .await
+            .is_err()
+    );
+    let action = f
+        .supervisor
+        .run_queued_action_now(target, &id, 1001)
+        .await
+        .unwrap();
+    assert_eq!(action.id.as_deref(), Some(id.as_str()));
+    assert!(action.bypass_conversation_cooldown);
+    assert_eq!(f.supervisor.queue_position(target).await, Some((1, 2)));
+    f.supervisor.run_next(1001).await.unwrap().unwrap();
+    assert_eq!(f.executor.calls.load(Ordering::SeqCst), 1);
+    {
+        let requests = f.executor.executions.lock().unwrap();
+        assert_eq!(
+            requests[0].request.url,
+            f.store.load(target).unwrap().pairing.canonical_url.unwrap()
+        );
+        assert!(requests[0].request.bypass_conversation_cooldown);
+        assert_eq!(requests[0].request.action_id, id);
+    }
+    assert!(f.store.load(target).unwrap().goal.is_none());
+    assert!(
+        f.supervisor
+            .run_queued_action_now(target, &id, 1002)
+            .await
+            .is_err()
+    );
+    let remaining_id = f.store.load(remaining).unwrap().action.id.unwrap();
+    f.supervisor
+        .cancel_action(remaining, &remaining_id, 1003)
+        .await
+        .unwrap();
+    assert_eq!(f.supervisor.queued_count().await, 0);
+    assert!(f.supervisor.run_next(1003).await.unwrap().is_none());
+    assert_eq!(f.executor.calls.load(Ordering::SeqCst), 1);
+    assert!(!chat.unread_snapshot().await.unwrap().messages.is_empty());
+}
+
 async fn fixture_with_queue_limit(max_queued_actions: usize) -> Fixture {
+    fixture_with_offline_timeout(max_queued_actions, 5).await
+}
+
+async fn fixture_with_offline_timeout(
+    max_queued_actions: usize,
+    offline_timeout_minutes: u64,
+) -> Fixture {
     let root = tempfile::tempdir().unwrap();
     let project = root.path().join("project");
     std::fs::create_dir_all(&project).unwrap();
     let mut config = default_config(project);
     config.memory.dir = Some(root.path().join("state").display().to_string());
     config.markdown_chat.enabled = true;
+    config.markdown_chat.offline_timeout_minutes = offline_timeout_minutes;
     config.markdown_chat.automation.enabled = true;
     config.markdown_chat.automation.recovery_enhancements = true;
     config
@@ -965,9 +1053,9 @@ fn authorized(headers: &HeaderMap) -> bool {
 }
 
 #[tokio::test]
-async fn unread_messages_wait_until_four_minutes_while_public_offline_remains_five_minutes() {
+async fn unread_messages_wait_until_the_same_five_minute_threshold_as_public_presence() {
     assert_eq!(codexify::markdown_chat::AWAY_AFTER_MS, 180_000);
-    assert_eq!(AUTOMATION_OFFLINE_AFTER_MS, 240_000);
+    assert_eq!(AUTOMATION_OFFLINE_AFTER_MS, 300_000);
     assert_eq!(codexify::markdown_chat::OFFLINE_AFTER_MS, 300_000);
     let fixture = fixture().await;
     fixture.chat.record_agent_call(1_000).await.unwrap();
@@ -2972,7 +3060,7 @@ async fn failed_send_notifies_once_across_scans_and_reopening_the_chat() {
 
 #[tokio::test]
 async fn confirmed_stop_failures_retry_after_backoff_without_losing_or_duplicating_messages() {
-    for (snapshot_failure, interference) in [(false,false),(true,false),(false,true)] {
+    for (snapshot_failure, interference) in [(false, false), (true, false), (false, true)] {
         let f = fixture().await;
         let executor = Arc::new(StopFailureThenSuccessExecutor {
             calls: AtomicUsize::new(0),
@@ -3009,7 +3097,14 @@ async fn confirmed_stop_failures_retry_after_backoff_without_losing_or_duplicati
         supervisor.scan_once(began).await.unwrap();
         let _ = supervisor.run_next(began + 1).await;
         let failed = f.store.load(&f.task).unwrap();
-        assert_eq!(failed.action.status, if interference {AutomationActionStatus::Interference} else {AutomationActionStatus::Failed});
+        assert_eq!(
+            failed.action.status,
+            if interference {
+                AutomationActionStatus::Interference
+            } else {
+                AutomationActionStatus::Failed
+            }
+        );
         assert!(failed.is_automatically_retrying());
         assert_eq!(failed.action.send_accepted, Some(false));
         assert_eq!(failed.goal.as_ref().unwrap().turn_count, 1);
@@ -3470,11 +3565,14 @@ async fn real_executor_defers_shared_browser_contention_without_consuming_send_r
         (false, "busy", Some("draft-replacement"), false, 0),
         (true, "unavailable", None, true, 0),
         (true, "unavailable", None, false, 0),
-    ].into_iter().map(|(a,b,c,d,e)|(a,b,c,d,e,false)).chain([
-        (false,"idle",Some("other-page-action"),true,1,true),
-        (false,"busy",Some("other-page-action"),true,1,true),
-        (false,"busy",Some("other-page-action"),false,0,true),
-        (false,"idle",Some("other-page-action"),false,0,true),
+    ]
+    .into_iter()
+    .map(|(a, b, c, d, e)| (a, b, c, d, e, false))
+    .chain([
+        (false, "idle", Some("other-page-action"), true, 1, true),
+        (false, "busy", Some("other-page-action"), true, 1, true),
+        (false, "busy", Some("other-page-action"), false, 0, true),
+        (false, "idle", Some("other-page-action"), false, 0, true),
     ]) {
         let execute_calls = Arc::new(AtomicUsize::new(0));
         let execute_counter = execute_calls.clone();
@@ -3549,6 +3647,9 @@ async fn real_executor_defers_shared_browser_contention_without_consuming_send_r
                 effort: None,
                 auto_approve_tool_calls: false,
                 bypass_conversation_cooldown: false,
+                retain_pairing_window: false,
+                pairing_continuation_of: None,
+                agent_ticket: None,
                 prompt: if pairing {
                     ActionPrompt::PairVerify {
                         reference: "A".repeat(43),
@@ -3570,10 +3671,13 @@ async fn real_executor_defers_shared_browser_contention_without_consuming_send_r
         } else if active_id == Some("draft-replacement") && !authenticated {
             let error = outcome.err().unwrap();
             assert!(error.send_accepted);
-        } else if pool && session_status=="idle" && !authenticated {
-            let error=outcome.err().unwrap();
+        } else if pool && session_status == "idle" && !authenticated {
+            let error = outcome.err().unwrap();
             assert!(!error.send_accepted);
-            assert_eq!(error.failure_status,Some(AutomationActionStatus::AuthenticationRequired));
+            assert_eq!(
+                error.failure_status,
+                Some(AutomationActionStatus::AuthenticationRequired)
+            );
         } else if session_status == "busy" || active_id.is_some() {
             let waiting = outcome.unwrap();
             assert_eq!(waiting.action_id, "draft-replacement");
@@ -3682,6 +3786,9 @@ async fn real_executor_delegates_authentication_recovery_but_rejects_known_accou
                 expected_url: "https://chatgpt.com/c/example".into(),
                 auto_approve_tool_calls: false,
                 bypass_conversation_cooldown: false,
+                retain_pairing_window: false,
+                pairing_continuation_of: None,
+                agent_ticket: None,
             },
         };
         let (events, _events_rx) = mpsc::unbounded_channel();
@@ -3818,6 +3925,9 @@ async fn real_executor_marks_an_unreconciled_execute_receipt_as_ambiguous() {
             expected_url: "https://chatgpt.com/c/ambiguous-execute".into(),
             auto_approve_tool_calls: false,
             bypass_conversation_cooldown: false,
+            retain_pairing_window: false,
+            pairing_continuation_of: None,
+            agent_ticket: None,
         },
     };
     let (events, _events_rx) = mpsc::unbounded_channel();
@@ -3938,6 +4048,9 @@ async fn successful_execute_receipt_stays_ambiguous_when_status_returns_not_foun
             expected_url: "https://chatgpt.com/c/ambiguous-not-found".into(),
             auto_approve_tool_calls: false,
             bypass_conversation_cooldown: false,
+            retain_pairing_window: false,
+            pairing_continuation_of: None,
+            agent_ticket: None,
         },
     };
     let (events, _events_rx) = mpsc::unbounded_channel();
@@ -4069,6 +4182,9 @@ async fn terminal_receipt_without_send_proof(
             expected_url: "https://chatgpt.com/c/idle-without-send".into(),
             auto_approve_tool_calls: false,
             bypass_conversation_cooldown: false,
+            retain_pairing_window: false,
+            pairing_continuation_of: None,
+            agent_ticket: None,
         },
     };
     let (events, _events_rx) = mpsc::unbounded_channel();
@@ -4220,6 +4336,9 @@ async fn accepted_execute_with_unreconciled_event_stream_is_ambiguous() {
             expected_url: "https://chatgpt.com/c/unreconciled-stream".into(),
             auto_approve_tool_calls: false,
             bypass_conversation_cooldown: false,
+            retain_pairing_window: false,
+            pairing_continuation_of: None,
+            agent_ticket: None,
         },
     };
     let (events, _events_rx) = mpsc::unbounded_channel();
@@ -4416,6 +4535,9 @@ async fn real_pair_executor_records_the_candidate_before_the_async_send_receipt(
             expected_url: expected_url.into(),
             auto_approve_tool_calls: false,
             bypass_conversation_cooldown: false,
+            retain_pairing_window: false,
+            pairing_continuation_of: None,
+            agent_ticket: None,
         },
     };
     let (events, mut events_rx) = mpsc::unbounded_channel();
@@ -4589,6 +4711,9 @@ async fn real_executor_skips_catalog_refresh_and_reconnects_a_dropped_stream() {
             expected_url: "https://chatgpt.com/c/stream-reconnect".into(),
             auto_approve_tool_calls: false,
             bypass_conversation_cooldown: false,
+            retain_pairing_window: false,
+            pairing_continuation_of: None,
+            agent_ticket: None,
         },
     };
     let (events_tx, mut events_rx) = mpsc::unbounded_channel();
@@ -4768,6 +4893,9 @@ async fn real_executor_replays_retained_prefix_from_an_idempotent_generating_rec
             expected_url: "https://chatgpt.com/c/generating-replay".into(),
             auto_approve_tool_calls: false,
             bypass_conversation_cooldown: false,
+            retain_pairing_window: false,
+            pairing_continuation_of: None,
+            agent_ticket: None,
         },
     };
     let (events_tx, mut events_rx) = mpsc::unbounded_channel();
@@ -4923,6 +5051,9 @@ async fn real_executor_reconnects_retained_events_from_an_idempotent_terminal_re
             expected_url: "https://chatgpt.com/c/terminal-replay".into(),
             auto_approve_tool_calls: false,
             bypass_conversation_cooldown: false,
+            retain_pairing_window: false,
+            pairing_continuation_of: None,
+            agent_ticket: None,
         },
     };
     let (events_tx, mut events_rx) = mpsc::unbounded_channel();
@@ -5783,6 +5914,9 @@ async fn real_executor_accepts_chat_id_aliases_but_rejects_different_conversatio
                     expected_url: expected.into(),
                     auto_approve_tool_calls: false,
                     bypass_conversation_cooldown: false,
+                    retain_pairing_window: false,
+                    pairing_continuation_of: None,
+                    agent_ticket: None,
                 },
             };
             let (events, _) = mpsc::unbounded_channel();
@@ -6160,7 +6294,12 @@ async fn notified_owner_steering_enters_before_remaining_worker_goals_without_in
     }
     #[async_trait]
     impl AutomationExecutor for DispatchExecutor {
-        async fn approve_pending_conversation(&self, _: &str, _: &str, _: &str) -> Result<bool, String> {
+        async fn approve_pending_conversation(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+        ) -> Result<bool, String> {
             self.approvals.fetch_add(1, Ordering::SeqCst);
             Ok(false)
         }
@@ -6170,21 +6309,38 @@ async fn notified_owner_steering_enters_before_remaining_worker_goals_without_in
             _: mpsc::UnboundedSender<CompanionEvent>,
             _: CancellationToken,
         ) -> Result<CompanionActionSnapshot, AutomationExecutionError> {
-            self.started.send(execution.task_key[..24].to_owned()).unwrap();
+            self.started
+                .send(execution.task_key[..24].to_owned())
+                .unwrap();
             self.release.acquire().await.unwrap().forget();
             Ok(snapshot_for(execution))
         }
     }
     let fixture = fixture().await;
-    let (other_task, other_chat) = add_task(&fixture, "dispatch-worker-two", "https://chatgpt.com/c/worker-two").await;
-    let (owner_task, owner_chat) = add_task(&fixture, "dispatch-owner-steer", "https://chatgpt.com/c/owner-steer").await;
+    let (other_task, other_chat) = add_task(
+        &fixture,
+        "dispatch-worker-two",
+        "https://chatgpt.com/c/worker-two",
+    )
+    .await;
+    let (owner_task, owner_chat) = add_task(
+        &fixture,
+        "dispatch-owner-steer",
+        "https://chatgpt.com/c/owner-steer",
+    )
+    .await;
     for task in [&fixture.task, &other_task] {
-        let goal = fixture.store.set_goal(task, "Implement and verify the owned worker scope", 100).unwrap();
+        let goal = fixture
+            .store
+            .set_goal(task, "Implement and verify the owned worker scope", 100)
+            .unwrap();
         fixture.store.run_goal(task, goal.revision, 101).unwrap();
     }
     let (started, mut starts) = mpsc::unbounded_channel();
     let executor = Arc::new(DispatchExecutor {
-        started, release: Semaphore::new(0), approvals: AtomicUsize::new(0),
+        started,
+        release: Semaphore::new(0),
+        approvals: AtomicUsize::new(0),
     });
     let mut config = fixture.config.markdown_chat.automation.clone();
     config.auto_approve_tool_calls = true;
@@ -6195,23 +6351,57 @@ async fn notified_owner_steering_enters_before_remaining_worker_goals_without_in
         (owner_task.clone(), owner_chat.clone()),
     ] {
         chat.record_agent_call(1).await.unwrap();
-        supervisor.register_task(AutomationTaskHandle::new(task, 0, fixture.store.clone(), chat)).await.unwrap();
+        supervisor
+            .register_task(AutomationTaskHandle::new(
+                task,
+                0,
+                fixture.store.clone(),
+                chat,
+            ))
+            .await
+            .unwrap();
     }
     let worker = supervisor.start();
-    let first = tokio::time::timeout(Duration::from_secs(2), starts.recv()).await.unwrap().unwrap();
+    let first = tokio::time::timeout(Duration::from_secs(2), starts.recv())
+        .await
+        .unwrap()
+        .unwrap();
     assert!(first == fixture.task.audit_hash() || first == other_task.audit_hash());
     let initial_approvals = executor.approvals.load(Ordering::SeqCst);
-    owner_chat.append_user("urgent-owner-steering".into(), "Handle this owner request next".into()).await.unwrap();
+    owner_chat
+        .append_user(
+            "urgent-owner-steering".into(),
+            "Handle this owner request next".into(),
+        )
+        .await
+        .unwrap();
     supervisor.notify();
-    assert!(tokio::time::timeout(Duration::from_millis(50), starts.recv()).await.is_err(),
-        "a new instruction must not interrupt the current Send");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), starts.recv())
+            .await
+            .is_err(),
+        "a new instruction must not interrupt the current Send"
+    );
     executor.release.add_permits(1);
-    let second = tokio::time::timeout(Duration::from_secs(2), starts.recv()).await.unwrap().unwrap();
-    assert_eq!(second, owner_task.audit_hash(), "new owner steering must outrank remaining goal-only work");
-    assert_eq!(executor.approvals.load(Ordering::SeqCst), initial_approvals,
-        "notification scans must not add passive browser approval checks");
+    let second = tokio::time::timeout(Duration::from_secs(2), starts.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        second,
+        owner_task.audit_hash(),
+        "new owner steering must outrank remaining goal-only work"
+    );
+    assert_eq!(
+        executor.approvals.load(Ordering::SeqCst),
+        initial_approvals,
+        "notification scans must not add passive browser approval checks"
+    );
     executor.release.add_permits(1);
-    let third = tokio::time::timeout(Duration::from_secs(2), starts.recv()).await.unwrap().unwrap();
+    let third = tokio::time::timeout(Duration::from_secs(2), starts.recv())
+        .await
+        .unwrap()
+        .unwrap();
     assert_ne!(third, first);
     assert!(third == fixture.task.audit_hash() || third == other_task.audit_hash());
     drop(worker);
@@ -6674,7 +6864,9 @@ async fn completed_goal_receipt_after_restart_unblocks_the_next_turn_without_rep
         queued.goal.as_ref().unwrap().updated_at_ms,
         before.updated_at_ms
     );
-    assert_eq!(queued.goal.as_ref().unwrap().active_since_ms, Some(3000));
+    // Presence and wake-up now share the same boundary: the old active
+    // interval is paused before the queued replacement has made a tool call.
+    assert_eq!(queued.goal.as_ref().unwrap().active_since_ms, None);
     assert_eq!(
         f.chat.clean_markdown_transcript().await.unwrap(),
         transcript
@@ -6763,7 +6955,9 @@ impl AutomationExecutor for MissingGoalStartExecutor {
         self.proof.clone()
     }
     async fn execute(
-        &self, _: AutomationExecution, _: mpsc::UnboundedSender<CompanionEvent>,
+        &self,
+        _: AutomationExecution,
+        _: mpsc::UnboundedSender<CompanionEvent>,
         _: CancellationToken,
     ) -> Result<CompanionActionSnapshot, AutomationExecutionError> {
         panic!("Recovery must queue a distinct action, not execute during a probe")
@@ -6772,38 +6966,91 @@ impl AutomationExecutor for MissingGoalStartExecutor {
 
 #[tokio::test]
 async fn missing_goal_start_requires_proof_and_preserves_stops_activity_and_send_uncertainty() {
-    for case in ["missing", "probe_failed", "busy", "recent_activity", "accepted", "counted", "paused", "stopped", "too_young", "user_message"] {
+    for case in [
+        "missing",
+        "probe_failed",
+        "busy",
+        "recent_activity",
+        "accepted",
+        "counted",
+        "paused",
+        "stopped",
+        "too_young",
+        "user_message",
+    ] {
         let f = orphaned_goal_fixture(false).await;
         // Reproduce a saved pre-Send start in an isolated temporary task.
-        let path = f.store.task_directory(&f.task).unwrap().join("automation.json");
+        let path = f
+            .store
+            .task_directory(&f.task)
+            .unwrap()
+            .join("automation.json");
         let mut state = f.store.load(&f.task).unwrap();
         state.action.goal_turn_counted = false;
         state.action.send_accepted = Some(false);
         let now = 2001 + AUTOMATION_OFFLINE_AFTER_MS + 120_000;
         match case {
-            "recent_activity" => {f.chat.record_agent_call(now - 1000).await.unwrap();}
-            "accepted" => {state.action.send_accepted = Some(true);}
-            "counted" => {state.action.goal_turn_counted = true;}
-            "paused" => {f.store.stop_goal(&f.task, 1, 3001).unwrap();}
-            "stopped" => {f.chat.request_agent_stop("explicit-stop".into()).await.unwrap();}
-            "too_young" => {state.action.updated_at_ms = Some(now - 1000);}
-            "user_message" => {state.action.kind = Some(codexify::agent_automation::AutomationActionKind::OfflineCombined);}
+            "recent_activity" => {
+                f.chat.record_agent_call(now - 1000).await.unwrap();
+            }
+            "accepted" => {
+                state.action.send_accepted = Some(true);
+            }
+            "counted" => {
+                state.action.goal_turn_counted = true;
+            }
+            "paused" => {
+                f.store.stop_goal(&f.task, 1, 3001).unwrap();
+            }
+            "stopped" => {
+                f.chat
+                    .request_agent_stop("explicit-stop".into())
+                    .await
+                    .unwrap();
+            }
+            "too_young" => {
+                state.action.updated_at_ms = Some(now - 1000);
+            }
+            "user_message" => {
+                state.action.kind =
+                    Some(codexify::agent_automation::AutomationActionKind::OfflineCombined);
+            }
             _ => {}
         }
         if case != "paused" {
             std::fs::write(&path, serde_json::to_vec(&state).unwrap()).unwrap();
         }
         let executor = Arc::new(MissingGoalStartExecutor {
-            proof: if case == "probe_failed" {Err("observation timeout".into())} else {Ok(case != "busy")},
+            proof: if case == "probe_failed" {
+                Err("observation timeout".into())
+            } else {
+                Ok(case != "busy")
+            },
         });
-        let restarted = AgentAutomationSupervisor::new(f.config.markdown_chat.automation.clone(), executor);
-        restarted.register_task(AutomationTaskHandle::new(f.task.clone(), 0, f.store.clone(), f.chat.clone())).await.unwrap();
+        let restarted =
+            AgentAutomationSupervisor::new(f.config.markdown_chat.automation.clone(), executor);
+        restarted
+            .register_task(AutomationTaskHandle::new(
+                f.task.clone(),
+                0,
+                f.store.clone(),
+                f.chat.clone(),
+            ))
+            .await
+            .unwrap();
         restarted.scan_once(now).await.unwrap();
-        assert_eq!(restarted.queued_count().await, usize::from(case == "missing"), "{case}");
+        assert_eq!(
+            restarted.queued_count().await,
+            usize::from(case == "missing"),
+            "{case}"
+        );
         if case == "missing" {
             let saved = f.store.load(&f.task).unwrap();
             assert_ne!(saved.action.id.as_deref(), Some("orphaned-goal-action"));
-            assert_eq!(saved.action.kind, Some(codexify::agent_automation::AutomationActionKind::OfflineGoal));
+            assert_eq!(
+                saved.action.kind,
+                Some(codexify::agent_automation::AutomationActionKind::OfflineGoal)
+            );
             assert!(saved.chat_mirror.message_ids.is_empty());
         }
     }
@@ -6811,7 +7058,13 @@ async fn missing_goal_start_requires_proof_and_preserves_stops_activity_and_send
 
 #[tokio::test]
 async fn missing_goal_start_requires_an_idle_same_account_404() {
-    for case in ["missing", "exists", "busy", "account_changed", "server_error"] {
+    for case in [
+        "missing",
+        "exists",
+        "busy",
+        "account_changed",
+        "server_error",
+    ] {
         let reads = Arc::new(AtomicUsize::new(0));
         let counter = reads.clone();
         let app = Router::new().route("/v1/health", get(move || async move {
@@ -6822,17 +7075,26 @@ async fn missing_goal_start_requires_an_idle_same_account_404() {
             else if case == "server_error" {StatusCode::INTERNAL_SERVER_ERROR.into_response()}
             else {axum::Json(serde_json::json!({"protocolVersion":1,"build":COMPANION_BUILD,"actionId":"orphaned-goal-action","state":"idle","sendAccepted":true,"lastEventSequence":10})).into_response()}
         }}));
-        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
-        let server = tokio::spawn(async move {axum::serve(listener, app).await.unwrap()});
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let root = tempfile::tempdir().unwrap();
         let descriptor = write_companion_descriptor(root.path(), &endpoint);
-        let executor = BrowserAutomationExecutor::new(codexify::markdown_chat::AgentAutomationConfig {
-            enabled:true, descriptor_path:descriptor.display().to_string(), ..Default::default()
-        });
-        let proof = executor.missing_goal_start("orphaned-goal-action", "account-1").await;
+        let executor =
+            BrowserAutomationExecutor::new(codexify::markdown_chat::AgentAutomationConfig {
+                enabled: true,
+                descriptor_path: descriptor.display().to_string(),
+                ..Default::default()
+            });
+        let proof = executor
+            .missing_goal_start("orphaned-goal-action", "account-1")
+            .await;
         assert_eq!(proof == Ok(true), case == "missing", "{case}: {proof:?}");
-        if case == "busy" || case == "account_changed" {assert_eq!(reads.load(Ordering::SeqCst), 0);}
+        if case == "busy" || case == "account_changed" {
+            assert_eq!(reads.load(Ordering::SeqCst), 0);
+        }
         server.abort();
     }
 }
@@ -8472,10 +8734,10 @@ async fn offline_goal_retries_three_times_with_backoff_without_tool_activity_acr
                 .last_nudged_at_ms
                 .unwrap()
                 .max(state.action.updated_at_ms.unwrap())
-                + delay;
+                + delay.max(AUTOMATION_OFFLINE_AFTER_MS);
             let deadline = state
                 .automatic_retry_at_ms()
-                .unwrap_or(earliest + delay / 10);
+                .unwrap_or(earliest + delay.max(AUTOMATION_OFFLINE_AFTER_MS) / 10);
             let restarted = AgentAutomationSupervisor::new(
                 f.config.markdown_chat.automation.clone(),
                 f.executor.clone(),
@@ -8521,6 +8783,42 @@ async fn offline_goal_retries_three_times_with_backoff_without_tool_activity_acr
             ) && e.unread_message_ids.is_empty()));
         }
         assert_eq!(f.store.load(&f.task).unwrap().goal.unwrap().turn_count, 5);
+        let final_send = f.store.load(&f.task).unwrap();
+        let waiting_at = final_send
+            .goal_wake
+            .last_nudged_at_ms
+            .unwrap()
+            .max(final_send.action.updated_at_ms.unwrap())
+            + 1;
+        f.supervisor.scan_once(waiting_at).await.unwrap();
+        let waiting = f.store.load(&f.task).unwrap();
+        assert_eq!(
+            waiting.action.status,
+            if submitted_only {
+                AutomationActionStatus::Idle
+            } else {
+                AutomationActionStatus::Stalled
+            },
+            "the final submitted attempt still needs its response window"
+        );
+        if submitted_only {
+            assert!(
+                waiting.action.last_error.is_none(),
+                "{:?}",
+                waiting.action.last_error
+            );
+        } else {
+            assert!(
+                !waiting
+                    .action
+                    .last_error
+                    .as_deref()
+                    .is_some_and(|error| error.starts_with("Automatic goal recovery stopped")),
+                "{:?}",
+                waiting.action.last_error
+            );
+        }
+        assert_eq!(f.executor.calls.load(Ordering::SeqCst), 4);
         let exhausted_at =
             f.store.load(&f.task).unwrap().action.updated_at_ms.unwrap() + 86_400_000;
         let restarted = AgentAutomationSupervisor::new(
@@ -8560,7 +8858,7 @@ async fn offline_goal_retries_three_times_with_backoff_without_tool_activity_acr
             .last_nudged_at_ms
             .unwrap()
             .max(resumed.action.updated_at_ms.unwrap())
-            + 66_000;
+            + 330_000;
         restarted.scan_once(retry_at).await.unwrap();
         assert_eq!(restarted.queued_count().await, 1);
         restarted.run_next(retry_at + 1).await.unwrap();
@@ -8580,6 +8878,95 @@ async fn offline_goal_retries_three_times_with_backoff_without_tool_activity_acr
             .await
             .unwrap();
         assert_eq!(restarted.queued_count().await, 1);
+    }
+}
+
+#[tokio::test]
+async fn accepted_goal_recovery_honors_configured_silence_and_waits_for_the_final_attempt() {
+    let mut f = fixture_with_offline_timeout(64, 7).await;
+    f.config
+        .markdown_chat
+        .automation
+        .retry_timings
+        .jitter_percent = 0;
+    f.store = Arc::new(AgentAutomationStore::for_config(&f.config).unwrap());
+    let goal = f
+        .store
+        .set_goal(
+            &f.task,
+            "Allow the response time to reach its first tool",
+            100,
+        )
+        .unwrap();
+    f.store.run_goal(&f.task, goal.revision, 101).unwrap();
+    f.chat.record_agent_call(1_000).await.unwrap();
+    f.executor.events.lock().unwrap().extend([
+        CompanionEventKind::SendAccepted,
+        CompanionEventKind::SubmissionComplete {
+            canonical_url: "https://chatgpt.com/c/example".into(),
+        },
+    ]);
+    let silence = 7 * 60_000;
+    let mut now = 1_000 + silence;
+    for attempt in 0..=3 {
+        let supervisor = AgentAutomationSupervisor::new(
+            f.config.markdown_chat.automation.clone(),
+            f.executor.clone(),
+        );
+        supervisor
+            .register_task(AutomationTaskHandle::new(
+                f.task.clone(),
+                0,
+                Arc::new(AgentAutomationStore::for_config(&f.config).unwrap()),
+                f.chat.clone(),
+            ))
+            .await
+            .unwrap();
+        supervisor.scan_once(now).await.unwrap();
+        assert_eq!(supervisor.queued_count().await, 1);
+        supervisor.run_next(now + 1).await.unwrap();
+        let sent = f.store.load(&f.task).unwrap();
+        let last = sent
+            .action
+            .updated_at_ms
+            .unwrap()
+            .max(sent.goal_wake.last_nudged_at_ms.unwrap());
+        supervisor.scan_once(last + silence - 1).await.unwrap();
+        let waiting = f.store.load(&f.task).unwrap();
+        assert_eq!(
+            waiting.action.status,
+            AutomationActionStatus::Idle,
+            "attempt {attempt}"
+        );
+        assert!(waiting.action.last_error.is_none());
+        assert_eq!(waiting.goal_wake.recovery_attempts, attempt);
+        assert_eq!(supervisor.queued_count().await, 0);
+        assert_eq!(
+            f.executor.calls.load(Ordering::SeqCst),
+            attempt as usize + 1
+        );
+        now = last + silence;
+        if attempt == 3 {
+            // Existing persisted banners are corrected during the final wait,
+            // without a reset, an extra Send, or changes to delivery evidence.
+            f.store.update_action_status(&f.task, sent.action.id.as_deref().unwrap(),
+                AutomationActionStatus::Stalled,
+                Some("Automatic goal recovery stopped after 3 retries without agent activity. Use Continue to try again."),
+                None, last).unwrap();
+            supervisor.scan_once(last + silence - 1).await.unwrap();
+            let repaired = f.store.load(&f.task).unwrap();
+            assert_eq!(repaired.action.status, AutomationActionStatus::Idle);
+            assert_eq!(repaired.action.id, sent.action.id);
+            assert_eq!(repaired.action.send_accepted, Some(true));
+            assert_eq!(repaired.goal_wake.recovery_attempts, 3);
+            assert!(repaired.action.last_error.is_none());
+            supervisor.scan_once(now).await.unwrap();
+            let exhausted = f.store.load(&f.task).unwrap();
+            assert_eq!(exhausted.action.status, AutomationActionStatus::Stalled);
+            assert!(exhausted.action.last_error.is_some());
+            assert_eq!(supervisor.queued_count().await, 0);
+            assert_eq!(f.executor.calls.load(Ordering::SeqCst), 4);
+        }
     }
 }
 
@@ -8841,9 +9228,10 @@ async fn resumed_goal_activity_clears_retry_cooldowns_across_restart() {
                 + u64::from(failure == "ambiguous" && !failed.action.goal_turn_counted)
         );
         assert!(restarted.live_state(&f.task).await.is_none());
-        restarted.scan_once(retry_at).await.unwrap();
+        let before_offline = retry_at.min(resumed_at + AUTOMATION_OFFLINE_AFTER_MS - 1);
+        restarted.scan_once(before_offline).await.unwrap();
         assert_eq!(restarted.queued_count().await, 0);
-        assert!(restarted.run_next(retry_at + 1).await.unwrap().is_none());
+        assert!(restarted.run_next(before_offline).await.unwrap().is_none());
         let reopened = AgentAutomationStore::for_config(&f.config)
             .unwrap()
             .load(&f.task)
@@ -10032,7 +10420,11 @@ async fn configured_retry_timings_drive_dispatch_and_exhaustion_across_restart()
                         .updated_at_ms
                         .unwrap()
                         .max(failed.goal_wake.last_nudged_at_ms.unwrap_or(0))
-                        + seconds * 1000,
+                        + if mode == "goal" {
+                            (seconds * 1000).max(AUTOMATION_OFFLINE_AFTER_MS)
+                        } else {
+                            seconds * 1000
+                        },
                     "{mode}"
                 );
                 now = deadline;
@@ -10329,7 +10721,7 @@ async fn repeated_cooldowns_preserve_real_failure_budget_and_resume_at_availabil
 #[tokio::test]
 async fn goal_recovery_cooldown_does_not_consume_a_goal_retry_or_count_an_extra_turn() {
     let now = 1000 + AUTOMATION_OFFLINE_AFTER_MS;
-    let until = now + 300_000;
+    let until = now + 600_000;
     let (f, supervisor, _) = waiting_fixture(
         vec![
             CooldownOutcome::Accepted,
@@ -10365,7 +10757,7 @@ async fn goal_recovery_cooldown_does_not_consume_a_goal_retry_or_count_an_extra_
                 .updated_at_ms
                 .unwrap()
                 .max(after.goal_wake.last_nudged_at_ms.unwrap_or(0))
-                + 120_000
+                + 120_000_u64.max(AUTOMATION_OFFLINE_AFTER_MS)
         )
     );
 }
@@ -10437,6 +10829,47 @@ async fn cooldown_survives_restart_and_does_not_block_other_ready_chats() {
     restarted.scan_once(until).await.unwrap();
     restarted.run_next(until).await.unwrap();
     assert_eq!(executor.requests.lock().unwrap().len(), 3);
+}
+
+#[tokio::test]
+async fn persisted_queued_chat_can_run_now_before_its_cooldown_without_a_goal() {
+    let now = 1000 + AUTOMATION_OFFLINE_AFTER_MS;
+    let (f, supervisor, executor) =
+        waiting_fixture(vec![CooldownOutcome::Wait(now + 180_000)], true).await;
+    f.chat
+        .append_user(
+            "manual-after-restart".into(),
+            "Keep the original request".into(),
+        )
+        .await
+        .unwrap();
+    supervisor.scan_once(now).await.unwrap();
+    supervisor.run_next(now).await.unwrap();
+    let before = f.store.load(&f.task).unwrap();
+    assert!(before.goal.is_none());
+    let restarted =
+        AgentAutomationSupervisor::new(f.config.markdown_chat.automation.clone(), executor.clone());
+    restarted
+        .register_task(AutomationTaskHandle::new(
+            f.task.clone(),
+            0,
+            f.store.clone(),
+            f.chat.clone(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(restarted.queued_count().await, 0);
+    let queued = restarted
+        .run_queued_action_now(&f.task, before.action.id.as_deref().unwrap(), now + 1)
+        .await
+        .unwrap();
+    assert_eq!(queued.status, AutomationActionStatus::Queued);
+    assert!(queued.bypass_conversation_cooldown);
+    restarted.run_next(now + 1).await.unwrap().unwrap();
+    let requests = executor.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(requests[1].bypass_conversation_cooldown);
+    assert!(f.store.load(&f.task).unwrap().goal.is_none());
 }
 
 #[tokio::test]
@@ -10576,4 +11009,50 @@ async fn first_real_failure_after_initial_cooldown_starts_at_the_first_retry_del
         failed.automatic_retry_at_ms(),
         Some(failed.action.updated_at_ms.unwrap() + 180_000)
     );
+}
+
+#[tokio::test]
+async fn configured_offline_timeout_prevents_premature_chat_and_goal_followups() {
+    for goal in [false, true] {
+        let f = fixture_with_offline_timeout(64, 10).await;
+        f.chat.record_agent_call(1_000).await.unwrap();
+        if goal {
+            let configured = f
+                .store
+                .set_goal(
+                    &f.task,
+                    "Continue only after the configured silence interval",
+                    100,
+                )
+                .unwrap();
+            f.store.run_goal(&f.task, configured.revision, 101).unwrap();
+        } else {
+            f.chat
+                .append_user(
+                    "slow-agent-message".into(),
+                    "Continue when the agent is offline".into(),
+                )
+                .await
+                .unwrap();
+        }
+        for elapsed in [240_000, 300_000, 599_999] {
+            f.supervisor.scan_once(1_000 + elapsed).await.unwrap();
+            assert_eq!(
+                f.supervisor.queued_count().await,
+                0,
+                "goal={goal}, elapsed={elapsed}"
+            );
+            assert_eq!(f.executor.calls.load(Ordering::SeqCst), 0);
+        }
+        // New activity resets the full configured interval, rather than merely
+        // extending the old fixed five-minute deadline.
+        f.chat.record_agent_call(590_000).await.unwrap();
+        f.supervisor.scan_once(1_000 + 600_000).await.unwrap();
+        assert_eq!(f.supervisor.queued_count().await, 0);
+        f.supervisor.scan_once(590_000 + 600_000 - 1).await.unwrap();
+        assert_eq!(f.supervisor.queued_count().await, 0);
+        f.supervisor.scan_once(590_000 + 600_000).await.unwrap();
+        assert_eq!(f.supervisor.queued_count().await, 1, "goal={goal}");
+        assert_eq!(f.executor.calls.load(Ordering::SeqCst), 0);
+    }
 }

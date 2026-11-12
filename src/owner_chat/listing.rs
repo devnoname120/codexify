@@ -106,7 +106,8 @@ async fn read_chat(
             }
         }
     };
-    let wake_activity = wake::Activity::from(&summary);
+    let wake_activity = wake::Activity::from(&summary)
+        .with_offline_timeout(state.config.markdown_chat.offline_after_ms());
     let OwnerChatSummary {
         title,
         custom_title,

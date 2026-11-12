@@ -3,6 +3,7 @@
 import type { Locator, Page } from "patchright";
 import {selectorDrift} from "./errors";
 import {observeReadOnly} from "./observation";
+import {throwIfConversationLimit} from "./browser-session";
 import {
   CHATGPT_ASSISTANT_TURN_SELECTOR,
   CHATGPT_STOP_BUTTON_SELECTOR,
@@ -261,6 +262,7 @@ export async function waitForSubmissionAcceptance(
   while (Date.now() < deadline) {
     if (signal?.aborted) throw new DOMException("Browser action aborted", "AbortError");
     const state = await submissionPoll(page, baseline, signal, Math.max(1, Math.min(5_000, deadline-Date.now())));
+    await throwIfConversationLimit(page);
     const evidence = submissionEvidence({ ...state, initialTurnIdentities:baseline.initialTurnIdentities });
     if (evidence === "user_turn") {
       const identity = newTurnIdentity(baseline.initialTurnIdentities, state.userIdentities)!;

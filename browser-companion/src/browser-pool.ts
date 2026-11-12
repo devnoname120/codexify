@@ -89,6 +89,11 @@ export class PooledWindowCoordinator {
   reveal:Coordinator["reveal"]=(url,signal)=>this.exclusive(c=>c.reveal(url,signal));
   turnHandoffComplete:Coordinator["turnHandoffComplete"]=(url,account,id,signal)=>this.onConversation(url,c=>c.turnHandoffComplete(url,account,id,signal));
   approvePendingConversation:Coordinator["approvePendingConversation"]=(request,signal,navigate,once)=>this.onConversation(request.url,c=>c.approvePendingConversation(request,signal,navigate,once));
+  // Navigation budgets are shared by every page in the profile.
+  navigationAvailability:Coordinator["navigationAvailability"]=url=>(this.laneFor(url)??this.lanes[0]!).coordinator.navigationAvailability(url);
+  // A retained pairing window belongs to the page that created the chat.
+  releasePairingWindow(actionId:string):boolean {return this.actions.get(actionId)?.lane.coordinator.releasePairingWindow(actionId)??false;}
+  refreshPairingWindow(actionId:string):boolean {return this.actions.get(actionId)?.lane.coordinator.refreshPairingWindow(actionId)??false;}
 
   async execute(raw:ExecuteActionRequest,signal?:AbortSignal):Promise<ActionSnapshot> {
     const request=executeActionRequestSchema.parse(raw);
@@ -114,12 +119,16 @@ export class PooledWindowCoordinator {
         throw new BrowserCompanionError("Browser companion account changed before the action could start","authentication_required");
       const conversation=canonicalChatGptConversationUrl(request.expectedUrl);
       if(this.observations.has(conversation))throw new BrowserCompanionError("This ChatGPT conversation is being inspected");
+      // A pairing continuation reuses the page retained by its new-chat action;
+      // that page validates the reservation before admitting the continuation.
+      const parent=request.pairingContinuationOf?this.actions.get(request.pairingContinuationOf):undefined;
       if(this.lanes.some(l=>{
         const active=l.coordinator.ownedActionId;
-        return active&&this.actions.get(active)?.conversation===conversation;
+        return active&&active!==request.pairingContinuationOf&&this.actions.get(active)?.conversation===conversation;
       }))throw new BrowserCompanionError("This ChatGPT conversation already owns an action");
       const affinity=this.laneFor(request.expectedUrl);
-      const lane=affinity&&this.free(affinity)?affinity:[...this.lanes].sort((a,b)=>a.lastUsed-b.lastUsed).find(l=>this.free(l));
+      const lane=parent&&!parent.lane.reserved&&parent.lane.coordinator.ownedActionId===request.pairingContinuationOf?parent.lane
+        :affinity&&this.free(affinity)?affinity:[...this.lanes].sort((a,b)=>a.lastUsed-b.lastUsed).find(l=>this.free(l));
       if(!lane)throw new BrowserCompanionError("All browser companion action pages are busy");
       if(this.actions.size>=this.lanes.length*1100) {
         for(const [id,owned] of this.actions) {

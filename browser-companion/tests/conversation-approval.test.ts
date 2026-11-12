@@ -107,6 +107,23 @@ test.skipIf(!native)("unexpected choices, disabled options and changed targets a
   expect(await page.evaluate(()=> JSON.parse(document.body.dataset.clicks!).conversation)).toBe(0);
 });
 
+test.skipIf(!native)("malformed approval controls are rejected before opening their menu",async()=>{
+  for(const variant of ['submit','extra-popup','ungrouped','extra-control']) {
+    fixture();await surface.navigate(url);
+    await page.evaluate(variant=>{
+      const deny=document.querySelector<HTMLButtonElement>('#deny')!;
+      const once=document.querySelector<HTMLButtonElement>('#once')!;
+      const trigger=document.querySelector<HTMLButtonElement>('#random-trigger')!;
+      if(variant==='submit')deny.type='submit';
+      if(variant==='extra-popup')once.setAttribute('aria-haspopup','menu');
+      if(variant==='ungrouped')trigger.parentElement!.append(deny);
+      if(variant==='extra-control')trigger.after(document.createElement('button'));
+    },variant);
+    expect(await approveConversationCard(page,request,appId,new AbortController().signal)).toBeFalse();
+    expect(await page.evaluate(()=>JSON.parse(document.body.dataset.clicks!))).toEqual({arrow:0,once:0,conversation:0,deny:0,send:0});
+  }
+});
+
 test.skipIf(!native)("a cancelled check and a stuck approval release the browser without submitting messages",async()=>{
   fixture();await surface.navigate(url);
   await approveConversationCard(page,request,appId,AbortSignal.abort()).catch(()=>false);
@@ -202,10 +219,12 @@ test.skipIf(!native)('automatic once approval handles a configured connector wit
   expect(await page.evaluate(()=>JSON.parse(document.body.dataset.clicks!))).toMatchObject({arrow:0,once:1,conversation:0,deny:0,send:0});
 });
 
-test.skipIf(!native)("the captured materialization card and portalled Radix menu select conversation scope exactly once",async()=>{
+for(const capture of ['materialization-approval','materialization-approval-neutral']) {
+test.skipIf(!native)(`the captured ${capture} card and portalled Radix menu select conversation scope exactly once`,async()=>{
   fixture();
   const live=JSON.parse(readFileSync(new URL('./fixtures/materialization-approval.json',import.meta.url),'utf8')) as {card:string;menu:string};
-  body=`<section data-turn-key="live-capture"><div data-user-message-bubble><span data-prompt-link-href="app://${appId}">${name}</span></div>${live.card}</section><form data-chatgpt-composer><div id="prompt-textarea" contenteditable="true" style="min-height:24px"></div><button type="submit" data-testid="send-button">Send</button></form><script>
+  const {card}=JSON.parse(readFileSync(new URL(`./fixtures/${capture}.json`,import.meta.url),'utf8')) as {card:string};
+  body=`<section data-turn-key="live-capture"><div data-user-message-bubble><span data-prompt-link-href="app://${appId}">${name}</span></div>${card}</section><form data-chatgpt-composer><div id="prompt-textarea" contenteditable="true" style="min-height:24px"></div><button type="submit" data-testid="send-button">Send</button></form><script>
     const clicks={arrow:0,once:0,conversation:0,deny:0,send:0};const update=()=>document.body.dataset.clicks=JSON.stringify(clicks);update();
     document.querySelector('#random-trigger').onclick=()=>{
       clicks.arrow++;document.querySelector('#random-trigger').setAttribute('aria-expanded','true');
@@ -223,6 +242,7 @@ test.skipIf(!native)("the captured materialization card and portalled Radix menu
   expect(await page.evaluate(()=>JSON.parse(document.body.dataset.clicks!))).toEqual({arrow:1,once:0,conversation:1,deny:0,send:0});
   expect(page.url()).toBe(url);expect(context.pages()).toEqual([page]);
 });
+}
 
 test.skipIf(!native)("an already expanded materialization menu is reused only when associated with its current card",async()=>{
   fixture();await surface.navigate(url);

@@ -1,3 +1,5 @@
+function analyticsDuration(ms){const minutes=Math.floor(Math.max(0,Number.isFinite(ms)?ms:0)/60000),hours=Math.floor(minutes/60);return hours>=100?`${hours}h`:`${hours}h ${minutes%60}m`;}
+
 function createUsageAnalytics({api,getChats,onOpenChat,isVisible,cutoffCard,getHighlights,rootId='usage-analytics',bindBackdrop=()=>{}}) {
  const svgNS='http://www.w3.org/2000/svg',palette=['#8b5cf6','#06b6d4','#f59e0b','#ec4899','#3b82f6','#14b8a6','#f97316','#a855f7','#84cc16','#eab308','#6366f1','#f43f5e'];
  const metricNames={turns:'Turns',activeMs:'Active time',toolCalls:'Tool calls'};
@@ -7,7 +9,7 @@ function createUsageAnalytics({api,getChats,onOpenChat,isVisible,cutoffCard,getH
  const el=(tag,className,text)=>{const n=document.createElement(tag);if(className)n.className=className;if(text!=null)n.textContent=text;return n;};
  const svg=(tag,attrs={})=>{const n=document.createElementNS(svgNS,tag);for(const [key,value]of Object.entries(attrs))n.setAttribute(key,String(value));return n;};
  const count=value=>new Intl.NumberFormat(undefined,{notation:value>=10000?'compact':'standard',maximumFractionDigits:1}).format(value||0);
- const duration=ms=>{const m=Math.floor((ms||0)/60000);return m>=60?`${Math.floor(m/60)}h${m%60?` ${m%60}m`:''}`:m?`${m}m`:ms>0?'<1m':'0m';};
+ const duration=analyticsDuration;
  const valueText=(key,v)=>key==='activeMs'?duration(v):count(v);
  const fullModel=row=>row.model==='unattributed'?'Unattributed':`${row.model.replace(/^gpt-/,'GPT-').replace(/-sol$/,' Sol').replace(/-astra$/,' Astra')} · ${row.effort==='max'?'Max':row.effort.replace(/^./,c=>c.toUpperCase())}`;
  const emptyTotals=()=>({turns:0,toolCalls:0,goals:0,activeMs:0});
@@ -270,9 +272,9 @@ function analyticsShareTopModel(models=[]) {
  return row?{model:row.model,effort:row.effort,turns:row.turns}:null;
 }
 function analyticsShareNumber(key,value) {
- const n=Math.max(0,Number.isFinite(value)?value:0)/(key==='activeMs'?3600000:1);
- const text=key==='activeMs'&&n>0&&n<.05?'<0.1':new Intl.NumberFormat('en-US',{notation:n>=10000?'compact':'standard',maximumFractionDigits:key==='activeMs'||n>=10000?1:0}).format(n);
- return key==='activeMs'?text+'h':text;
+ if(key==='activeMs')return analyticsDuration(value);
+ const n=Math.max(0,Number.isFinite(value)?value:0);
+ return new Intl.NumberFormat('en-US',{notation:n>=10000?'compact':'standard',maximumFractionDigits:n>=10000?1:0}).format(n);
 }
 function analyticsShareTiles(snapshot) {
  const top=snapshot.topModel,known=top&&top.model!=='unattributed';

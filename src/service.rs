@@ -19,6 +19,11 @@ use crate::process_env::SERVICE_SUPERVISED_ENV;
 use crate::terminal::{ACCENT, EMPHASIS, MUTED, SUCCESS, WARNING, paint};
 use crate::util::home_dir;
 
+#[cfg(any(windows, test))]
+mod health;
+#[cfg(any(windows, test))]
+mod windows_launcher;
+
 #[cfg(any(target_os = "macos", test))]
 const SERVICE_LABEL: &str = "dev.codexify.service";
 #[cfg(target_os = "linux")]
@@ -542,48 +547,15 @@ pub async fn wait_ready(port: u16, timeout: Duration) -> anyhow::Result<()> {
             );
         }
 
-        let probe = async {
-            let mut response = client.get(&url).send().await?;
-            if !response.status().is_success() {
-                return Ok::<Result<(), String>, reqwest::Error>(Err(format!(
-                    "health endpoint returned {}",
-                    response.status()
-                )));
-            }
-
-            let mut body = Vec::new();
-            while let Some(chunk) = response.chunk().await? {
-                if body.len().saturating_add(chunk.len()) > SERVICE_READY_MAX_BODY_BYTES {
-                    return Ok(Err(format!(
-                        "health endpoint response exceeds {SERVICE_READY_MAX_BODY_BYTES} bytes"
-                    )));
-                }
-                body.extend_from_slice(&chunk);
-            }
-            let payload: serde_json::Value = match serde_json::from_slice(&body) {
-                Ok(payload) => payload,
-                Err(error) => {
-                    return Ok(Err(format!(
-                        "health endpoint returned invalid JSON: {error}"
-                    )));
-                }
-            };
-            if payload.get("status").and_then(serde_json::Value::as_str) == Some("ok") {
-                Ok(Ok(()))
-            } else {
-                Ok(Err(
-                    "health endpoint has not reported status `ok`".to_string()
-                ))
-            }
-        };
-
-        match tokio::time::timeout(remaining.min(SERVICE_READY_REQUEST_TIMEOUT), probe).await {
-            Ok(Ok(Ok(()))) => return Ok(()),
-            Ok(Ok(Err(detail))) => {
+        match tokio::time::timeout(
+            remaining.min(SERVICE_READY_REQUEST_TIMEOUT),
+            probe_service_health(&client, &url),
+        )
+        .await
+        {
+            Ok(Ok(())) => return Ok(()),
+            Ok(Err(detail)) => {
                 last_detail = detail;
-            }
-            Ok(Err(error)) => {
-                last_detail = error.to_string();
             }
             Err(_) => {
                 last_detail = "health probe timed out".to_string();
@@ -595,6 +567,31 @@ pub async fn wait_ready(port: u16, timeout: Duration) -> anyhow::Result<()> {
             continue;
         }
         tokio::time::sleep(remaining.min(SERVICE_READY_POLL_INTERVAL)).await;
+    }
+}
+
+async fn probe_service_health(client: &reqwest::Client, url: &str) -> Result<(), String> {
+    let mut response = client.get(url).send().await.map_err(|e| e.to_string())?;
+    if !response.status().is_success() {
+        return Err(format!("health endpoint returned {}", response.status()));
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|e| e.to_string())? {
+        if body.len().saturating_add(chunk.len()) > SERVICE_READY_MAX_BODY_BYTES {
+            return Err(format!(
+                "health endpoint response exceeds {SERVICE_READY_MAX_BODY_BYTES} bytes"
+            ));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    let payload: serde_json::Value = serde_json::from_slice(&body)
+        .map_err(|error| format!("health endpoint returned invalid JSON: {error}"))?;
+    // Tunnel readiness is deliberately independent: restart an unresponsive
+    // server, not a responsive server whose upstream connection is recovering.
+    if payload.get("status").and_then(serde_json::Value::as_str) == Some("ok") {
+        Ok(())
+    } else {
+        Err("health endpoint has not reported status `ok`".to_string())
     }
 }
 
@@ -611,6 +608,7 @@ fn ensure_log_directory(home: &Path) -> anyhow::Result<PathBuf> {
 }
 
 fn command_output(mut command: StdCommand, action: &str) -> anyhow::Result<String> {
+    crate::process_env::isolate_console(&mut command);
     let output = command.output().with_context(|| {
         format!(
             "{action}: start {}",
@@ -628,6 +626,7 @@ fn command_output(mut command: StdCommand, action: &str) -> anyhow::Result<Strin
 }
 
 fn probe_output(mut command: StdCommand, action: &str) -> anyhow::Result<std::process::Output> {
+    crate::process_env::isolate_console(&mut command);
     command.output().with_context(|| {
         format!(
             "{action}: start {}",
@@ -740,12 +739,13 @@ where
     }
 }
 
-#[cfg(target_os = "macos")]
-fn command_output_with_timeout(
+#[cfg(any(target_os = "macos", windows, test))]
+pub(crate) fn command_output_with_timeout(
     mut command: StdCommand,
     action: &str,
     timeout: Duration,
 ) -> anyhow::Result<std::process::Output> {
+    crate::process_env::isolate_console(&mut command);
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     let program = command.get_program().to_string_lossy().into_owned();
     let mut child = command
@@ -805,7 +805,7 @@ where
     )
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 fn write_definition(path: &Path, contents: &str, mode: u32) -> anyhow::Result<()> {
     let parent = path
         .parent()
@@ -821,8 +821,13 @@ fn write_definition(path: &Path, contents: &str, mode: u32) -> anyhow::Result<()
     })?;
     temp.write_all(contents.as_bytes())?;
     temp.as_file().sync_all()?;
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(temp.path(), fs::Permissions::from_mode(mode))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(temp.path(), fs::Permissions::from_mode(mode))?;
+    }
+    #[cfg(windows)]
+    let _ = mode;
 
     match temp.persist(path) {
         Ok(_) => Ok(()),
@@ -925,16 +930,93 @@ fn encode_powershell_script(script: &str) -> String {
 fn windows_hidden_service_script(spec: &ServiceSpec) -> String {
     let executable = powershell_quote(&spec.executable.to_string_lossy());
     let config = powershell_quote(&spec.config.to_string_lossy());
+    let log = powershell_quote(
+        &spec
+            .home
+            .join(".codexify")
+            .join("logs")
+            .join(LOG_FILE)
+            .to_string_lossy(),
+    );
+    windows_launcher_source(&executable, &config, &log)
+}
+
+#[cfg(any(windows, test))]
+fn windows_launcher_source(executable: &str, config: &str, log: &str) -> String {
     format!(
-        "$ErrorActionPreference = 'Stop'\n& {executable} service run --config {config}\nif ($LASTEXITCODE -ne 0) {{ exit $LASTEXITCODE }}\n"
+        r#"# Codexify supervisor launcher v2
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+$serviceExecutable = {executable}
+$serviceConfig = {config}
+$serviceLog = {log}
+function Write-ServiceEvent([string] $message) {{
+    try {{
+        [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($serviceLog)) | Out-Null
+        [IO.File]::AppendAllText($serviceLog, ('[' + [DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ') + '] [service] ' + $message + [Environment]::NewLine))
+    }} catch {{}}
+}}
+$restartDelay = 2
+while ($true) {{
+    $supervisor = $null
+    $supervisorStarted = $false
+    $startedAt = [DateTime]::UtcNow
+    try {{
+        $startInfo = New-Object Diagnostics.ProcessStartInfo
+        $startInfo.FileName = $serviceExecutable
+        $startInfo.Arguments = 'service run --config "' + $serviceConfig + '"'
+        $startInfo.UseShellExecute = $false
+        $startInfo.CreateNoWindow = $true
+        $supervisor = New-Object Diagnostics.Process
+        $supervisor.StartInfo = $startInfo
+        $null = $supervisor.Start()
+        $supervisorStarted = $true
+        while (-not $supervisor.WaitForExit(1000)) {{}}
+        $exitCode = $supervisor.ExitCode
+        Write-ServiceEvent ('supervisor exited unexpectedly with code ' + $exitCode + ' (0x' + $exitCode.ToString('X8') + ')')
+    }} catch {{
+        Write-ServiceEvent ('supervisor launcher failed: ' + $_.Exception.Message)
+        if ($supervisorStarted) {{
+            try {{
+                if (-not $supervisor.HasExited) {{ $supervisor.Kill(); $supervisor.WaitForExit() }}
+            }} catch {{
+                Write-ServiceEvent ('could not stop the owned supervisor: ' + $_.Exception.Message)
+                exit 1
+            }}
+        }}
+    }} finally {{
+        if ($supervisor) {{ $supervisor.Dispose() }}
+    }}
+    if (([DateTime]::UtcNow - $startedAt).TotalSeconds -ge 60) {{ $restartDelay = 2 }}
+    Write-ServiceEvent ('restarting supervisor in ' + $restartDelay + ' seconds')
+    Start-Sleep -Seconds $restartDelay
+    $restartDelay = [Math]::Min($restartDelay * 2, 60)
+}}
+"#
     )
 }
 
 #[cfg(any(target_os = "windows", test))]
 fn windows_action_arguments(spec: &ServiceSpec) -> String {
-    let encoded = encode_powershell_script(&windows_hidden_service_script(spec));
     format!(
-        "-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -EncodedCommand {encoded}"
+        "-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File \"{}\"",
+        windows_launcher_path(spec).display()
+    )
+}
+
+#[cfg(any(windows, test))]
+fn windows_launcher_path(spec: &ServiceSpec) -> PathBuf {
+    spec.home.join(".codexify/service/supervisor.ps1")
+}
+
+#[cfg(windows)]
+fn write_windows_launcher(spec: &ServiceSpec) -> anyhow::Result<()> {
+    // Windows PowerShell 5.1 otherwise reads non-ASCII paths using the ANSI
+    // code page. The BOM is required for a file-based UTF-8 launcher.
+    write_definition(
+        &windows_launcher_path(spec),
+        &format!("\u{feff}{}", windows_hidden_service_script(spec)),
+        0o600,
     )
 }
 
@@ -1009,6 +1091,7 @@ fn powershell_command(script: &str) -> StdCommand {
         "pwsh.exe"
     };
     let mut command = StdCommand::new(program);
+    crate::process_env::isolate_console(&mut command);
     command.args([
         "-NoLogo",
         "-NoProfile",
@@ -1023,12 +1106,37 @@ fn powershell_command(script: &str) -> StdCommand {
 
 #[cfg(target_os = "windows")]
 fn which_program(program: &str) -> bool {
-    StdCommand::new("where.exe")
+    let mut command = StdCommand::new("where.exe");
+    crate::process_env::isolate_console(&mut command);
+    command
         .arg(program)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
         .is_ok_and(|status| status.success())
+}
+
+#[cfg(windows)]
+pub(crate) fn windows_file_command(path: &Path) -> StdCommand {
+    let program = if which_program("powershell.exe") {
+        "powershell.exe"
+    } else {
+        "pwsh.exe"
+    };
+    let mut command = StdCommand::new(program);
+    crate::process_env::isolate_console(&mut command);
+    command
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+        ])
+        .arg(path)
+        .stdin(Stdio::null());
+    command
 }
 
 #[cfg(target_os = "linux")]
@@ -1468,15 +1576,30 @@ fn platform_status() -> anyhow::Result<ServiceStatus> {
 
 #[cfg(target_os = "windows")]
 fn platform_install(spec: &ServiceSpec) -> anyhow::Result<()> {
-    command_output(
-        powershell_command(&windows_install_script(spec)),
-        "install the Codexify scheduled task",
+    write_windows_launcher(spec)?;
+    let registration = windows_launcher_path(spec).with_file_name("install.ps1");
+    write_definition(
+        &registration,
+        &format!("\u{feff}{}", windows_install_script(spec)),
+        0o600,
     )?;
+    command_output(
+        windows_file_command(&registration),
+        "install the Codexify scheduled task",
+    )
+    .with_context(|| {
+        format!(
+            "registration script: {}; launcher: {}",
+            registration.display(),
+            windows_launcher_path(spec).display()
+        )
+    })?;
     Ok(())
 }
 
 #[cfg(target_os = "windows")]
 fn platform_start() -> anyhow::Result<()> {
+    windows_launcher::refresh()?;
     command_output(
         powershell_command(&windows_start_script()),
         "start the Codexify scheduled task",
@@ -1495,6 +1618,7 @@ fn platform_stop() -> anyhow::Result<()> {
 
 #[cfg(target_os = "windows")]
 fn platform_restart() -> anyhow::Result<()> {
+    windows_launcher::refresh()?;
     command_output(
         powershell_command(&windows_restart_script()),
         "restart the Codexify scheduled task",
@@ -1504,6 +1628,7 @@ fn platform_restart() -> anyhow::Result<()> {
 
 #[cfg(target_os = "windows")]
 fn platform_enable() -> anyhow::Result<()> {
+    windows_launcher::refresh()?;
     let task = powershell_quote(WINDOWS_TASK);
     let script = format!(
         "$ErrorActionPreference = 'Stop'\n$task = Get-ScheduledTask -TaskName {task} -ErrorAction Stop\nEnable-ScheduledTask -InputObject $task | Out-Null\nStart-ScheduledTask -InputObject $task\n"
@@ -1890,7 +2015,13 @@ async fn shutdown_signal() {
 
 #[cfg(windows)]
 async fn shutdown_signal() {
-    let _ = tokio::signal::ctrl_c().await;
+    match tokio::signal::ctrl_c().await {
+        Ok(()) => tracing::info!(process_id = std::process::id(), "service received Ctrl+C"),
+        Err(error) => {
+            tracing::error!(%error, "could not listen for service Ctrl+C; continuing supervision");
+            std::future::pending::<()>().await;
+        }
+    }
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -2076,12 +2207,26 @@ where
         let wait = child.wait();
         tokio::pin!(wait);
 
+        #[cfg(windows)]
+        let health = health::watch(&config, log.clone(), health::POLICY);
+        #[cfg(not(windows))]
+        let health = std::future::pending::<String>();
+        tokio::pin!(health);
+
         let status = tokio::select! {
             status = &mut wait => Some(status),
             _ = &mut shutdown => {
                 append_event(&log, "stopping Codexify after service shutdown request");
                 terminate_child(pid, &mut wait).await;
                 None
+            }
+            reason = &mut health => {
+                append_event(&log, &format!("restarting unresponsive Codexify: {reason}"));
+                // Closing our non-inherited Job Object terminates this server
+                // tree without depending on an external taskkill process.
+                #[cfg(windows)]
+                drop(child_job.take());
+                Some((&mut wait).await)
             }
         };
 
@@ -2377,6 +2522,28 @@ mod tests {
     }
 
     #[test]
+    fn service_management_probe_timeout_is_bounded() {
+        #[cfg(unix)]
+        let command = {
+            let mut command = StdCommand::new("/bin/sh");
+            command.args(["-c", "exec sleep 30"]);
+            command
+        };
+        #[cfg(windows)]
+        let command = powershell_command("Start-Sleep -Seconds 30");
+        let started = std::time::Instant::now();
+        assert!(
+            command_output_with_timeout(
+                command,
+                "isolated management probe",
+                Duration::from_millis(100)
+            )
+            .is_err()
+        );
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
     fn native_definitions_use_absolute_config_and_restart_policy() {
         let root = Path::new("/tmp/codexify-test");
         let spec = spec(root);
@@ -2403,7 +2570,9 @@ mod tests {
         assert!(script.contains("-RestartCount 999"));
         assert!(script.contains("New-TimeSpan -Minutes 1"));
         assert!(script.contains("-WindowStyle Hidden"));
-        assert!(script.contains("-EncodedCommand"));
+        assert!(script.contains("-File"));
+        assert!(!script.contains("-EncodedCommand"));
+        assert!(script.contains("supervisor.ps1"));
         assert!(script.contains("(Get-Process -Id $PID).Path"));
         assert!(
             !script.contains("New-ScheduledTaskAction -Execute '/tmp/codexify-test/bin/codexify'")
@@ -2692,21 +2861,70 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn scheduled_task_definition_is_valid_powershell() {
-        let root = tempfile::tempdir().unwrap();
-        let path = root.path().join("service-install.ps1");
-        fs::write(&path, windows_install_script(&spec(root.path()))).unwrap();
-        let path = powershell_quote(&path.to_string_lossy());
-        let parser = format!(
-            "$tokens = $null\n$errors = $null\n[System.Management.Automation.Language.Parser]::ParseFile({path}, [ref]$tokens, [ref]$errors) | Out-Null\nif ($errors.Count) {{ $errors | ForEach-Object {{ Write-Error $_ }}; exit 1 }}\n"
+    fn management_powershell_uses_an_isolated_console_and_unicode_script_files() {
+        let script = format!(
+            r#"Add-Type -TypeDefinition 'using System.Runtime.InteropServices; public static class ManagementConsoleProbe {{ [DllImport("kernel32.dll")] public static extern uint GetConsoleProcessList([Out] uint[] ids,uint size); }}'
+$ids=New-Object uint[] 256
+$count=[ManagementConsoleProbe]::GetConsoleProcessList($ids,256)
+if ($ids -contains {}) {{ throw 'management helper shares the server console' }}
+Write-Output 'ISOLATED'
+"#,
+            std::process::id()
         );
-        let output = powershell_command(&parser).output().unwrap();
+        let output = powershell_command(&script).output().unwrap();
         assert!(
             output.status.success(),
-            "{}{}",
-            String::from_utf8_lossy(&output.stdout),
+            "{}",
             String::from_utf8_lossy(&output.stderr)
         );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("ISOLATED"));
+
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("O'Brien caf\u{e9}");
+        fs::create_dir(&directory).unwrap();
+        let path = directory.join("probe.ps1");
+        let body = format!(
+            "\u{feff}$ErrorActionPreference='Stop'\nif (-not (Test-Path -LiteralPath {})) {{ throw 'Unicode path was corrupted' }}\nWrite-Output 'UNICODE_OK'",
+            powershell_quote(&directory.to_string_lossy())
+        );
+        write_definition(&path, &body, 0o600).unwrap();
+        let output = windows_file_command(&path).output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("UNICODE_OK"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn scheduled_task_definition_is_valid_powershell() {
+        let root = tempfile::tempdir().unwrap();
+        for (name, script) in [
+            (
+                "service-install.ps1",
+                windows_install_script(&spec(root.path())),
+            ),
+            (
+                "service-launcher.ps1",
+                windows_hidden_service_script(&spec(root.path())),
+            ),
+        ] {
+            let path = root.path().join(name);
+            fs::write(&path, script).unwrap();
+            let path = powershell_quote(&path.to_string_lossy());
+            let parser = format!(
+                "$tokens = $null\n$errors = $null\n[System.Management.Automation.Language.Parser]::ParseFile({path}, [ref]$tokens, [ref]$errors) | Out-Null\nif ($errors.Count) {{ $errors | ForEach-Object {{ Write-Error $_ }}; exit 1 }}\n"
+            );
+            let output = powershell_command(&parser).output().unwrap();
+            assert!(
+                output.status.success(),
+                "{name}: {}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
     }
 
     #[test]

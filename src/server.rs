@@ -63,6 +63,7 @@ use crate::tools::continuation::{ContinueTask, PrepareContinuation};
 use crate::tools::set_project_root::{
     ProjectSelection, ProjectSelectionRequest, SetProjectRoot, select_and_render,
 };
+use crate::tools::ticket_wait::TicketWait;
 use crate::types::{AppConfig, ToolContent, ToolResult};
 use crate::widget_debug;
 
@@ -88,7 +89,10 @@ async fn read_pending_chat_inline(
     if receipt.is_error
         || receipt.audit.truncated == Some(true)
         || receipt.chat_delivery_end.is_none()
-        || receipt.new_chat_message_from_user.as_ref().is_none_or(|text| text.is_empty())
+        || receipt
+            .new_chat_message_from_user
+            .as_ref()
+            .is_none_or(|text| text.is_empty())
     {
         return None;
     }
@@ -97,7 +101,8 @@ async fn read_pending_chat_inline(
     receipt.is_error = true;
     receipt.content = vec![ToolContent::Text(INLINE_CHAT_WRITE_REQUIRED.into())];
     receipt.structured_content = None;
-    receipt.new_chat_message_from_user = receipt.new_chat_message_from_user
+    receipt.new_chat_message_from_user = receipt
+        .new_chat_message_from_user
         .map(|text| format!("{INLINE_CHAT_WRITE_REQUIRED}\n\n{text}"));
     Some(receipt)
 }
@@ -370,6 +375,7 @@ impl CodexHandler {
     ) -> Option<ToolResult> {
         if self.config.conversation_auth_token.is_none()
             || tool_name == AUTHORIZATION_TOOL_WIRE_NAME
+            || tool_name == TicketWait::NAME
             || self
                 .conversation_authorizations
                 .is_authorized(conversation, &self.session)
@@ -458,8 +464,21 @@ fn without_widget_advertisement(
     (!meta.0.is_empty()).then_some(meta)
 }
 
+pub(crate) fn automation_schema_version(tools: &[Box<dyn Tool>], config: &AppConfig) -> String {
+    use sha2::Digest;
+    let advertising = crate::global_settings::advertising_config(config);
+    let mut catalog: Vec<_> = tools
+        .iter()
+        .map(|tool| advertised_tool(tool.as_ref(), &advertising))
+        .collect();
+    catalog.sort_by(|a, b| a.name.cmp(&b.name));
+    let bytes = serde_json::to_vec(&catalog).expect("advertised tools serialize as JSON");
+    format!("schema-v1:{:x}", sha2::Sha256::digest(bytes))
+}
+
 fn advertised_tool(tool: &dyn Tool, config: &AppConfig) -> rmcp::model::Tool {
     let ticketed = ticketed_model_tool(tool, config);
+    let ticket_wait = tool.name() == TicketWait::NAME;
     let input = if ticketed {
         crate::agent_tickets::input_schema(tool.input_schema())
     } else {
@@ -506,13 +525,13 @@ fn advertised_tool(tool: &dyn Tool, config: &AppConfig) -> rmcp::model::Tool {
         advertised = advertised.with_meta(meta);
     }
     let mut fields = Vec::new();
-    if ticketed {
+    if ticketed || ticket_wait {
         fields.push((
             crate::agent_tickets::OUTPUT_FIELD,
             crate::agent_tickets::OUTPUT_DESCRIPTION,
         ));
     }
-    if config.markdown_chat.enabled {
+    if config.markdown_chat.enabled && !ticket_wait {
         fields.push((
             crate::markdown_chat::USER_MESSAGE_FIELD,
             crate::markdown_chat::output::USER_MESSAGE_DESCRIPTION,
@@ -528,7 +547,7 @@ fn advertised_tool(tool: &dyn Tool, config: &AppConfig) -> rmcp::model::Tool {
             ));
         }
     }
-    if !app_only_tool(tool) {
+    if !app_only_tool(tool) && !ticket_wait {
         fields.push((WORKSPACE_CHANGE_FIELD, WORKSPACE_CHANGE_DESCRIPTION));
     }
     let output = if fields.is_empty() {
@@ -563,12 +582,18 @@ fn app_only_tool(tool: &dyn Tool) -> bool {
 fn counts_rollout_work(name: &str) -> bool {
     !matches!(
         name,
-        "chat_await" | "turn_completed" | "goal_finish" | "automation_verify_pairing"
+        "chat_await"
+            | "turn_completed"
+            | "goal_finish"
+            | "automation_verify_pairing"
+            | "ticket_wait"
     )
 }
 
 fn ticketed_model_tool(tool: &dyn Tool, config: &AppConfig) -> bool {
-    config.experimental.agent_tickets && !app_only_tool(tool) && tool.name() != ContinueTask::NAME
+    config.experimental.agent_tickets
+        && !app_only_tool(tool)
+        && !matches!(tool.name(), ContinueTask::NAME | TicketWait::NAME)
 }
 
 fn builtin_ui_resources(ui_widgets: bool) -> Vec<rmcp::model::Resource> {
@@ -802,6 +827,7 @@ impl ServerHandler for CodexHandler {
             .map(Value::Object)
             .unwrap_or_else(|| json!({}));
         let tool = self.tools.iter().find(|t| t.name() == name);
+        let ticket_wait = name == TicketWait::NAME && tool.is_some();
         let model_call = !tool.is_some_and(|tool| app_only_tool(tool.as_ref()));
         let mut task_conversation = conversation.clone();
         let mut task_owner_generation = None;
@@ -856,8 +882,9 @@ impl ServerHandler for CodexHandler {
                 }
             }
         }
-        let ticketed =
-            self.config.experimental.agent_tickets && model_call && name != ContinueTask::NAME;
+        let ticketed = self.config.experimental.agent_tickets
+            && model_call
+            && !matches!(name.as_str(), ContinueTask::NAME | TicketWait::NAME);
         let call_id = self.next_tool_call_id.fetch_add(1, Ordering::Relaxed);
         let ticket_supplied = match args.get("codexify_ticket") {
             None => "missing",
@@ -865,7 +892,7 @@ impl ServerHandler for CodexHandler {
             Some(_) => "malformed",
         };
         let mut ticket_argument_error = None;
-        let ticket_permit = if ticketed {
+        let mut ticket_permit = if ticketed {
             if context.ct.is_cancelled() {
                 if let Some(audit) = &self.audit {
                     audit.ticket_reservation(
@@ -908,7 +935,17 @@ impl ServerHandler for CodexHandler {
             };
             let next = match self
                 .agent_tickets
-                .reserve(conversation.as_ref(), &self.session, supplied)
+                .reserve_for_call(
+                    crate::agent_tickets::TicketCall {
+                        conversation: conversation.as_ref(),
+                        task: task_conversation.as_ref(),
+                        owner_generation: task_owner_generation,
+                        tool: &name,
+                    },
+                    &self.session,
+                    supplied,
+                    context.ct.clone(),
+                )
                 .await
             {
                 Ok(ticket) => ticket,
@@ -988,12 +1025,13 @@ impl ServerHandler for CodexHandler {
         // the audit begin/finish pairing below rather than short-circuiting.
         let agent_call = self.config.markdown_chat.enabled
             && tool.is_some_and(|tool| !app_only_tool(tool.as_ref()))
+            && !ticket_wait
             && !context.ct.is_cancelled();
         let called_at_ms = crate::markdown_chat::now_ms();
         let authorized_before = self
             .conversation_auth_error("chat_read", conversation.as_ref())
             .is_none();
-        let workspace_at_start = if model_call && authorized_before {
+        let workspace_at_start = if model_call && authorized_before && !ticket_wait {
             match task_conversation.as_ref() {
                 Some(identity) => {
                     self.project_bindings
@@ -1005,6 +1043,22 @@ impl ServerHandler for CodexHandler {
         } else {
             Ok((None, None))
         };
+        // Selecting the correct folder does not attach this physical chat to
+        // the original logical task. Recover that handoff before consuming its
+        // one-time proof, even when the target already selected a workspace.
+        let pairing_task_mismatch = name == "automation_verify_pairing"
+            && authorized_before
+            && task_conversation.as_ref().is_some_and(|task| {
+                crate::tools::automation_pair::AutomationVerifyPairing::reference(&args)
+                    .ok()
+                    .and_then(|reference| {
+                        crate::agent_automation::AgentAutomationStore::for_config(&self.config)
+                            .ok()?
+                            .pairing_task_key(&reference)
+                            .ok()
+                    })
+                    .is_some_and(|key| key != task.stable_key())
+            });
         let _analytics_tool_guard = if agent_call && authorized_before && name != ContinueTask::NAME
         {
             task_conversation
@@ -1102,26 +1156,55 @@ impl ServerHandler for CodexHandler {
         let started = Instant::now();
         // New work must not run past an unread owner/team instruction. Polling
         // or interrupting a resident command remains available through write_stdin.
-        let work_preflight = if agent_call && authorized_before
-            && let Some(root)=self.selected_project_root(task_conversation.as_ref())
-            && let Ok(config)=self.effective_task_config(task_conversation.as_ref(),root)
-            && let Ok(chat)=self.markdown_chat.chat(&config,task_conversation.as_ref(),&self.session)
+        let work_preflight = if agent_call
+            && authorized_before
+            && let Some(root) = self.selected_project_root(task_conversation.as_ref())
+            && let Ok(config) = self.effective_task_config(task_conversation.as_ref(), root)
+            && let Ok(chat) =
+                self.markdown_chat
+                    .chat(&config, task_conversation.as_ref(), &self.session)
         {
             if chat.agent_stop_requested().await.unwrap_or(true)
-                && tool.is_some_and(|tool|!tool.behavior().read_only)
-                && !matches!(name.as_str(),"chat_write"|"chat_read"|"chat_await"|"turn_completed"|"write_stdin"|"rollout_update"|"agent_report")
-            {Some((crate::markdown_chat::AGENT_STOP_MESSAGE, None))}
-            else if matches!(name.as_str(),"exec_command"|"apply_patch"|"write_file"|"edit_file"|"agent_spawn"|"agent_control"|"agent_message"|"goal_finish") {
+                && tool.is_some_and(|tool| !tool.behavior().read_only)
+                && !matches!(
+                    name.as_str(),
+                    "chat_write"
+                        | "chat_read"
+                        | "chat_await"
+                        | "turn_completed"
+                        | "write_stdin"
+                        | "rollout_update"
+                        | "agent_report"
+                )
+            {
+                Some((crate::markdown_chat::AGENT_STOP_MESSAGE, None))
+            } else if matches!(
+                name.as_str(),
+                "exec_command"
+                    | "apply_patch"
+                    | "write_file"
+                    | "edit_file"
+                    | "agent_spawn"
+                    | "agent_control"
+                    | "agent_message"
+                    | "goal_finish"
+            ) {
                 match chat.read_cancellable(false, context.ct.clone()).await {
-                    Ok(snapshot) if !snapshot.text.is_empty() => Some((PENDING_CHAT_READ_REQUIRED, Some(config))),
+                    Ok(snapshot) if !snapshot.text.is_empty() => {
+                        Some((PENDING_CHAT_READ_REQUIRED, Some(config)))
+                    }
                     // An unavailable or over-limit inbox must not permit work.
                     Err(_) => Some((PENDING_CHAT_READ_REQUIRED, None)),
                     Ok(_) => None,
                 }
+            } else {
+                None
             }
-            else {None}
-        } else {None};
+        } else {
+            None
+        };
         let mut inline_chat_read = false;
+        let mut pairing_continuation = false;
         let execution = async {
             if let Some(error) = self.conversation_auth_error(&name, conversation.as_ref()) {
                 error
@@ -1135,8 +1218,11 @@ impl ServerHandler for CodexHandler {
                 if let Some(config) = inline_config
                     && matches!(&workspace_at_start, Ok((Some(root), None)) if root == &config.work_dir)
                     && !context.ct.is_cancelled()
-                    && self.conversation_auth_error("chat_read", conversation.as_ref()).is_none()
-                    && let Some(receipt) = read_pending_chat_inline(&config, &self.session, &tool_context).await
+                    && self
+                        .conversation_auth_error("chat_read", conversation.as_ref())
+                        .is_none()
+                    && let Some(receipt) =
+                        read_pending_chat_inline(&config, &self.session, &tool_context).await
                 {
                     inline_chat_read = true;
                     receipt
@@ -1159,6 +1245,88 @@ impl ServerHandler for CodexHandler {
 
                 match tool {
                     None => ToolResult::error(format!("Unknown tool: {name}")),
+                    Some(_) if ticket_wait => {
+                        if !self.config.experimental.agent_tickets {
+                            ToolResult::error(
+                                "Agent tickets are disabled; continue using the available task tools without a ticket.",
+                            )
+                        } else {
+                            match self
+                                .agent_tickets
+                                .wait_for_ticket(
+                                    conversation.as_ref(),
+                                    &self.session,
+                                    Duration::from_millis(self.config.markdown_chat.max_wait_ms),
+                                    context.ct.clone(),
+                                )
+                                .await
+                            {
+                                Ok(crate::agent_tickets::TicketWaitOutcome::Renewed(permit)) => {
+                                    if let Some(audit) = &self.audit {
+                                        audit.ticket_reservation(
+                                            call_id,
+                                            &name,
+                                            &self.audit_scope(
+                                                conversation.as_ref(),
+                                                task_conversation.as_ref(),
+                                            ),
+                                            "missing",
+                                            "accepted",
+                                            permit.acceptance(),
+                                        );
+                                    }
+                                    ticket_permit = Some(permit);
+                                    let next_action = if !authorized_before {
+                                        AUTHORIZATION_TOOL_WIRE_NAME
+                                    } else if self.config.markdown_chat.enabled
+                                        && self
+                                            .selected_project_root(task_conversation.as_ref())
+                                            .is_some()
+                                    {
+                                        "rollout_read"
+                                    } else {
+                                        "get_agent_brief"
+                                    };
+                                    TicketWait::renewed(next_action)
+                                }
+                                Ok(crate::agent_tickets::TicketWaitOutcome::Pending) => {
+                                    TicketWait::waiting(false)
+                                }
+                                Ok(crate::agent_tickets::TicketWaitOutcome::Interrupted) => {
+                                    TicketWait::waiting(true)
+                                }
+                                Err(error) => TicketWait::unavailable(error),
+                            }
+                        }
+                    }
+                    Some(_)
+                        if name == "automation_verify_pairing"
+                            && (pairing_task_mismatch
+                                || matches!(&workspace_at_start, Ok((None, _)))) =>
+                    {
+                        match (
+                            conversation.as_ref(),
+                            self.agent_automation.as_ref(),
+                            crate::tools::automation_pair::AutomationVerifyPairing::reference(
+                                &args,
+                            ),
+                        ) {
+                            (Some(_), Some(supervisor), Ok(reference)) => {
+                                let target_workspace = workspace_at_start
+                                    .as_ref()
+                                    .ok()
+                                    .and_then(|(root, _)| root.as_deref());
+                                match supervisor.pairing_continuation_for_chat(&reference, target_workspace).await {
+                                    Ok((token, generation)) => crate::tools::automation_pair::AutomationVerifyPairing::continuation_required(&token, &reference, generation),
+                                    Err(error) => ToolResult::error(error),
+                                }
+                            }
+                            (_, _, Err(error)) => ToolResult::error(error),
+                            _ => ToolResult::error(
+                                "Pairing recovery requires stable ChatGPT conversation and browser automation context.",
+                            ),
+                        }
+                    }
                     Some(_) if name == PrepareContinuation::NAME => {
                         let prepared = conversation
                         .as_ref()
@@ -1207,17 +1375,20 @@ impl ServerHandler for CodexHandler {
                                         .to_string()
                                 });
                             }
-                            if self
+                            let selected_target = self
                                 .project_bindings
-                                .selected_project_root(&self.config, physical)?
-                                .is_some()
-                            {
-                                return Err(
-                                "This ChatGPT conversation already has a workspace. Continue the task in a new conversation before selecting anything."
-                                    .into(),
-                            );
+                                .selected_project_root(&self.config, physical)?;
+                            self.continuations.claim_with_generation(physical, &token, |source_task, saved, owner| {
+                            if let Some(target) = selected_target.as_ref() {
+                                let next_owner = owner.checked_add(1).ok_or("Conversation owner generation overflow")?;
+                                let permitted = target.canonicalize().ok().as_deref() == Some(saved)
+                                    && self.effective_task_config(Some(source_task), saved.to_path_buf())
+                                        .and_then(|config|crate::agent_automation::AgentAutomationStore::for_config(&config))
+                                        .and_then(|store|store.pending_pairing_handoff(source_task, next_owner, crate::markdown_chat::now_ms()))?;
+                                if !permitted {
+                                    return Err("This ChatGPT conversation already has a workspace. Continue the task in a new conversation before selecting anything.".into());
+                                }
                             }
-                            self.continuations.claim(physical, &token, |source_task, saved| {
                             let current = {
                                 self.project_bindings
                                     .selected_project_root(&self.config, source_task)?
@@ -1254,7 +1425,15 @@ impl ServerHandler for CodexHandler {
                                     {
                                         task_owner_generation = Some(snapshot.generation);
                                         task_conversation = Some(claimed.task);
-                                        ContinueTask::result(&claimed.workspace.to_string_lossy())
+                                        pairing_continuation = self.config.markdown_chat.automation.enabled
+                                            && self.effective_task_config(task_conversation.as_ref(), claimed.workspace.clone())
+                                                .and_then(|config| crate::agent_automation::AgentAutomationStore::for_config(&config))
+                                                .and_then(|store| store.load(task_conversation.as_ref().expect("continued task")))
+                                                .is_ok_and(|state| state.pairing.pending.as_ref().is_some_and(|pending| pending.owner_generation == snapshot.generation));
+                                        ContinueTask::result(
+                                            &claimed.workspace.to_string_lossy(),
+                                            pairing_continuation,
+                                        )
                                     }
                                     Ok(_) => ToolResult::error(
                                         "Conversation ownership changed while the continuation was completing.",
@@ -1571,11 +1750,12 @@ impl ServerHandler for CodexHandler {
         }
 
         let mut delivery = None;
-        let chat_delivery_root = if inline_chat_read || (!result.is_error
-            && matches!(
-                name.as_str(),
-                "chat_read" | "chat_write" | "chat_await" | "turn_completed"
-            )) {
+        let chat_delivery_root = if inline_chat_read
+            || (!result.is_error
+                && matches!(
+                    name.as_str(),
+                    "chat_read" | "chat_write" | "chat_await" | "turn_completed"
+                )) {
             workspace_at_start
                 .as_ref()
                 .ok()
@@ -1585,6 +1765,8 @@ impl ServerHandler for CodexHandler {
         };
         if self.config.markdown_chat.enabled
             && name != "automation_verify_pairing"
+            && !pairing_continuation
+            && !ticket_wait
             && !tool.is_some_and(|tool| app_only_tool(tool.as_ref()))
             && !context.ct.is_cancelled()
             && self
@@ -1638,8 +1820,11 @@ impl ServerHandler for CodexHandler {
             }
             if stop_requested {
                 result.new_chat_message_from_user = Some(if inline_chat_read {
-                    format!("{}\n\n{}", crate::markdown_chat::AGENT_STOP_MESSAGE,
-                        result.new_chat_message_from_user.take().unwrap_or_default())
+                    format!(
+                        "{}\n\n{}",
+                        crate::markdown_chat::AGENT_STOP_MESSAGE,
+                        result.new_chat_message_from_user.take().unwrap_or_default()
+                    )
                 } else {
                     crate::markdown_chat::AGENT_STOP_MESSAGE.into()
                 });
@@ -1702,7 +1887,7 @@ impl ServerHandler for CodexHandler {
             }
         }
         let mut output_fields = Vec::new();
-        if self.config.markdown_chat.enabled {
+        if self.config.markdown_chat.enabled && !ticket_wait {
             output_fields.push((
                 crate::markdown_chat::USER_MESSAGE_FIELD,
                 result.new_chat_message_from_user.take(),
@@ -1766,7 +1951,7 @@ impl ServerHandler for CodexHandler {
         {
             tracing::warn!(%error, "could not persist Markdown chat delivery receipt");
         }
-        if model_call {
+        if model_call && !ticket_wait {
             let notice = if authorized_before {
                 let change = match task_conversation.as_ref() {
                     Some(identity) => self
@@ -1803,6 +1988,9 @@ impl ServerHandler for CodexHandler {
                             "interrupted",
                         );
                     }
+                    if ticket_wait {
+                        return Ok(to_call_tool_result(TicketWait::waiting(true)).into());
+                    }
                     return Ok(to_call_tool_result(ToolResult::error(
                         "Call interrupted before ticket handoff. The original codexify_ticket is unchanged. Work may already have run; verify its outcome before retrying."
                     )).into());
@@ -1816,7 +2004,12 @@ impl ServerHandler for CodexHandler {
                             "failed",
                         );
                     }
-                    return Ok(to_call_tool_result(ToolResult::error(error)).into());
+                    return Ok(to_call_tool_result(if ticket_wait {
+                        TicketWait::unavailable(error)
+                    } else {
+                        ToolResult::error(error)
+                    })
+                    .into());
                 }
             };
             output_fields.push((crate::agent_tickets::OUTPUT_FIELD, Some(next_ticket)));
@@ -1826,6 +2019,7 @@ impl ServerHandler for CodexHandler {
                 &mut result,
                 tool.and_then(|tool| tool.output_schema()).as_ref(),
                 output_fields,
+                tool_output_token_budget(&self.config),
             );
         }
         if ticketed && let Some(audit) = &self.audit {
@@ -1957,10 +2151,6 @@ pub async fn start_http_server(mut config: AppConfig) -> anyhow::Result<()> {
             executor,
         )
     });
-    let _agent_automation_worker = agent_automation
-        .as_ref()
-        .map(|supervisor| supervisor.start());
-
     // Connect to any configured upstream MCP servers and merge their tools in.
     // The returned services must stay alive for the whole server lifetime, so
     // they are held in `_bridge_services` until `axum::serve` returns.
@@ -1997,6 +2187,20 @@ pub async fn start_http_server(mut config: AppConfig) -> anyhow::Result<()> {
     let bridged_count = all_tools.len() - native.len();
 
     let tools = Arc::new(all_tools);
+    if let Some(supervisor) = &agent_automation {
+        supervisor
+            .enable_conversation_rollover(
+                config.clone(),
+                project_bindings.clone(),
+                continuations.clone(),
+                tools.clone(),
+                agent_tickets.clone(),
+            )
+            .map_err(anyhow::Error::msg)?;
+    }
+    let _agent_automation_worker = agent_automation
+        .as_ref()
+        .map(|supervisor| supervisor.start());
     let tool_count = tools.len();
     let ready = Arc::new(AtomicBool::new(!native_tunnel));
     let multi_availability = (!config.additional_openai_tunnels.is_empty()).then(|| {
@@ -2024,8 +2228,12 @@ pub async fn start_http_server(mut config: AppConfig) -> anyhow::Result<()> {
         http_config.allowed_hosts = config.allowed_hosts.clone();
     }
 
-    crate::owner_chat::start_schema_refresh(config.clone());
-    let owner_chat_store = Arc::new(crate::markdown_chat::MarkdownChatStore::default());
+    crate::owner_chat::start_schema_refresh(config.clone(), agent_automation.clone());
+    let owner_chat_store = Arc::new(
+        crate::markdown_chat::MarkdownChatStore::with_offline_timeout(
+            config.markdown_chat.offline_after_ms(),
+        ),
+    );
     let make_service = |factory_connector_schemas: Arc<
         crate::connector_schema::ConnectorSchemaStore,
     >| {
@@ -2730,7 +2938,13 @@ fn flatten_server_result(
 
 async fn shutdown_signal() {
     let ctrl_c = async {
-        let _ = tokio::signal::ctrl_c().await;
+        match tokio::signal::ctrl_c().await {
+            Ok(()) => tracing::info!(process_id = std::process::id(), "server received Ctrl+C"),
+            Err(error) => {
+                tracing::error!(%error, "could not listen for Ctrl+C; continuing to serve");
+                std::future::pending::<()>().await;
+            }
+        }
     };
 
     #[cfg(unix)]
@@ -2755,6 +2969,21 @@ async fn shutdown_signal() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn automation_schema_tracks_catalog_and_hints_but_not_labels_or_order() {
+        let mut config = crate::config::default_config(std::path::PathBuf::from("/tmp/schema"));
+        let mut tools = crate::registry::load_tools_for_config(&config);
+        let baseline = super::automation_schema_version(&tools, &config);
+        tools.reverse();
+        assert_eq!(super::automation_schema_version(&tools, &config), baseline);
+        config.instance_name = Some("Unrelated label".into());
+        assert_eq!(super::automation_schema_version(&tools, &config), baseline);
+        config.experimental.force_read_only_tool_annotations = true;
+        assert_ne!(super::automation_schema_version(&tools, &config), baseline);
+        config.experimental.force_read_only_tool_annotations = false;
+        tools.pop();
+        assert_ne!(super::automation_schema_version(&tools, &config), baseline);
+    }
     use std::collections::HashMap;
     use std::fmt;
     use std::sync::Mutex;
@@ -4195,6 +4424,117 @@ mod tests {
                 .and_then(|metadata| metadata.0.get("trace")),
             Some(&json!("upstream"))
         );
+    }
+
+    #[test]
+    fn unstructured_chat_envelopes_bound_text_and_metadata_before_notices() {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = crate::config::default_config(root.path().to_path_buf());
+        for budget in [20_u64, 10_000] {
+            config.output.max_tool_output_tokens = Some(budget);
+            for metadata in [
+                None,
+                Some(json!({"duration": 0})),
+                Some(json!({WORKSPACE_CHANGE_FIELD: 17})),
+                Some(json!([1, 2])),
+            ] {
+                for text in [
+                    "x".repeat(budget as usize * 8),
+                    String::from_utf8([34, 92, 10].repeat(budget as usize * 8)).unwrap(),
+                    "é😀".repeat(budget as usize * 4),
+                ] {
+                    let mut result = ToolResult::text(text);
+                    result.structured_content = metadata.clone();
+                    result.content.push(ToolContent::Image {
+                        data: "image-data".into(),
+                        mime_type: "image/png".into(),
+                    });
+                    finalize_model_visible_result(None, &mut result, &config);
+                    crate::markdown_chat::output::attach_fields(
+                        &mut result,
+                        None,
+                        vec![(WORKSPACE_CHANGE_FIELD, None)],
+                        tool_output_token_budget(&config),
+                    );
+                    assert!(!result.is_error);
+                    let value = result.structured_content.as_ref().unwrap();
+                    assert!(
+                        (serde_json::to_vec(value).unwrap().len() as u64).div_ceil(4) <= budget
+                    );
+                    assert!(
+                        crate::output_budget::approx_token_count(&result.joined_text()) <= budget
+                    );
+                    assert_eq!(value["content"], result.joined_text());
+                    assert_eq!(result.audit.truncated, Some(true));
+                    assert!(result.content.iter().any(|block| matches!(block, ToolContent::Image { data, .. } if data == "image-data")));
+                    if let Some(original) = metadata.as_ref() {
+                        if original.is_array() || original.get(WORKSPACE_CHANGE_FIELD).is_some() {
+                            assert_eq!(&value["upstream_result"], original);
+                        } else {
+                            assert_eq!(value["duration"], original["duration"]);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn bounded_unstructured_text_keeps_full_user_notices_and_ticket_handoff() {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = crate::config::default_config(root.path().to_path_buf());
+        config.output.max_tool_output_tokens = Some(20);
+        let user = "Complete user instructions\n".repeat(10_000);
+        let mut result =
+            ToolResult::text("x".repeat(1_000)).with_structured(json!({"duration": 0}));
+        finalize_model_visible_result(None, &mut result, &config);
+        crate::markdown_chat::output::attach_fields(
+            &mut result,
+            None,
+            vec![
+                (crate::markdown_chat::USER_MESSAGE_FIELD, Some(user.clone())),
+                (
+                    crate::agent_tickets::OUTPUT_FIELD,
+                    Some("next-ticket".into()),
+                ),
+            ],
+            tool_output_token_budget(&config),
+        );
+        assert!(!result.is_error);
+        let mut value = result.structured_content.clone().unwrap();
+        let object = value.as_object_mut().unwrap();
+        assert_eq!(
+            object.remove(crate::markdown_chat::USER_MESSAGE_FIELD),
+            Some(json!(user))
+        );
+        assert_eq!(
+            object.remove(crate::agent_tickets::OUTPUT_FIELD),
+            Some(json!("next-ticket"))
+        );
+        assert_eq!(object["duration"], 0);
+        assert!((serde_json::to_vec(&value).unwrap().len() as u64).div_ceil(4) <= 20);
+        assert!(result.joined_text().contains("Complete user instructions"));
+    }
+
+    #[test]
+    fn tiny_unstructured_mirror_budget_returns_a_bounded_error_without_empty_json() {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = crate::config::default_config(root.path().to_path_buf());
+        for budget in [1, 2, 3] {
+            config.output.max_tool_output_tokens = Some(budget);
+            let mut result = ToolResult::text("original text");
+            finalize_model_visible_result(None, &mut result, &config);
+            crate::markdown_chat::output::attach_fields(
+                &mut result,
+                None,
+                vec![(WORKSPACE_CHANGE_FIELD, None)],
+                tool_output_token_budget(&config),
+            );
+            assert!(result.is_error);
+            assert!(result.structured_content.is_none());
+            assert!(!result.joined_text().is_empty());
+            assert!(crate::output_budget::approx_token_count(&result.joined_text()) <= budget);
+        }
     }
 
     #[test]

@@ -39,6 +39,49 @@ fn windows_temporary_reader_does_not_lose_a_goal_update() {
 }
 
 #[test]
+fn run_now_capability_is_only_for_a_current_confirmed_unsent_queued_action() {
+    use codexify::agent_automation::{AutomationActionState, AutomationTaskState};
+    let mut state = AutomationTaskState::default();
+    state.pairing.generation = 1;
+    state.pairing.verified_owner_generation = Some(0);
+    state.action = AutomationActionState {
+        id: Some("queued-chat".into()),
+        kind: Some(AutomationActionKind::OfflineChat),
+        status: AutomationActionStatus::Queued,
+        pairing_generation: Some(1),
+        send_accepted: Some(false),
+        ..Default::default()
+    };
+    assert!(state.can_run_queued_now());
+    for accepted in [None, Some(true)] {
+        let mut changed = state.clone();
+        changed.action.send_accepted = accepted;
+        assert!(!changed.can_run_queued_now());
+    }
+    for phase in [
+        AutomationActionStatus::Navigating,
+        AutomationActionStatus::Sending,
+        AutomationActionStatus::Idle,
+        AutomationActionStatus::Cancelled,
+    ] {
+        let mut changed = state.clone();
+        changed.action.status = phase;
+        assert!(!changed.can_run_queued_now());
+    }
+    let mut changed = state.clone();
+    changed.action.messages_fenced = true;
+    assert!(!changed.can_run_queued_now());
+    let mut changed = state.clone();
+    changed.action.goal_turn_counted = true;
+    assert!(!changed.can_run_queued_now());
+    let mut changed = state.clone();
+    changed.action.kind = Some(AutomationActionKind::PairVerify);
+    assert!(!changed.can_run_queued_now());
+    state.pairing.generation = 2;
+    assert!(!state.can_run_queued_now());
+}
+
+#[test]
 fn automatic_retry_requires_confirmed_unsent_work_and_an_active_matching_goal() {
     use codexify::agent_automation::{AutomationActionState, AutomationTaskState};
     let mut state = AutomationTaskState::default();
@@ -128,19 +171,38 @@ fn automatic_retry_requires_confirmed_unsent_work_and_an_active_matching_goal() 
 #[test]
 fn confirmed_unsent_interference_retries_without_user_input_but_preserves_send_and_pause_guards() {
     use codexify::agent_automation::{AutomationActionState, AutomationTaskState};
-    let mut state=AutomationTaskState::default();
-    state.retry_timings.infinite_retries=true;
-    state.retry_timings.action_delays_seconds=vec![30];
-    state.action=AutomationActionState {id:Some("draft-recovery".into()),kind:Some(AutomationActionKind::OfflineChat),status:AutomationActionStatus::Interference,send_accepted:Some(false),updated_at_ms:Some(100),last_error:Some("ChatGPT composer contains an existing draft; automation will not overwrite it".into()),..Default::default()};
-    for attempt in [0,100,u32::MAX] {
-        state.action.automatic_retry_attempts=attempt;
+    let mut state = AutomationTaskState::default();
+    state.retry_timings.infinite_retries = true;
+    state.retry_timings.action_delays_seconds = vec![30];
+    state.action = AutomationActionState {
+        id: Some("draft-recovery".into()),
+        kind: Some(AutomationActionKind::OfflineChat),
+        status: AutomationActionStatus::Interference,
+        send_accepted: Some(false),
+        updated_at_ms: Some(100),
+        last_error: Some(
+            "ChatGPT composer contains an existing draft; automation will not overwrite it".into(),
+        ),
+        ..Default::default()
+    };
+    for attempt in [0, 100, u32::MAX] {
+        state.action.automatic_retry_attempts = attempt;
         assert!(state.automatic_retry_at_ms().is_some());
-        assert_eq!(state.retry_mode(),Some("retry"));
+        assert_eq!(state.retry_mode(), Some("retry"));
     }
-    for sent in [None,Some(true)] { let mut protected=state.clone();protected.action.send_accepted=sent;assert!(protected.automatic_retry_at_ms().is_none()); }
-    let mut paused=state.clone();paused.action.automatic_retry_paused=true;assert!(paused.automatic_retry_at_ms().is_none());
-    let mut fenced=state.clone();fenced.action.messages_fenced=true;assert!(fenced.automatic_retry_at_ms().is_none());
-    state.retry_timings.infinite_retries=false;assert!(state.automatic_retry_at_ms().is_none());
+    for sent in [None, Some(true)] {
+        let mut protected = state.clone();
+        protected.action.send_accepted = sent;
+        assert!(protected.automatic_retry_at_ms().is_none());
+    }
+    let mut paused = state.clone();
+    paused.action.automatic_retry_paused = true;
+    assert!(paused.automatic_retry_at_ms().is_none());
+    let mut fenced = state.clone();
+    fenced.action.messages_fenced = true;
+    assert!(fenced.automatic_retry_at_ms().is_none());
+    state.retry_timings.infinite_retries = false;
+    assert!(state.automatic_retry_at_ms().is_none());
 }
 
 #[test]
@@ -2084,6 +2146,7 @@ fn configured_retry_timings_survive_restart_and_shortening_without_changing_send
             let bytes = serde_json::to_vec(&state).unwrap();
             let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
             assert!(json.get("retryTimings").is_none());
+            assert!(json.get("offlineResponseGraceMs").is_none());
             std::fs::write(&path, &bytes).unwrap();
             let restarted = AgentAutomationStore::for_state_root(&config, root.path())
                 .unwrap()
@@ -2092,7 +2155,14 @@ fn configured_retry_timings_survive_restart_and_shortening_without_changing_send
             assert_eq!(restarted.automatic_retry_limit(), delays.len());
             assert_eq!(
                 restarted.automatic_retry_at_ms(),
-                delays.get(attempt).map(|seconds| 100 + seconds * 1000)
+                delays.get(attempt).map(|seconds| {
+                    let delay = seconds * 1000;
+                    100 + if accepted {
+                        delay.max(config.markdown_chat.offline_timeout_minutes * 60_000)
+                    } else {
+                        delay
+                    }
+                })
             );
             assert_eq!(std::fs::read(&path).unwrap(), bytes);
             if !accepted {

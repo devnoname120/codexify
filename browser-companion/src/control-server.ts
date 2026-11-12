@@ -13,9 +13,9 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { basename, dirname, join } from "node:path";
 import { z } from "zod";
 import { SingleWindowCoordinator } from "./browser-window";
-type BrowserCoordinator = Pick<SingleWindowCoordinator,"build"|"liveness"|"presentation"|"setPresentationStyle"|"health"|"readyHealth"|"login"|"capabilities"|"accountPlan"|"turnHandoffComplete"|"approvePendingConversation"|"refreshConnector"|"newChatCapabilities"|"reveal"|"execute"|"cancel"|"action"|"events"|"close">;
+type BrowserCoordinator = Pick<SingleWindowCoordinator,"build"|"liveness"|"presentation"|"setPresentationStyle"|"health"|"readyHealth"|"login"|"capabilities"|"accountPlan"|"turnHandoffComplete"|"approvePendingConversation"|"refreshConnector"|"newChatCapabilities"|"reveal"|"execute"|"cancel"|"action"|"events"|"close"|"navigationAvailability"|"releasePairingWindow"|"refreshPairingWindow">;
 import {validateNewChatProjectUrl} from "./new-chat";
-import { asCompanionError } from "./errors";
+import { asCompanionError,type BrowserStage,type BrowserFailureCode } from "./errors";
 import {
   COMPANION_KIND,
   chatGptUrlSchema,
@@ -86,7 +86,7 @@ async function readJson(request: IncomingMessage): Promise<unknown> {
 }
 
 class ClientError extends Error {
-  constructor(readonly status: number, message: string) {
+  constructor(readonly status: number, message: string,readonly detail?:{code:BrowserFailureCode;phase:BrowserStage;message:string}) {
     super(message);
     this.name = "ClientError";
   }
@@ -98,7 +98,8 @@ function httpError(error: unknown): ClientError {
   if (error instanceof Error && error.message === "Browser action was not found") {
     return new ClientError(404, "Browser action was not found");
   }
-  return new ClientError(409, asCompanionError(error).message);
+  const failure=asCompanionError(error);
+  return new ClientError(409,failure.message,failure.phase?{code:failure.code,phase:failure.phase,message:failure.message}:undefined);
 }
 
 async function ensurePrivateDirectory(path: string): Promise<void> {
@@ -198,6 +199,10 @@ async function route(
     try {json(response,200,await coordinator.accountPlan(body.epoch,operation.signal));}
     catch(error){if(error instanceof Error&&error.message.toLowerCase().includes("busy"))throw new ClientError(423,"Browser companion is busy");throw error;}return;
   }
+  if(request.method==="POST"&&url.pathname==="/v1/navigation/availability") {
+    const body=z.strictObject({url:chatGptUrlSchema}).parse(await readJson(request));
+    json(response,200,await coordinator.navigationAvailability(body.url));return;
+  }
   if(request.method === "POST" && url.pathname === "/v1/turns/handoff") {
     const body=z.strictObject({url:chatGptUrlSchema,expectedAccountFingerprint:opaqueIdSchema,handoffId:z.string().regex(/^renew-[a-f0-9]{64}$/)}).parse(await readJson(request));
     json(response,200,await coordinator.turnHandoffComplete(body.url,body.expectedAccountFingerprint,body.handoffId,operation.signal));return;
@@ -234,6 +239,16 @@ async function route(
   if (request.method === "POST" && url.pathname === "/v1/actions/cancel") {
     const body = cancelActionRequestSchema.parse(await readJson(request));
     json(response, 200, await coordinator.cancel(body));
+    return;
+  }
+  if (request.method === "POST" && url.pathname === "/v1/actions/release-pairing") {
+    const body=z.strictObject({actionId:opaqueIdSchema}).parse(await readJson(request));
+    json(response,200,{released:coordinator.releasePairingWindow(body.actionId)});
+    return;
+  }
+  if (request.method === "POST" && url.pathname === "/v1/actions/refresh-pairing") {
+    const body=z.strictObject({actionId:opaqueIdSchema}).parse(await readJson(request));
+    json(response,200,{retained:coordinator.refreshPairingWindow(body.actionId)});
     return;
   }
   const match = url.pathname.match(/^\/v1\/actions\/([A-Za-z0-9_.-]{1,256})(?:\/(events))?$/);
@@ -284,7 +299,8 @@ export async function startControlServer(
         return;
       }
       const failure = httpError(error);
-      text(response, failure.status, failure.message);
+      if(failure.detail)json(response,failure.status,{protocolVersion:PROTOCOL_VERSION,build:coordinator.build,error:failure.detail});
+      else text(response, failure.status, failure.message);
     });
   });
   server.requestTimeout = 0;

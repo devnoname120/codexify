@@ -134,7 +134,7 @@ impl FilesystemWorker {
         crate::process_env::scrub_untrusted_child_env(&mut command, config);
         #[cfg(windows)]
         command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
-        let record_worker = crate::audit::worker_observer();
+        let record_worker = crate::audit::worker_observer("filesystem");
         let mut spawning = tokio::task::spawn_blocking(move || {
             let child = command.spawn()?;
             record_worker(child.id());

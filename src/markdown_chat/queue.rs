@@ -1,6 +1,6 @@
 //! Private, durable user messages. Only a released message enters CHAT.md.
 use super::*;
-use crate::markdown_chat::{MessageMode, OFFLINE_AFTER_MS, attachments::Attachment};
+use crate::markdown_chat::{MessageMode, attachments::Attachment};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::time::Duration;
@@ -197,7 +197,7 @@ fn goal_holds_queue(chat: &ChatFile) -> Result<bool, String> {
     goal_holds_queue_for_release(chat, false, None)
 }
 
-fn automation_state(chat: &ChatFile) -> Result<Option<serde_json::Value>, String> {
+pub(super) fn automation_state(chat: &ChatFile) -> Result<Option<serde_json::Value>, String> {
     let path = chat.path.with_file_name("automation.json");
     if !path.try_exists().map_err(io_error)? {
         return Ok(None);
@@ -261,12 +261,12 @@ fn repair_pending(
     repair_pending_at(chat, state, None)
 }
 
-fn queue_offline(cursor: &Cursor, now_ms: u64) -> bool {
+fn queue_offline(cursor: &Cursor, now_ms: u64, offline_after_ms: u64) -> bool {
     cursor.agent_presence_until_ms.map_or_else(
         || {
             cursor
                 .last_agent_call_at_ms
-                .is_none_or(|last| now_ms.saturating_sub(last) >= OFFLINE_AFTER_MS)
+                .is_none_or(|last| now_ms.saturating_sub(last) >= offline_after_ms)
         },
         |until| now_ms >= until,
     )
@@ -294,7 +294,7 @@ fn repair_pending_at(
             && (state.input_waiting
                 || goal_holds_queue_for_release(
                     chat,
-                    now_ms.is_some_and(|now| queue_offline(cursor, now)),
+                    now_ms.is_some_and(|now| queue_offline(cursor, now, chat.offline_after_ms())),
                     state.blocked_goal_submissions.get(&entry.id),
                 )?
                 || cursor.agent_stop_requested
@@ -338,7 +338,11 @@ pub(super) fn append_steering(
 }
 
 pub(super) fn append_steering_guarded(
-    chat: &ChatFile, id: String, message: String, attachment_ids: Vec<String>, respect_stop: bool,
+    chat: &ChatFile,
+    id: String,
+    message: String,
+    attachment_ids: Vec<String>,
+    respect_stop: bool,
 ) -> Result<UserSendReceipt, String> {
     with_queue(chat, false, |state| {
         if state.messages.iter().any(|m| m.id == id) {
@@ -357,7 +361,10 @@ pub(super) fn append_steering_guarded(
             let committed =
                 chat.with_cursor(|_, file| widget::contains_user_message(file, &pending.id))?;
             if respect_stop && !committed {
-                return Err("Worker has an unresolved queued send; wait for its receipt before steering".into());
+                return Err(
+                    "Worker has an unresolved queued send; wait for its receipt before steering"
+                        .into(),
+                );
             }
             if committed || pending.mode == MessageMode::Steer {
                 let _ = repair_pending(chat, state)?;
@@ -369,7 +376,9 @@ pub(super) fn append_steering_guarded(
         }
         let sent = chat.with_cursor(|cursor, file| {
             if respect_stop && cursor.agent_stop_requested {
-                return Err("Worker is explicitly stopped; resume it before sending instructions".into());
+                return Err(
+                    "Worker is explicitly stopped; resume it before sending instructions".into(),
+                );
             }
             widget::append_user_locked(chat, cursor, file, id, message, attachment_ids)
         })?;
@@ -714,7 +723,7 @@ impl ChatFile {
                     return Ok(None);
                 }
                 let next = chat.with_cursor(|cursor, file| {
-                    let offline = queue_offline(cursor, now_ms);
+                    let offline = queue_offline(cursor, now_ms, chat.offline_after_ms());
                     if cursor.agent_stop_requested || !snapshot(chat, file, cursor)?.text.is_empty()
                     {
                         return Ok(None);
@@ -797,6 +806,7 @@ impl ChatFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::markdown_chat::OFFLINE_AFTER_MS;
     use crate::markdown_chat::attachments::AttachmentStore;
     use tokio_util::sync::CancellationToken;
 
@@ -1288,6 +1298,41 @@ mod tests {
                 .is_some()
         );
     }
+    #[tokio::test]
+    async fn queued_delivery_respects_the_configured_offline_timeout() {
+        let (_root, chat) = fixture().await;
+        chat.set_offline_timeout(600_000);
+        enqueue(&chat, "slow-turn").await;
+        let last = chat
+            .owner_summary()
+            .await
+            .unwrap()
+            .last_agent_call_at_ms
+            .unwrap();
+        assert!(
+            chat.release_queued_message(last + 300_000)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            chat.release_queued_message(last + 600_000 - 1)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            chat.widget_page(None, None).await.unwrap().offline_after_ms,
+            600_000
+        );
+        assert!(
+            chat.release_queued_message(last + 600_000)
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+
     #[tokio::test]
     async fn offline_threshold_stop_and_input_wait_are_distinct() {
         let (_root, chat) = fixture().await;

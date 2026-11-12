@@ -1003,7 +1003,9 @@ async fn clone_repository_from(
         .arg("--")
         .arg(clone_source)
         .arg(crate::worktrees::strip_verbatim_prefix(temporary.clone()))
-        .current_dir(crate::worktrees::strip_verbatim_prefix(clone_dir.to_path_buf()))
+        .current_dir(crate::worktrees::strip_verbatim_prefix(
+            clone_dir.to_path_buf(),
+        ))
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GCM_INTERACTIVE", "Never")
         .env("GIT_OPTIONAL_LOCKS", "0")

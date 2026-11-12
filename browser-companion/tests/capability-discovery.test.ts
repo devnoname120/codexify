@@ -74,7 +74,7 @@ test.skipIf(process.env.CODEXIFY_TEST_BROWSER_COMPANION_CHROME !== "1")(
       let discoveryError: unknown;
       try { await detectChatGptAccountCapabilities(page); } catch (error) { discoveryError = error; }
       expect(discoveryError).toBeInstanceOf(Error);
-      expect((discoveryError as Error).message).toContain("did not announce");
+      expect(discoveryError).toMatchObject({code:"selector_drift",phase:"effort_selection"});
       expect(await page.locator('[data-family="5.5"]').getAttribute("aria-checked")).toBe("true");
       expect(await page.locator('[role="slider"]').getAttribute("aria-valuenow")).toBe("10");
       expect(await page.locator("#effort").getAttribute("aria-expanded")).toBe("false");

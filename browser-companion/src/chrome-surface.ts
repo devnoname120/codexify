@@ -7,7 +7,8 @@ import type { SingleBrowserSurface } from "./chatgpt-driver";
 import { BrowserCompanionError } from "./errors";
 import { backgroundChromeArgs } from "./background-chrome";
 import {prepareRequestBlockList,requestBlockListArgs,verifyRequestBlockList} from "./request-block-list";
-import {isChatGptPage,navigatePage,observeConversationRateLimits} from "./navigation";
+import {isChatGptPage,navigatePage,observeConversationRateLimits,observeConversationLoadResponses} from "./navigation";
+import {installChatModeCompatibility} from "./chat-mode";
 import {browserSimplicityFromEnvironment,parseBrowserSimplicity,installMinimalChatGptPage,styleRestoredChatGptPage,type BrowserSimplicity} from "./minimal-page";
 import {recoverOrphanedWindowsChrome} from "./windows-chrome-recovery";
 import {normalizeWindowsRendererPriorities} from "./windows-priority";
@@ -95,6 +96,7 @@ export class ChromeSingleWindowSurface implements SingleBrowserSurface {
       if (minimalUi) {
         await installMinimalChatGptPage(context,presentationCss,0,browserSimplicity);
       }
+      await context.addInitScript(installChatModeCompatibility);
       await verifyRequestBlockList(context,policy);
       let page = context.pages().find(page => isChatGptPage(page.url())) ?? context.pages()[0];
       if (!page) {
@@ -130,6 +132,7 @@ export class ChromeSingleWindowSurface implements SingleBrowserSurface {
       context.on("page",page=>page.once("close",pageClosed));
       const surface = new ChromeSingleWindowSurface(context,page,state,true);
       observeConversationRateLimits(page);
+      observeConversationLoadResponses(page);
       if(!isChatGptPage(page.url())) {
         try {
           await surface.navigate(CHATGPT_HOME);
@@ -147,7 +150,10 @@ export class ChromeSingleWindowSurface implements SingleBrowserSurface {
           } else throw error;
         }
       }
-      else if (minimalUi) await styleRestoredChatGptPage(page,presentationCss,0,browserSimplicity);
+      else {
+        await page.evaluate(installChatModeCompatibility, undefined, undefined, false);
+        if (minimalUi) await styleRestoredChatGptPage(page,presentationCss,0,browserSimplicity);
+      }
       return surface;
     } catch (error) {
       await context.close().catch(() => {});
@@ -188,7 +194,7 @@ export class ChromeSingleWindowSurface implements SingleBrowserSurface {
         throw new BrowserCompanionError("Browser action lane capacity is already allocated");
       page=await this.context.newPage();
       const lane=new ChromeSingleWindowSurface(this.context,page,this.state,false);
-      observeConversationRateLimits(page);
+      observeConversationRateLimits(page);observeConversationLoadResponses(page);
       release();
       await lane.navigate(CHATGPT_HOME);
       if(this.state.browserSimplicity!=="off")

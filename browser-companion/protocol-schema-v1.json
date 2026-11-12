@@ -22,6 +22,7 @@
     "GET /v1/actions/{actionId}/events?after={sequence}",
     "POST /v1/new-chat/capabilities",
     "POST /v1/account/plan",
+    "POST /v1/navigation/availability",
     "POST /v1/connectors/refresh",
     "POST /v1/turns/handoff",
     "POST /v1/approvals/conversation"
@@ -72,7 +73,8 @@
     ],
     "turn_renewal": [
       "handoffId"
-    ]
+    ],
+    "task_continuation": []
   },
   "fieldLimits": {
     "opaqueIdBytes": 256,
@@ -144,7 +146,11 @@
       ],
       "accountFingerprint": "opaque verified account identifier"
     },
-    "cache": "one successful billing inspection per server epoch and account"
+    "cache": "cache verified nonempty plans per server epoch and account; retry a basic Pro fallback after 60 seconds to resolve its billing tier",
+    "deadlineMs": 45000,
+    "billingObservationMs": 5000,
+    "billingNavigationMs": 10000,
+    "restoration": "a conversation-loading cooldown may defer restoring the shared tab but must not discard an already verified plan; it never bypasses the global navigation budget"
   },
   "connectorRefresh": {
     "request": {
@@ -155,6 +161,25 @@
     "deadlineMs": 120000,
     "schemaVerified": false
   },
+  "pairingWindowReservation": {
+    "requestFields": ["retainPairingWindow", "pairingContinuationOf"],
+    "retentionMs": 90000,
+    "scope": "Successful re-pairing CreateChat submissions retain the shared window for one matching continuation; account, canonical URL, connector and pairing generation must match",
+    "releasePath": "/v1/actions/release-pairing",
+    "expiry": "Timeout, cancellation, superseded pairing or shutdown releases the window without replaying the initialization message"
+  },
+  "browserPromptTicket": {
+    "requestField": "agentTicket",
+    "lengthBytes": 8,
+    "scope": "Host-issued single-use ticket for this task owner; new-conversation initialization may bootstrap setup on an empty chain before continue_task claims the task",
+    "redemption": "First ticketed call waits for any preceding in-flight call, then advances the normal ticket chain; all later calls use the returned new_codexify_ticket",
+    "issuance": "Fresh for each new browser message action, including initialization, retries and renewal; transport retries retain the admitted request unchanged"
+  },
+  "responseStop": {
+    "preparation": "offline chat and goal actions inspect Stop and its exact confirmation before composer cleanup, model selection, connector selection and prompt insertion; a late confirmation permits one retry of the interrupted pre-Send step",
+    "settleMs": 20000,
+    "ownership": "confirm only in the verified paired conversation and account; never retry Send or reload an open confirmation"
+  },
   "conversationApproval": {
     "request": ["url", "expectedAccountFingerprint", "connectorName"],
     "response": ["protocolVersion", "build", "approved"],
@@ -162,6 +187,7 @@
     "policy": "Core calls only while autoApproveToolCalls is enabled; checks yield to browser actions"
   },
   "navigationDeferral": {
+    "availability": "Read-only POST /v1/navigation/availability accepts a ChatGPT url and returns protocolVersion, build and nullable availableAtMs without navigating; reusing the current conversation requires no load",
     "event": {"type":"waiting", "availableAtMs":"positive safe integer absolute deadline"},
     "snapshot": {"state":"waiting", "cooldownUntilMs":"same absolute deadline", "sendAccepted":false},
     "policy":"A local cooldown prevents navigation without failing the action or consuming a retry. The core queues the action until the deadline and releases the shared browser. HTTP 429 received after a real request remains a failure."
@@ -172,10 +198,53 @@
   "launchConfiguration": {
     "requestBlockList": "CODEXIFY_BROWSER_REQUEST_BLOCK_LIST: JSON array of RE2 URL patterns; verified browser-wide before navigation"
   },
+  "conversationLimitRecovery": {
+    "failureCode": "conversation_limit",
+    "detection": "A visible ChatGPT conversation-length alert outside user or assistant message content; verify the same account and requested conversation before reporting it.",
+    "recovery": "Do not retry Send in the exhausted conversation. Create one replacement in the configured project, use continue_task and pairing verification, and retain the existing task workspace, history, goals and unread message cursor.",
+    "acceptance": "A confirmed conversation-length rejection retains its typed cause even after transport Send acceptance; uncertain sends without that rejection remain ambiguous.",
+    "ownership": "Pair the next task owner only; source activity must not revoke its pending creation. Retire the old conversation only after the one-time continuation claim."
+  },
   "turnRenewal": {
     "handoffId": "renew-<64 lowercase hexadecimal characters>",
     "completionProof": "Same account and conversation; latest assistant final begins with the exact handoff ID, has completion controls, no generation and stable content across two observations. Rechecked before continuation Send.",
     "continuation": "Continue.",
     "sendClock": "First confirmed Send acceptance, actual selected model and effort; pairing sends excluded."
+  },
+  "actionAdmission": {
+    "receipt": "Record and acknowledge a queued action before waiting for browser ownership or account preflight; Send is not accepted by admission.",
+    "reconciliation": "Idempotent execute and action status remain available during preflight; preflight failures and cancellation are retained unsent terminal events.",
+    "ownership": "One admitted action at a time; preflight waits behind earlier browser maintenance, verifies account and idle state before execution, and outlives the receipt connection."
+  },
+  "modelPickerInspection": {
+    "modelOptions": "Discovery, model selection and pairing expose the composer-owned model submenu before requiring model radios, including lazily mounted inline or aria-controls-owned portal lists.",
+    "control": "Use a unique composer-owned semantic trigger, or a unique aria-controls trigger bearing a known localized effort label. Never infer model identity from an effort label.",
+    "restoration": "Inspection restores the effort view and verifies unchanged range and selection; pairing borrows localized Medium and restores the original model and effort.",
+    "submenuOwnership": "Read aria-controls after expansion and during hydration; a closed trigger need not publish its future portaled menu ID.",
+    "clickability": "Mounted model rows are not actionable inside a collapsed simple view or an inert/aria-hidden panel, even when they have layout boxes. Expand the owned model panel and verify active rows before selecting."
+  },
+  "operationError": {
+    "httpStatus": 409,
+    "fields": [
+      "protocolVersion",
+      "build",
+      "error"
+    ],
+    "errorFields": [
+      "code",
+      "phase",
+      "message"
+    ],
+    "phases": [
+      "composer_lookup",
+      "effort_control_lookup",
+      "picker_open",
+      "model_options",
+      "model_identity",
+      "effort_selection",
+      "effort_restore",
+      "capability_discovery"
+    ],
+    "policy": "Only controlled bounded picker failures carry structured messages. Unknown raw page/request failures remain generic. The core verifies protocol, build, code and stage before displaying a failure."
   }
 }

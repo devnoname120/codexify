@@ -33,7 +33,10 @@ pub fn load_tools_for_config(config: &AppConfig) -> Vec<Box<dyn Tool>> {
         config.ui_widgets,
         config.artifact_ingress.max_concurrent_downloads,
     );
-    if config.markdown_chat.enabled && config.markdown_chat.automation.enabled && config.markdown_chat.features.agent_teams {
+    if config.markdown_chat.enabled
+        && config.markdown_chat.automation.enabled
+        && config.markdown_chat.features.agent_teams
+    {
         tools.push(Box::new(tools::agents::AgentTool::Spawn));
         tools.push(Box::new(tools::agents::AgentTool::Status));
         tools.push(Box::new(tools::agents::AgentTool::Report));
@@ -42,6 +45,9 @@ pub fn load_tools_for_config(config: &AppConfig) -> Vec<Box<dyn Tool>> {
         if config.markdown_chat.features.external_agent_control {
             tools.push(Box::new(tools::agent_client::AgentClient));
         }
+    }
+    if config.experimental.agent_tickets {
+        tools.push(Box::new(tools::ticket_wait::TicketWait));
     }
     if config.markdown_chat.enabled && config.ui_widgets {
         tools.push(Box::new(tools::markdown_chat_ui::ChatUiTool::Send));
@@ -171,8 +177,18 @@ mod tests {
         for enabled in [false, true, false] {
             config.markdown_chat.features.agent_teams = enabled;
             let tools = load_tools_for_config(&config);
-            for name in ["agent_spawn", "agent_status", "agent_report", "agent_control", "agent_message"] {
-                assert_eq!(tools.iter().any(|tool|tool.name()==name), enabled, "{name}");
+            for name in [
+                "agent_spawn",
+                "agent_status",
+                "agent_report",
+                "agent_control",
+                "agent_message",
+            ] {
+                assert_eq!(
+                    tools.iter().any(|tool| tool.name() == name),
+                    enabled,
+                    "{name}"
+                );
             }
         }
     }
@@ -190,8 +206,12 @@ mod tests {
                         config.markdown_chat.automation.enabled = browser;
                         config.markdown_chat.features.agent_teams = teams;
                         config.markdown_chat.features.external_agent_control = clients;
-                        assert_eq!(load_tools_for_config(&config).iter().any(|tool| tool.name() == "agent_client"),
-                            chats && browser && teams && clients);
+                        assert_eq!(
+                            load_tools_for_config(&config)
+                                .iter()
+                                .any(|tool| tool.name() == "agent_client"),
+                            chats && browser && teams && clients
+                        );
                     }
                 }
             }

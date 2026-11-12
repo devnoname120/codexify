@@ -2641,6 +2641,7 @@ mod tests {
                     "enabled",
                     "features",
                     "maxWaitMs",
+                    "offlineTimeoutMinutes",
                     "rolloutReminderInterval",
                     "rolloutEnabled",
                     "turnRenewal",
@@ -2661,6 +2662,8 @@ mod tests {
             &[
                 "autoApproveToolCalls",
                 "automaticRetries",
+                "browserActionLanes",
+                "newConversationOnLoadRateLimit",
                 "retryTimings",
                 "connectorName",
                 "descriptorPath",

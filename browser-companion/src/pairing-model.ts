@@ -1,10 +1,11 @@
 import type { Page } from "patchright";
 import { activeComposer } from "./composer";
-import { BrowserCompanionError } from "./errors";
+import { BrowserCompanionError,browserStage } from "./errors";
+import {browserEffortIdFromLabel } from "./models";
+import {withChatGptModelOptions} from "./model-picker";
 import {observeReadOnly} from "./observation";
-import { readModelOptionRows,browserEffortIdFromLabel } from "./models";
 import {
-  CHATGPT_EFFORT_CONTROL_SELECTOR, activateChatGptEffortMenu,
+  requireChatGptEffortControl, activateChatGptEffortMenu, discoverChatGptEfforts,
   moveChatGptEffortSlider, readChatGptEffortSnapshot, readCurrentEffortLabel,
 } from "./session";
 
@@ -17,19 +18,21 @@ const normalize = (label: string) => label.normalize("NFKC").replace(/\p{Cf}/gu,
 
 /** The pairing turn borrows Medium; neither the model family nor saved preferences are changed. */
 export async function selectPairingMedium(page: Page, signal: AbortSignal): Promise<PairingMediumSelection> {
-  const composer = await activeComposer(page, 10_000, signal);
-  const controls = composer.locator("xpath=ancestor::form[1]")
-    .locator(CHATGPT_EFFORT_CONTROL_SELECTOR).filter({ visible: true });
-  await controls.first().waitFor({state:"visible", timeout:10_000, signal});
-  if (await observeReadOnly(controls.count(),signal) !== 1) throw new BrowserCompanionError("Pairing requires one verifiable Medium control; the request was not sent", "model_unavailable");
-  const control = controls.first();
+  return browserStage("effort_selection","ChatGPT could not select and verify Medium for pairing",()=>selectPairingMediumInner(page,signal));
+}
+
+async function selectPairingMediumInner(page: Page, signal: AbortSignal): Promise<PairingMediumSelection> {
+  const composer = await browserStage("composer_lookup","ChatGPT did not expose one editable pairing composer",()=>activeComposer(page, 10_000, signal));
+  const control = await requireChatGptEffortControl(composer.locator("xpath=ancestor::form[1]"),signal);
+  const activate=(operationSignal=signal)=>browserStage("picker_open","ChatGPT did not open its pairing effort picker",()=>activateChatGptEffortMenu(page,control,{signal:operationSignal}));
   const close=()=>control.press("Escape",{timeout:1_000}).catch(()=>{});
-  const checkedFamily = async (menu: Awaited<ReturnType<typeof activateChatGptEffortMenu>>,readSignal:AbortSignal) => {
-    const checked=(await observeReadOnly(readModelOptionRows(menu.menu),readSignal)).filter(row=>row.checked);
-    if(checked.length!==1||!normalize(checked[0]!.label))throw new BrowserCompanionError("ChatGPT did not identify the pairing request's model family", "model_unavailable");
+  const checkedFamily = async (menu: Awaited<ReturnType<typeof activateChatGptEffortMenu>>,operationSignal=signal) => {
+    const {value:rows}=await withChatGptModelOptions(menu,()=>activate(operationSignal),async(_scope,rows)=>rows,{signal:operationSignal});
+    const checked=rows.filter(row=>row.checked&&row.family);
+    if(checked.length!==1||!normalize(checked[0]!.label))throw new BrowserCompanionError("ChatGPT did not identify the pairing request's model family", "model_unavailable",{phase:"model_identity"});
     return checked[0]!.family??normalize(checked[0]!.label);
   };
-  let menu = await activateChatGptEffortMenu(page, control,{signal});
+  let menu = await activate();
   let original: Awaited<ReturnType<typeof readChatGptEffortSnapshot>>;
   let family: string;
   let label: string;
@@ -40,13 +43,13 @@ export async function selectPairingMedium(page: Page, signal: AbortSignal): Prom
   } catch (error) { await close(); throw error; }
   let target: number | undefined;
   let mediumSelected = false;
-  const inspect = async (readSignal:AbortSignal) => {
-    menu = await activateChatGptEffortMenu(page, control,{signal:readSignal});
-    const state = await observeReadOnly(readChatGptEffortSnapshot(menu.sliderContainer),readSignal);
-    if (await checkedFamily(menu,readSignal) !== family || state.min !== original.min || state.max !== original.max) {
+  const inspect = async (operationSignal=signal) => {
+    menu = await activate(operationSignal);
+    const state = await observeReadOnly(readChatGptEffortSnapshot(menu.sliderContainer),operationSignal);
+    if (await checkedFamily(menu,operationSignal) !== family || state.min !== original.min || state.max !== original.max) {
       throw new BrowserCompanionError("ChatGPT changed the model family or effort range during pairing", "external_interference");
     }
-    return {state, label:await observeReadOnly(readCurrentEffortLabel(menu),readSignal)};
+    return {state, label:await observeReadOnly(readCurrentEffortLabel(menu),operationSignal)};
   };
   const restore = async (restoreSignal: AbortSignal) => {
     try {
@@ -94,7 +97,10 @@ export async function selectPairingMedium(page: Page, signal: AbortSignal): Prom
     };
     await verify(signal);
     mediumSelected = true;
-    return {verify, restore};
+    return {
+      verify:verifySignal=>browserStage("effort_selection","ChatGPT did not retain Medium for pairing",()=>verify(verifySignal)),
+      restore:restoreSignal=>browserStage("effort_restore","ChatGPT could not restore the original pairing effort",()=>restore(restoreSignal)),
+    };
   } catch (error) {
     await restore(AbortSignal.timeout(2_000));
     throw error;

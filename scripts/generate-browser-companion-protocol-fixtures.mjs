@@ -72,6 +72,10 @@ const fixture = {
     { ...baseAction, actionId:"fixture-goal", idempotencyKey:"fixture-goal-execute", prompt:{ kind:"offline_goal", goalRevision:3 } },
     { ...baseAction, prompt:{ kind:"offline_combined", batchId:"fixture-batch", messages:[{ id:"fixture-message", markdown:"Preserve <data> & Markdown." }], goalRevision:3 } },
     {...baseAction,actionId:"fixture-renewal",idempotencyKey:"fixture-renewal-execute",prompt:{kind:"turn_renewal",handoffId:`renew-${"a".repeat(64)}`}},
+    {...baseAction,actionId:"fixture-continuation",idempotencyKey:"fixture-continuation-execute",prompt:{kind:"task_continuation"}},
+    {...baseAction,actionId:"fixture-retained",idempotencyKey:"fixture-retained-execute",url:"https://chatgpt.com/new",expectedUrl:"https://chatgpt.com/new",model:null,effort:null,retainPairingWindow:true,prompt:{kind:"create_chat",continuationToken:"A".repeat(43),reference:"A".repeat(43),setupReference:null}},
+    {...baseAction,actionId:"fixture-paired-followup",idempotencyKey:"fixture-paired-followup-execute",pairingContinuationOf:"fixture-retained",prompt:{kind:"offline_goal",goalRevision:3}},
+    {...baseAction,actionId:"fixture-ticket",idempotencyKey:"fixture-ticket-execute",agentTicket:"FreshT_1",prompt:{kind:"task_continuation"}},
   ],
   actionSnapshot:{
     protocolVersion:1,

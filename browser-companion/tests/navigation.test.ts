@@ -3,7 +3,7 @@ import type {BrowserContext,Page} from "patchright";
 import {mkdtempSync,unlinkSync,rmdirSync} from "node:fs";
 import {tmpdir} from "node:os";
 import {join} from "node:path";
-import {configureNavigationTimings,configureNavigationPersistence,navigatePage,recordConversationAvailable,recordConversationUnavailable,withConversationCooldownBypass,observeConversationRateLimits,throwIfConversationRateLimited} from "../src/navigation";
+import {configureNavigationTimings,configureNavigationPersistence,navigatePage,recordConversationAvailable,recordConversationUnavailable,withConversationCooldownBypass,conversationLoadAvailableAt,observeConversationRateLimits,throwIfConversationRateLimited} from "../src/navigation";
 
 class NavigationPage {
   current="https://chatgpt.com/";
@@ -44,6 +44,19 @@ test("an unsettled document load cannot hold another chat's navigation slot",asy
   } finally {release();await first;}
 });
 
+test("passive availability reports the real shared deadline without loading or delaying current-page reuse",async()=>{
+ // The healthy interval default is one second; verify a long interval explicitly.
+ configureNavigationTimings('{"conversationLoadIntervalSeconds":180}');
+ const page=new NavigationPage(),now=Date.now();setSystemTime(now);
+ expect(conversationLoadAvailableAt(page.asPage(),'https://chatgpt.com/c/first')).toBeNull();
+ await navigatePage(page.asPage(),'https://chatgpt.com/c/first');
+ expect(conversationLoadAvailableAt(page.asPage(),page.current)).toBeNull();
+ expect(conversationLoadAvailableAt(page.asPage(),'https://chatgpt.com/c/second')).toBe(now+180000);
+ setSystemTime(now+30000);expect(conversationLoadAvailableAt(page.asPage(),'https://chatgpt.com/c/second')).toBe(now+180000);
+ expect(page.loads).toEqual(['https://chatgpt.com/c/first']);
+ setSystemTime(now+180000);expect(conversationLoadAvailableAt(page.asPage(),'https://chatgpt.com/c/second')).toBeNull();
+});
+
 test("manual Retry bypasses local cooldowns for its action while automatic loads remain throttled",async()=>{
   const page=new NavigationPage(),now=Date.now();setSystemTime(now);
   await navigatePage(page.asPage(),'https://chatgpt.com/c/first');
@@ -53,7 +66,7 @@ test("manual Retry bypasses local cooldowns for its action while automatic loads
   await withConversationCooldownBypass(true,()=>navigatePage(page.asPage(),page.current,{reload:true}));
   await expect(navigatePage(page.asPage(),'https://chatgpt.com/c/automatic')).rejects.toMatchObject({code:'conversation_cooldown'});
   page.responseCode=429;page.retryAfter='900';
-  await expect(withConversationCooldownBypass(true,()=>navigatePage(page.asPage(),page.current,{reload:true}))).rejects.toMatchObject({code:'rate_limited'});
+  await expect(withConversationCooldownBypass(true,()=>navigatePage(page.asPage(),page.current,{reload:true}))).rejects.toMatchObject({code:'conversation_load_rate_limited'});
   recordConversationAvailable(page.asPage());page.responseCode=200;
   await expect(navigatePage(page.asPage(),'https://chatgpt.com/c/automatic')).rejects.toMatchObject({code:'conversation_cooldown'});
   await expect(withConversationCooldownBypass(true,()=>navigatePage(page.asPage(),'https://chatgpt.com/c/manual-again'))).rejects.toMatchObject({code:'conversation_cooldown'});
@@ -115,7 +128,7 @@ test("server Retry-After survives a browser restart without blocking after expir
  try {
   configureNavigationPersistence(path);
   const page=new NavigationPage();page.responseCode=429;page.retryAfter='600';
-  await expect(navigatePage(page.asPage(),'https://chatgpt.com/c/first')).rejects.toMatchObject({code:'rate_limited'});
+  await expect(navigatePage(page.asPage(),'https://chatgpt.com/c/first')).rejects.toMatchObject({code:'conversation_load_rate_limited'});
   configureNavigationPersistence();configureNavigationPersistence(path);
   const restarted=new NavigationPage();
   await expect(withConversationCooldownBypass(true,()=>navigatePage(restarted.asPage(),'https://chatgpt.com/c/second'))).rejects.toMatchObject({code:'conversation_cooldown'});
@@ -139,14 +152,14 @@ test("custom navigation settings control normal loads, unavailable probes, and H
   await expect(navigatePage(page.asPage(),page.current,{reload:true})).rejects.toMatchObject({code:'conversation_cooldown'});
   setSystemTime(now+18_000);
   page.responseCode=429;
-  await expect(navigatePage(page.asPage(),page.current,{reload:true})).rejects.toMatchObject({code:'rate_limited'});
+  await expect(navigatePage(page.asPage(),page.current,{reload:true})).rejects.toMatchObject({code:'conversation_load_rate_limited'});
   recordConversationAvailable(page.asPage());page.responseCode=200;
   setSystemTime(now+36_999);
   await expect(navigatePage(page.asPage(),'https://chatgpt.com/c/third')).rejects.toMatchObject({code:'conversation_cooldown'});
   setSystemTime(now+37_000);
   await navigatePage(page.asPage(),'https://chatgpt.com/c/third');
   page.responseCode=429;page.retryAfter='40';setSystemTime(now+44_000);
-  await expect(navigatePage(page.asPage(),page.current,{reload:true})).rejects.toMatchObject({code:'rate_limited'});
+  await expect(navigatePage(page.asPage(),page.current,{reload:true})).rejects.toMatchObject({code:'conversation_load_rate_limited'});
   page.responseCode=200;setSystemTime(now+83_999);
   await expect(navigatePage(page.asPage(),'https://chatgpt.com/c/fourth')).rejects.toMatchObject({code:'conversation_cooldown'});
   setSystemTime(now+84_000);
@@ -189,7 +202,7 @@ test("an eligible recovery never reloads a different page opened by the user",as
 
 test("HTTP 429 applies one cooldown across chats and respects Retry-After",async()=>{
   const page=new NavigationPage();page.responseCode=429;page.retryAfter='120';
-  await expect(navigatePage(page.asPage(),'https://chatgpt.com/c/first')).rejects.toMatchObject({code:'rate_limited'});
+  await expect(navigatePage(page.asPage(),'https://chatgpt.com/c/first')).rejects.toMatchObject({code:'conversation_load_rate_limited'});
   page.responseCode=200;setSystemTime(Date.now()+119_000);
   await expect(navigatePage(page.asPage(),'https://chatgpt.com/c/another')).rejects.toMatchObject({code:'conversation_cooldown'});
   expect(page.loads).toHaveLength(1);
@@ -200,7 +213,7 @@ test("a failed Retry-After read still reports rate limiting and throttles the ne
   const page=new NavigationPage();
   page.responseCode=429;
   page.headerFailure=true;
-  await expect(navigatePage(page.asPage(),"https://chatgpt.com/c/first")).rejects.toMatchObject({code:"rate_limited"});
+  await expect(navigatePage(page.asPage(),"https://chatgpt.com/c/first")).rejects.toMatchObject({code:"conversation_load_rate_limited"});
   page.responseCode=200;
   await expect(navigatePage(page.asPage(),"https://chatgpt.com/c/second")).rejects.toMatchObject({code:"conversation_cooldown"});
   expect(page.loads).toHaveLength(1);
@@ -208,7 +221,7 @@ test("a failed Retry-After read still reports rate limiting and throttles the ne
 
 test("a missing Retry-After has a bounded three-minute cooldown",async()=>{
   const page=new NavigationPage(),now=Date.now();setSystemTime(now);page.responseCode=429;
-  await expect(navigatePage(page.asPage(),'https://chatgpt.com/c/first')).rejects.toMatchObject({code:'rate_limited'});
+  await expect(navigatePage(page.asPage(),'https://chatgpt.com/c/first')).rejects.toMatchObject({code:'conversation_load_rate_limited'});
   page.responseCode=200;setSystemTime(now+179_999);
   await expect(navigatePage(page.asPage(),'https://chatgpt.com/c/another')).rejects.toMatchObject({code:'conversation_cooldown',availableAtMs:now+180_000});
   setSystemTime(now+180_000);await navigatePage(page.asPage(),'https://chatgpt.com/c/another');expect(page.loads).toHaveLength(2);
@@ -222,7 +235,7 @@ test("a billing-only rate limit does not block unrelated conversation loads",asy
 
 test("Retry-After HTTP dates are honored and unrelated browser profiles are independent",async()=>{
   const page=new NavigationPage();page.responseCode=429;page.retryAfter=new Date(Date.now()+60_000).toUTCString();
-  await expect(navigatePage(page.asPage(),'https://chatgpt.com/c/first')).rejects.toMatchObject({code:'rate_limited'});
+  await expect(navigatePage(page.asPage(),'https://chatgpt.com/c/first')).rejects.toMatchObject({code:'conversation_load_rate_limited'});
   const independent=new NavigationPage();await navigatePage(independent.asPage(),'https://chatgpt.com/c/second');expect(independent.loads).toHaveLength(1);
   page.responseCode=200;setSystemTime(Date.now()+180_001);await navigatePage(page.asPage(),'https://chatgpt.com/c/second');expect(page.loads).toHaveLength(2);
 });
@@ -291,7 +304,7 @@ test("observing a non-conversation failure never assigns a cooldown to future ch
 
 test("the conversation cooldown never shortens a longer HTTP Retry-After",async()=>{
   const page=new NavigationPage();page.responseCode=429;page.retryAfter='600';
-  await expect(navigatePage(page.asPage(),'https://chatgpt.com/c/first')).rejects.toMatchObject({code:'rate_limited'});
+  await expect(navigatePage(page.asPage(),'https://chatgpt.com/c/first')).rejects.toMatchObject({code:'conversation_load_rate_limited'});
   recordConversationUnavailable(page.asPage());setSystemTime(Date.now()+300_000);page.responseCode=200;
   await expect(navigatePage(page.asPage(),'https://chatgpt.com/c/next')).rejects.toMatchObject({code:'conversation_cooldown'});
   expect(page.loads).toHaveLength(1);
@@ -321,7 +334,7 @@ test("cancelling a conversation probe does not consume its five-minute slot",asy
 test("deferral carries the latest applicable absolute deadline without consuming or extending a slot",async()=>{
   const now=Date.now();setSystemTime(now);
   const page=new NavigationPage();page.responseCode=429;page.retryAfter='600';
-  await expect(navigatePage(page.asPage(),'https://chatgpt.com/c/first')).rejects.toMatchObject({code:'rate_limited'});
+  await expect(navigatePage(page.asPage(),'https://chatgpt.com/c/first')).rejects.toMatchObject({code:'conversation_load_rate_limited'});
   recordConversationUnavailable(page.asPage());page.responseCode=200;
   for(const elapsed of [1_000,179_000,300_000,599_999]){
     setSystemTime(now+elapsed);

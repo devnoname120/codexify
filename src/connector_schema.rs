@@ -21,10 +21,17 @@ pub(crate) fn schema_version(config: &AppConfig) -> String {
         version.push_str("+agent-status-v2");
     }
     if config.experimental.agent_tickets {
-        version.push_str("+tickets-v1");
+        version.push_str("+tickets-v2");
     }
     {
         version.push_str("+workspace-v1");
+    }
+    if crate::global_settings::advertising_config(config)
+        .experimental
+        .force_read_only_tool_annotations
+    {
+        // Cached conversations must not retain the former read-only exit rule.
+        version.push_str("+readonly-brief-v1");
     }
     version
 }
@@ -188,12 +195,12 @@ mod tests {
         for (markdown_chat, agent_tickets, _legacy_mode, suffix) in [
             (false, false, false, "+continuation-v1"),
             (false, false, true, "+continuation-v1+workspace-v1"),
-            (false, true, false, "+continuation-v1+tickets-v1"),
+            (false, true, false, "+continuation-v1+tickets-v2"),
             (
                 false,
                 true,
                 true,
-                "+continuation-v1+tickets-v1+workspace-v1",
+                "+continuation-v1+tickets-v2+workspace-v1",
             ),
             (
                 true,
@@ -211,13 +218,13 @@ mod tests {
                 true,
                 true,
                 false,
-                "+continuation-v1+markdown-chat-v6+agent-automation-v4+tickets-v1",
+                "+continuation-v1+markdown-chat-v6+agent-automation-v4+tickets-v2",
             ),
             (
                 true,
                 true,
                 true,
-                "+continuation-v1+markdown-chat-v6+agent-automation-v4+tickets-v1+workspace-v1",
+                "+continuation-v1+markdown-chat-v6+agent-automation-v4+tickets-v2+workspace-v1",
             ),
         ] {
             let mut config = crate::config::default_config(PathBuf::from("/tmp/project"));

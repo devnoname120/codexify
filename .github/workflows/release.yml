@@ -100,14 +100,14 @@ jobs:
           - name: darwin-x64
             # Cross-compile the Intel binary on Apple-Silicon runners: the
             # macos-13 (Intel) pool has a long queue and was stalling releases.
-            # macos-14's toolchain targets x86_64 fine and starts quickly.
-            os: macos-14
+            # macos-15's toolchain targets x86_64 fine and starts quickly.
+            os: macos-15
             target: x86_64-apple-darwin
             ext: ""
             archive: tar.gz
             macos_sign: true
           - name: darwin-arm64
-            os: macos-14
+            os: macos-15
             target: aarch64-apple-darwin
             ext: ""
             archive: tar.gz
@@ -261,13 +261,13 @@ jobs:
             archive: tar.gz
             smoke: false
           - name: darwin-x64
-            os: macos-14
+            os: macos-15
             platform: darwin
             arch: x64
             archive: tar.gz
             smoke: false
           - name: darwin-arm64
-            os: macos-14
+            os: macos-15
             platform: darwin
             arch: arm64
             archive: tar.gz
@@ -337,7 +337,7 @@ jobs:
 
   stage-release:
     needs: [check, build, browser-build, deploy-installers]
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 15
     permissions:
       contents: write

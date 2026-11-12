@@ -1285,7 +1285,10 @@ mod tests {
         let config: Value =
             serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
         assert_eq!(config["schemaVersion"], json!(1));
-        assert_eq!(config["agentChat"]["automation"]["browserSimplicity"], "bones");
+        assert_eq!(
+            config["agentChat"]["automation"]["browserSimplicity"],
+            "bones"
+        );
         assert_eq!(config["agentChat"]["defaultMessageMode"], "steer");
         assert_eq!(config["agentChat"]["features"]["agentTeams"], true);
         assert_eq!(config["agentChat"]["turnRenewal"]["enabled"], true);

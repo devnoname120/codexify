@@ -461,9 +461,15 @@ serial-call coordination mechanism, not an authentication or replay service.
 The five-minute offline interval allows the next call to reclaim a chain
 with a stale or missing ticket after inactivity, but never while its reservation
 is held. File modification times (or in-memory timestamps) track the last handoff;
-rejected and widget-only calls do not extend the deadline. This permits recovery
-when the user asks ChatGPT to continue, at the cost of allowing stale forks to
-compete again after expiry.
+rejected, widget-only, and `ticket_wait` calls do not extend the deadline.
+After rejection, the agent must repeatedly call the ticketless, read-only
+`ticket_wait` tool until it returns a successor. Each wait uses `agentChat.maxWaitMs`
+and admits one winner only after inactivity and release of any in-flight reservation.
+Pending waits neither update chat presence/work counters nor deliver user messages,
+rollout reminders, or turn-renewal notices. A renewed branch reads the latest rollout
+reports before continuing. Both tool descriptions and replies require continued
+waiting rather than ending the assistant turn. This provides serialized recovery;
+it does not assign agent roles or implement multi-agent coordination.
 Native Codex project entries are intentionally re-read
 when the catalogue tool is called rather than copied into `AppConfig` at startup.
 `conversationAuthToken` is a top-level optional authentication secret with no CLI

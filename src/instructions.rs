@@ -105,7 +105,17 @@ fn configured_agent_brief(config: &AppConfig) -> String {
         AGENT_BRIEF.to_string()
     };
     brief.push_str(&format!("\n\n{COMMAND_REJECTION_INSTRUCTIONS}"));
-    brief.push_str(&format!("\n\n{TURN_HANDOFF_INSTRUCTIONS}"));
+    let handoffs = if crate::global_settings::advertising_config(config)
+        .experimental
+        .force_read_only_tool_annotations
+    {
+        TURN_HANDOFF_INSTRUCTIONS
+            .replace(" When only read-only tools are available, give the summary as a normal final answer even though Markdown chat normally requires chat_write.", "")
+            .replace("If at some point you only have access to read-only tools then summarize what you did and the next steps and then finish the turn with this summary as the answer. You should not mark the goal as blocked/stopped/paused when this happens.\n\n", "")
+    } else {
+        TURN_HANDOFF_INSTRUCTIONS.to_string()
+    };
+    brief.push_str(&format!("\n\n{handoffs}"));
     if config.markdown_chat.enabled && config.markdown_chat.automation.enabled {
         brief.push_str(&format!("\n\n{AGENT_GOAL_INSTRUCTIONS}"));
     }
@@ -229,6 +239,43 @@ pub fn build_instructions(config: &AppConfig) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn read_only_annotation_override_removes_read_only_exit_rules_from_all_generated_briefs() {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = crate::config::default_config(root.path().into());
+        for markdown in [false, true] {
+            config.markdown_chat.enabled = markdown;
+            config.experimental.force_read_only_tool_annotations = true;
+            for brief in [
+                build_initial_instructions(&config),
+                build_instructions(&config),
+            ] {
+                assert!(!brief.contains("When only read-only tools are available"));
+                assert!(!brief.contains("only have access to read-only tools"));
+                assert!(brief.contains("Concurrent workspace changes are expected"));
+            }
+        }
+        config.experimental.force_read_only_tool_annotations = false;
+        assert!(build_instructions(&config).contains("only have access to read-only tools"));
+        let path = root.path().join("settings.json");
+        std::fs::write(
+            &path,
+            r#"{"experimental":{"forceReadOnlyToolAnnotations":true}}"#,
+        )
+        .unwrap();
+        config.loaded_config_path = Some(path.clone());
+        assert!(!build_instructions(&config).contains("only have access to read-only tools"));
+        assert!(
+            !build_initial_instructions(&config)
+                .contains("When only read-only tools are available")
+        );
+        std::fs::write(
+            path,
+            r#"{"experimental":{"forceReadOnlyToolAnnotations":false}}"#,
+        )
+        .unwrap();
+        assert!(build_instructions(&config).contains("only have access to read-only tools"));
+    }
     use super::*;
 
     #[test]
@@ -301,11 +348,11 @@ mod tests {
         let mut config = crate::config::default_config(root.path().to_path_buf());
         config.conversation_auth_token = Some("a".repeat(64).into());
         assert!(!build_initial_instructions(&config).contains("codexify_ticket"));
-        assert!(!crate::connector_schema::schema_version(&config).contains("tickets-v1"));
+        assert!(!crate::connector_schema::schema_version(&config).contains("tickets-v2"));
         config.experimental.agent_tickets = true;
         assert!(build_initial_instructions(&config).contains(crate::agent_tickets::INSTRUCTIONS));
         assert!(configured_agent_brief(&config).contains(crate::agent_tickets::INSTRUCTIONS));
-        assert!(crate::connector_schema::schema_version(&config).contains("tickets-v1"));
+        assert!(crate::connector_schema::schema_version(&config).contains("tickets-v2"));
     }
 
     #[test]

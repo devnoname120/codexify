@@ -62,7 +62,7 @@ async function main(): Promise<void> {
   const requestBlockList=parseRequestBlockList(process.env.CODEXIFY_BROWSER_REQUEST_BLOCK_LIST);
   configureNavigationTimings(process.env.CODEXIFY_BROWSER_NAVIGATION_TIMINGS);
   configureNavigationPersistence(join(root,"navigation-cooldown.json"));
-  const actionLaneLimit=Number(process.env.CODEXIFY_BROWSER_ACTION_LANES??2);
+  const actionLaneLimit=Number(process.env.CODEXIFY_BROWSER_ACTION_LANES??1);
   if(!Number.isInteger(actionLaneLimit)||actionLaneLimit<1||actionLaneLimit>4)throw new Error("Browser action pages must be between one and four");
   surface = await ChromeSingleWindowSurface.create({ profilePath, executablePath, requestBlockList,
     actionLaneLimit,

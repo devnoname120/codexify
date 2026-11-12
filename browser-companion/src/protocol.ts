@@ -2,7 +2,7 @@ import { z } from "zod";
 
 export const PROTOCOL_VERSION = 1 as const;
 export const COMPANION_KIND = "codexify-browser-companion" as const;
-export const PROTOCOL_SCHEMA_HASH = "7d1f04ca4cb844940820aeeb703a42c36363cee5e5f7209d46c5907f26c5ce05" as const;
+export const PROTOCOL_SCHEMA_HASH = "36957a042ed31cae11d0401411999119d39c22af98278a46b25c412b0be765c6" as const;
 export const PROTOCOL_BUILD_SUFFIX = `+protocol.${PROTOCOL_SCHEMA_HASH}` as const;
 export const MAX_DESCRIPTOR_BYTES = 8 * 1024;
 export const MAX_JSON_BYTES = 1024 * 1024;
@@ -130,6 +130,7 @@ export const actionPromptSchema = z.discriminatedUnion("kind", [
     messages: z.array(unreadMessageSchema).min(1).max(MAX_UNREAD_MESSAGES),
   }),
   z.strictObject({kind:z.literal("turn_renewal"),handoffId:z.string().regex(/^renew-[a-f0-9]{64}$/)}),
+  z.strictObject({kind:z.literal("task_continuation")}),
   z.strictObject({
     kind: z.literal("offline_goal"),
     goalRevision: z.number().int().positive(),
@@ -172,7 +173,7 @@ const goalClause = [
 
 export const rolloutRestoreGuidance = "Before task work in each new turn, call rollout_read to read up to five recent progress reports from this chat's rollout.md, then use the current goal if one is configured. When the progress journal is enabled (rollout_read reports if disabled), use rollout_update regularly to append status, progress and next steps. Treat reports as history; current instructions and live state take precedence. Setup and pairing verification must finish before task work.";
 
-export function renderActionPrompt(raw: ActionPrompt): string {
+export function renderActionPrompt(raw: ActionPrompt, agentTicket?:string): string {
   const prompt = actionPromptSchema.parse(raw);
   let rendered: string;
   switch (prompt.kind) {
@@ -192,6 +193,9 @@ export function renderActionPrompt(raw: ActionPrompt): string {
     case "turn_renewal":
       rendered = "Continue.";
       break;
+    case "task_continuation":
+      rendered = "Continue the previous user request in this Codexify task using its existing workspace, CHAT.md and progress history. Initialization and pairing are already complete. Call get_agent_brief, read the task history and continue from the saved state; do not treat this as a new task or repeat completed work.";
+      break;
     case "offline_goal":
       rendered = goalClause;
       break;
@@ -200,6 +204,10 @@ export function renderActionPrompt(raw: ActionPrompt): string {
       break;
   }
   rendered += `\n\n${rolloutRestoreGuidance}`;
+  if (agentTicket !== undefined) {
+    if (!/^[A-Za-z0-9_-]{8}$/.test(agentTicket)) throw new Error("Invalid browser agent ticket");
+    rendered += `\n\nCodexify supplied a fresh agent ticket for this prompt: \`${agentTicket}\`. Pass it as \`codexify_ticket\` on the first ticketed tool call in this turn, including setup or pairing verification. \`continue_task\` is exempt and does not consume it. After that first call, use the latest \`new_codexify_ticket\` returned by each response. This ticket replaces any ticket remembered from a previous turn; do not omit it or reuse an older one.`;
+  }
   if (utf8Length(rendered) > MAX_PROMPT_BYTES) throw new Error("Browser automation prompt exceeds the safety limit");
   return rendered;
 }
@@ -217,13 +225,20 @@ export const executeActionRequestSchema = z.strictObject({
   expectedUrl: chatGptUrlSchema,
   autoApproveToolCalls: z.boolean(),
   bypassConversationCooldown: z.boolean().optional(),
+  retainPairingWindow: z.boolean().optional(),
+  pairingContinuationOf: opaqueIdSchema.optional(),
+  agentTicket: z.string().regex(/^[A-Za-z0-9_-]{8}$/).optional(),
 }).superRefine((value, context) => {
+  if (value.retainPairingWindow && value.prompt.kind !== "create_chat"
+    || value.pairingContinuationOf && (value.prompt.kind === "create_chat" || value.prompt.kind === "pair_verify" || value.pairingContinuationOf === value.actionId)) {
+    context.addIssue({code:"custom",message:"Invalid pairing window reservation"});
+  }
   if ((value.model === null) !== (value.effort === null)
     || (value.prompt.kind === "pair_verify" && value.model !== null)) {
     context.addIssue({ code:"custom", message:"Model and effort must be supplied together; pairing does not change saved conversation settings" });
   }
   try {
-    renderActionPrompt(value.prompt);
+    renderActionPrompt(value.prompt,value.agentTicket);
   } catch (error) {
     context.addIssue({ code: "custom", path: ["prompt"], message: error instanceof Error ? error.message : "Invalid prompt" });
   }

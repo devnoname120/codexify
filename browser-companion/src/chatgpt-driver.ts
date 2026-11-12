@@ -7,8 +7,8 @@ import {DraftRecoveryJournal} from './draft-recovery';
 import {approveConversationCard,throwIfConversationApproval} from "./conversation-approval";
 import {openNewChat, createdChatUrl, assertNewChatDraft} from "./new-chat";
 import { HealthAccountCache, readChatGptAccount, type ChatGptAccount } from "./account";
-import { throwIfSessionAttention, toolApprovalVisible } from "./browser-session";
-import {navigatePage,recordConversationAvailable,acquireSubmissionSlot} from "./navigation";
+import { throwIfSessionAttention, throwIfConversationLimit, toolApprovalVisible } from "./browser-session";
+import {navigatePage,recordConversationAvailable,acquireSubmissionSlot,conversationLoadAvailableAt} from "./navigation";
 import {waitForConversationComposer} from "./conversation-readiness";
 import {refreshConversationEditor} from "./editor-recovery";
 import {inspectPresentation} from "./presentation";
@@ -17,7 +17,7 @@ import {stopControls,END_TURN_CONTROL_NAME,traceStopControls} from "./stop-contr
 import type { BrowserDriver, DriverExecution, BrowserStepRunner, StopProgressStep } from "./browser-window";
 import { activeComposer, composerText, ensureEmptyOwnedComposer, insertExactPrompt, isPairingVerificationDraft, isAutomationGoalDraft, uniqueSendButton } from "./composer";
 import { clearComposerState, connectorIsSelected, ConnectorMenuUnavailableError, SELECTED_CONNECTOR_SELECTOR, selectConnector, type SelectedConnector } from "./connector-selection";
-import { asCompanionError, BrowserCompanionError,ModelOptionUnavailableError, CONVERSATION_UNAVAILABLE_MESSAGE } from "./errors";
+import { asCompanionError, BrowserCompanionError,ModelOptionUnavailableError, CONVERSATION_UNAVAILABLE_MESSAGE, ConversationCooldownError, browserStage } from "./errors";
 import { uiLabelPattern } from "./ui-localization";
 import { assertSelectedModelAndEffort, selectAvailableModelAndEffort } from "./model-selection";
 import { selectPairingMedium, type PairingMediumSelection } from "./pairing-model";
@@ -446,7 +446,7 @@ export class ChatGptBrowserDriver implements BrowserDriver {
       try {
         await throwIfSessionAttention(page,signal);
       } catch (error) {
-        if (error instanceof BrowserCompanionError && (error.code === "conversation_unavailable"||error.code==="rate_limited")) {
+        if (error instanceof BrowserCompanionError && ["conversation_unavailable","conversation_limit","conversation_load_rate_limited","rate_limited"].includes(error.code)) {
           // The account was verified independently. Keep it signed in; the
           // shared navigation budget enforces conversation and server cooldowns.
           return {authenticated:true, accountFingerprint:account.fingerprint, status:"idle", detail:error.message};
@@ -540,7 +540,7 @@ export class ChatGptBrowserDriver implements BrowserDriver {
     // may not have mounted yet. Hydration gets one bounded readiness wait.
     trace('waiting for setup composer');
     await waitForConversationComposer(page,signal);
-    const capabilities = await detectChatGptAccountCapabilities(page,{signal,onProgress:trace});
+    const capabilities = await browserStage("capability_discovery","ChatGPT capability discovery failed",()=>detectChatGptAccountCapabilities(page,{signal,onProgress:trace}));
     const planKind = this.planCache?.plan.accountFingerprint === account.fingerprint&&this.planCache.planType===account.planType
       ? this.planCache.plan.kind : classifyPlan(account.planType).kind;
     const catalog = buildCapabilityCatalog(capabilities, account.fingerprint, this.build, planKind);
@@ -559,6 +559,10 @@ export class ChatGptBrowserDriver implements BrowserDriver {
     // availability is still discovered and verified from the live picker.
     const plan={...classifyPlan(account.planType),accountFingerprint:account.fingerprint};
     this.planCache={epoch,planType:account.planType,plan};return plan;
+  }
+
+  async navigationAvailability(url:string):Promise<number|null> {
+    return conversationLoadAvailableAt(await this.surface.page(),url);
   }
 
   async refreshConnector(name:string, signal?:AbortSignal) {
@@ -661,7 +665,7 @@ export class ChatGptBrowserDriver implements BrowserDriver {
       try { await observeReadOnly(throwIfSessionAttention(page),signal); }
       catch(error) {
         // A page-local load failure must not prevent opening global settings.
-        if (!(error instanceof BrowserCompanionError && (error.code === "conversation_unavailable"||error.code==="rate_limited"))) throw error;
+        if (!(error instanceof BrowserCompanionError && ["conversation_unavailable","conversation_limit","rate_limited"].includes(error.code))) throw error;
       }
       // Ownership tracks our UI operation, never ChatGPT's response lifetime.
       const composers=page.locator(CHATGPT_COMPOSER_SELECTOR).filter({visible:true});
@@ -818,6 +822,22 @@ export class ChatGptBrowserDriver implements BrowserDriver {
           throw new BrowserCompanionError("Turn handoff is not complete; continuation was not sent","external_interference");
         }
       };
+      const canStopPrevious = execution.request.prompt.kind !== "pair_verify" && !creating && !renewal;
+      const stopPrevious = async () => {
+        if (canStopPrevious) await stopLingeringResponse(page, execution.signal, { canonicalUrl, accountFingerprint:account.fingerprint }, execution.emit);
+      };
+      const prepareBeforeSend = async <T>(operation:()=>Promise<T>):Promise<T> => {
+        await stopPrevious();
+        try { return await operation(); }
+        catch (error) {
+          // React can open the confirmation after the initial Stop inspection,
+          // while a picker or composer operation is already in progress. Resolve
+          // that exact modal, then retry only this pre-Send preparation step.
+          if (!canStopPrevious || !(await visibleStopDialogs(page)).length) throw error;
+          await stopPrevious();
+          return operation();
+        }
+      };
       await verifyHandoff();
       if (execution.request.prompt.kind === "pair_verify") await this.replacePairingDraft(execution.request);
       if(this.recoveryEnhancements && !creating && execution.request.prompt.kind!=='pair_verify'){
@@ -834,12 +854,12 @@ export class ChatGptBrowserDriver implements BrowserDriver {
           console.warn(`[composer-recovery] reclaimed ${ownedUnsent?'confirmed unsent draft':staleConnectorQuery?'connector query':'fixed automation goal draft'} chars=${draft.length}`);
         }
       }
-      if (this.recoveryEnhancements && execution.request.prompt.kind !== "pair_verify" && !creating && !renewal) {
+      if (canStopPrevious) {
         // Offline actions are dispatched after tool-call inactivity. Stop only
         // while preparing this send; ongoing conversations need no observation.
         step("stopping previous response");
         await traceStopControls(page,"before-stop");
-        await stopLingeringResponse(page, execution.signal, { canonicalUrl, accountFingerprint:account.fingerprint }, execution.emit);
+        await stopPrevious();
         if (canonicalChatGptConversationUrl(page.url()) !== canonicalUrl) {
           throw new BrowserCompanionError("ChatGPT changed conversations while stopping the previous response", "conversation_unavailable");
         }
@@ -849,7 +869,7 @@ export class ChatGptBrowserDriver implements BrowserDriver {
       const cache = this.capabilitiesCache;
       step("checking draft");
       if(!creating&&execution.request.prompt.kind!=="pair_verify")
-        await ensureEmptyOwnedComposer(await activeComposer(page,3_000,execution.signal));
+        await prepareBeforeSend(async()=>ensureEmptyOwnedComposer(await activeComposer(page,3_000,execution.signal)));
       else await clearExistingDraft(page,execution.signal);
       execution.emit({ type:"composer_ready" });
       const verifyFallbackDestination=async()=>{
@@ -883,8 +903,9 @@ export class ChatGptBrowserDriver implements BrowserDriver {
       const selectModel=async()=>{
         if(execution.request.model===null||execution.request.effort===null)return null;
         step("selecting model");
-        return selectAvailableModelAndEffort(page,execution.request.model,execution.request.effort,
-          cache?.accountFingerprint===account.fingerprint?cache.capabilities:undefined,execution.signal,verifyFallbackDestination,true);
+        const model=execution.request.model,effort=execution.request.effort;
+        return prepareBeforeSend(()=>selectAvailableModelAndEffort(page,model,effort,
+          cache?.accountFingerprint===account.fingerprint?cache.capabilities:undefined,execution.signal,verifyFallbackDestination,true));
       };
       if (!creating && execution.request.prompt.kind !== "pair_verify"
         && execution.request.model !== null && execution.request.effort !== null) {
@@ -897,6 +918,7 @@ export class ChatGptBrowserDriver implements BrowserDriver {
         execution.emit({ type:"model_verified", model:selected!.id, effort:selected!.effort });
       }
       if (creating || execution.request.prompt.kind === "pair_verify") {
+        step("selecting pairing Medium");
         pairingSelection = await selectPairingMedium(page, execution.signal);
       }
       // A verified existing conversation already carries its connector tools.
@@ -910,8 +932,8 @@ export class ChatGptBrowserDriver implements BrowserDriver {
       for(let attempt=0;(requiresConnector||hasConnectorChip)&&attempt<2;attempt++) {
         try {
           step("selecting connector");
-          selectedConnector=await selectConnector(page,execution.request.connectorName,execution.signal,
-            connectorStep=>{step(`connector ${connectorStep}`);execution.emit({type:"connector_progress",step:connectorStep});});
+          selectedConnector=await prepareBeforeSend(()=>selectConnector(page,execution.request.connectorName,execution.signal,
+            connectorStep=>{step(`connector ${connectorStep}`);execution.emit({type:"connector_progress",step:connectorStep});}));
           break;
         } catch(error) {
           if(!(error instanceof BrowserCompanionError)||error.code!=="connector_unavailable")throw error;
@@ -947,7 +969,7 @@ export class ChatGptBrowserDriver implements BrowserDriver {
       insertionAttempted = true;
       step("inserting prompt");
       const preparedComposer=selectedConnector?.composer ?? await activeComposer(page,30_000,execution.signal);
-      try {await insertExactPrompt(preparedComposer, execution.renderedPrompt);}
+      try {await prepareBeforeSend(()=>insertExactPrompt(preparedComposer, execution.renderedPrompt));}
       catch(error){
         execution.signal.throwIfAborted();
         await throwIfConversationApproval(page);
@@ -988,6 +1010,7 @@ export class ChatGptBrowserDriver implements BrowserDriver {
       await throwIfConversationApproval(page);
       execution.signal.throwIfAborted();
       await verifyHandoff();
+      await throwIfConversationLimit(page);
       if(!creating&&execution.request.prompt.kind!=="pair_verify"&&await generationRunning(page)) {
         if(!this.recoveryEnhancements || renewal || !this.draftRecovery.recoverable(account.fingerprint,canonicalUrl,await composerText(await activeComposer(page,3_000,execution.signal))))
           throw new BrowserCompanionError("ChatGPT's previous turn is still running; the continuation was not sent","editor_unavailable");
@@ -1032,6 +1055,7 @@ export class ChatGptBrowserDriver implements BrowserDriver {
           submissionNetwork?.wait(execution.signal),
         ]);
       } catch (error) {
+        if(error instanceof BrowserCompanionError&&error.code==="conversation_limit")throw error;
         throw new BrowserCompanionError(
           error instanceof BrowserCompanionError ? error.message : "ChatGPT Send may have been accepted, but semantic acceptance could not be proven",
           "ambiguous_send",
@@ -1066,6 +1090,7 @@ export class ChatGptBrowserDriver implements BrowserDriver {
       step("letting submission requests settle");
       await settleSubmission();
       execution.signal.throwIfAborted();
+      await throwIfConversationLimit(page);
       execution.emit({ type:"submission_complete", canonicalUrl });
       timing.totalMs=Math.round(performance.now()-preparationStarted);
     } catch (error) {
@@ -1091,6 +1116,16 @@ export class ChatGptBrowserDriver implements BrowserDriver {
           return `${value.code}: ${value.message.split(/\r?\n/)[0]!.slice(0,240)}`;
         }).join("; ");
         console.error(`[submission-step] ${execution.request.actionId} failed at ${submissionStep}; sendActivated=${sendActivated}; sendAccepted=${sendAccepted}; ${details}`);
+      }
+      if(error instanceof BrowserCompanionError&&error.code==="conversation_limit") {
+        const current=await this.surface.page();
+        if(execution.request.prompt.kind!=="create_chat"&&canonicalChatGptConversationUrl(current.url())!==canonicalChatGptConversationUrl(execution.request.expectedUrl)) {
+          throw new BrowserCompanionError("ChatGPT changed conversations before its length limit could be verified","external_interference",{sendAccepted:sendActivated});
+        }
+        if((await readChatGptAccount(current)).fingerprint!==execution.request.expectedAccountFingerprint) {
+          throw new BrowserCompanionError("ChatGPT account changed before its conversation limit could be verified","authentication_required",{sendAccepted:sendActivated});
+        }
+        throw new BrowserCompanionError(error.message,"conversation_limit",{sendAccepted:sendAccepted,cause:error});
       }
       if (!sendActivated && insertionAttempted && ownedPage) {
         // A failed readiness check must not leave our own unchanged prompt blocking retries.

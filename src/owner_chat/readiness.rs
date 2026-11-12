@@ -37,7 +37,7 @@ pub(super) fn describe(health: &Value, browser: Option<&Value>, refresh: Option<
                 false,
                 true,
                 "browser_stopped",
-                "The browser companion is stopped. Start it in Browser settings.",
+                "The browser companion is stopped.",
             );
         }
         if browser["status"] == "authentication_required" {

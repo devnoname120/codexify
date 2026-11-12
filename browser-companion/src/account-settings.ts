@@ -1,6 +1,6 @@
 import type {Page} from "patchright";
 import {uiLabels,escapeUiPattern,normalizeUiLabel} from "./ui-localization";
-import {readChatGptAccount} from "./account";
+import {readChatGptAccount,type ChatGptAccount} from "./account";
 import {selectConnector,SELECTED_CONNECTOR_SELECTOR,clearComposerState} from "./connector-selection";
 import {CHATGPT_COMPOSER_SELECTOR} from "./session";
 import {BrowserCompanionError,selectorDrift} from "./errors";
@@ -8,6 +8,9 @@ import {navigatePage} from "./navigation";
 import {observeReadOnly} from "./observation";
 
 export type AccountPlan = {label:string; sourceLabel:string; kind:"free"|"go"|"pro"|"unknown"; accountFingerprint:string};
+export function completeAccountPlan(plan:AccountPlan):boolean {
+  return Boolean(plan.label.trim())&&!(plan.kind==="pro"&&plan.label==="Pro");
+}
 function traceRefresh(phase:string):void {
   if(process.env.CODEXIFY_BROWSER_MAINTENANCE_TRACE==="1")console.info(`[connector-refresh] ${Date.now()} ${phase}`);
 }
@@ -99,30 +102,38 @@ async function readAccountMenuPlan(page:Page,previousUrl:string,signal?:AbortSig
   }
 }
 
-export async function readBillingPlan(page:Page,signal?:AbortSignal):Promise<AccountPlan> {
+export async function readBillingPlan(page:Page,signal?:AbortSignal,expectedAccount?:ChatGptAccount):Promise<AccountPlan> {
   const previousUrl=page.url();
+  const initialAccount=expectedAccount??await readChatGptAccount(page,signal);
+  const verifiedAccount=async()=>{
+    const current=await readChatGptAccount(page,signal);
+    if(current.fingerprint!==initialAccount.fingerprint)throw new BrowserCompanionError("ChatGPT account changed during plan inspection","authentication_required");
+    return current;
+  };
   const menuLabel=await readAccountMenuPlan(page,previousUrl,signal);
   if(menuLabel){
     const plan=classifyPlan(menuLabel);
     // A plain Pro label does not identify its billing tier. Keep the billing
     // fallback for that case instead of silently replacing Pro 20x with Pro.
-    if(new RegExp(planLabelPattern,"iu").test(menuLabel)&&(plan.kind!=="pro"||plan.label!=="Pro"))return {...plan,accountFingerprint:(await readChatGptAccount(page,signal)).fingerprint};
+    if(new RegExp(planLabelPattern,"iu").test(menuLabel)&&(plan.kind!=="pro"||plan.label!=="Pro"))return {...plan,accountFingerprint:(await verifiedAccount()).fingerprint};
   }
   let billingReady=false;
   try {
     if(page.url()!=="https://chatgpt.com/settings/billing"&&await observeReadOnly(page.locator(CHATGPT_COMPOSER_SELECTOR).filter({visible:true}).count(),signal)===1)await clearComposerState(page,"",signal);
-    await navigatePage(page,"https://chatgpt.com/settings/billing",{timeout:5_000,signal});
+    await navigatePage(page,"https://chatgpt.com/settings/billing",{timeout:10_000,signal});
     await page.locator("body").waitFor({state:"visible",timeout:1_000,signal});
     billingReady=true;
   } catch {
     signal?.throwIfAborted();
-    await navigatePage(page,previousUrl,{timeout:2_000,signal});
+    // The maintenance owner restores the shared tab once. A failed billing load
+    // must still allow the independently verified account tier to be returned.
   }
-  const account=await readChatGptAccount(page,signal);
+  const account=await verifiedAccount();
   let sourceLabel:string|null|undefined;
   if(billingReady) {
-    // Leave room for account verification and restoring the shared tab within the 10s action budget.
-    const deadline=Date.now()+2_500;
+    // Billing hydrates after navigation. Keep observation bounded while allowing
+    // the subscription card to arrive before falling back to the verified tier.
+    const deadline=Date.now()+5_000;
     do {
     signal?.throwIfAborted();
     sourceLabel=await observeReadOnly(page.evaluate(({headingPattern,labelPattern})=>{
@@ -144,12 +155,13 @@ export async function readBillingPlan(page:Page,signal?:AbortSignal):Promise<Acc
     }while(Date.now()<deadline);
   }
   if(!sourceLabel) {
-    try {sourceLabel=menuLabel??await readAccountMenuPlan(page,previousUrl,signal);}
+    try {sourceLabel=menuLabel??await readAccountMenuPlan(page,page.url(),signal);}
     catch {signal?.throwIfAborted();}
-    if((await readChatGptAccount(page,signal)).fingerprint!==account.fingerprint)throw new BrowserCompanionError("ChatGPT account changed during plan inspection","authentication_required");
+    await verifiedAccount();
   }
   if(process.env.CODEXIFY_BROWSER_MAINTENANCE_TRACE==="1")console.info(`[account-plan] ${JSON.stringify({sourceLabel:sourceLabel??null})}`);
-  return {...classifyPlan(sourceLabel??""),accountFingerprint:account.fingerprint};
+  const sessionPlan=classifyPlan(account.planType);
+  return {...classifyPlan(sourceLabel|| (sessionPlan.kind!=="unknown"?sessionPlan.label:"")),accountFingerprint:account.fingerprint};
 }
 
 async function markRefreshButton(page:Page):Promise<void> {
@@ -369,7 +381,7 @@ export async function inspectConnectorSettings(page:Page,appId:string,name:strin
 }
 
 export async function prepareConnectorRefresh(page:Page,name:string,expectedAccountFingerprint?:string,signal?:AbortSignal,knownAppId?:string,witness?:PermissionWitness):Promise<{appId:string;permissionChanged:boolean;observation:ConnectorRefreshObservation}> {
-  const account=expectedAccountFingerprint??(await readChatGptAccount(page)).fingerprint;
+  const account=expectedAccountFingerprint??(await readChatGptAccount(page,signal)).fingerprint;
   const appId=knownAppId??await identifyConnectorApp(page,name,account,signal);
   const before=await inspectConnectorSettings(page,appId,name,account,signal);
   let permissionChanged=false;

@@ -13,6 +13,41 @@ pub struct BlockerAudit {
     pub first_at_ms: u64,
 }
 
+impl AgentAutomationStore {
+    pub fn audit_goal_blocker(
+        &self,
+        task: &ConversationIdentity,
+        revision: u64,
+        reason: &str,
+        now: u64,
+    ) -> Result<(), String> {
+        if reason.trim().is_empty() || reason.len() > 4096 {
+            return Err("A blocked goal requires a concrete reason of at most 4096 bytes".into());
+        }
+        let deferred = self.mutate(task, |state| {
+            let goal = state.goal.as_ref().ok_or("No agent-chat goal is configured")?;
+            if goal.revision != revision { return Err("The goal revision changed; read goal_read again".into()); }
+            if !state.retry_timings.infinite_retries || goal.status != GoalStatus::Active { return Ok(None); }
+            let same = state.blocker_audit.as_ref().is_some_and(|audit| audit.revision == revision && audit.reason == reason);
+            if !same {
+                state.blocker_audit = Some(BlockerAudit {revision, reason:reason.into(), attempts:1, last_turn:goal.turn_count, first_at_ms:now});
+            } else if let Some(audit) = state.blocker_audit.as_mut()
+                && audit.last_turn != goal.turn_count
+            {
+                audit.last_turn = goal.turn_count;
+                audit.attempts = audit.attempts.saturating_add(1);
+            }
+            let audit = state.blocker_audit.as_ref().expect("audit recorded");
+            Ok((audit.attempts < 3 || now.saturating_sub(audit.first_at_ms) < 60_000).then(|| format!(
+                "Goal remains active. Blocker audit {}/3: {}. Check alternatives, retry temporary failures, and continue independent work. Record evidence and the exact external input needed in rollout_update and chat_write. If the same blocker remains on a later goal turn, submit the same reason again. Repeated calls within this turn do not count. Three distinct turns and at least 60 seconds are required before blocking an infinite goal.", audit.attempts.min(3), audit.reason)))
+        })?;
+        if let Some(message) = deferred {
+            return Err(message);
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -20,7 +55,11 @@ mod tests {
     fn infinite_goal_rejects_premature_blocking_but_accepts_a_persistent_blocker() {
         let root = tempfile::tempdir().unwrap();
         let mut config = crate::config::default_config(root.path().into());
-        config.markdown_chat.automation.retry_timings.infinite_retries = true;
+        config
+            .markdown_chat
+            .automation
+            .retry_timings
+            .infinite_retries = true;
         let store = AgentAutomationStore::for_config(&config).unwrap();
         let task = ConversationIdentity::from_openai_session("blocker-audit").unwrap();
         store
@@ -67,40 +106,5 @@ mod tests {
         store.run_goal(&task, 1, 500_000).unwrap();
         assert!(store.load(&task).unwrap().blocker_audit.is_none());
         assert!(store.audit_goal_blocker(&task, 1, reason, 500_001).is_err());
-    }
-}
-
-impl AgentAutomationStore {
-    pub fn audit_goal_blocker(
-        &self,
-        task: &ConversationIdentity,
-        revision: u64,
-        reason: &str,
-        now: u64,
-    ) -> Result<(), String> {
-        if reason.trim().is_empty() || reason.len() > 4096 {
-            return Err("A blocked goal requires a concrete reason of at most 4096 bytes".into());
-        }
-        let deferred = self.mutate(task, |state| {
-            let goal = state.goal.as_ref().ok_or("No agent-chat goal is configured")?;
-            if goal.revision != revision { return Err("The goal revision changed; read goal_read again".into()); }
-            if !state.retry_timings.infinite_retries || goal.status != GoalStatus::Active { return Ok(None); }
-            let same = state.blocker_audit.as_ref().is_some_and(|audit| audit.revision == revision && audit.reason == reason);
-            if !same {
-                state.blocker_audit = Some(BlockerAudit {revision, reason:reason.into(), attempts:1, last_turn:goal.turn_count, first_at_ms:now});
-            } else if let Some(audit) = state.blocker_audit.as_mut() {
-                if audit.last_turn != goal.turn_count {
-                    audit.last_turn = goal.turn_count;
-                    audit.attempts = audit.attempts.saturating_add(1);
-                }
-            }
-            let audit = state.blocker_audit.as_ref().expect("audit recorded");
-            Ok((audit.attempts < 3 || now.saturating_sub(audit.first_at_ms) < 60_000).then(|| format!(
-                "Goal remains active. Blocker audit {}/3: {}. Check alternatives, retry temporary failures, and continue independent work. Record evidence and the exact external input needed in rollout_update and chat_write. If the same blocker remains on a later goal turn, submit the same reason again. Repeated calls within this turn do not count. Three distinct turns and at least 60 seconds are required before blocking an infinite goal.", audit.attempts.min(3), audit.reason)))
-        })?;
-        if let Some(message) = deferred {
-            return Err(message);
-        }
-        Ok(())
     }
 }

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import {runInNewContext} from 'node:vm';
 import {createRequire} from 'node:module';
 import {mkdtempSync,mkdirSync,readFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
@@ -11,6 +12,14 @@ const origin='http://127.0.0.1:43329',today='2026-10-17';
 const numbers={1:{turns:12,toolCalls:690,goals:1},7:{turns:84,toolCalls:12480,goals:9},30:{turns:328,toolCalls:50321,goals:27},90:{turns:820,toolCalls:150000,goals:84},all:{turns:1240,toolCalls:284000,goals:119}};
 const modelCases={1:['gpt-5.6-sol','max','GPT-5.6 Sol Pro'],7:['gpt-6-astra','pro','GPT-6 Astra Pro'],30:['gpt-5.6-sol','max','GPT-5.6 Sol Pro'],90:['gpt-5.6-sol','xhigh','GPT-5.6 Sol (Extra High)'],all:['gpt-6-astra','pro','GPT-6 Astra Pro']};
 const activeMs={1:365400000,7:12345678,30:36000000,90:720000000,all:72000000000};
+const timeText={1:'101h',7:'3h 25m',30:'10h 0m',90:'200h',all:'20000h'};
+test('time values show hours and minutes below 100 hours and whole hours from 100 onward',()=>{
+ const source=readFileSync(new URL('../src/analytics_ui.js',import.meta.url),'utf8');
+ const {duration,share}=runInNewContext(source+'\n({duration:analyticsDuration,share:analyticsShareNumber})');
+ for(const [ms,expected]of [[0,'0h 0m'],[60000,'0h 1m'],[(45*60+1)*60000,'45h 1m'],[(27*60+23)*60000,'27h 23m'],[100*3600000-1,'99h 59m'],[100*3600000,'100h'],[(134*60+59)*60000,'134h'],[(1705*60+18)*60000,'1705h'],[20000*3600000,'20000h']]){
+  assert.equal(duration(ms),expected);assert.equal(share('activeMs',ms),expected);
+ }
+});
 async function fixture(engine,{clipboard=true,usage={}}={}){
  const browser=await engine.launch(),page=await browser.newPage({viewport:{width:1440,height:1000}});page.setDefaultTimeout(6000);const errors=[],requests=[],posts=[];page.on('pageerror',e=>errors.push(e.message));page.on('request',r=>{if(r.url().startsWith(origin))requests.push(new URL(r.url()).pathname);if(r.method()!=='GET')posts.push(new URL(r.url()).pathname);});
  await page.addInitScript(({clipboard})=>{
@@ -58,7 +67,7 @@ for(const [name,engine]of [['Chromium',chromium],['WebKit',webkit]])test(`${name
    assert.match(await dialog.locator('#stats-share-description').textContent(),period==='all'?/Lifetime/:period==='1'?/Today/:new RegExp(`Last ${period} days`));
    assert.equal(await dialog.locator('img').getAttribute('src').then(v=>v.startsWith('blob:')),true);
    const text=await page.evaluate(()=>window.__drawn);assert(text.includes('Codexify stats'));assert(text.includes('codexify.dev'));assert(text.includes('Turns'));assert(text.includes('Tool calls'));assert(text.includes('Goals completed'));assert(text.some(t=>t===String(numbers[period].turns)||t===new Intl.NumberFormat('en-US').format(numbers[period].turns)));
-   assert(text.includes('Thinking hours'));assert(text.includes(new Intl.NumberFormat('en-US',{maximumFractionDigits:1,notation:activeMs[period]/3600000>=10000?'compact':'standard'}).format(activeMs[period]/3600000)+'h'));assert(text.includes(modelCases[period][2]));assert(text.includes(`Top model · ${Math.ceil(numbers[period].turns*.6)} turns`));assert(!text.some(t=>t.includes('estimated')));
+   assert(text.includes('Thinking hours'));assert(text.includes(timeText[period]));assert(text.includes(modelCases[period][2]));assert(text.includes(`Top model · ${Math.ceil(numbers[period].turns*.6)} turns`));assert(!text.some(t=>t.includes('estimated')));
    assert(text.includes(period==='all'?'LIFETIME':period==='1'?'TODAY':`LAST ${period} DAYS`));
    assert(!text.some(t=>/secret|private|runner-up|share-test-token|127\.0\.0\.1|chatgpt\.com/i.test(t)),'only aggregate usage, the winning model and public branding belong on the card');
    const pending=page.waitForEvent('download');await dialog.getByRole('link',{name:'Download PNG',exact:true}).click();const download=await pending;
@@ -105,7 +114,7 @@ for(const [name,engine]of [['Chromium',chromium],['WebKit',webkit]])test(`${name
    const path=join(output,`${name.toLowerCase()}-${period}.svg`);await download.saveAs(path);const svg=readFileSync(path,'utf8');assert.equal(await page.evaluate(async source=>(await fetch(source)).text(),source),svg,'download and live preview use identical SVG bytes');
    assert(svg.length<60000);assert(svg.includes('prefers-reduced-motion'));assert(!/secret|private|share-test-token|127\.0\.0\.1|chatgpt\.com|foreignObject|<script|<image|href=|@import|onload=/i.test(svg));
    const xml=await page.evaluate(svg=>{const d=new DOMParser().parseFromString(svg,'image/svg+xml');return {error:!!d.querySelector('parsererror'),dimensions:[d.documentElement.getAttribute('width'),d.documentElement.getAttribute('height')],final:[...d.querySelectorAll('[data-final]')].map(n=>n.textContent),animated:d.querySelectorAll('animateTransform').length,desc:d.querySelector('desc')?.textContent};},svg);
-   assert.equal(xml.error,false);assert.deepEqual(xml.dimensions,['1200','675']);assert(xml.animated>=4);assert(xml.desc.includes(`${numbers[period].toolCalls} tool calls`));assert(xml.desc.includes('h thinking time'));assert(svg.includes('Thinking hours'));assert(!svg.includes('estimated'));assert.equal(xml.final.length,5);assert.equal(xml.final[4],modelCases[period][2]);assert(svg.includes(`Top model · ${Math.ceil(numbers[period].turns*.6)} turns`));assert(xml.final[3].endsWith('h'));
+   assert.equal(xml.error,false);assert.deepEqual(xml.dimensions,['1200','675']);assert(xml.animated>=4);assert(xml.desc.includes(`${numbers[period].toolCalls} tool calls`));assert(xml.desc.includes(`${timeText[period]} thinking time`));assert(svg.includes('Thinking hours'));assert(!svg.includes('estimated'));assert.equal(xml.final.length,5);assert.equal(xml.final[4],modelCases[period][2]);assert(svg.includes(`Top model · ${Math.ceil(numbers[period].turns*.6)} turns`));assert.equal(xml.final[3],timeText[period]);
    assert(svg.includes('Codexify stats · '+(period==='all'?'LIFETIME':period==='1'?'TODAY':`LAST ${period} DAYS`)));
    assert.equal(xml.final[0],new Intl.NumberFormat('en-US',{notation:numbers[period].turns>=10000?'compact':'standard'}).format(numbers[period].turns));
    await dialog.getByRole('button',{name:'Pause preview',exact:true}).click();assert.notEqual(await dialog.locator('img').getAttribute('src'),source);
@@ -162,7 +171,7 @@ for(const [name,engine]of [['Chromium',chromium],['WebKit',webkit]])test(`${name
 for(const [name,engine]of [['Chromium',chromium],['WebKit',webkit]])test(`${name}: share cards handle zero hours and missing model attribution without inventing a winner`,{timeout:30000},async()=>{
  const usage={models:[],totals:{turns:0,toolCalls:0,goals:0,activeMs:0}},f=await fixture(engine,{usage}),{browser,page,settings,errors,posts}=f;
  try{
-  for(const [model,hours]of [['No turns yet','0h'],['Not recorded','<0.1h']]){
+  for(const [model,hours]of [['No turns yet','0h 0m'],['Not recorded','0h 1m']]){
    if(model==='Not recorded'){
     usage.totals={turns:1,toolCalls:0,goals:0,activeMs:60000};usage.models=[{id:'private-unknown',model:'unattributed',effort:'unknown',...usage.totals}];
     await settings.getByRole('button',{name:'Refresh analytics',exact:true}).click();await page.waitForFunction(()=>!document.querySelector('[aria-label="Share analytics"]').disabled);

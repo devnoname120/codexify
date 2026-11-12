@@ -99,12 +99,14 @@ impl ContinueTask {
         Ok(parsed.continuation_token)
     }
 
-    pub(crate) fn result(workspace: &str) -> ToolResult {
-        ToolResult::text(
-            "This Codexify task is now attached to this ChatGPT conversation. Call get_agent_brief and recall before continuing.",
-        )
-        .with_structured(json!({
-            "content":"This Codexify task is now attached to this ChatGPT conversation. Call get_agent_brief and recall before continuing.",
+    pub(crate) fn result(workspace: &str, pairing_pending: bool) -> ToolResult {
+        let content = if pairing_pending {
+            "This Codexify task and its existing workspace are now attached. Call automation_verify_pairing now with the reference supplied in the pairing request. Do not select another workspace, start task work, stop, or end this turn before verification succeeds."
+        } else {
+            "This Codexify task is now attached to this ChatGPT conversation. Call get_agent_brief and recall before continuing."
+        };
+        ToolResult::text(content).with_structured(json!({
+            "content":content,
             "continued":true,
             "activeRoot":workspace
         }))

@@ -734,8 +734,12 @@ enable or disable login startup. Use `enable` to enable and start the definition
 or `disable` to stop it and disable future automatic startup.
 
 On Windows, the Task Scheduler action starts the supervisor through the current
-PowerShell host with `-WindowStyle Hidden` and an encoded fixed command. The
-supervisor also creates its ordinary server child with `CREATE_NO_WINDOW`. This
+PowerShell host with `-WindowStyle Hidden -File` and a private UTF-8 launcher at
+`~/.codexify/service/supervisor.ps1`. Registration uses the adjacent `install.ps1`;
+registration failures include both paths so the exact definition can be inspected.
+Neither script contains the configuration's credentials. Management helpers and
+diagnostic probes use isolated consoles rather than the foreground server's.
+The supervisor also creates its ordinary server child with `CREATE_NO_WINDOW`. This
 prevents the otherwise empty console window without changing the Interactive
 logon principal required for tunnel and network access.
 
@@ -749,6 +753,26 @@ For a read-only Windows autowork snapshot, run
 supervisor count, free disk space, active goals, last tool activity, and retry
 errors. Use `-ChatPrefix` to follow particular conversation IDs. State reads
 allow atomic replacement, so monitoring does not block goal updates.
+The Windows supervisor begins liveness monitoring after the server first answers
+`/health` successfully. Six consecutive failed probes (with a five-second pause
+between them and a three-second request timeout) restart the contained server process tree. A slow
+initial startup and a responsive server whose tunnel is reconnecting do not
+trigger this recovery. Probe failures and recovery reasons appear in the service
+log. This monitors local HTTP responsiveness, independently of agent inactivity.
+
+Windows foreground processes also append console-close, logoff, shutdown, and
+panic markers to the service log with their process ID. Normal Ctrl+C delivery
+and server returns are logged separately. Forced termination can bypass these
+records; the absence of a marker does not establish a crash cause.
+
+The scheduled-task launcher waits for the supervisor's process handle and records
+its exit code. It restarts unexpectedly terminated supervisors, including code
+zero, with a two-to-sixty-second backoff, independently of Task Scheduler's
+failure retry behavior for on-demand starts. Explicit `service stop` and
+`service disable` remain stopped.
+Recognized older launchers are upgraded by `service start`, `restart`, or `enable`,
+including the `enable` call made by older self-update workers; custom task actions
+are preserved.
 
 `service status` queries the native service manager without loading the server
 configuration, starting the MCP server, or changing the service. It works even
@@ -817,6 +841,14 @@ record through `scheduled`, `installing`, `validating`, `restarting`, and one of
 card polls the record through the app-only `self_update_status` tool. That tool is
 advertised with app visibility rather than model visibility, and accepts only the
 opaque 96-bit update identifier returned by `self_update`.
+
+On Windows the worker records `installing` immediately, before its ten-second
+handoff delay, and uses a typed .NET null for atomic status replacement under
+Windows PowerShell 5.1. If a record remains `scheduled` for a minute and Task
+Scheduler confirms that its task is absent or stopped, polling records a failure
+with the scheduler result and releases only that update's lock. Running, queued,
+unknown, or inaccessible tasks are not classified as stopped. UTF-8 script files
+include a BOM so non-ASCII user and installation paths survive PowerShell 5.1.
 
 The card polls every second while reachable and backs off to two seconds across
 the expected restart outage. It reports success for a supervised update only
@@ -918,7 +950,17 @@ are killed; Unix process groups also terminate their owned filter descendants.
 Checkpoint stdout is bounded at 32 MiB and diagnostics at 64 KiB.
 
 Audit records include `tool_stage` start/finish events and `tool_worker` PIDs,
-linked by call and run IDs. Queue, spawn, filesystem execution/cleanup,
+linked by call and run IDs. `worker_kind` identifies `git`, `filesystem`, or the
+actual `exec` shell.
+Command launches have an `exec_spawn` stage, and `tool_worker_exit` records the
+shell's exit code or wait error, retaining the originating tool call ID even
+when a resident command finishes after its initial tool reply. These lifecycle
+records do not include command arguments or output. On Windows, pipe-based
+command shells, checkpoint Git helpers, and command termination helpers use
+`CREATE_NO_WINDOW`, avoiding visible windows and preventing inheritance of the
+server's console and its control events. A separate headless console can still
+exist in the command process.
+Queue, spawn, filesystem execution/cleanup,
 checkpoint, command-output and upstream waits can be distinguished without
 retaining raw payloads or tickets. `/health` includes filesystem slot/queue
 counts and connected upstream runtime status from memory; it performs no remote
@@ -1276,7 +1318,8 @@ After changing the flag, refresh the connector's tools in ChatGPT Settings and
 start a new conversation so its cached schemas and instructions match. Disabling
 the flag uses the same commands with `false`. It does not delete ticket state.
 
-The first ticketed model-facing tool call omits `codexify_ticket` and claims the conversation's
+The first ticketed model-facing tool call uses a fresh ticket supplied inline by
+browser automation, or omits `codexify_ticket` if none was supplied, and claims the conversation's
 chain. Its result contains an eight-character `new_codexify_ticket`. Every subsequent
 ticketed call passes the latest value as `codexify_ticket`. The server reserves it before
 dispatch and replaces it at response handoff, including tool, argument-validation,
@@ -1285,7 +1328,8 @@ The ticket is returned in both structured content and
 a small text block, after output truncation. Native tools and all upstream MCP
 exposure modes are guarded centrally. App-only widget helpers and protocol-level
 discovery/resource requests (`tools/list`, `resources/list`, `resources/read`)
-do not participate. `continue_task` is also exempt: its random one-time token and
+do not participate. `ticket_wait` requires no ticket and is advertised as read-only;
+it is available only when agent tickets are enabled. `continue_task` is also exempt: its random one-time token and
 idempotent completed-claim receipt provide the exclusivity and replay handling
 needed for a handoff, without risking a lost ticket successor during ownership
 transfer. A displayed tool such as `setup` or
@@ -1295,22 +1339,23 @@ is disabled, so user interactions never consume the agent's ticket.
 
 Calls must be serial, including read-only calls, chat tools, command polling,
 and MCP search/schema tools. While a chain is active, a missing, malformed, or
-consumed ticket rejects the call before dispatch, returns no replacement, and tells that agent branch
-to stop. A rejection does not change the winning branch's ticket. Tools with
+consumed ticket rejects the call before dispatch, returns no replacement, and requires
+that agent to call `ticket_wait`. A rejection does not change the winning branch's ticket. Tools with
 input schemas that cannot safely accommodate the extra field use an
 `arguments` envelope for their original arguments; the advertised schema shows
 the applicable shape. Codexify removes its own ticket before validating or
 forwarding the original tool arguments.
 
 With `agentChat.enabled`, each rejected call writes a yellow warning between
-messages in the selected workspace's chat: **Duplicate agent detected. Its tool
-call was terminated.** This is a server notice, not an agent message. It does
+messages in the selected workspace's chat explaining that the affected agent
+was instructed to wait for ticket renewal. This is a server notice, not an agent message. It does
 not acknowledge unread user messages or increase the active agent's call
-counter. Without a selected Markdown chat, the rejection response instructs
-the blocked branch to tell the user without making another tool call. A ticket
+counter. The rejection response always directs the affected branch to `ticket_wait`,
+including before setup or workspace selection. Renewing a ticket does not authorize
+project access; setup and workspace selection still apply. A ticket
 mismatch does not prove duplication: a lost response or legitimate parallel
 call can also cause rejection. Codexify rejects that tool call and instructs
-the model branch to stop; it cannot terminate the remote model or already-running
+the model branch to wait; it cannot terminate the remote model or already-running
 commands.
 
 With stable ChatGPT conversation metadata, the current ticket is stored in one
@@ -1326,21 +1371,32 @@ corrupt ticket state refuses execution rather than resetting it. A persistence
 failure at handoff can occur after tool side effects; it returns no successor
 and requires user recovery.
 
-**Offline recovery.** The guard reuses the chat's five-minute offline interval,
+**Offline recovery.** The ticket guard uses its own fixed five-minute lease,
+independent of `agentChat.offlineTimeoutMinutes`,
 measured conservatively from the last completed ticket handoff. When that interval
 has elapsed and no ticketed call is in flight, the next call may omit its ticket
 or supply an older or otherwise wrong string ticket. That call claims a new chain; competing
 calls using the old or missing ticket are rejected again. The persistent file's
 modification time records the last handoff, so this also works after restart.
-Rejected calls and widget interactions neither extend the deadline nor reset the
+Rejected calls, `ticket_wait`, and widget interactions neither extend the deadline nor reset the
 chain. A held reservation is never stolen, even after five minutes.
 
-This lets a user ask ChatGPT to continue after the conversation has gone offline,
-without obtaining a ticket from internal state. A rejected branch must not wait
-for expiry and restart itself; it may resume only when the user asks. Expiry is a
-deliberate availability trade-off: a stale fork can compete again after inactivity,
-and the server still cannot identify the original agent. Already-running commands
-are not cancelled by offline recovery.
+**Repeated ticket waits.** `ticket_wait` takes no arguments and uses
+`agentChat.maxWaitMs` (55 seconds by default). Pending or interrupted responses
+always include an instruction to call `ticket_wait` again, plus
+`required_next_action: "ticket_wait"` and `assistant_turn_may_end: false`.
+It must be repeated until a response includes `new_codexify_ticket`. After renewal,
+the agent uses that ticket to read the latest `rollout_read` reports before resuming
+work, completing setup/workspace selection first if required. Without Markdown chat,
+it recovers context using `get_agent_brief`. Descriptions and replies explicitly
+forbid treating a wait timeout or renewal as permission to end the turn. Waiting
+does not count as agent work, extend presence, deliver pending user messages, or
+trigger rollout/turn-renewal notices.
+
+Expiry remains a deliberate availability trade-off: a stale fork can compete again
+after inactivity, and the server still cannot identify the original agent.
+Already-running commands are not cancelled by offline recovery. No master/worker
+roles or multi-agent coordination are implemented by this wait protocol.
 
 This is coordination, not authentication, agent identification, or exactly-once
 execution. Whichever fork consumes a shared ticket first wins; there is no way
@@ -1939,8 +1995,24 @@ and `retryTimings.jitterPercent`) allows the first tool call to arrive; fresh ag
 wait immediately. Browser restart does not reset the wait. Approval alone does not
 mark pending user messages delivered or count a new goal turn. It does not enable file materialization
 in Codexify when that feature is disabled.
-The first release reuses agent chat's existing five-minute offline threshold and
-always uses one shared window rather than a configurable tab count.
+`agentChat.offlineTimeoutMinutes` sets the inactivity timeout for offline status,
+queued-message delivery, and automatic recovery prompts. It defaults to `5` and
+accepts whole minutes from `1` to `1440`; set it to `10` to allow ten minutes
+between tool calls. Change it under **Chats & goals → Offline timeout (minutes)**,
+then restart Codexify. New tool activity resets the interval. Active tool calls
+and explicit waits continue to suppress premature recovery. The separately
+configured retry schedules are preserved. The browser always uses one shared
+window rather than a configurable tab count. After a goal continuation is sent,
+each recovery wait is at least the offline timeout, even when its configured
+retry delay is shorter. The final attempt receives this full wait before being
+marked exhausted; an accepted Send alone is not a failed recovery attempt.
+
+The dedicated browser opts out of ChatGPT's client-side Work rollout, keeping
+its automation in Chat mode and preventing the merged model picker from silently
+routing project messages into unsupported Work mode. Codexify only supports Chat;
+it does not offer a Work selector. The override applies only to the companion's
+top-level `chatgpt.com` page; account/workspace access controls and the user's
+regular browser are unchanged.
 
 `agentChat.automation.requestBlockList` is an optional array of case-sensitive
 RE2 regular expressions matched against complete browser request URLs. It defaults
@@ -1953,6 +2025,11 @@ patterns, each 1–4096 printable ASCII characters; Chromium additionally checks
 regex syntax and compiled-memory limits. Non-ASCII URL characters must be matched
 in their URL-encoded or punycode form.
 
+The conversation-list defaults match only the list endpoint, with or without a
+query, so individual `/conversations/<id>` requests remain available. The exact
+older shipped list patterns are narrowed when loaded; custom expressions are
+preserved.
+
 For example, merge this into the existing `agentChat.automation` object:
 
 ```json
@@ -1960,8 +2037,8 @@ For example, merge this into the existing `agentChat.automation` object:
   "requestBlockingEnabled": true,
   "requestBlockList": [
     "^https?://(www\\.)?chatgpt\\.com/.*/rgstr",
-    "^https?://(www\\.)?chatgpt\\.com/backend-api/.*/conversations",
-    "^https?://(www\\.)?chatgpt\\.com/backend-api/conversations",
+    "^https?://(www\\.)?chatgpt\\.com/backend-api/.*/conversations(?:\\?|$)",
+    "^https?://(www\\.)?chatgpt\\.com/backend-api/conversations(?:\\?|$)",
     "^https?://(www\\.)?chatgpt\\.com/backend-api/sidebar",
     "^https?://(www\\.)?chatgpt\\.com/backend-api/.*/sidebar"
   ]
@@ -2115,6 +2192,11 @@ and the paired account again before sending; a pending connector approval is
 preserved instead of reloaded. Healthy conversation pages remain reusable, and
 passive health checks do not navigate.
 
+Conversation preparation waits up to **10 seconds** for ChatGPT's editor to
+render after navigation. A missing editor does not establish that the account
+is signed out. If the account remains valid but the editor is unavailable,
+the action reports an editor-availability failure before inserting or sending
+anything. Cancellation also stops this wait without spending a recovery load.
 Conversation actions wait for the editable composer after document loading;
 a missing editor alone is not treated as an expired account. While an action
 owns the tab, health requests report its last verified identity and busy state
@@ -2185,11 +2267,16 @@ Pairing is explicit. In the standalone page, paste the exact ChatGPT conversatio
 URL and choose **Pair**. Codexify stores it as an unverified candidate and queues a
 content-free verification message. The target conversation must call
 `automation_verify_pairing` with the short-lived one-time reference. Only then is
-the canonical URL bound to the current stable task and owner generation. Codexify
-does not infer a URL from recency, browser history, projects, or `openai/session`,
-does not create a replacement conversation, and does not transfer or retire task
-ownership. A later full task continuation invalidates the old pairing until the
-user verifies the new physical conversation.
+the canonical URL bound to the current stable task and owner generation. If the
+authorized target conversation has no workspace attached, verification first
+returns a one-time `continue_task` handoff to the task already selected in the
+standalone chat. The agent claims that handoff and retries verification; it must
+not select a project or create another worktree. Queued user messages remain
+unread during this initialization. The continuation transfers ownership while
+retaining the workspace and task history; verification itself does not authorize
+setup or transfer ownership. Delayed activity from the prior owner does not
+revoke the pending handoff. Codexify does not infer a URL from recency, browser
+history, projects, or `openai/session`.
 
 After Send, pairing has a 60-second verification grace period that does not hold
 the browser queue. A valid verification can still arrive later while its current
@@ -2230,9 +2317,10 @@ also restore the original settings; settings changed externally are preserved.
 
 Messages posted while the agent appears online remain pending in `CHAT.md` until
 a chat tool acknowledges them. Preparing an opportunistic tool response does not
-consume the pending message. If the turn ends first, four minutes without genuine
-tool activity lets a verified pairing forward the unread message through ChatGPT,
-even without a goal; the interface's five-minute offline threshold is unchanged.
+consume the pending message. If the turn ends first, the configured offline
+interval without genuine tool activity lets a verified pairing forward the unread
+message through ChatGPT, even without a goal. The interface and automation use
+the same `agentChat.offlineTimeoutMinutes` threshold (five minutes by default).
 The queued action checks again that the message is still unread before execution.
 Once ChatGPT accepts the send, a persisted message-ID fence prevents another
 automatic browser send, including after a restart or another burst of activity.
@@ -2539,7 +2627,7 @@ and live state take precedence.
 `agentChat.rolloutReminderInterval` defaults to **25** and accepts integers from
 1 to 10000. It is editable under **Settings → Chats & goals → Progress report
 interval** and applies without a restart. Agent work calls, including errors,
-count; app-only polling, `chat_await`, `turn_completed`, `goal_finish`, and pairing
+count; app-only polling, `chat_await`, `turn_completed`, `ticket_wait`, `goal_finish`, and pairing
 verification do not. Waiting and completion results never deliver checkpoint
 reminders; a due reminder stays pending for the next work call. When due, work
 tool results include an optional `rollout_checkpoint_required`
@@ -3566,6 +3654,26 @@ is unsupported.
 
 ### Automatic error retries
 
+`agentChat.automation.newConversationOnLoadRateLimit` defaults to `false`.
+Enable **New conversation when loading is rate-limited** under **Settings →
+Chats & goals → Automatic retries**, then restart Codexify, to recover from a
+confirmed HTTP 429 while loading an existing ChatGPT conversation. This includes
+the transcript API returning 429 after the document itself loaded successfully.
+The same Codexify task, workspace, history, selected model/effort, pending messages,
+and goal continue in a freshly created and automatically paired ChatGPT chat.
+The shared browser stays on that chat through verification and acceptance of
+the first work prompt; other chats and account maintenance cannot navigate away
+during the handoff. A failure before the first work prompt is sent retains the
+page for its normal retry policy. Stop/cancellation, expired pairing, or loss of
+the browser reservation ends the handoff.
+
+This option follows the automatic-retry and per-action pause controls. It does
+not trigger for ordinary local cooldown waits, authentication failures, model
+limits, unconfirmed network errors, or a prompt that may already have been sent.
+A failed replacement creation does not recursively create more conversations.
+Rate limits and `Retry-After` still apply to subsequent existing-chat loads;
+fresh creation is a separate browser operation.
+
 `agentChat.automation.automaticRetries` defaults to `true`. Change **Settings →
 Chats & goals → Automatic retries** to apply the policy immediately, including
 retries already queued. With it off, initial sends and normal goal continuations
@@ -3581,7 +3689,7 @@ shared browser. Infinite retries are disabled by default:
 | `infiniteRetries` | `false` | Repeat the final delay indefinitely for eligible failed actions and active goals. |
 | `actionDelaysSeconds` | `[30, 60, 120, 240, 480]` | Confirmed-unsent browser action failures. |
 | `chatgptAccessDelaysSeconds` | `[180, 300, 600, 1200, 1800, 3600]` | Sign-in, conversation access, and actual rate-limit failures. |
-| `goalRecoveryDelaysSeconds` | `[60, 120, 240]` | Recover an active goal when the agent remains offline after a continuation. |
+| `goalRecoveryDelaysSeconds` | `[60, 120, 240]` | Recover an active goal after a continuation; each effective wait is at least `offlineTimeoutMinutes`. |
 | `jitterPercent` | `10` | Add a stable random wait between 0 and this percentage of each retry delay or approval resume wait. Set to `0` for no jitter. |
 | `approvalResumeGraceSeconds` | `180` | Wait for agent activity after accepting an approval before considering another continuation. |
 | `conversationLoadIntervalSeconds` | `1` | Minimum interval between healthy conversation document loads or reloads across all chats. Actual HTTP 429 backoffs still apply. |

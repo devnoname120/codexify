@@ -8,10 +8,20 @@ import { chatHtml as html, setupChatHtml } from "./chat-widget-source.mjs";
 const { chromium, webkit } = createRequire(import.meta.url)("playwright");
 const META = "io.github.devnoname120/codexify/markdown-chat";
 const ENABLED = "io.github.devnoname120/codexify/markdown-chat-enabled";
-const DUPLICATE_WARNING = "ChatGPT started a duplicated agent on this same project. This is a ChatGPT bug and it\u2019s problematic because then two agents can fight to do edits and overwrite each other. The duplicated agent was asked to stop in order to let the other agent work without interference";
+const DUPLICATE_WARNING = "An agent ticket was rejected. Another agent may be active, or a tool response may have been lost. The affected agent was instructed to wait for ticket renewal while the current agent continues working.";
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
-const presenceDetails = vm.runInNewContext("(" + html.slice(html.indexOf("function presenceDetails("), html.indexOf("  function toolCallLabel(")) + ")");
+const presenceSource = "(" + html.slice(html.indexOf("function presenceDetails("), html.indexOf("  function toolCallLabel(")) + ")";
+const presenceFor = (offlineAfterMs = 300000) => vm.runInNewContext(presenceSource, { offlineAfterMs });
+const presenceDetails = presenceFor();
+test("presence: configured ten-minute and one-minute timeouts use their own boundaries", () => {
+  const tenMinutes = presenceFor(600000), oneMinute = presenceFor(60000), last = 1000000;
+  assert.equal(tenMinutes(last, last + 300000).state, "away");
+  assert.equal(tenMinutes(last, last + 599999).state, "away");
+  assert.equal(tenMinutes(last, last + 600000).state, "offline");
+  assert.equal(oneMinute(last, last + 59999).state, "online");
+  assert.equal(oneMinute(last, last + 60000).state, "offline");
+});
 test("presence: exact three/five-minute boundaries, unknown activity, and clock skew", () => {
   for (const [age, state, label] of [
     [0, "online", "online"], [179999, "online", "online"],

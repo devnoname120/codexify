@@ -641,7 +641,8 @@ async fn load_or_initialize_persistent(
         read_ref(config, &workspace.git_root, &refs.last_diff),
     )?;
     if project_open.is_none() || last_diff.is_none() {
-        migrate_legacy_checkpoint_refs(config, workspace, owner_key, legacy_owner_key, &refs).await?;
+        migrate_legacy_checkpoint_refs(config, workspace, owner_key, legacy_owner_key, &refs)
+            .await?;
         (project_open, last_diff) = tokio::try_join!(
             read_ref(config, &workspace.git_root, &refs.project_open),
             read_ref(config, &workspace.git_root, &refs.last_diff),
@@ -1451,6 +1452,8 @@ async fn run_git(
     input: Option<&[u8]>,
     timeout_ms: u64,
 ) -> Result<Output, String> {
+    #[cfg(windows)]
+    command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
     command
         .stdin(if input.is_some() {
             Stdio::piped()
@@ -1462,7 +1465,7 @@ async fn run_git(
     let mut child = command
         .spawn()
         .map_err(|error| format!("failed to run git: {error}"))?;
-    crate::audit::worker_started(child.id());
+    crate::audit::worker_started("git", child.id());
     #[cfg(unix)]
     let mut group = GitProcessGroup(child.id());
     let mut stdin = child.stdin.take();
@@ -1621,7 +1624,11 @@ mod tests {
         }
         // A producer which never closes remains subject to the command deadline.
         let (_writer, reader) = tokio::io::duplex(16);
-        assert!(tokio::time::timeout(Duration::from_millis(30), read_git_diagnostics(reader)).await.is_err());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), read_git_diagnostics(reader))
+                .await
+                .is_err()
+        );
     }
 
     #[cfg(windows)]
@@ -1636,9 +1643,16 @@ mod tests {
             assert_eq!(output.status.code(), Some(code));
             assert_eq!(output.stdout, b"checkpoint");
             assert_eq!(output.stderr.len(), MAX_GIT_ERROR_BYTES);
-            assert!(output.stderr.ends_with(b"[Additional Git diagnostics omitted.]\n"));
+            assert!(
+                output
+                    .stderr
+                    .ends_with(b"[Additional Git diagnostics omitted.]\n")
+            );
             if code != 0 {
-                assert!(git_failure("git checkpoint", &output.stderr, output.status.code()).contains("failed"));
+                assert!(
+                    git_failure("git checkpoint", &output.stderr, output.status.code())
+                        .contains("failed")
+                );
             }
         }
     }
@@ -1699,21 +1713,38 @@ mod tests {
             &ConversationIdentity::from_openai_session("warm-checkpoint").unwrap(),
         );
         let manager = DiffCheckpointManager::new();
-        manager.ensure_initialized(&config, owner.clone()).await.unwrap();
+        manager
+            .ensure_initialized(&config, owner.clone())
+            .await
+            .unwrap();
         std::fs::write(repo.path().join("file.txt"), "after\n").unwrap();
 
-        TEST_GIT_COMMAND_COUNT.scope(std::cell::Cell::new(0), async {
-            let (availability, guard) = manager.begin_mutation(&config, owner.clone()).await.unwrap();
-            assert_eq!(availability, DiffAvailability::Ready);
-            // Resolve the workspace and validate the two current commit refs.
-            // Missing/corrupt baselines still take the initialization path.
-            assert_eq!(TEST_GIT_COMMAND_COUNT.with(|count| count.get()), 3);
-            drop(guard);
-        }).await;
+        TEST_GIT_COMMAND_COUNT
+            .scope(std::cell::Cell::new(0), async {
+                let (availability, guard) = manager
+                    .begin_mutation(&config, owner.clone())
+                    .await
+                    .unwrap();
+                assert_eq!(availability, DiffAvailability::Ready);
+                // Resolve the workspace and validate the two current commit refs.
+                // Missing/corrupt baselines still take the initialization path.
+                assert_eq!(TEST_GIT_COMMAND_COUNT.with(|count| count.get()), 3);
+                drop(guard);
+            })
+            .await;
 
-        let diff = manager.show_diff(&config, owner, DiffRequest {
-            since: DiffBaseline::ProjectOpen, advance: false, include_patch: true,
-        }).await.unwrap();
+        let diff = manager
+            .show_diff(
+                &config,
+                owner,
+                DiffRequest {
+                    since: DiffBaseline::ProjectOpen,
+                    advance: false,
+                    include_patch: true,
+                },
+            )
+            .await
+            .unwrap();
         assert!(diff.patch.contains("-before"));
         assert!(diff.patch.contains("+after"));
     }

@@ -56,7 +56,9 @@ impl Tool for AgentTool {
     }
     fn input_schema(&self) -> Value {
         match self {
-            Self::Status => json!({"type":"object","properties":{"includeReports":{"type":"boolean","default":false,"description":"Include full goal text and reports when reviewing detailed evidence. Default returns compact progress."},"knownStatusRevision":{"type":"string","pattern":"^[a-f0-9]{64}$","description":"The previous statusRevision. An unchanged team returns a small receipt; this is not a goal revision."}},"additionalProperties":false}),
+            Self::Status => {
+                json!({"type":"object","properties":{"includeReports":{"type":"boolean","default":false,"description":"Include full goal text and reports when reviewing detailed evidence. Default returns compact progress."},"knownStatusRevision":{"type":"string","pattern":"^[a-f0-9]{64}$","description":"The previous statusRevision. An unchanged team returns a small receipt; this is not a goal revision."}},"additionalProperties":false})
+            }
             Self::Message => {
                 json!({"type":"object","properties":{"requestId":{"type":"string","minLength":1,"maxLength":80},"recipientTaskKey":{"type":"string","minLength":1},"message":{"type":"string","minLength":1,"maxLength":6000}},"required":["requestId","recipientTaskKey","message"],"additionalProperties":false})
             }
@@ -87,19 +89,33 @@ impl Tool for AgentTool {
         let Some(runtime) = context.agent_runtime.as_deref() else {
             return ToolResult::error("Enable browser automation before using agents");
         };
-        if let Err(error) = runtime.require_enabled() { return ToolResult::error(error); }
+        if let Err(error) = runtime.require_enabled() {
+            return ToolResult::error(error);
+        }
         let result = match self {
             Self::Spawn => match serde_json::from_value::<SpawnWorkersRequest>(args) {
                 Ok(request) => runtime.spawn(task, request, false).await.map(compact_team),
                 Err(error) => Err(format!("Invalid agent request: {error}")),
             },
-            Self::Status => runtime.status(task).await.map(|value| status_receipt(value,args.get("includeReports").and_then(Value::as_bool).unwrap_or(false),args.get("knownStatusRevision").and_then(Value::as_str),Some(task.stable_key()))),
+            Self::Status => runtime.status(task).await.map(|value| {
+                status_receipt(
+                    value,
+                    args.get("includeReports")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
+                    args.get("knownStatusRevision").and_then(Value::as_str),
+                    Some(task.stable_key()),
+                )
+            }),
             Self::Message => match serde_json::from_value::<AgentMessageRequest>(args) {
                 Ok(request) => runtime.message(task, request).await,
                 Err(error) => Err(format!("Invalid team message: {error}")),
             },
             Self::Control => match serde_json::from_value::<AgentControlRequest>(args) {
-                Ok(request) => runtime.control(task, request).await.map(compact_control_receipt),
+                Ok(request) => runtime
+                    .control(task, request)
+                    .await
+                    .map(compact_control_receipt),
                 Err(error) => Err(format!("Invalid worker control: {error}")),
             },
             Self::Report => match args.get("report").and_then(Value::as_str) {
@@ -114,7 +130,12 @@ impl Tool for AgentTool {
     }
 }
 
-fn status_receipt(mut team:Value,include_reports:bool,known_revision:Option<&str>,caller:Option<&str>)->Value {
+fn status_receipt(
+    mut team: Value,
+    include_reports: bool,
+    known_revision: Option<&str>,
+    caller: Option<&str>,
+) -> Value {
     // Hash the freshly read full state before clipping. Even a report edit
     // beyond the compact preview, a revocation or a new goal must be visible.
     // No cross-request authority/state cache is introduced.
@@ -122,24 +143,46 @@ fn status_receipt(mut team:Value,include_reports:bool,known_revision:Option<&str
     // activity counters from the digest so polling does not invalidate itself.
     // Restore the fresh counters in full replies; every peer/authority/goal/
     // report change still participates, including the caller's own assignment.
-    let own_activity=team.get_mut("workers").and_then(Value::as_array_mut).and_then(|workers| {
-        let index=workers.iter().position(|worker|caller.is_some_and(|key|worker["taskKey"]==key))?;
-        let worker=workers[index].as_object_mut()?;
-        Some((index,worker.remove("toolCallCount"),worker.remove("lastCallAtMs")))
-    });
-    let revision=format!("{:x}",Sha256::digest(serde_json::to_vec(&team).unwrap_or_default()));
-    if let Some((index,calls,last))=own_activity {
-        let worker=team["workers"][index].as_object_mut().expect("existing worker object");
-        if let Some(calls)=calls {worker.insert("toolCallCount".into(),calls);}
-        if let Some(last)=last {worker.insert("lastCallAtMs".into(),last);}
+    let own_activity = team
+        .get_mut("workers")
+        .and_then(Value::as_array_mut)
+        .and_then(|workers| {
+            let index = workers
+                .iter()
+                .position(|worker| caller.is_some_and(|key| worker["taskKey"] == key))?;
+            let worker = workers[index].as_object_mut()?;
+            Some((
+                index,
+                worker.remove("toolCallCount"),
+                worker.remove("lastCallAtMs"),
+            ))
+        });
+    let revision = format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(&team).unwrap_or_default())
+    );
+    if let Some((index, calls, last)) = own_activity {
+        let worker = team["workers"][index]
+            .as_object_mut()
+            .expect("existing worker object");
+        if let Some(calls) = calls {
+            worker.insert("toolCallCount".into(), calls);
+        }
+        if let Some(last) = last {
+            worker.insert("lastCallAtMs".into(), last);
+        }
     }
-    if !include_reports&&known_revision==Some(revision.as_str()) {
+    if !include_reports && known_revision == Some(revision.as_str()) {
         return json!({"unchanged":true,"statusRevision":revision,"capacity":team["capacity"],
             "allowDelegation":team["allowDelegation"],"fullDevelopmentAccess":team["fullDevelopmentAccess"]});
     }
-    let mut receipt=if include_reports {team}else{compact_team(team)};
-    receipt["statusRevision"]=Value::String(revision);
-    receipt["unchanged"]=Value::Bool(false);
+    let mut receipt = if include_reports {
+        team
+    } else {
+        compact_team(team)
+    };
+    receipt["statusRevision"] = Value::String(revision);
+    receipt["unchanged"] = Value::Bool(false);
     receipt
 }
 
@@ -153,24 +196,44 @@ fn compact_control_receipt(mut receipt: Value) -> Value {
     receipt
 }
 
-pub(crate) fn compact_team(mut team:Value)->Value {
-    fn shorten(value:&mut Value,limit:usize)->bool {
-        let Some(text)=value.as_str()else{return false};
-        if text.len()<=limit{return false;}
-        let mut end=limit;while !text.is_char_boundary(end){end-=1;}
-        *value=Value::String(format!("{} [Full detail: agent_status includeReports=true]",&text[..end]));true
+pub(crate) fn compact_team(mut team: Value) -> Value {
+    fn shorten(value: &mut Value, limit: usize) -> bool {
+        let Some(text) = value.as_str() else {
+            return false;
+        };
+        if text.len() <= limit {
+            return false;
+        }
+        let mut end = limit;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        *value = Value::String(format!(
+            "{} [Full detail: agent_status includeReports=true]",
+            &text[..end]
+        ));
+        true
     }
     if team["fullDevelopmentAccess"] == true {
         team["developmentInstructions"] = Value::String("Owner development access applies to active assignments, overriding legacy audit flags. Preserve scope, completed goals, pauses and stops. Implement and verify your assigned work; the coordinator also implements while workers run.".into());
     }
-    if let Some(workers)=team.get_mut("workers").and_then(Value::as_array_mut){
+    if let Some(workers) = team.get_mut("workers").and_then(Value::as_array_mut) {
         for worker in workers {
-            if let Some(goal)=worker.get_mut("goal").and_then(Value::as_object_mut){
+            if let Some(goal) = worker.get_mut("goal").and_then(Value::as_object_mut) {
                 goal.remove("markdown");
-                if let Some(summary)=goal.get_mut("summary"){shorten(summary,600);}
+                if let Some(summary) = goal.get_mut("summary") {
+                    shorten(summary, 600);
+                }
             }
-            if let Some(text)=worker.get_mut("goalText"){shorten(text,600);}
-            if let Some(report)=worker.get_mut("report"){let clipped=shorten(report,800);if clipped{worker["reportTruncated"]=Value::Bool(true);}}
+            if let Some(text) = worker.get_mut("goalText") {
+                shorten(text, 600);
+            }
+            if let Some(report) = worker.get_mut("report") {
+                let clipped = shorten(report, 800);
+                if clipped {
+                    worker["reportTruncated"] = Value::Bool(true);
+                }
+            }
         }
     }
     team
@@ -180,67 +243,92 @@ pub(crate) fn compact_team(mut team:Value)->Value {
 mod tests {
     use super::*;
     #[test]
-    fn unchanged_status_is_small_but_progress_permissions_and_full_reports_remain_fresh(){
-        let full=json!({"capacity":{"active":12,"limit":null},"allowDelegation":true,"fullDevelopmentAccess":true,
+    fn unchanged_status_is_small_but_progress_permissions_and_full_reports_remain_fresh() {
+        let full = json!({"capacity":{"active":12,"limit":null},"allowDelegation":true,"fullDevelopmentAccess":true,
             "workers":(0..12).map(|index|json!({"taskKey":format!("{index:064x}"),"role":"Implementer","scope":format!("src/module{index}"),
                 "goal":{"revision":3,"status":"active","markdown":"goal ".repeat(1000)},
                 "report":"evidence ".repeat(1000),"toolCallCount":10,"readOnly":false})).collect::<Vec<_>>()});
-        let first=status_receipt(full.clone(),false,None,None);
-        let revision=first["statusRevision"].as_str().unwrap();
-        let same=status_receipt(full.clone(),false,Some(revision),None);
-        assert_eq!(same["unchanged"],true);
+        let first = status_receipt(full.clone(), false, None, None);
+        let revision = first["statusRevision"].as_str().unwrap();
+        let same = status_receipt(full.clone(), false, Some(revision), None);
+        assert_eq!(same["unchanged"], true);
         assert!(same.get("workers").is_none());
-        assert!(serde_json::to_vec(&same).unwrap().len()*20<serde_json::to_vec(&first).unwrap().len());
-        for change in ["activity","permission","goal","report-tail"] {
-            let mut changed=full.clone();
+        assert!(
+            serde_json::to_vec(&same).unwrap().len() * 20
+                < serde_json::to_vec(&first).unwrap().len()
+        );
+        for change in ["activity", "permission", "goal", "report-tail"] {
+            let mut changed = full.clone();
             match change {
-                "activity"=>changed["workers"][0]["toolCallCount"]=json!(11),
-                "permission"=>changed["fullDevelopmentAccess"]=json!(false),
-                "goal"=>changed["workers"][0]["goal"]["revision"]=json!(4),
-                _=>changed["workers"][0]["report"]=json!(format!("{}new evidence","evidence ".repeat(1000))),
+                "activity" => changed["workers"][0]["toolCallCount"] = json!(11),
+                "permission" => changed["fullDevelopmentAccess"] = json!(false),
+                "goal" => changed["workers"][0]["goal"]["revision"] = json!(4),
+                _ => {
+                    changed["workers"][0]["report"] =
+                        json!(format!("{}new evidence", "evidence ".repeat(1000)))
+                }
             }
-            let fresh=status_receipt(changed,false,Some(revision),None);
-            assert_eq!(fresh["unchanged"],false,"{change}");
-            assert!(fresh["workers"].is_array(),"{change}");
-            assert_ne!(fresh["statusRevision"],revision,"{change}");
+            let fresh = status_receipt(changed, false, Some(revision), None);
+            assert_eq!(fresh["unchanged"], false, "{change}");
+            assert!(fresh["workers"].is_array(), "{change}");
+            assert_ne!(fresh["statusRevision"], revision, "{change}");
         }
-        let evidence=status_receipt(full.clone(),true,Some(revision),None);
-        assert_eq!(evidence["unchanged"],false);
-        assert_eq!(evidence["workers"][0]["report"],full["workers"][0]["report"]);
+        let evidence = status_receipt(full.clone(), true, Some(revision), None);
+        assert_eq!(evidence["unchanged"], false);
+        assert_eq!(
+            evidence["workers"][0]["report"],
+            full["workers"][0]["report"]
+        );
     }
     #[test]
-    fn worker_status_poll_does_not_invalidate_itself_or_hide_real_team_changes(){
-        let caller="worker-a";
-        let full=json!({"allowDelegation":true,"fullDevelopmentAccess":true,"workers":[
+    fn worker_status_poll_does_not_invalidate_itself_or_hide_real_team_changes() {
+        let caller = "worker-a";
+        let full = json!({"allowDelegation":true,"fullDevelopmentAccess":true,"workers":[
             {"taskKey":caller,"toolCallCount":10,"lastCallAtMs":100,"readOnly":false,"goal":{"revision":1},"report":"own evidence"},
             {"taskKey":"worker-b","toolCallCount":20,"lastCallAtMs":200,"readOnly":false}
         ]});
-        let first=status_receipt(full.clone(),false,None,Some(caller));
-        let revision=first["statusRevision"].as_str().unwrap();
-        let mut polled=full.clone();
-        polled["workers"][0]["toolCallCount"]=json!(11);
-        polled["workers"][0]["lastCallAtMs"]=json!(300);
-        assert_eq!(status_receipt(polled.clone(),false,Some(revision),Some(caller))["unchanged"],true);
-        let details=status_receipt(polled.clone(),true,Some(revision),Some(caller));
-        assert_eq!(details["workers"][0]["toolCallCount"],11);
-        assert_eq!(details["workers"][0]["lastCallAtMs"],300);
-        for change in ["peer-activity","own-permission","own-goal","own-report"] {
-            let mut changed=polled.clone();
+        let first = status_receipt(full.clone(), false, None, Some(caller));
+        let revision = first["statusRevision"].as_str().unwrap();
+        let mut polled = full.clone();
+        polled["workers"][0]["toolCallCount"] = json!(11);
+        polled["workers"][0]["lastCallAtMs"] = json!(300);
+        assert_eq!(
+            status_receipt(polled.clone(), false, Some(revision), Some(caller))["unchanged"],
+            true
+        );
+        let details = status_receipt(polled.clone(), true, Some(revision), Some(caller));
+        assert_eq!(details["workers"][0]["toolCallCount"], 11);
+        assert_eq!(details["workers"][0]["lastCallAtMs"], 300);
+        for change in ["peer-activity", "own-permission", "own-goal", "own-report"] {
+            let mut changed = polled.clone();
             match change {
-                "peer-activity"=>changed["workers"][1]["toolCallCount"]=json!(21),
-                "own-permission"=>changed["workers"][0]["readOnly"]=json!(true),
-                "own-goal"=>changed["workers"][0]["goal"]["revision"]=json!(2),
-                _=>changed["workers"][0]["report"]=json!("updated evidence"),
+                "peer-activity" => changed["workers"][1]["toolCallCount"] = json!(21),
+                "own-permission" => changed["workers"][0]["readOnly"] = json!(true),
+                "own-goal" => changed["workers"][0]["goal"]["revision"] = json!(2),
+                _ => changed["workers"][0]["report"] = json!("updated evidence"),
             }
-            assert_eq!(status_receipt(changed,false,Some(revision),Some(caller))["unchanged"],false,"{change}");
+            assert_eq!(
+                status_receipt(changed, false, Some(revision), Some(caller))["unchanged"],
+                false,
+                "{change}"
+            );
         }
     }
     #[test]
     fn spawn_schema_allows_eight_workers_per_batch() {
-        let schema=AgentTool::Spawn.input_schema();
-        assert_eq!(schema["properties"]["workers"]["maxItems"],8);
-        assert_eq!(schema["properties"]["workers"]["items"]["properties"]["readOnly"]["default"],false);
-        assert!(!schema["properties"]["workers"]["items"]["required"].as_array().unwrap().iter().any(|field| field=="readOnly"));
+        let schema = AgentTool::Spawn.input_schema();
+        assert_eq!(schema["properties"]["workers"]["maxItems"], 8);
+        assert_eq!(
+            schema["properties"]["workers"]["items"]["properties"]["readOnly"]["default"],
+            false
+        );
+        assert!(
+            !schema["properties"]["workers"]["items"]["required"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|field| field == "readOnly")
+        );
         assert!(!AgentTool::Spawn.description().contains("six active"));
     }
     #[test]
@@ -258,38 +346,81 @@ mod tests {
             "communication":{"messageTool":"agent_message"},"workers":workers
         }});
         let compact = compact_control_receipt(full.clone());
-        assert_eq!(compact["applied"],true);
-        assert_eq!(compact["replayed"],false);
-        assert_eq!(compact["team"]["capacity"],full["team"]["capacity"]);
-        assert_eq!(compact["team"]["fullDevelopmentAccess"],true);
-        assert!(compact["team"]["developmentInstructions"].as_str().unwrap().len()<300);
+        assert_eq!(compact["applied"], true);
+        assert_eq!(compact["replayed"], false);
+        assert_eq!(compact["team"]["capacity"], full["team"]["capacity"]);
+        assert_eq!(compact["team"]["fullDevelopmentAccess"], true);
+        assert!(
+            compact["team"]["developmentInstructions"]
+                .as_str()
+                .unwrap()
+                .len()
+                < 300
+        );
         for i in 0..6 {
-            for field in ["taskKey","scope","canControl","readOnly","stopped","retired","toolCallCount","queuePosition"] {
-                assert_eq!(compact["team"]["workers"][i][field],full["team"]["workers"][i][field]);
+            for field in [
+                "taskKey",
+                "scope",
+                "canControl",
+                "readOnly",
+                "stopped",
+                "retired",
+                "toolCallCount",
+                "queuePosition",
+            ] {
+                assert_eq!(
+                    compact["team"]["workers"][i][field],
+                    full["team"]["workers"][i][field]
+                );
             }
-            assert_eq!(compact["team"]["workers"][i]["goal"]["revision"],i+2);
-            assert_eq!(compact["team"]["workers"][i]["goal"]["status"],"active");
-            assert!(compact["team"]["workers"][i]["goal"].get("markdown").is_none());
-            assert_eq!(compact["team"]["workers"][i]["reportTruncated"],true);
+            assert_eq!(compact["team"]["workers"][i]["goal"]["revision"], i + 2);
+            assert_eq!(compact["team"]["workers"][i]["goal"]["status"], "active");
+            assert!(
+                compact["team"]["workers"][i]["goal"]
+                    .get("markdown")
+                    .is_none()
+            );
+            assert_eq!(compact["team"]["workers"][i]["reportTruncated"], true);
         }
-        let full_bytes=serde_json::to_vec(&full).unwrap().len();
-        let compact_bytes=serde_json::to_vec(&compact).unwrap().len();
-        assert!(compact_bytes<20_000,"context should fit a bounded team receipt: {compact_bytes}");
-        assert!(compact_bytes*5<full_bytes,"receipt should remove at least 80% of repeated evidence");
-        assert!(full["team"]["workers"][0]["goal"]["markdown"].as_str().unwrap().len()>8_000);
-        assert_eq!(compact_control_receipt(json!({"applied":true,"replayed":true})),json!({"applied":true,"replayed":true}));
+        let full_bytes = serde_json::to_vec(&full).unwrap().len();
+        let compact_bytes = serde_json::to_vec(&compact).unwrap().len();
+        assert!(
+            compact_bytes < 20_000,
+            "context should fit a bounded team receipt: {compact_bytes}"
+        );
+        assert!(
+            compact_bytes * 5 < full_bytes,
+            "receipt should remove at least 80% of repeated evidence"
+        );
+        assert!(
+            full["team"]["workers"][0]["goal"]["markdown"]
+                .as_str()
+                .unwrap()
+                .len()
+                > 8_000
+        );
+        assert_eq!(
+            compact_control_receipt(json!({"applied":true,"replayed":true})),
+            json!({"applied":true,"replayed":true})
+        );
     }
 
     #[test]
-    fn compact_status_preserves_control_and_evidence_metadata_with_a_small_context_budget(){
-        let full=json!({"communication":{"messageTool":"agent_message"},"workers":[{"taskKey":"worker","role":"Renderer","goal":{"revision":7,"status":"active","markdown":"x".repeat(8000),"summary":"x".repeat(4000)},"goalText":"y".repeat(6000),"report":"\u{1f680}".repeat(2000),"toolCallCount":42,"lastError":null,"canControl":true}]});
-        let compact=compact_team(full.clone());
-        assert_eq!(compact["workers"][0]["goal"]["revision"],7);
-        assert_eq!(compact["workers"][0]["toolCallCount"],42);
-        assert_eq!(compact["workers"][0]["canControl"],true);
+    fn compact_status_preserves_control_and_evidence_metadata_with_a_small_context_budget() {
+        let full = json!({"communication":{"messageTool":"agent_message"},"workers":[{"taskKey":"worker","role":"Renderer","goal":{"revision":7,"status":"active","markdown":"x".repeat(8000),"summary":"x".repeat(4000)},"goalText":"y".repeat(6000),"report":"\u{1f680}".repeat(2000),"toolCallCount":42,"lastError":null,"canControl":true}]});
+        let compact = compact_team(full.clone());
+        assert_eq!(compact["workers"][0]["goal"]["revision"], 7);
+        assert_eq!(compact["workers"][0]["toolCallCount"], 42);
+        assert_eq!(compact["workers"][0]["canControl"], true);
         assert!(compact["workers"][0]["goal"].get("markdown").is_none());
-        assert_eq!(compact["workers"][0]["reportTruncated"],true);
-        assert!(serde_json::to_vec(&compact).unwrap().len()<3000);
-        assert!(full["workers"][0]["goal"]["markdown"].as_str().unwrap().len()==8000);
+        assert_eq!(compact["workers"][0]["reportTruncated"], true);
+        assert!(serde_json::to_vec(&compact).unwrap().len() < 3000);
+        assert!(
+            full["workers"][0]["goal"]["markdown"]
+                .as_str()
+                .unwrap()
+                .len()
+                == 8000
+        );
     }
 }

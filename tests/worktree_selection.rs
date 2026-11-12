@@ -354,7 +354,10 @@ async fn targeted_github_urls_use_isolated_worktrees_without_moving_the_source()
         .await
         .unwrap();
     assert!(!repeated.newly_selected);
-    assert_eq!(repeated.project_root, fs::canonicalize(&selection.project_root).unwrap());
+    assert_eq!(
+        repeated.project_root,
+        fs::canonicalize(&selection.project_root).unwrap()
+    );
 
     let fetched_refs_before_switch = git(
         &project_root,
@@ -433,7 +436,10 @@ async fn targeted_github_urls_use_isolated_worktrees_without_moving_the_source()
         .await
         .unwrap();
     assert!(!repeated_commit.newly_selected);
-    assert_eq!(repeated_commit.project_root, fs::canonicalize(&commit_selection.project_root).unwrap());
+    assert_eq!(
+        repeated_commit.project_root,
+        fs::canonicalize(&commit_selection.project_root).unwrap()
+    );
 
     let mut never = auto.clone();
     never.worktrees.mode = WorktreeMode::Never;
@@ -666,7 +672,8 @@ async fn new_worktrees_use_the_selected_base_commit_and_keep_authorized_source_m
             }
             .unwrap();
             assert_eq!(
-                retry.project_root, fs::canonicalize(&selected.project_root).unwrap(),
+                retry.project_root,
+                fs::canonicalize(&selected.project_root).unwrap(),
                 "retrying creation must reuse its saved workspace"
             );
         }

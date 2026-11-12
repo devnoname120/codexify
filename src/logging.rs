@@ -6,6 +6,9 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, Layer};
 
+#[cfg(windows)]
+mod windows;
+
 pub fn default_filter(verbosity: u8) -> &'static str {
     match verbosity {
         0 => "info",
@@ -28,6 +31,22 @@ pub fn init(verbosity: u8) {
         .with_filter(env_filter.and(payload_guard));
 
     tracing_subscriber::registry().with(layer).init();
+    #[cfg(windows)]
+    {
+        windows::install();
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |panic| {
+            // Keep request data out of diagnostics; the source location and
+            // process identify an internal panic without logging its payload.
+            tracing::error!(process_id=std::process::id(), location=?panic.location(), "Rust panic");
+            windows::record_panic();
+            previous(panic);
+        }));
+        tracing::info!(
+            process_id = std::process::id(),
+            "process logging initialized"
+        );
+    }
 }
 
 fn framework_metadata_allowed(metadata: &Metadata<'_>) -> bool {

@@ -505,15 +505,26 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("config.json");
         let limits = json!([{"model":"gpt-6-sol","effort":"high","minutes":42,"enabled":false}]);
-        fs::write(&path, json!({"workDir":root.path(),"codexMcp":{"enabled":false},
-            "exec":{"maxSessions":6},"agentChat":{"turnRenewal":{"limits":limits}}}).to_string()).unwrap();
+        fs::write(
+            &path,
+            json!({"workDir":root.path(),"codexMcp":{"enabled":false},
+            "exec":{"maxSessions":6},"agentChat":{"turnRenewal":{"limits":limits}}})
+            .to_string(),
+        )
+        .unwrap();
         fast_setup(&path).unwrap();
         let document = Value::Object(read_document(&path).unwrap());
-        assert_eq!(document["agentChat"]["automation"]["browserSimplicity"], "bones");
+        assert_eq!(
+            document["agentChat"]["automation"]["browserSimplicity"],
+            "bones"
+        );
         assert_eq!(document["agentChat"]["defaultMessageMode"], "steer");
         assert_eq!(document["agentChat"]["turnRenewal"]["limits"], limits);
         assert_eq!(document["exec"]["maxSessions"], 6);
-        assert_eq!(document["agentChat"]["features"]["externalAgentControl"], Value::Null);
+        assert_eq!(
+            document["agentChat"]["features"]["externalAgentControl"],
+            Value::Null
+        );
 
         let invalid = json!({"workDir":root.path(),"command":{"maxTimeout":-1}}).to_string();
         fs::write(&path, &invalid).unwrap();

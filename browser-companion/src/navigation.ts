@@ -5,6 +5,7 @@ import {readFileSync,lstatSync,writeFileSync,renameSync,unlinkSync,existsSync} f
 import {randomUUID} from "node:crypto";
 import {join,dirname} from "node:path";
 import {setTimeout as delay} from "node:timers/promises";
+import {canonicalChatGptConversationUrl} from "./protocol";
 
 const cooldownBypass = new AsyncLocalStorage<boolean>();
 export function withConversationCooldownBypass<T>(allowed:boolean, operation:()=>Promise<T>):Promise<T> {
@@ -105,6 +106,42 @@ export function throwIfConversationRateLimited(page:Page,includeFailedHistory=fa
     throw new BrowserCompanionError("ChatGPT conversation loading is temporarily rate limited; wait before retrying","rate_limited");
 }
 
+const rateLimitedConversations = new WeakMap<Page,{url:string;until:number}>();
+const loadObservedPages = new WeakSet<Page>();
+
+function recordLoadRateLimit(page:Page,retryAfter:string|null):void {
+  const budget=navigationBudget(page.context());
+  const value=retryAfter?.trim();
+  const delay=value&&/^\d+$/.test(value)?Number(value)*1_000:Date.parse(value??'')-Date.now();
+  budget.blockedUntil=Math.max(budget.blockedUntil,Date.now()+Math.max(timings.conversationLoadIntervalSeconds*1_000,
+    Number.isFinite(delay)&&delay>=0?delay:timings.rateLimitCooldownSeconds*1_000));
+  try{rateLimitedConversations.set(page,{url:canonicalChatGptConversationUrl(page.url()),until:budget.blockedUntil});}catch{}
+}
+
+export function conversationLoadWasRateLimited(page:Page):boolean {
+  try{const failure=rateLimitedConversations.get(page);return !!failure&&failure.until>Date.now()&&failure.url===canonicalChatGptConversationUrl(page.url());}catch{return false;}
+}
+
+/** ChatGPT can serve the document successfully and rate-limit its transcript API. */
+export function observeConversationLoadResponses(page:Page):void {
+  if(loadObservedPages.has(page)||typeof page.on!=="function")return;
+  loadObservedPages.add(page);
+  page.on('response',response=>{
+    void (async()=>{
+      const request=response.request(),url=new URL(response.url());
+      if(request.method()!=='GET'||url.origin!=='https://chatgpt.com')return;
+      const match=/^\/backend-api\/(?:f\/)?conversations?\/([^/]+)\/?$/.exec(url.pathname);
+      if(!match)return;
+      const current=canonicalChatGptConversationUrl(page.url());
+      if(current!==canonicalChatGptConversationUrl('https://chatgpt.com/c/'+match[1]))return;
+      if(response.status()===429){
+        const retryAfter=await response.headerValue('retry-after');
+        if(canonicalChatGptConversationUrl(page.url())===current)recordLoadRateLimit(page,retryAfter);
+      }else if(response.status()>=200&&response.status()<300)rateLimitedConversations.delete(page);
+    })().catch(()=>{});
+  });
+}
+
 function navigationBudget(context:BrowserContext):Budget {
   let budget=budgets.get(context);
   if(!budget){budget={lastLoad:null,lastSend:null,sendTail:Promise.resolve(),blockedUntil:persistedBlockedUntil,sendBlockedUntil:persistedSendBlockedUntil,unavailableUntilByConversation:new Map(),tail:Promise.resolve()};budgets.set(context,budget);}
@@ -146,6 +183,16 @@ function conversationKey(url:URL):string|undefined {
   return match?`https://chatgpt.com/c/${match[1]}`:undefined;
 }
 
+export function conversationLoadAvailableAt(page:Page,url:string):number|null {
+  const target=new URL(url);
+  if(!isConversationUrl(target))return null;
+  try {if(canonicalChatGptConversationUrl(page.url())===canonicalChatGptConversationUrl(url))return null;} catch {}
+  const budget=budgets.get(page.context());
+  if(!budget)return null;
+  const at=Math.max(budget.unavailableUntilByConversation.get(conversationKey(target)??"")??0,budget.blockedUntil,budget.lastLoad===null?0:budget.lastLoad+timings.conversationLoadIntervalSeconds*1_000);
+  return at>Date.now()?at:null;
+}
+
 export function recordConversationUnavailable(page:Page):void {
   const key=conversationKey(new URL(page.url()));if(!key)return;
   const budget=navigationBudget(page.context());
@@ -160,6 +207,7 @@ export function recordConversationAvailable(page:Page):void {
     const budget=budgets.get(page.context());
     budget?.unavailableUntilByConversation.delete(key);
     pageReadLimits.delete(page);
+    rateLimitedConversations.delete(page);
   }
 }
 
@@ -213,8 +261,8 @@ export async function navigatePage(page:Page,url:string,options:{signal?:AbortSi
       // A proxy or browser transport can fail to expose response headers.
       // Preserve the 429 diagnosis and the normal cooldown in that case.
       const retryAfter=await response.headerValue("retry-after").catch(()=>null);
-      if(conversation)recordRateLimit(page,retryAfter);
-      throw new BrowserCompanionError("ChatGPT conversation loading is temporarily rate limited; wait before retrying", "rate_limited");
+      if(conversation){recordRateLimit(page,retryAfter);recordLoadRateLimit(page,retryAfter);}
+      throw new BrowserCompanionError("ChatGPT conversation loading is temporarily rate limited; wait before retrying", conversation?"conversation_load_rate_limited":"rate_limited");
     }
   }finally{releaseReservation();}
 }

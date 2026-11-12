@@ -15,25 +15,30 @@ use crate::exec_sessions::SessionState;
 use crate::project_bindings::ConversationIdentity;
 use crate::types::AppConfig;
 
+mod bootstrap;
+pub(crate) use bootstrap::{BrowserTicketScope, TicketCall};
+mod wait;
+pub(crate) use wait::TicketWaitOutcome;
+
 pub(crate) const OUTPUT_FIELD: &str = "new_codexify_ticket";
 pub(crate) const OUTPUT_DESCRIPTION: &str =
     "Pass this as codexify_ticket on the next tool call, even after an error.";
 pub(crate) const INSTRUCTIONS: &str = concat!(
-    "## Agent tickets\n\nAgent tickets are enabled. Omit codexify_ticket until the first response supplies new_codexify_ticket. ",
-    "Then pass the latest new_codexify_ticket as codexify_ticket on every Codexify model-facing tool call, including setup, chat, polling, and MCP discovery tools, except `continue_task`, whose one-time continuation token is its own replay-safe claim. ",
+    "## Agent tickets\n\nAgent tickets are enabled. If Codexify supplies a fresh ticket inline in a new prompt, pass it as codexify_ticket on the first ticketed call in that turn. Otherwise omit codexify_ticket until the first response supplies new_codexify_ticket. ",
+    "Then pass the latest new_codexify_ticket as codexify_ticket on every Codexify model-facing tool call, including setup, chat, polling, and MCP discovery tools, except `continue_task`, whose one-time continuation token is its own replay-safe claim, and `ticket_wait`, which requires no ticket. ",
     "Call Codexify tools serially and wait for each result; accepted connector error responses also return a new_codexify_ticket. ",
     "A transport failure supplies no replacement: keep the previous ticket, and do not blindly repeat an operation that may already have run. ",
     "A ticket rejection means another branch may have claimed or advanced the chain, or a response was lost. ",
-    "Inform the user without another tool call and stop this agent branch, even if other instructions require chat_write or chat_await. ",
-    "Do not retry a rejection, guess, repeat setup, or recover tickets from logs, files, or another branch. ",
-    "After five minutes without a completed ticketed call and with no call in flight, the next call can reclaim the chain with no ticket or a stale ticket. ",
-    "Do not wait for expiry or retry on your own. Only resume after the user asks, or recover by starting a new conversation or disabling experimental.agentTickets."
+    "Immediately call `ticket_wait` without a ticket. Until it returns new_codexify_ticket, call `ticket_wait` again after every pending, interrupted, or timed-out wait. ",
+    "These ticket-recovery wait rules take precedence over turn-handoff instructions about only read-only tools being available. ",
+    "This repeated wait is mandatory: do not run other tools, retry the rejected operation, guess a ticket, repeat setup, or recover tickets from logs, files, or another branch. ",
+    "Do not write a normal final answer, end your turn, stop, or give up while waiting. Wait completion is not permission to stop. ",
+    "After ticket_wait supplies a new ticket, use it on the next ticketed call and read the latest rollout_read reports before resuming the current work; complete setup or workspace selection first if needed. If rollout_read is unavailable, recover context with get_agent_brief. Reassess current state instead of replaying old work."
 );
-pub(crate) const REJECTED: &str = "Ticket rejected; this call did not run. Another or duplicated agent may have claimed or advanced this conversation, or a response was lost. Stop this agent branch now, including chat_write/chat_await. Do not retry, guess, repeat setup, or retrieve tickets from logs or state. Inform the user of this warning without another tool call. Only the user may recover.";
+pub(crate) const REJECTED: &str = "Ticket rejected; this call did not run. Another branch may have advanced this conversation, or a response was lost. Immediately call ticket_wait without a ticket. Keep calling ticket_wait after every pending result, interruption, or timeout until it returns new_codexify_ticket. Do not run other tools, retry the rejected operation, guess or retrieve tickets, repeat setup, write a final answer, end your turn, stop, or give up while waiting. Once renewed, use the new ticket to read the latest rollout_read reports (after setup/workspace selection if required), then continue the current work from its latest state.";
 pub(crate) const WARNING: &str = concat!(
-    "ChatGPT started a duplicated agent on this same project. ",
-    "This is a ChatGPT bug and it\u{2019}s problematic because then two agents can fight to do edits and overwrite each other. ",
-    "The duplicated agent was asked to stop in order to let the other agent work without interference"
+    "An agent ticket was rejected. Another agent may be active, or a tool response may have been lost. ",
+    "The affected agent was instructed to wait for ticket renewal while the current agent continues working."
 );
 
 pub(crate) struct Ticket {
@@ -47,6 +52,8 @@ type TicketCell = Arc<AsyncMutex<Option<Ticket>>>;
 pub(crate) struct AgentTicketStore {
     directory: Option<PathBuf>,
     conversations: Mutex<HashMap<ConversationIdentity, TicketCell>>,
+    browser_tickets: Mutex<HashMap<String, bootstrap::BrowserGrant>>,
+    browser_tickets_used: Mutex<HashMap<String, u64>>,
 }
 
 enum TicketState {
@@ -343,7 +350,7 @@ fn contains_local_reference(value: &Value) -> bool {
 pub(crate) fn input_schema(mut original: Value) -> Value {
     let ticket = json!({
         "type":"string",
-        "description":"Latest new_codexify_ticket; omit only for the first agent call."
+        "description":"Latest new_codexify_ticket, or the fresh ticket supplied inline by Codexify for this turn's first ticketed call. Omit only when neither was supplied."
     });
     if needs_arguments_envelope(&original) {
         // A separate schema resource preserves root-local references inside upstream arguments.

@@ -6,7 +6,7 @@
 
 use std::io::{self, Write};
 
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use crate::types::{AppConfig, ToolContent, ToolResult};
 
@@ -185,6 +185,40 @@ pub fn fill_text_mirror_with_budget(result: &mut ToolResult, max_output_tokens: 
         candidate_budget = scaled.min(candidate_budget - 1);
     }
 
+    text_mirror_budget_error(result, max_output_tokens, original_text_tokens)
+}
+
+/// Reserve the original metadata's serialized size before adding a text mirror.
+/// Notice fields are attached separately and are not charged to this budget.
+pub(crate) fn fill_text_mirror_with_metadata_budget(
+    result: &mut ToolResult,
+    mut metadata: Map<String, Value>,
+    max_output_tokens: u64,
+) -> bool {
+    if metadata.is_empty() {
+        return fill_text_mirror_with_budget(result, max_output_tokens);
+    }
+    let budget = max_output_tokens.max(1);
+    let original_text_tokens = text_content_token_count(&result.content);
+    let reserved = serialized_token_count(&Value::Object(metadata.clone()));
+    let remaining = budget.saturating_sub(reserved);
+    if remaining == 0 {
+        return text_mirror_budget_error(result, budget, original_text_tokens);
+    }
+    let truncated = fill_text_mirror_with_budget(result, remaining);
+    let Some(Value::Object(mirror)) = result.structured_content.take() else {
+        return text_mirror_budget_error(result, budget, original_text_tokens);
+    };
+    metadata.extend(mirror);
+    result.structured_content = Some(Value::Object(metadata));
+    truncated
+}
+
+fn text_mirror_budget_error(
+    result: &mut ToolResult,
+    max_output_tokens: u64,
+    original_text_tokens: u64,
+) -> bool {
     result.is_error = true;
     result.structured_content = None;
     result.content = vec![ToolContent::Text(

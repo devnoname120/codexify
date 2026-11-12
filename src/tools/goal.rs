@@ -366,15 +366,15 @@ impl Tool for GoalTool {
                     Ok(summary) => summary.total_tool_calls,
                     Err(error) => return ToolResult::error(error),
                 };
-                if let GoalFinish::Blocked { reason } = &finish {
-                    if let Err(error) = store.audit_goal_blocker(
+                if let GoalFinish::Blocked { reason } = &finish
+                    && let Err(error) = store.audit_goal_blocker(
                         task,
                         args.expected_revision,
                         args.reason.as_deref().unwrap_or(reason).trim(),
                         crate::markdown_chat::now_ms(),
-                    ) {
-                        return ToolResult::error(error);
-                    }
+                    )
+                {
+                    return ToolResult::error(error);
                 }
                 match store.finish_goal_with_tool_count(
                     task,

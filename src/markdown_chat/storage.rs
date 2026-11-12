@@ -147,6 +147,7 @@ impl OfflineClaim {
 }
 
 pub struct ChatFile {
+    offline_after_ms: AtomicU64,
     path: PathBuf,
     cursor_path: Option<PathBuf>,
     cursor: Mutex<Option<Cursor>>,
@@ -172,6 +173,7 @@ impl ChatFile {
         let cursor_path = persistent.then(|| path.with_file_name("cursor.json"));
         Self {
             path,
+            offline_after_ms: AtomicU64::new(super::OFFLINE_AFTER_MS),
             cursor_path,
             cursor: Mutex::new(None),
             owner_summary_cache: Mutex::new(None),
@@ -182,6 +184,15 @@ impl ChatFile {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    pub(crate) fn set_offline_timeout(&self, offline_after_ms: u64) {
+        self.offline_after_ms
+            .store(offline_after_ms, Ordering::Relaxed);
+    }
+
+    pub(crate) fn offline_after_ms(&self) -> u64 {
+        self.offline_after_ms.load(Ordering::Relaxed)
     }
 
     pub async fn set_owner_title(self: &Arc<Self>, title: String) -> Result<(), String> {
@@ -239,6 +250,7 @@ impl ChatFile {
     ) -> Result<ChatSnapshot, String> {
         self.run(move |chat| {
             chat.with_cursor(|cursor, file| {
+                check_schema_handoff(chat)?;
                 if cancellation.is_cancelled() {
                     return Err(
                         "Markdown chat read was cancelled; no messages were consumed".into(),
@@ -583,6 +595,7 @@ impl ChatFile {
             );
         }
         self.with_cursor(|cursor, file| {
+            check_schema_handoff(self)?;
             let before = snapshot(self, file, cursor)?;
             let block = agent_block(message, cursor.total_tool_calls);
             before_append();
@@ -604,6 +617,9 @@ impl ChatFile {
             let gap = read_range(file, before.end, start, MAX_UNREAD_BYTES.saturating_sub(before.text.len()))?;
             let gap = String::from_utf8(gap).map_err(|_| "CHAT.md contains incomplete UTF-8; finish saving before retrying")?;
             let user_text = before.text + &user_text(&gap, &self.path)?;
+            // A settings edit can begin a handoff while the write is in flight.
+            // Preserve the unread cursor even when the agent text was appended.
+            check_schema_handoff(self)?;
             if !user_text.is_empty() {
                 self.clear_agent_waiting();
             }
@@ -737,6 +753,17 @@ fn advanced_cursor(file: &mut File, mut cursor: Cursor, end: u64) -> Result<Curs
     )?;
     cursor.offset = end;
     Ok(cursor)
+}
+
+fn check_schema_handoff(chat: &ChatFile) -> Result<(), String> {
+    if queue::automation_state(chat)
+        .ok()
+        .flatten()
+        .is_some_and(|state| state["pairing"]["schemaRolloverPending"] == true)
+    {
+        return Err("The connector schema changed. Codexify is continuing this task in a fresh ChatGPT conversation; user messages remain unread for its new owner. Do not repeat chat_write or end the assistant turn. Call chat_await while the handoff completes.".into());
+    }
+    Ok(())
 }
 
 fn snapshot(chat: &ChatFile, file: &mut File, cursor: &Cursor) -> Result<ChatSnapshot, String> {

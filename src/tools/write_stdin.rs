@@ -10,7 +10,9 @@ use crate::exec_sessions::{
 };
 use crate::output_budget::resolve_requested_output_tokens;
 use crate::tool::{Tool, ToolBehavior, ToolRequestContext, parse_tool_args};
-use crate::tools::exec_command::{command_chat, render_unified_exec_output, unified_exec_output_schema, wait_for_command_output};
+use crate::tools::exec_command::{
+    command_chat, render_unified_exec_output, unified_exec_output_schema, wait_for_command_output,
+};
 use crate::types::{AppConfig, ToolAuditMetadata, ToolContent, ToolResult};
 
 pub struct WriteStdin;
@@ -204,12 +206,13 @@ impl WriteStdin {
         }
 
         let chat = command_chat(config, session, context);
-        let (output, exited, buffer_truncated) = match wait_for_command_output(
-            &exec_session, yield_ms, chat.as_ref(), &cancellation,
-        ).await {
-            Ok(output) => output,
-            Err(error) => return ToolResult::error(error),
-        };
+        let (output, exited, buffer_truncated) =
+            match wait_for_command_output(&exec_session, yield_ms, chat.as_ref(), &cancellation)
+                .await
+            {
+                Ok(output) => output,
+                Err(error) => return ToolResult::error(error),
+            };
         let (text, original_token_count, truncated) = truncate_output(&output, max_output_tokens);
 
         let mut result = UnifiedExecOutput {

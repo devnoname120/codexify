@@ -207,6 +207,8 @@ test("a retired primary page preserves healthy lane actions and idle maintenance
   expect(drivers[0]!.maintenanceCalls).toEqual([]);
   expect(drivers[1]!.maintenanceCalls).toEqual(["body { color: green; }"]);
   await pool.execute(request("healthy-after-primary-retired"));
+  const started=Date.now()+2_000;
+  while(!drivers[1]!.runs.length&&Date.now()<started)await Bun.sleep(5);
   expect(drivers[1]!.runs).toEqual(["healthy-after-primary-retired"]);
 });
 

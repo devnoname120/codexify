@@ -13,7 +13,8 @@ export async function waitForConversationComposer(page:Page,signal?:AbortSignal,
     await throwIfSessionAttention(page);
     // A real sign-in surface should still fail promptly. Ignore sign-in links
     // inside conversation content, where an answer may quote any URL.
-    if(new URL(page.url()).pathname.startsWith("/auth/") || await page.locator(
+    const url=new URL(page.url());
+    if(url.origin==="https://auth.openai.com" || url.pathname.startsWith("/auth/") || await page.locator(
       'a[href="/auth/login"]:not(article a, [data-turn-key] a, [data-turn-id] a, [data-message-author-role] a)',
     ).filter({visible:true}).count()) {
       throw new BrowserCompanionError("Sign in to ChatGPT in the browser companion","authentication_required");
@@ -32,5 +33,5 @@ export async function waitForConversationComposer(page:Page,signal?:AbortSignal,
   } while(Date.now()<deadline);
   // Missing/disabled editors are not evidence of an expired account. The
   // driver separately verifies fresh account identity before it can send.
-  throw new BrowserCompanionError("ChatGPT's conversation editor did not finish loading; nothing was sent","editor_unavailable",{cause:lastError});
+  throw new BrowserCompanionError("ChatGPT's conversation editor did not finish loading; nothing was sent","editor_unavailable",{cause:lastError,phase:"composer_lookup"});
 }

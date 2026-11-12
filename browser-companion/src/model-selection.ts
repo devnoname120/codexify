@@ -4,12 +4,13 @@ import { activateChatGptEffortMenu, parseChatGptEffortSliderState, parseChatGptM
 import type { Locator, Page } from "patchright";
 import {uiLabelPattern,parseEffortAnnouncement} from "./ui-localization";
 import { activeComposer, composerText } from "./composer";
-import { readChatGptEffortSnapshot, readCurrentEffortLabel, moveChatGptEffortSlider, CHATGPT_EFFORT_CONTROL_SELECTOR } from "./session";
+import { readChatGptEffortSnapshot, readCurrentEffortLabel, moveChatGptEffortSlider, chatGptEffortControls, requireChatGptEffortControl } from "./session";
 import { readModelOptionRows, browserEffortIdFromLabel, modelsFromDiscoveredEfforts, resolveBrowserModel, type AccountCapabilities, type BrowserEffort, type BrowserModelFamily, type ResolvedBrowserModel } from "./models";
 import { BrowserCompanionError, ModelOptionUnavailableError } from "./errors";
 import { canonicalChatGptConversationUrl } from "./protocol";
 import { modelFallbacks } from "./model-fallback";
 import {observeReadOnly} from "./observation";
+import {withChatGptModelOptions} from "./model-picker";
 
 type EffortMenu = Awaited<ReturnType<typeof activateChatGptEffortMenu>>;
 
@@ -41,43 +42,25 @@ export async function selectChatGptModelFamily(
       throw new ModelOptionUnavailableError(`ChatGPT model ${family} is unavailable`,family);
     }
     if (await option.count() === 1 && await option.getAttribute("aria-checked") === "true") return menu;
-    // The attached radio rows are inert while this composer-owned advanced view is collapsed.
-    const powerView = menu.menu.locator('[data-model-picker-view]');
-    if (await powerView.count() === 1) {
-      const view = await powerView.getAttribute("data-model-picker-view");
-      if (view === "simple") {
-        const trigger = powerView.locator('[data-model-picker-view-toggle="true"]:not([aria-hidden="true"])')
-          .filter({ visible: true });
-        if (await trigger.count() !== 1) throw familyError(family);
-        await trigger.click({ timeout: 5_000,signal });
-      } else if (view !== "advanced") throw familyError(family);
-    } else {
-      const trigger = menu.menu.locator('[role="menuitem"][aria-expanded][aria-hidden="false"]');
-      if (await powerView.count() !== 0 || await trigger.count() !== 1) throw familyError(family);
-      if (await trigger.getAttribute("aria-expanded") === "false") await trigger.click({ timeout: 5_000,signal });
-    }
-    if (await option.count() === 0) {
-      const rows=await observeReadOnly(readModelOptionRows(menu.menu),signal);
-      if (rows.some(row=>row.family)) {
+    await withChatGptModelOptions(menu,activate,async(scope,rows)=>{
+      const candidate=scope.locator(`[role="menuitemradio"][data-browser-model-family="${family}"]`);
+      if(await candidate.count()===0&&rows.some(row=>row.family)) {
         throw new ModelOptionUnavailableError(`ChatGPT model ${family} is not offered in this conversation`,family);
       }
-      throw familyError(family);
-    }
-    await option.waitFor({ state: "visible", timeout: 5_000,signal });
-    await option.click({ timeout: 5_000,signal });
-    // Choosing a family returns the open picker to its slider. Keep that surface:
-    // Escape followed by an immediate reopen races the outgoing menu's cleanup.
-    // Activation reuses the open menu and verifies its owner before returning it.
-    const selected = await activate();
-    const deadline = Date.now() + 1_000;
-    do {
-      signal?.throwIfAborted();
-      const current = await familyOption(selected, family,signal);
-      if (await current.count() > 1) throw familyError(family);
-      if (await current.count() === 1 && await current.getAttribute("aria-checked") === "true") return selected;
-      await new Promise(resolve => setTimeout(resolve, 50));
-    } while (Date.now() < deadline);
-    throw familyError(family);
+      if(await candidate.count()!==1)throw familyError(family);
+      if(await candidate.getAttribute("aria-disabled")==="true"||await candidate.getAttribute("disabled")!==null) {
+        throw new ModelOptionUnavailableError(`ChatGPT model ${family} is unavailable`,family);
+      }
+      if(await candidate.getAttribute("aria-checked")!=="true") {
+        await candidate.waitFor({state:"visible",timeout:5_000,signal});
+        await candidate.click({timeout:5_000,signal});
+      }
+    },{signal,visible:true,changesModel:true});
+    const selected=await activate();
+    const confirmed=await withChatGptModelOptions(selected,activate,async(_scope,rows)=>rows,{signal});
+    const checked=confirmed.value.filter(row=>row.checked&&row.family);
+    if(checked.length!==1||checked[0]!.family!==family)throw familyError(family);
+    return confirmed.menu;
   } catch (cause) {
     if (cause instanceof BrowserCompanionError) throw cause;
     throw familyError(family, cause);
@@ -133,15 +116,18 @@ export async function assertChatGptModelFamily(
 ): Promise<void> {
   const deadline = Date.now() + settleMs;
   do {
-    signal?.throwIfAborted();
-    const option = await familyOption(menu, family,signal);
-    const checked = await option.count() === 1 && await option.getAttribute("aria-checked") === "true";
+    const editor=await activeComposer(menu.menu.page());
+    const controls=await chatGptEffortControls(editor.locator("xpath=ancestor::form[1]"));
+    const activate=()=>activateChatGptEffortMenu(menu.menu.page(),controls.first());
+    const {value:rows}=await withChatGptModelOptions(menu,activate,async(_scope,rows)=>rows);
+    const checkedRows=rows.filter(row=>row.checked&&row.family);
+    const checked=checkedRows.length===1&&checkedRows[0]!.family===family;
     const state = parseChatGptEffortSliderState(
       await menu.slider.getAttribute("aria-valuemin"), await menu.slider.getAttribute("aria-valuemax"),
       await menu.slider.getAttribute("aria-valuenow"),
     );
     const descriptions = await readChatGptModelAnnouncements(menu.slider,signal);
-    const familyLabel = checked ? (await observeReadOnly(readModelOptionRows(menu.menu),signal)).find(row=>row.checked&&row.family===family)?.label??null : null;
+    const familyLabel = checked ? checkedRows[0]!.label : null;
     if (state && state.value === state.min + effortIndex && chatGptModelSelectionMatches(descriptions, family, effort, checked, familyLabel)) return;
     if (Date.now() >= deadline) break;
     await new Promise(resolve => setTimeout(resolve, 50));
@@ -279,7 +265,7 @@ export async function selectModelAndEffort(
   }
   const composer = await activeComposer(page, 30_000, signal);
   const form = composer.locator("xpath=ancestor::form[1]");
-  const controls = form.locator(CHATGPT_EFFORT_CONTROL_SELECTOR).filter({ visible:true });
+  const controls = await chatGptEffortControls(form);
   if (luna) {
     if (await controls.count() > 0) {
       throw new BrowserCompanionError("ChatGPT account changed from Luna-only to Sol during selection", "model_unavailable");
@@ -287,15 +273,10 @@ export async function selectModelAndEffort(
     await setLunaThinkMode(composer, luna.lunaThink, signal);
     return { ...luna, selection:null };
   }
-  try {await controls.first().waitFor({ state:"visible", timeout:8_000, signal });}
-  catch(error) {
+  const control = await requireChatGptEffortControl(form,signal,8_000).catch(error=>{
     signal?.throwIfAborted();
     throw new BrowserCompanionError("ChatGPT's model control did not finish loading; nothing was sent","model_unavailable",{cause:error});
-  }
-  if (await controls.count() !== 1) {
-    throw new BrowserCompanionError("ChatGPT did not expose one model/effort control", "model_unavailable");
-  }
-  const control = controls.first();
+  });
   let menu = await activateChatGptEffortMenu(page, control,{signal});
   menu = await selectChatGptModelFamily(menu, family!, () => activateChatGptEffortMenu(page, control,{signal}),signal);
   let resolved: ResolvedBrowserModel;
@@ -374,8 +355,7 @@ export async function assertSelectedModelAndEffort(
     && canonicalChatGptConversationUrl(page.url()) !== canonicalChatGptConversationUrl(selected.selection.url))) {
     throw new BrowserCompanionError("ChatGPT changed the selected conversation before Send", "external_interference");
   }
-  const controls = composer.locator("xpath=ancestor::form[1]")
-    .locator(CHATGPT_EFFORT_CONTROL_SELECTOR).filter({ visible:true });
+  const controls = await chatGptEffortControls(composer.locator("xpath=ancestor::form[1]"));
   if (await controls.count() !== 1) throw new BrowserCompanionError("ChatGPT model control changed before Send", "model_unavailable");
   const control = controls.first();
   if ((await control.innerText()).trim() !== selected.selection.label

@@ -10,6 +10,28 @@ import {
   validateChatGptConversationUrl,
 } from "../src/protocol";
 
+test("fresh inline tickets apply to every browser prompt and preserve successor-ticket guidance",()=>{
+  const reference="A".repeat(43);
+  const prompts:Parameters<typeof renderActionPrompt>[0][]=[
+    {kind:"create_chat",continuationToken:reference,reference,setupReference:null},
+    {kind:"pair_verify",reference},
+    {kind:"offline_chat",batchId:"batch",messages:[{id:"message",markdown:"Continue"}]},
+    {kind:"offline_goal",goalRevision:1},
+    {kind:"offline_combined",batchId:"batch",messages:[{id:"message",markdown:"Continue"}],goalRevision:1},
+    {kind:"turn_renewal",handoffId:`renew-${"a".repeat(64)}`},
+    {kind:"task_continuation"},
+  ];
+  for(const prompt of prompts) {
+    const rendered=renderActionPrompt(prompt,"FreshT_1");
+    expect(rendered).toContain('`FreshT_1`');
+    expect(rendered).toContain('first ticketed tool call');
+    expect(rendered).toContain('latest `new_codexify_ticket`');
+    expect(rendered).toContain('`continue_task` is exempt');
+    expect(renderActionPrompt(prompt)).not.toContain('fresh agent ticket for this prompt');
+    expect(()=>renderActionPrompt(prompt,"invalid ticket")).toThrow();
+  }
+});
+
 const base = {
   actionId: "action-1",
   idempotencyKey: "execute-1",

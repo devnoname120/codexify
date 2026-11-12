@@ -91,9 +91,14 @@ fn default_true() -> bool {
 }
 
 fn is_codexify_agent_endpoint(spec: &McpServerSpec) -> bool {
-    spec.url.as_deref().and_then(|url|reqwest::Url::parse(url).ok()).is_some_and(|url|
-        url.scheme() == "http" && matches!(url.host_str(),Some("127.0.0.1" | "localhost" | "[::1]"))
-            && url.path().trim_end_matches('/') == "/mcp/agents")
+    spec.url
+        .as_deref()
+        .and_then(|url| reqwest::Url::parse(url).ok())
+        .is_some_and(|url| {
+            url.scheme() == "http"
+                && matches!(url.host_str(), Some("127.0.0.1" | "localhost" | "[::1]"))
+                && url.path().trim_end_matches('/') == "/mcp/agents"
+        })
 }
 
 fn run_codex_command(
@@ -809,16 +814,23 @@ Authorization = "Bearer private-agent-token"
 [mcp_servers.other]
 url = "https://example.invalid/mcp/agents"
 "#;
-        let imported = parse_codex_mcp_servers(contents,&|_|None).unwrap();
+        let imported = parse_codex_mcp_servers(contents, &|_| None).unwrap();
         assert!(!imported.servers.contains_key("codexify_agents"));
         assert!(imported.servers.contains_key("other"));
         assert!(!imported.report.join(" ").contains("private-agent-token"));
-        let mut runner = |args:&[OsString]| Ok(match args.get(1).and_then(|arg|arg.to_str()) {
+        let mut runner = |args: &[OsString]| {
+            Ok(match args.get(1).and_then(|arg|arg.to_str()) {
             Some("list") => br#"[{"name":"codexify_agents"}]"#.to_vec(),
             Some("get") => br#"{"name":"codexify_agents","enabled":true,"transport":{"type":"streamable_http","url":"http://127.0.0.1:3120/mcp/agents"}}"#.to_vec(),
             _ => panic!("Unexpected CLI call"),
-        });
-        let imported = discover_additional_codex_mcp_servers_with_runner(&HashMap::new(),&|_|None,&mut runner).unwrap();
+        })
+        };
+        let imported = discover_additional_codex_mcp_servers_with_runner(
+            &HashMap::new(),
+            &|_| None,
+            &mut runner,
+        )
+        .unwrap();
         assert!(imported.servers.is_empty());
         assert!(imported.report.join(" ").contains("must not be bridged"));
     }

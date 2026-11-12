@@ -5,6 +5,96 @@ import {createRequire} from 'node:module';
 import {ownerHtml,routeOwner} from './owner-chat-source.mjs';
 const {chromium,webkit}=createRequire(import.meta.url)('playwright');
 const origin='http://127.0.0.1:43357',META='io.github.devnoname120/codexify/markdown-chat';
+
+async function goalFreeWaitFixture(browser,preparing=false) {
+ const page=await browser.newPage({viewport:{width:1280,height:820}});page.setDefaultTimeout(5000);
+ const id='7'.repeat(64),base=Date.now(),writes=[],errors=[];
+ const queued=()=>({id:'queued-wake',kind:'offline_chat',status:'queued',sendAccepted:false,canRunNow:true,lastError:null,retryMode:null});
+ const state={now:base,action:preparing?{status:'idle'}:queued(),wake:{phase:'queued',label:'Queued to wake'},queue:preparing?null:{position:2,total:3},until:preparing?null:base+164000,stopped:false,browserStopped:preparing,failNow:false};
+ let releaseNow,holdNow=false;
+ page.on('pageerror',error=>errors.push(error.message));await page.clock.install({time:base+3600000});
+ await routeOwner(page,origin+'/**',async route=>{
+  const request=route.request(),path=new URL(request.url()).pathname;
+  if(path==='/')return route.fulfill({contentType:'text/html',body:ownerHtml});
+  if(path==='/api/global')return route.fulfill({json:{version:'2.3.19',settingsAvailable:false}});
+  if(path==='/api/analytics/extras')return route.fulfill({status:503});
+  if(path==='/api/chats')return route.fulfill({json:{chats:[{id,title:'Flappy Bird',workspace:'repo',goal:null,automationWake:state.wake,lastEntryAtMs:base,lastEntryEnd:100,totalToolCalls:0}],automationEnabled:true,serverTimeMs:state.now}});
+  if(path.endsWith('/automation'))return route.fulfill({json:{enabled:true,goal:null,action:state.action,wake:state.wake,queue:state.queue,waitUntilMs:state.until,pairing:{status:'verified'},catalog:{models:[]},companion:{authenticated:!state.browserStopped,status:state.browserStopped?'unavailable':'idle',manuallyStopped:state.browserStopped},presence:{},serverTimeMs:state.now}});
+  if(path.endsWith('/read'))return route.fulfill({json:{ownerReadThrough:100}});
+  if(request.method()==='POST'){
+   writes.push({path,body:request.postDataJSON()});
+   if(path.endsWith('/action/now')){
+    if(holdNow)await new Promise(resolve=>releaseNow=resolve);
+    if(state.failNow)return route.fulfill({status:409,body:'The browser action changed'});
+    state.action={...state.action,status:'sending'};state.wake={phase:'sending',label:'Sending to ChatGPT'};
+   }else if(path.endsWith('/action/cancel')){
+    if(state.cancelRaced){state.action={...state.action,status:'sending'};state.wake={phase:'sending',label:'Sending to ChatGPT'};return route.fulfill({status:409,body:'The browser action already started'});}
+    state.action={...state.action,status:'cancelled'};state.wake=null;
+   }
+   else if(path.endsWith('/send')){assert.equal(request.postDataJSON().stop_agent,true);state.stopped=true;state.wake=null;return route.fulfill({json:{_meta:{[META]:{stopped:true,goal:null}}}});}
+   else if(path==='/api/browser/start'){state.browserStopped=false;state.action=queued();state.queue={position:1,total:1};state.until=state.now+60000;}
+   else assert.fail('Unexpected mutation: '+path);
+   return route.fulfill({json:{}});
+  }
+  return route.fulfill({json:{_meta:{[META]:{chat_file:'/fixture/CHAT.md',revision:`${state.stopped}-${state.now}`,delivered_through:0,read_through:0,total_tool_calls:0,server_time_ms:state.now,last_agent_call_at_ms:null,agent_stop_requested:state.stopped,wake_status:state.wake,messages:[{id:'user-request',role:'user',markdown:'Commit and push to my private repo',start:0,end:100,created_at_ms:base,tool_call_count:0}],has_more:false,unchanged:false}}}});
+ });
+ await page.goto(`${origin}/?chat=${id}#wait-fixture-token`);
+ const host=page.locator('#chat-host');await host.locator('#conversation-wait-bar').waitFor();
+ return {page,host,state,writes,errors,queued,holdNow(){holdNow=true;},releaseNow(){holdNow=false;releaseNow?.();},async tick(ms=2000){state.now+=ms;await page.clock.fastForward(ms);}};
+}
+
+for(const [name,engine]of [['Chromium',chromium],['WebKit',webkit]]) {
+ test(`${name}: goal-free queued wake shows a live countdown, position, Do now and Cancel`,{timeout:30000},async()=>{
+  const browser=await engine.launch();let f;
+  try{
+   f=await goalFreeWaitFixture(browser);const {page,host,state,writes}=f,bar=host.locator('#conversation-wait-bar'),now=bar.locator('#conversation-wait-now');
+   await bar.getByText(/Available in 164s/).waitFor();assert.match(await bar.textContent(),/Position in queue: 2 of 3/);
+   assert.equal(await host.locator('#goal-bar').isVisible(),false);assert.equal(await host.locator('#automation-error').isVisible(),false);
+   assert.equal(await bar.locator('svg').evaluate(node=>getComputedStyle(node).animationDuration),'2s');
+   for(const width of [320,390,1280]){
+    await page.setViewportSize({width,height:820});
+    assert.equal(await bar.evaluate(node=>node.scrollWidth>node.clientWidth),false);
+    const geometry=await bar.locator('#conversation-wait-copy').evaluate(node=>{const box=node.getBoundingClientRect(),range=document.createRange();range.selectNodeContents(node);return [...range.getClientRects()].every(line=>line.left>=box.left-1&&line.right<=box.right+1&&line.bottom<=box.bottom+1);});
+    assert(geometry,'all countdown and queue text is visible');assert(await now.isVisible());assert(await bar.getByRole('button',{name:'Cancel',exact:true}).isVisible());
+    if(process.env.CODEXIFY_WAIT_BAR_SCREENSHOTS){mkdirSync(process.env.CODEXIFY_WAIT_BAR_SCREENSHOTS,{recursive:true});await bar.screenshot({path:`${process.env.CODEXIFY_WAIT_BAR_SCREENSHOTS}/${name.toLowerCase()}-${width}.png`});}
+   }
+   await f.tick(1000);await bar.getByText(/Available in 163s/).waitFor();
+   await page.reload();await bar.getByText(/Available in 163s/).waitFor();
+   state.queue={position:1,total:2};await f.tick();await bar.getByText('Position in queue: 1 of 2',{exact:true}).waitFor();
+   state.until=null;await f.tick();await bar.getByText('Waiting for the shared browser.',{exact:true}).waitFor();
+   assert.doesNotMatch(await bar.textContent(),/0s|Available in/);assert.deepEqual(writes,[]);
+   f.holdNow();await now.click();await bar.getByRole('button',{name:'Running…',exact:true}).waitFor();assert(await now.isDisabled());
+   await now.dispatchEvent('click');assert.equal(writes.length,1);f.releaseNow();await bar.waitFor({state:'hidden'});
+   assert.match(writes[0].path,/\/action\/now$/);assert.equal(writes[0].body.actionId,'queued-wake');
+   state.action={...f.queued(),id:'another-wake'};state.wake={phase:'queued',label:'Queued to wake'};state.failNow=true;
+   await f.tick();await bar.waitFor();await now.click();await host.locator('#automation-error').getByText('The browser action changed',{exact:true}).waitFor();
+   await f.tick();assert(await host.locator('#automation-error').isVisible(),'an operation error remains visible');
+   await bar.getByRole('button',{name:'Cancel',exact:true}).click();await bar.waitFor({state:'hidden'});
+   assert.match(writes.at(-1).path,/\/action\/cancel$/);assert.equal(writes.at(-1).body.actionId,'another-wake');
+   assert.equal(await host.getByText('Commit and push to my private repo',{exact:true}).count(),1);
+   state.action={...f.queued(),id:'racing-wake'};state.wake={phase:'queued',label:'Queued to wake'};state.cancelRaced=true;
+   await f.tick();await bar.waitFor();await bar.getByRole('button',{name:'Cancel',exact:true}).click();
+   await f.tick();await bar.waitFor({state:'hidden'});await host.locator('#automation-error').getByText('The browser action already started',{exact:true}).waitFor();
+   assert.deepEqual(f.errors,[]);
+  }finally{f?.releaseNow();await browser.close();}
+ });
+ test(`${name}: goal-free pending wake can be cancelled before admission and exposes a stopped browser`,{timeout:30000},async()=>{
+  const browser=await engine.launch();
+  try{
+   const f=await goalFreeWaitFixture(browser,true),{page,host,state,writes}=f,bar=host.locator('#conversation-wait-bar');
+   await bar.getByText('Browser stopped',{exact:true}).waitFor();assert(await bar.getByRole('button',{name:'Start browser',exact:true}).isEnabled());
+   assert.doesNotMatch(await bar.textContent(),/Position in queue|\d+s/);
+   await host.locator('#draft').fill('Keep my draft');await bar.getByRole('button',{name:'Cancel',exact:true}).click();await bar.waitFor({state:'hidden'});
+   assert.equal(writes.length,1);assert.match(writes[0].path,/\/send$/);assert.equal(writes[0].body.stop_agent,true);
+   assert.equal(await host.locator('#draft').inputValue(),'Keep my draft');assert.equal(await host.getByText('Commit and push to my private repo',{exact:true}).count(),1);
+   state.stopped=false;state.wake={phase:'queued',label:'Queued to wake'};await page.reload();await bar.waitFor();
+   await bar.getByRole('button',{name:'Start browser',exact:true}).click();await bar.getByRole('button',{name:'Do now',exact:true}).waitFor();
+   assert.equal(writes.length,2);assert.equal(writes[1].path,'/api/browser/start');assert(await bar.getByRole('button',{name:'Do now',exact:true}).isEnabled());
+   assert.deepEqual(f.errors,[]);
+  }finally{await browser.close();}
+ });
+}
+
 for(const [name,engine]of [['Chromium',chromium],['WebKit',webkit]])test(`${name}: saved conversation cooldowns count down locally across polls, reopening and expiry`,{timeout:30000},async()=>{
  const browser=await engine.launch(),page=await browser.newPage({viewport:{width:1280,height:820}});page.setDefaultTimeout(5000);
  const id='9'.repeat(64),base=Date.now(),errors=[],writes=[];

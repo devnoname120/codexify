@@ -40,7 +40,7 @@ fn ordinary_ci_uses_lean_debug_info_without_redundant_platform_check() {
 fn legacy_migration_regressions_run_on_the_service_platforms() {
     let ci = workflow(".github/workflows/ci.yml");
     let platforms = job_section(&ci, "service-platforms", "unused");
-    assert!(platforms.contains("macos-14"));
+    assert!(platforms.contains("macos-15"));
     assert!(platforms.contains("windows-latest"));
     assert!(platforms.contains("cargo test --test legacy_migration"));
     assert!(job_section(&ci, "check", "diff-widget").contains("cargo test --all"));

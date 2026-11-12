@@ -178,7 +178,7 @@ impl AgentRuntime {
             .bindings
             .selected_project_root(&self.config, &task)?
             .ok_or("Coding-app team workspace is missing; retry setup")?;
-        if root != PathBuf::from(&record.project_path) {
+        if root != std::path::Path::new(&record.project_path) {
             return Err("Team workspace changed; do not control it through an old teamId".into());
         }
         let saved = self.store(&task)?.1.load(&task)?;

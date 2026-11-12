@@ -217,6 +217,16 @@ dialog:modal{box-sizing:border-box;block-size:fit-content;margin:auto;inset-bloc
 #automation-pair-chat:disabled { cursor:default; }
 #automation-pair-chat:disabled:hover { background:transparent; }
 #goal-bar { display:flex; align-items:center; gap:8px; margin:0 16px -10px; padding:10px 12px 18px; border:1px solid var(--border); border-bottom:0; border-radius:18px 18px 0 0; font-size:var(--chat-label-size); }
+#conversation-wait-bar { display:flex; align-items:center; flex-wrap:wrap; gap:6px 8px; margin:0 16px -10px; padding:10px 12px 18px; border:1px solid var(--border); border-bottom:0; border-radius:18px 18px 0 0; font-size:13px; }
+#conversation-wait-icon { display:grid; place-items:center; flex:none; color:var(--muted); }
+#conversation-wait-icon svg { width:17px; height:17px; transform-origin:center; animation:stop-spin 2s linear infinite; }
+#conversation-wait-copy { flex:1 1 160px; min-width:0; overflow-wrap:anywhere; }
+#conversation-wait-title { display:block; font-weight:600; }
+#conversation-wait-details { display:flex; flex-wrap:wrap; gap:0 8px; color:var(--muted); font-size:12px; font-variant-numeric:tabular-nums; }
+#conversation-wait-actions { display:flex; gap:4px; margin-left:auto; }
+#conversation-wait-actions button { min-height:30px; }
+@media(max-width:480px) { #conversation-wait-bar { margin-left:8px; margin-right:8px; } }
+@media(prefers-reduced-motion:reduce) { #conversation-wait-icon svg { animation:none; } }
 #goal-caption { white-space:nowrap; font-weight:600; }
 #goal-text { flex:1; min-width:0; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; color:var(--muted); }
 #goal-metrics { flex:none; color:var(--muted); font-size:12px; white-space:nowrap; font-variant-numeric:tabular-nums; }
@@ -492,11 +502,12 @@ dialog:modal{box-sizing:border-box;block-size:fit-content;margin:auto;inset-bloc
       if (saved && (readPositions.get(id) || 0) > through) void remember(id, readPositions.get(id));
     }
   }
+  let offlineAfterMs = 300000;
   function presence(lastCall, now, waitingUntil = null, presenceUntil = null, idleUntil = null) {
     if (Number.isSafeInteger(waitingUntil) && now < waitingUntil) return "waiting";
     if (Number.isSafeInteger(idleUntil) && now < idleUntil) return "waiting";
     if (Number.isSafeInteger(presenceUntil)) return now < presenceUntil ? "online" : "offline";
-    if (!Number.isFinite(lastCall) || now - lastCall >= 300000) return "offline";
+    if (!Number.isFinite(lastCall) || now - lastCall >= offlineAfterMs) return "offline";
     if (now - lastCall >= 180000) return "away";
     return "online";
   }
@@ -641,7 +652,7 @@ dialog:modal{box-sizing:border-box;block-size:fit-content;margin:auto;inset-bloc
     if (pairing.status === "verified") return "verified";
     const pairAction = action.kind === "pair_verify";
     if (pairAction && action.sendAccepted && Number.isSafeInteger(pairing.verificationWaitUntilMs)) return now < pairing.verificationWaitUntilMs ? "pairing" : "failed";
-    if (pairAction && (action.lastError || ["failed", "ambiguous", "stalled", "approval_required", "authentication_required", "conversation_unavailable", "rate_limited", "interference"].includes(action.status))) return "failed";
+    if (pairAction && (action.lastError || ["failed", "ambiguous", "stalled", "approval_required", "authentication_required", "conversation_unavailable", "conversation_limit", "rate_limited", "interference"].includes(action.status))) return "failed";
     // A queued request gets a fresh verification deadline when it starts.
     if (pairAction && action.status === "queued") return "pairing";
     if (Number.isSafeInteger(pairing.expiresAtMs)) return now < pairing.expiresAtMs ? "pairing" : "failed";
@@ -695,7 +706,7 @@ dialog:modal{box-sizing:border-box;block-size:fit-content;margin:auto;inset-bloc
       close() { closed = true; clearTimeout(timer); abort?.abort(); document.removeEventListener("visibilitychange", onVisibility); }
     };
   }
-  function createAutomationPanel(id, scope) {
+  function createAutomationPanel(id, scope, cancelPendingWake) {
     const changes = createCodeChangesCounter(id, scope);
     const panel = document.createElement("section");
     panel.id = "automation-panel";
@@ -768,8 +779,14 @@ dialog:modal{box-sizing:border-box;block-size:fit-content;margin:auto;inset-bloc
         <button type="button" class="composer-button" id="automation-clear-goal" aria-label="Clear goal" title="Clear goal"><svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13M10 10v7m4-7v7"/></svg></button>
         <button type="button" class="composer-button" id="automation-toggle-goal" aria-label="Run goal" title="Run goal"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path id="goal-toggle-icon" d="m10 8 6 4-6 4Z"/></svg></button>
         <button type="button" class="composer-button" id="automation-edit-goal" aria-label="Edit goal" title="Edit goal"><svg viewBox="0 0 24 24"><path d="m4 16 12-12 4 4-12 12H4ZM14 6l4 4"/></svg></button>
+      </div>
+      <div id="conversation-wait-bar" role="group" aria-label="Conversation wake-up queue" hidden>
+        <span id="conversation-wait-icon" aria-hidden="true"></span>
+        <div id="conversation-wait-copy" role="status"><strong id="conversation-wait-title"></strong><div id="conversation-wait-details"><span id="conversation-wait-time" aria-live="off"></span><span id="conversation-wait-position"></span></div></div>
+        <div id="conversation-wait-actions"><button type="button" class="composer-button" id="conversation-wait-now">Do now</button><button type="button" class="composer-button" id="conversation-wait-cancel">Cancel</button></div>
       </div>`;
     panel.querySelector("#goal-icon").append(goalIcon());
+    panel.querySelector("#conversation-wait-icon").append(presenceIcon("browser-cooldown"));
     const composer = scope.querySelector("#composer");
     composer.before(panel);
     const tools = document.createElement("div");
@@ -808,6 +825,7 @@ dialog:modal{box-sizing:border-box;block-size:fit-content;margin:auto;inset-bloc
     let current = null, models = [], closed = false, timer = null, requestInFlight = false, catalogLoaded = false, savingSelection = false, selectionDraft = null, selectionRevision = 0, catalogContext = null;
     let pairingSubmitting = false, pairingRevision = 0, pairingSubmissionError = "", lastSubmittedPairingUrl = "";
     let dismissedError = null, shownErrorSignature = null;
+    let waitOperation = null, waitFailure = null;
     function conversationCooldown(action, now) {
       // These two companion messages contain the duration left when the error
       // was saved. Anchor to that receipt, never to a poll or the first render.
@@ -972,7 +990,7 @@ dialog:modal{box-sizing:border-box;block-size:fit-content;margin:auto;inset-bloc
       if (autoModeButton.hidden) byId("auto-mode-editor").hidden = true;
       autoModeButton.dataset.enabled = String(goal?.status === "active" && goal?.markdown?.startsWith("Auto mode\n\nObjective:\n"));
       byId("automation-add-goal").hidden = !verified || Boolean(goal);
-      const actionFailed = !waitingForBrowser && !pairingWaiting && (pairingTimedOut || ["failed", "ambiguous", "stalled", "approval_required", "authentication_required", "conversation_unavailable", "rate_limited", "interference"].includes(state.action?.status));
+      const actionFailed = !waitingForBrowser && !pairingWaiting && (pairingTimedOut || ["failed", "ambiguous", "stalled", "approval_required", "authentication_required", "conversation_unavailable", "conversation_limit", "rate_limited", "interference"].includes(state.action?.status));
       const actionNeedsAttention = !automaticRetry && actionFailed;
       const goalNeedsAttention = goal?.status === "active" && actionNeedsAttention;
       const cooldown = conversationCooldown(state.action, Date.now() + clockOffset);
@@ -1012,6 +1030,26 @@ dialog:modal{box-sizing:border-box;block-size:fit-content;margin:auto;inset-bloc
       nodes.cancelAction.textContent = actionFailed ? "Cancel failed action" : "Cancel queued action";
       nodes.retryAction.disabled = !retryMode;
       nodes.retryAction.textContent = retryLabel;
+      const wake = Object.hasOwn(state,"wake") ? state.wake : chat?.automationWake;
+      const queuedWake = state.action?.status === "queued" && state.action.kind !== "pair_verify" || wake?.phase === "queued";
+      const showWait = !goal && queuedWake && !actionFailed && !pairingWaiting;
+      byId("conversation-wait-bar").hidden = !showWait;
+      if (showWait) {
+        const stopped = companion.manuallyStopped === true;
+        const deadline = state.action?.bypassConversationCooldown ? null : state.waitUntilMs ?? state.action?.cooldownUntilMs;
+        const seconds = Number.isSafeInteger(deadline) ? Math.max(0,Math.ceil((deadline-Date.now()-clockOffset)/1000)) : 0;
+        const waitText=(name,text)=>{const node=byId(name);if(node.textContent!==text)node.textContent=text;};
+        waitText("conversation-wait-title",stopped ? "Browser stopped" : seconds ? "Waiting for browser" : "Queued to wake");
+        waitText("conversation-wait-time",stopped ? "Start the browser to continue." : seconds ? `Available in ${seconds}s.` : state.action?.bypassConversationCooldown ? "Runs next when the browser is available." : state.action?.status !== "queued" ? "Preparing the wake-up request." : "Waiting for the shared browser.");
+        waitText("conversation-wait-position",Number.isSafeInteger(state.queue?.position) && state.queue.position > 0 ? `Position in queue: ${state.queue.position}${Number.isSafeInteger(state.queue.total)?` of ${state.queue.total}`:""}` : "");
+        const now = byId("conversation-wait-now"), cancel = byId("conversation-wait-cancel");
+        now.textContent = waitOperation === "now" ? (stopped?"Starting…":"Running…") : stopped ? "Start browser" : "Do now";
+        now.disabled = Boolean(waitOperation) || !stopped && !(state.action?.canRunNow || retryMode);
+        now.title = stopped ? "Start the shared browser" : now.disabled ? "The wake-up request is still being prepared" : "Run this queued request now without waiting for the browser cooldown";
+        cancel.disabled = Boolean(waitOperation);
+        cancel.textContent = waitOperation === "cancel" ? "Cancelling…" : "Cancel";
+        cancel.title = "Cancel this wake-up and keep the message";
+      }
       if (waitingForBrowser) setStateError(waitingStatus,true);
       else if (pairingWaiting || verified && state.action?.kind === "pair_verify") setStateError("");
       else if (pairingSubmissionError) setStateError(pairingSubmissionError);
@@ -1024,9 +1062,12 @@ dialog:modal{box-sizing:border-box;block-size:fit-content;margin:auto;inset-bloc
         setStateError(`${failure} ${nextStep}`);
       } else if (state.action?.lastError) setStateError(failure);
       else setStateError("");
+      if (waitFailure && waitFailure.actionId !== state.action?.id) waitFailure = null;
+      if (waitFailure && !pairingSubmissionError) setStateError(waitFailure.message);
+      else if (showWait && !actionNeedsAttention && !pairingSubmissionError) setStateError("");
       if (nodes.error.hidden) inlineRetry.hidden = true;
       byId("automation-dismiss-inline").hidden = nodes.error.hidden;
-      byId("automation-pause-retries").hidden = !state.action?.canPauseRetries;
+      byId("automation-pause-retries").hidden = showWait || !state.action?.canPauseRetries;
       byId("automation-replace-chat").hidden = !(state.features?.conversationRecovery === true && state.goal?.status === "active" && state.action?.status === "conversation_unavailable" && state.action?.sendAccepted === false && state.action?.lastError === "ChatGPT conversation temporarily not accessible");
       if (atBottom) history.scrollTop = history.scrollHeight;
     }
@@ -1393,6 +1434,24 @@ dialog:modal{box-sizing:border-box;block-size:fit-content;margin:auto;inset-bloc
     byId("automation-recover-conversations").addEventListener("change",()=>run(async()=>{
       await post("conversation-recovery",{requestId:requestId("recovery-settings"),enabled:byId("automation-recover-conversations").checked});
     }));
+    async function runWaitOperation(operation) {
+      if (waitOperation || !current) return;
+      const actionId=current.action?.id, canRunNow=current.action?.canRunNow, stopped=current.companion?.manuallyStopped;
+      waitOperation=operation;waitFailure=null;render(current);
+      try {
+        if(operation==="cancel") {
+          if(actionId&&current.action?.status==="queued") await post("action/cancel",{requestId:requestId("cancel-wake"),actionId});
+          else await cancelPendingWake();
+        } else if(stopped) {
+          await api("/api/browser/start",{method:"POST",body:JSON.stringify({requestId:requestId("start-browser")})});
+          window.dispatchEvent(new Event("codexify-browser-change"));
+        } else if(actionId) await post(canRunNow?"action/now":"action/retry",{requestId:requestId("wake-now"),actionId});
+        if(!closed)await refreshState();
+      } catch(error) { waitFailure={actionId,message:error.message||"Could not update this wake-up"}; }
+      finally {waitOperation=null;if(current&&!closed)render(current);}
+    }
+    byId("conversation-wait-now").addEventListener("click",()=>void runWaitOperation("now"));
+    byId("conversation-wait-cancel").addEventListener("click",()=>void runWaitOperation("cancel"));
     byId("automation-pause-retries").addEventListener("click", () => run(async () => {
       await post("action/pause-retries", {requestId:requestId("pause-retries"), actionId:current.action.id});
     }));
@@ -1426,7 +1485,7 @@ dialog:modal{box-sizing:border-box;block-size:fit-content;margin:auto;inset-bloc
     timer = setInterval(() => { if (!document.hidden) { void refreshState({ quiet:true }); if (!byId("agents-editor").hidden && !agentsSubmitting && Date.now() - agentsRefreshedAt >= 5000) void refreshAgents().catch(error => { if (!closed) { byId("agents-status").textContent = error.message || "Team status is unavailable."; byId("agents-status").dataset.error = "true"; } }); } }, 1500);
     const metricsTimer = setInterval(() => {
       if (!document.hidden) {
-        if (current && (Number.isSafeInteger(current.action?.cooldownUntilMs) || conversationCooldown(current.action, Date.now() + clockOffset))) render(current);
+        if (current && (Number.isSafeInteger(current.waitUntilMs) || Number.isSafeInteger(current.action?.cooldownUntilMs) || conversationCooldown(current.action, Date.now() + clockOffset))) render(current);
         else updateGoalMetrics();
       }
     }, 1000);
@@ -1574,7 +1633,7 @@ dialog:modal{box-sizing:border-box;block-size:fit-content;margin:auto;inset-bloc
     if (document.hidden) return;
     updateSelectedHeader();
     const now = Date.now() + clockOffset;
-    const next = chats.flatMap(chat => [chat.agentWaitingUntilMs, chat.agentIdleUntilMs, chat.agentPresenceUntilMs, ...[180000,300000].map(age => chat.lastAgentCallAtMs + age)].map(deadline => deadline - now)).filter(delay => Number.isFinite(delay) && delay > 0);
+    const next = chats.flatMap(chat => [chat.agentWaitingUntilMs, chat.agentIdleUntilMs, chat.agentPresenceUntilMs, ...[Math.min(180000, offlineAfterMs),offlineAfterMs].map(age => chat.lastAgentCallAtMs + age)].map(deadline => deadline - now)).filter(delay => Number.isFinite(delay) && delay > 0);
     if (!document.hidden && next.length) presenceTimer = setTimeout(renderList, Math.max(1, Math.min(...next)));
     const focused = document.activeElement;
     const focusedChat = focused?.closest(".conversation-row")?.dataset.chatId;
@@ -1724,7 +1783,8 @@ dialog:modal{box-sizing:border-box;block-size:fit-content;margin:auto;inset-bloc
     back.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 19-7-7 7-7M5 12h14"/></svg>`;
     back.addEventListener("click", showChatList);
     scope.querySelector(".header").prepend(back);
-    const automation = createAutomationPanel(id, scope);
+    let chatController;
+    const automation = createAutomationPanel(id, scope,()=>chatController.cancelWake());
     const rename = document.createElement("button");
     rename.id = "rename-chat"; rename.type = "button"; rename.className = "icon-button";
     rename.setAttribute("aria-label", "Rename chat"); rename.title = "Rename chat";
@@ -1841,7 +1901,7 @@ dialog:modal{box-sizing:border-box;block-size:fit-content;margin:auto;inset-bloc
         await navigator.clipboard.writeText(await response.text());
       }
     };
-    const chatController = window.mountCodexifyChat(scope, bridge);
+    chatController = window.mountCodexifyChat(scope, bridge);
     chatController.setLoading(runtimeLoading);
     chatController.setAvailable(true);
     controller = { setLoading:value=>chatController.setLoading(value), close() { automation.close(); chatController.close(); } };
@@ -1880,6 +1940,7 @@ dialog:modal{box-sizing:border-box;block-size:fit-content;margin:auto;inset-bloc
       }
       if (typeof payload.automationEnabled === "boolean") automationEnabled = payload.automationEnabled;
       matchedQuery = query; matchedIds = new Set(payload.matchedChatIds || []);
+      if (Number.isSafeInteger(payload.offlineAfterMs) && payload.offlineAfterMs > 0) offlineAfterMs = payload.offlineAfterMs;
       if (Number.isSafeInteger(payload.serverTimeMs)) clockOffset = payload.serverTimeMs - Date.now();
       waitingForPresenceRefresh = false;
       showError("");

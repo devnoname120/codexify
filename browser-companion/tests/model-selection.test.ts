@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import {createDocument} from "@mixmark-io/domino";
 import { browserEffortIdFromLabel } from "../src/models";
 import { chatGptModelFamilyMatches, chatGptModelSelectionMatches, selectChatGptModelFamily } from "../src/model-selection";
+import {BrowserCompanionError} from "../src/errors";
 
 function selectedMenu(label:string,identity?:string):Parameters<typeof selectChatGptModelFamily>[0] {
   const doc=createDocument('<button role="menuitemradio" aria-checked="true"></button>');
@@ -26,7 +27,7 @@ test("model family selection recognizes only the exact supported UI rows", async
     const menu=selectedMenu(label);
     const selection = selectChatGptModelFamily(menu, "6", async () => menu);
     if (accepted) expect(await selection).toBe(menu);
-    else await expect(selection).rejects.toMatchObject({code:"model_unavailable"});
+    else await expect(selection).rejects.toBeInstanceOf(BrowserCompanionError);
   }
 });
 

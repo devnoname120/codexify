@@ -1203,17 +1203,32 @@ async fn completed_goal_releases_one_private_message_and_blocked_goal_releases_n
 #[tokio::test]
 async fn blocker_audit_uses_concrete_reason_when_report_next_steps_change() {
     let mut f = fixture("goal-report-blocker-audit");
-    f.config.markdown_chat.automation.retry_timings.infinite_retries = true;
+    f.config
+        .markdown_chat
+        .automation
+        .retry_timings
+        .infinite_retries = true;
     f.automation = Arc::new(AgentAutomationStore::for_config(&f.config).unwrap());
     f.context.agent_automation = Some(f.automation.clone());
-    let goal = f.automation.set_goal(&f.task, "Verify on the device", now_ms()).unwrap();
-    f.automation.run_goal(&f.task, goal.revision, now_ms()).unwrap();
-    for next in ["Connect the console", "Connect the console and run the prepared check"] {
+    let goal = f
+        .automation
+        .set_goal(&f.task, "Verify on the device", now_ms())
+        .unwrap();
+    f.automation
+        .run_goal(&f.task, goal.revision, now_ms())
+        .unwrap();
+    for next in [
+        "Connect the console",
+        "Connect the console and run the prepared check",
+    ] {
         let result = GoalTool::Finish.call_with_context(
             json!({"expectedRevision":goal.revision,"status":"blocked","reason":"The physical console is unavailable","nextSteps":next}),
             &f.config, &f.session, &f.context,
         ).await;
-        assert!(result.is_error, "A same-turn report must not block the infinite goal");
+        assert!(
+            result.is_error,
+            "A same-turn report must not block the infinite goal"
+        );
         let state = f.automation.load(&f.task).unwrap();
         let audit = state.blocker_audit.unwrap();
         assert_eq!(audit.reason, "The physical console is unavailable");
