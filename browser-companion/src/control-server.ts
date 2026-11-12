@@ -13,6 +13,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { basename, dirname, join } from "node:path";
 import { z } from "zod";
 import { SingleWindowCoordinator } from "./browser-window";
+type BrowserCoordinator = Pick<SingleWindowCoordinator,"build"|"liveness"|"presentation"|"setPresentationStyle"|"health"|"readyHealth"|"login"|"capabilities"|"accountPlan"|"turnHandoffComplete"|"approvePendingConversation"|"refreshConnector"|"newChatCapabilities"|"reveal"|"execute"|"cancel"|"action"|"events"|"close">;
 import {validateNewChatProjectUrl} from "./new-chat";
 import { asCompanionError } from "./errors";
 import {
@@ -156,7 +157,7 @@ async function writeEvent(response: ServerResponse, value: unknown): Promise<voi
 }
 
 async function route(
-  coordinator: SingleWindowCoordinator,
+  coordinator: BrowserCoordinator,
   token: string,
   request: IncomingMessage,
   response: ServerResponse,
@@ -170,8 +171,16 @@ async function route(
   if(request.method === "GET" && url.pathname === "/v1/liveness") {
     json(response,200,await coordinator.liveness());return;
   }
+  if(request.method === "GET" && url.pathname === "/v1/diagnostics/presentation") {
+    const screenshot=z.enum(["0","1"]).parse(url.searchParams.get("screenshot")??"0")==="1";
+    json(response,200,await coordinator.presentation(operation.signal,screenshot));return;
+  }
+  if(request.method === "POST" && url.pathname === "/v1/presentation/style") {
+    const value=z.strictObject({css:z.string().max(32768)}).parse(await readJson(request));
+    json(response,200,await coordinator.setPresentationStyle(value.css,operation.signal));return;
+  }
   if (request.method === "GET" && url.pathname === "/v1/health") {
-    json(response, 200, await coordinator.health());
+    json(response, 200, await (url.searchParams.get("ready")==="1"?coordinator.readyHealth():coordinator.health()));
     return;
   }
   if (request.method === "POST" && url.pathname === "/v1/session/login") {
@@ -197,10 +206,15 @@ async function route(
     const body=conversationApprovalRequestSchema.parse(await readJson(request));
     json(response,200,await coordinator.approvePendingConversation(body,operation.signal));return;
   }
+  if(request.method === 'POST' && url.pathname === '/v1/approvals/recover-conversation') {
+    const body=conversationApprovalRequestSchema.parse(await readJson(request));
+    json(response,200,await coordinator.approvePendingConversation(body,operation.signal,true));return;
+  }
   if (request.method === "POST" && url.pathname === "/v1/connectors/refresh") {
     const body=z.strictObject({name:z.string().min(1).max(256)}).parse(await readJson(request));
     try {json(response,200,await coordinator.refreshConnector(body.name,operation.signal));}
-    catch(error){if(error instanceof Error&&error.message.toLowerCase().includes("busy"))throw new ClientError(423,"Browser companion is busy");throw error;}return;
+    catch(error){if(error instanceof Error&&(error.message.toLowerCase().includes("busy")
+      ||error.message.includes("Another browser action changed pages during connector refresh")))throw new ClientError(423,"Browser companion is busy");throw error;}return;
   }
   if (request.method === "POST" && url.pathname === "/v1/new-chat/capabilities") {
     const body = z.strictObject({projectUrl:z.string().nullable()}).parse(await readJson(request));
@@ -259,7 +273,7 @@ async function route(
 }
 
 export async function startControlServer(
-  coordinator: SingleWindowCoordinator,
+  coordinator: BrowserCoordinator,
   descriptorPath: string,
 ): Promise<ControlServer> {
   const token = randomBytes(32).toString("base64url");

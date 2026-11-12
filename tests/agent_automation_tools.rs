@@ -36,9 +36,13 @@ fn fixture(name: &str) -> Fixture {
     config.task_state_root = Some(root.path().join("metadata"));
     config.markdown_chat.enabled = true;
     config.markdown_chat.automation.enabled = true;
+    config
+        .markdown_chat
+        .automation
+        .retry_timings
+        .infinite_retries = false;
     let task = ConversationIdentity::from_openai_session(name).unwrap();
-    let automation =
-        Arc::new(AgentAutomationStore::new(root.path().join("metadata/chats")).unwrap());
+    let automation = Arc::new(AgentAutomationStore::for_config(&config).unwrap());
     let context = context(
         root.path(),
         Some(task.clone()),
@@ -83,6 +87,7 @@ fn context(
         )),
         markdown_chat: Arc::new(MarkdownChatStore::default()),
         agent_automation,
+        agent_runtime: None,
         cancellation: CancellationToken::new(),
     }
 }
@@ -1193,4 +1198,26 @@ async fn completed_goal_releases_one_private_message_and_blocked_goal_releases_n
             .contains("private first")
     );
     assert!(!finished.joined_text().contains("private second"));
+}
+
+#[tokio::test]
+async fn blocker_audit_uses_concrete_reason_when_report_next_steps_change() {
+    let mut f = fixture("goal-report-blocker-audit");
+    f.config.markdown_chat.automation.retry_timings.infinite_retries = true;
+    f.automation = Arc::new(AgentAutomationStore::for_config(&f.config).unwrap());
+    f.context.agent_automation = Some(f.automation.clone());
+    let goal = f.automation.set_goal(&f.task, "Verify on the device", now_ms()).unwrap();
+    f.automation.run_goal(&f.task, goal.revision, now_ms()).unwrap();
+    for next in ["Connect the console", "Connect the console and run the prepared check"] {
+        let result = GoalTool::Finish.call_with_context(
+            json!({"expectedRevision":goal.revision,"status":"blocked","reason":"The physical console is unavailable","nextSteps":next}),
+            &f.config, &f.session, &f.context,
+        ).await;
+        assert!(result.is_error, "A same-turn report must not block the infinite goal");
+        let state = f.automation.load(&f.task).unwrap();
+        let audit = state.blocker_audit.unwrap();
+        assert_eq!(audit.reason, "The physical console is unavailable");
+        assert_eq!(audit.attempts, 1);
+        assert_eq!(state.goal.unwrap().status, GoalStatus::Active);
+    }
 }

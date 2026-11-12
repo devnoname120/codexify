@@ -2,6 +2,7 @@
 // src/adapters/chatgpt-web/browser-worker.ts at f9ad4ae83a579287105ad822dd0c3e0029b04ef6.
 import type { Locator, Page } from "patchright";
 import {selectorDrift} from "./errors";
+import {observeReadOnly} from "./observation";
 import {
   CHATGPT_ASSISTANT_TURN_SELECTOR,
   CHATGPT_STOP_BUTTON_SELECTOR,
@@ -17,11 +18,17 @@ export interface TurnDomState {
   responseIdentities: string[];
   generationRunning: boolean;
 }
+export interface TurnDeltaState {
+  newUserIdentities: string[];
+  newResponseIdentities: string[];
+  generationRunning: boolean;
+}
 
 export interface SubmissionBaseline {
   initialTurnIdentities: readonly string[];
   submittedText: string;
   acceptedUserIdentity?: string;
+  browserBaselineId?: number;
 }
 
 export interface AssistantTurnBinding {
@@ -81,8 +88,64 @@ function unique(values: string[], kind: string): string[] {
   return [...new Set(values)];
 }
 
-export async function readTurnDomState(page: Page): Promise<TurnDomState> {
-  return page.evaluate(({ userSelector, assistantSelector, stopSelector }) => {
+export function readTurnDomState(page: Page, browserBaselineId?: undefined, signal?: AbortSignal, timeoutMs?: number): Promise<TurnDomState>;
+export function readTurnDomState(page: Page, browserBaselineId: number, signal?: AbortSignal, timeoutMs?: number): Promise<TurnDeltaState>;
+export async function readTurnDomState(page: Page, browserBaselineId?: number, signal?: AbortSignal, timeoutMs=5_000): Promise<TurnDomState | TurnDeltaState> {
+  signal?.throwIfAborted();
+  return observeReadOnly(page.evaluate(({ userSelector, assistantSelector, stopSelector, baselineId }) => {
+    type TurnIdentityCache = {
+      url: string;
+      dirty: boolean;
+      scans: number;
+      state: Pick<TurnDomState, "turnIdentities" | "userIdentities" | "responseIdentities"> | null;
+      observer: MutationObserver;
+      nextBaselineId: number;
+      baseline?: { id:number; known:Set<string> };
+    };
+    const scope = globalThis as typeof globalThis & { __CODEXIFY_TURN_IDENTITIES__?: TurnIdentityCache };
+    let cache = scope.__CODEXIFY_TURN_IDENTITIES__;
+    if (!cache) {
+      const relevant = '[data-turn-key], [data-turn-id], [data-turn-id-container], [data-testid^="conversation-turn-"], [data-message-author-role], [data-user-message-bubble], [data-conversation-role], [data-chatgpt-agent-turn-start]';
+      cache = {
+        url: "", dirty: true, scans: 0, state: null, nextBaselineId: 0,
+        observer: undefined as unknown as MutationObserver,
+      };
+      const current = cache;
+      current.observer = new MutationObserver(records => {
+        for (const record of records) {
+          if (record.type === "attributes") {
+            // Composer/status/test-id changes elsewhere on the page are not
+            // new turns. Streaming UI changes must not rescan all old turns.
+            if (record.attributeName === "data-testid"
+              && !(record.oldValue ?? "").startsWith("conversation-turn-")
+              && !(record.target as Element).matches(relevant)) continue;
+            current.dirty = true;
+            break;
+          }
+          // Streamed answer text is not a new conversation turn. Avoid a full
+          // history scan for each Markdown/text update in very long chats.
+          const changed = [...record.addedNodes, ...record.removedNodes].some(node =>
+            node.nodeType === Node.ELEMENT_NODE
+            && ((node as Element).matches(relevant) || (node as Element).querySelector(relevant) !== null));
+          if (changed) {
+            current.dirty = true;
+            break;
+          }
+        }
+      });
+      current.observer.observe(document.documentElement, {
+        childList: true, subtree: true, attributes: true,
+        attributeOldValue: true,
+        attributeFilter: [
+          "data-turn-key", "data-turn-id", "data-turn-id-container", "data-testid",
+          "data-message-author-role", "data-user-message-bubble",
+          "data-conversation-role", "data-chatgpt-agent-turn-start", "data-turn",
+        ],
+      });
+      scope.__CODEXIFY_TURN_IDENTITIES__ = current;
+    }
+    if (cache.dirty || cache.url !== location.href || cache.state === null) {
+    if (cache.url !== location.href) cache.baseline = undefined;
     const legacy = (selector: string) => [...document.querySelectorAll<HTMLElement>(selector)]
       .filter(element => !element.closest("[data-turn-key]"));
     const legacyIdentity = (element: HTMLElement): string => {
@@ -106,11 +169,22 @@ export async function readTurnDomState(page: Page): Promise<TurnDomState> {
       if (!key?.trim()) throw new Error("ChatGPT grouped turn has no stable data-turn-key");
       const user = `group:user:${key}`;
       const assistant = `group:assistant:${key}`;
-      turnIdentities.push(user, assistant);
-      if (group.querySelector("[data-user-message-bubble]")) userIdentities.push(user);
+      // Grouped user shells can exist before an assistant response is mounted.
+      // Do not include an absent assistant in the Send baseline, or the
+      // response later appearing under this same key looks like an old turn.
+      if (group.querySelector("[data-user-message-bubble]")) {
+        turnIdentities.push(user);
+        userIdentities.push(user);
+      }
       if (group.querySelector('[data-conversation-role="assistant"], [data-chatgpt-agent-turn-start]')) {
+        turnIdentities.push(assistant);
         responseIdentities.push(assistant);
       }
+    }
+      cache.state = { turnIdentities, userIdentities, responseIdentities };
+      cache.url = location.href;
+      cache.scans++;
+      cache.dirty = false;
     }
     const visible = (element: Element): boolean => {
       const style = getComputedStyle(element as HTMLElement);
@@ -119,26 +193,63 @@ export async function readTurnDomState(page: Page): Promise<TurnDomState> {
         && style.display !== "none";
     };
     const generationRunning = [...document.querySelectorAll(stopSelector)].some(visible);
-    return { turnIdentities, userIdentities, responseIdentities, generationRunning };
+    if (baselineId !== undefined) {
+      const known = cache.baseline?.id === baselineId ? cache.baseline.known : undefined;
+      if (!known) throw new Error("ChatGPT conversation baseline changed during the action");
+      return {
+        newUserIdentities:cache.state.userIdentities.filter(id => !known.has(id)),
+        newResponseIdentities:cache.state.responseIdentities.filter(id => !known.has(id)),
+        generationRunning,
+      };
+    }
+    return { ...cache.state, generationRunning };
   }, {
     userSelector:CHATGPT_USER_TURN_SELECTOR,
     assistantSelector:CHATGPT_ASSISTANT_TURN_SELECTOR,
     stopSelector:CHATGPT_STOP_BUTTON_SELECTOR,
+    baselineId:browserBaselineId,
   }).catch(error=>{
     const reasons=["ChatGPT legacy turn has no stable data-turn-id","ChatGPT turn container has no stable identity","ChatGPT grouped turn has no stable data-turn-key"];
     const detail=error instanceof Error?reasons.find(reason=>error.message.includes(reason)):undefined;
     throw selectorDrift(detail??"ChatGPT conversation history could not be inspected before sending",error);
-  }).then(state => ({
-    turnIdentities:unique(state.turnIdentities, "turn"),
-    userIdentities:unique(state.userIdentities, "user turn"),
-    responseIdentities:unique(state.responseIdentities, "assistant turn"),
+  }).then(state => baselineIdIsPresent(browserBaselineId) ? {
+    newUserIdentities:unique((state as TurnDeltaState).newUserIdentities, "new user turn"),
+    newResponseIdentities:unique((state as TurnDeltaState).newResponseIdentities, "new assistant turn"),
     generationRunning:state.generationRunning,
-  }));
+  } : {
+    turnIdentities:unique((state as TurnDomState).turnIdentities, "turn"),
+    userIdentities:unique((state as TurnDomState).userIdentities, "user turn"),
+    responseIdentities:unique((state as TurnDomState).responseIdentities, "assistant turn"),
+    generationRunning:state.generationRunning,
+  }), signal, timeoutMs);
 }
 
-export async function captureSubmissionBaseline(page: Page, submittedText: string): Promise<SubmissionBaseline> {
+function baselineIdIsPresent(value: number | undefined): value is number {
+  return value !== undefined;
+}
+
+export async function captureSubmissionBaseline(page: Page, submittedText: string, signal?: AbortSignal): Promise<SubmissionBaseline> {
   if (!submittedText) throw new Error("Submitted prompt must not be empty");
-  return { initialTurnIdentities:(await readTurnDomState(page)).turnIdentities, submittedText };
+  const initialTurnIdentities = (await readTurnDomState(page, undefined, signal)).turnIdentities;
+  signal?.throwIfAborted();
+  const browserBaselineId = await observeReadOnly(page.evaluate(known => {
+    const cache = (globalThis as any).__CODEXIFY_TURN_IDENTITIES__;
+    if (!cache) throw new Error("ChatGPT conversation turn cache is missing");
+    const id = ++cache.nextBaselineId;
+    cache.baseline = { id, known:new Set(known) };
+    return id as number;
+  },initialTurnIdentities), signal);
+  return { initialTurnIdentities, browserBaselineId, submittedText };
+}
+
+async function submissionPoll(page: Page, baseline: SubmissionBaseline, signal?: AbortSignal, timeoutMs?: number) {
+  if (baseline.browserBaselineId === undefined) return readTurnDomState(page, undefined, signal, timeoutMs);
+  const state = await readTurnDomState(page, baseline.browserBaselineId, signal, timeoutMs);
+  return {
+    userIdentities:state.newUserIdentities,
+    responseIdentities:state.newResponseIdentities,
+    generationRunning:state.generationRunning,
+  };
 }
 
 export async function waitForSubmissionAcceptance(
@@ -149,7 +260,7 @@ export async function waitForSubmissionAcceptance(
 ): Promise<SubmissionEvidence> {
   while (Date.now() < deadline) {
     if (signal?.aborted) throw new DOMException("Browser action aborted", "AbortError");
-    const state = await readTurnDomState(page);
+    const state = await submissionPoll(page, baseline, signal, Math.max(1, Math.min(5_000, deadline-Date.now())));
     const evidence = submissionEvidence({ ...state, initialTurnIdentities:baseline.initialTurnIdentities });
     if (evidence === "user_turn") {
       const identity = newTurnIdentity(baseline.initialTurnIdentities, state.userIdentities)!;
@@ -172,13 +283,17 @@ export async function waitForAssistantTurn(
 ): Promise<AssistantTurnBinding> {
   while (Date.now() < deadline) {
     if (signal?.aborted) throw new DOMException("Browser action aborted", "AbortError");
-    const state = await readTurnDomState(page);
+    const state = await submissionPoll(page, baseline, signal, Math.max(1, Math.min(5_000, deadline-Date.now())));
     const identity = newTurnIdentity(baseline.initialTurnIdentities, state.responseIdentities);
     if (identity) {
+      const accepted = await readTurnDomState(page, undefined, signal);
+      if (newTurnIdentity(baseline.initialTurnIdentities, accepted.responseIdentities) !== identity) {
+        throw new Error("ChatGPT changed assistant turns while binding the accepted response");
+      }
       return {
         identity,
         locator:page.locator(chatGptAssistantTurnSelector(identity)),
-        acceptedTurnIdentities:state.turnIdentities,
+        acceptedTurnIdentities:accepted.turnIdentities,
       };
     }
     await new Promise(resolve => setTimeout(resolve, 50));

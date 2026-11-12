@@ -739,6 +739,17 @@ supervisor also creates its ordinary server child with `CREATE_NO_WINDOW`. This
 prevents the otherwise empty console window without changing the Interactive
 logon principal required for tunnel and network access.
 
+The supervisor holds an operating-system lock for its lifetime. A second
+`service run` exits before launching another server or opening the shared log.
+The lock is released when the process exits, including after a crash; a leftover
+lock file does not prevent recovery.
+
+For a read-only Windows autowork snapshot, run
+`./scripts/windows-autowork-status.ps1`. It reports server/browser readiness,
+supervisor count, free disk space, active goals, last tool activity, and retry
+errors. Use `-ChatPrefix` to follow particular conversation IDs. State reads
+allow atomic replacement, so monitoring does not block goal updates.
+
 `service status` queries the native service manager without loading the server
 configuration, starting the MCP server, or changing the service. It works even
 when the configuration is missing or invalid. `--config` and `CODEXIFY_CONFIG`
@@ -1866,6 +1877,7 @@ runtime:
       "descriptorPath": "~/.codexify/browser/descriptor.json",
       "connectorName": "Codexify",
       "maxQueuedActions": 64,
+      "browserActionLanes": 2,
       "autoApproveToolCalls": false
     }
   }
@@ -1902,6 +1914,13 @@ Browser automation defaults to enabled and can refresh tools even when agent cha
 is disabled. The descriptor path
 must be absolute or start with `~/`; the connector name is bounded visible text;
 `maxQueuedActions` accepts 1–1024; and `autoApproveToolCalls` defaults to `true`.
+
+`browserActionLanes` defaults to `2` and accepts `1`–`4`. Independent chats use
+separate pages in the same private browser context. Each chat retains its own
+ordered action lease; setup and recovery wait for all active pages before taking
+exclusive browser access. Actual Sends remain spaced by at least one second,
+and server rate-limit deadlines apply across every page. Restart Codexify and its
+companion after changing the lane count.
 
 With auto-approval enabled, the supervisor also checks the current shared ChatGPT
 tab for a pending connector approval, including file materialization. It opens
@@ -1986,6 +2005,59 @@ The persistent profile, descriptor, install manifest, and runtime live under the
 private `~/.codexify/browser/` directory. The companion is a separate user-session
 process, so restarting the Codexify service does not intentionally stop it.
 
+The dedicated ChatGPT window offers Off, Simplified and Bones presentation in
+Settings → Browser → Browser simplicity. Simplified hides history chrome and
+suggestions, suppresses decorative motion/blur, and lets Chrome defer rendering
+offscreen historical turns. Bones adds a narrower navigation rail, plain message
+and code styling, and a compact composer with less decoration.
+The four newest turns, focused/expanded history, composer, Stop, Copy, model/app
+menus, approvals and error surfaces remain available. Historical text and turn IDs
+stay in the DOM for receipt and response extraction. The persisted field is
+`agentChat.automation.browserSimplicity` (`off`, `simplified`, or `bones`). An
+omitted field preserves the older `minimalUi` choice: true means Simplified,
+false means Off. Restart Codexify to apply. Direct companion launches also accept
+`CODEXIFY_BROWSER_SIMPLICITY`; the old `CODEXIFY_BROWSER_MINIMAL_UI` environment
+switch remains a fallback. Other origins and the user's normal browser are unaffected.
+The current fast presentation includes a small **CODEXIFY · FAST MODE** indicator,
+14px system message text and flat compact turn/composer controls. An adopted
+stylesheet plus shell-only repair observers preserve it through React head/body
+replacement; observers do not watch every streamed token. The private bearer-
+protected `GET /v1/diagnostics/presentation` reports style application, DOM counts,
+navigation timings and recent action preparation stages without transcript text.
+Its optional `?screenshot=1` captures the existing viewport only when no action
+owns the page; it neither scrolls nor navigates. Busy observations are deferred.
+Private `POST /v1/presentation/style` accepts bounded resource-free `{css}` and
+persists it to `~/.codexify/browser/fast-ui.css`; edits apply in place without a
+restart. Revision ownership is shared through the document across isolated
+script worlds, and obsolete owned adopted sheets are removed. Diagnostics report
+the applied document revision, owned sheet count and actual sidebar widths.
+The narrow account/navigation rail remains available while the history panel and
+its reserved width collapse. Cross-world replacement and hydration are covered by
+`browser-companion/scripts/minimal-style-world-smoke.ts`.
+This reduces local rendering work; model generation and network latency remain
+separate limits. `browser-companion/scripts/minimal-page-smoke.ts` checks both
+message renderers and measures alternating long-chat layout workloads in a
+disposable Chrome instance.
+
+Passive browser health verifies the renderer/session without waiting for the
+current chat's composer. Actions still wait for a unique usable target editor
+and fresh account before Send. A slow approval, login or reveal operation keeps
+its UI lease until late work settles instead of closing a responsive browser;
+queued callers remain bounded. Lifecycle and forced-retirement logs include
+timestamps for distinguishing real exits from observation failures.
+Existing-chat model selection defers one redundant confirmation to the mandatory
+final pre-Send check, which verifies the exact slider value, origin and family.
+Batch new-chat preparation may reuse a catalogue for at most 60 seconds after a
+fresh matching account/plan check. Explicit refreshes always rescan; cached
+availability never authorizes Send. See `scripts/health-readiness-smoke.ts` and
+`scripts/model-selection-speed-smoke.ts` in `browser-companion/` for real Chrome
+negative controls and stage measurements.
+Catalogue refresh uses a fresh session proof and a bounded editor hydration wait;
+an absent editor alone never requests sign-in. Background catalogue/plan checks
+defer promptly while ordinary UI work owns the page, and handoff observation
+returns incomplete. Explicit connector maintenance retains its existing queued
+work/restoration ordering.
+
 The core keeps a five-second browser watchdog while automation is enabled. It
 uses the optional `/v1/liveness` probe in current companions (with health-route
 fallback for older compatible builds). This probe checks the existing renderer
@@ -2043,12 +2115,34 @@ and the paired account again before sending; a pending connector approval is
 preserved instead of reloaded. Healthy conversation pages remain reusable, and
 passive health checks do not navigate.
 
+Conversation actions wait for the editable composer after document loading;
+a missing editor alone is not treated as an expired account. While an action
+owns the tab, health requests report its last verified identity and busy state
+without repeatedly scanning the loading document. Fresh account checks still
+gate the action itself.
+
+A stuck model control or missing connector menu can trigger one recovery
+refresh before insertion or Send. Recovery requires the paired conversation,
+the verified account, an empty composer, no approval card, and no running
+response. It rechecks those conditions after loading and verifies model and
+connector selection again. Optional connector searches and model-control waits
+finish within the shared stall budget, so a missing control does not by itself
+force Chrome to quit.
+
 During offline-send preparation, each Stop click gets up to **20 seconds** to
 settle. An optional Stop confirmation starts its own full 20-second window.
 Recognized confirmations that are already open are accepted before editing the
 composer, after verifying the conversation and account.
 Preparation continues as soon as the response stops; retries and reload recovery
 wait for that settling window.
+The stopped state must remain quiet for **1.5 seconds**, including when no Stop
+control is initially visible, so delayed Work controls and brief rerenders do
+not send a continuation into the old turn. Disabled Stop controls can enable
+within an **eight-second** click window. The account and conversation are
+rechecked after stopping, and a control appearing during model/app preparation
+is stopped before prompt insertion. Recovery preserves existing drafts and
+requires an empty composer before its one bounded reload; cancelled actions
+never insert or send the next prompt.
 
 Every browser UI operation has a **30-second inactivity deadline**. Verified
 preparation and Stop milestones renew it; repeating the same milestone does not.
@@ -2059,6 +2153,10 @@ closed, with a further **2-second** bound on shutdown, so late work cannot mutat
 a tab reused by another action. A possibly accepted Send remains ambiguous and
 is never automatically repeated. HTTP client disconnection also cancels pending
 UI work instead of leaving it holding the queue.
+While a retired driver closes, health and liveness retain its active action so
+the native watchdog cannot replace the process before its terminal event is
+delivered. After cleanup, a 250ms drain window keeps that ownership visible;
+the retired driver continues rejecting new operations throughout this window.
 
 Connector App IDs are cached locally by verified account and connector name.
 Refresh navigates directly to that connector's settings and identifies its
@@ -2195,7 +2293,7 @@ picker. A send reuses a healthy destination conversation
 already open in the shared tab, or opens it when necessary, then selects and
 verifies the preferred model and effort there. A known conversation-load failure
 still receives a deliberate recovery reload. Required conversation loads share
-a three-minute minimum spacing across chats by default, or five minutes while a
+a one-second minimum spacing across healthy chats by default, or five minutes while a
 conversation is inaccessible. HTTP 429 conversation-load responses pause further
 conversation loads for Retry-After, or three minutes by default when none is supplied.
 These waits are configurable under `agentChat.automation.retryTimings`; see
@@ -2204,7 +2302,7 @@ Plan inspection reads the account menu first when it identifies the full plan,
 and maintenance skips restoration when the original page is already current.
 Prepared empty new chats are reused at creation. Handoff checks do not reload
 the current conversation; necessary visits to another pending handoff are
-limited to once per three minutes. These rules preserve the single shared tab.
+limited to once per second. These rules apply across the bounded shared page pool.
 If the picker confirms that option is locked or missing, it tries the next available
 entry in `browser-companion/model-fallback-order.json`, starting with GPT-6 Astra
 Pro, GPT-5.6 Sol Pro, GPT-6 Sol Extra High, and GPT-6 Sol High. The selected fallback
@@ -3476,24 +3574,26 @@ scheduled until the option is enabled again.
 
 The same settings section exposes `agentChat.automation.retryTimings`. All timing
 changes require **Restart Codexify** to apply to both the retry scheduler and the
-shared browser. Defaults preserve the existing behavior:
+shared browser. Infinite retries are disabled by default:
 
 | Setting | Default | Purpose |
 | --- | --- | --- |
+| `infiniteRetries` | `false` | Repeat the final delay indefinitely for eligible failed actions and active goals. |
 | `actionDelaysSeconds` | `[30, 60, 120, 240, 480]` | Confirmed-unsent browser action failures. |
 | `chatgptAccessDelaysSeconds` | `[180, 300, 600, 1200, 1800, 3600]` | Sign-in, conversation access, and actual rate-limit failures. |
 | `goalRecoveryDelaysSeconds` | `[60, 120, 240]` | Recover an active goal when the agent remains offline after a continuation. |
 | `jitterPercent` | `10` | Add a stable random wait between 0 and this percentage of each retry delay or approval resume wait. Set to `0` for no jitter. |
 | `approvalResumeGraceSeconds` | `180` | Wait for agent activity after accepting an approval before considering another continuation. |
-| `conversationLoadIntervalSeconds` | `180` | Minimum interval between conversation document loads or reloads across all chats. |
+| `conversationLoadIntervalSeconds` | `1` | Minimum interval between healthy conversation document loads or reloads across all chats. Actual HTTP 429 backoffs still apply. |
 | `conversationUnavailableCooldownSeconds` | `300` | Shared conversation loading cooldown while a conversation is inaccessible. |
 | `rateLimitCooldownSeconds` | `180` | Shared fallback cooldown after HTTP 429 when no valid `Retry-After` is supplied. |
 
 In the GUI, enter retry schedules as comma-separated durations, for example
 `30s, 1m, 2m`. Bare numbers mean seconds. The JSON configuration always stores
 whole seconds. Each schedule accepts 1–32 entries, each between 1 second and
-24 hours. Each entry is the wait after the preceding failure; automatic retries
-stop after the final entry. The other waits accept 1–86400 seconds, and jitter
+24 hours. Each entry is the wait after the preceding failure. With infinite
+retries enabled, the final delay repeats; disabling it restores a finite retry
+budget. The other waits accept 1–86400 seconds, and jitter
 accepts 0–100 percent. Clearing a field or choosing **Use default** restores its
 application default.
 
@@ -3504,7 +3604,14 @@ not consume a document-loading slot. An explicit owner **Retry** bypasses these
 local cooldown checks for that attempt. Account verification, browser ownership,
 and protection against replaying accepted messages still apply. The manual load
 also reserves the next automatic loading slot; it does not disable throttling for
-other chats or later retries. ChatGPT can still return HTTP 429 to that request.
+other chats or later retries. Server rate-limit deadlines still apply to manual
+retries. Conversation API requests are monitored too: a successful document load
+can still contain a throttled history request. Such failures use a shared cooldown
+and do not count as broken conversations.
+History-read and submission rate limits have separate persisted deadlines. A
+history-read limit delays conversation document loads while healthy loaded chats,
+fresh-chat setup, and account settings remain usable. A submission limit delays
+all sends. Sidebar-list throttling does not declare an individual chat broken.
 If a local cooldown blocks an action before a request is attempted, the action
 stays queued with a neutral **Waiting for the shared browser** countdown. It runs
 when the shared loading slot becomes available, without recording a failure,
@@ -3516,8 +3623,126 @@ extend the wait without consuming a retry. Queued waits survive server restarts.
 
 Changing schedules and restarting retains
 attempt counts and uses the original failure time for pending retries; shortening
-a schedule can exhaust an existing retry budget. Accepted or uncertain sends
+a schedule can exhaust an existing finite retry budget. Accepted or uncertain sends
 remain protected from automatic replay regardless of timing settings.
+
+The private Chrome companion confirms Send with both a new conversation turn and
+a successful response to the UI's own conversation submission. An optimistic
+message bubble alone cannot release browser ownership. Rejected or unconfirmed
+submissions retain uncertain-send protection. Existing paired conversations reuse
+their connector context; new chats still require explicit connector selection.
+Routing a goal continuation into an old turn is not proof of a fresh turn. If
+that request exposes a delayed Stop control, recovery waits for it to become
+usable and ends the stalled turn on the verified account and conversation.
+The original send remains uncertain: recovery does not reload the page or replay
+that action. The next scheduled goal continuation is a distinct action. New
+workers always leave Temporary chat drafts before creating a saved conversation.
+The model picker retains its verified control identity when opening changes the
+button's presentation attributes. Menu waits honor cancellation and use bounded
+selector reads so a missing control can fail before the browser watchdog closes
+an otherwise usable window.
+
+In infinite mode, an agent's proposed blocker keeps the goal active until the
+same reason is reported across three distinct goal turns spanning at least one
+minute. Repeated calls in one turn do not count. The agent must check alternatives,
+record evidence and the exact external input needed, and continue independent work.
+Explicit stops, pauses, completed goals, and confirmed persistent blockers still
+stop automatic goal work.
+
+### Broken conversations and agent teams
+
+Enable **Automatically replace repeatedly inaccessible chats** in a chat's
+connection settings. The app first retries the original URL. Replacement requires
+three distinct confirmed-unsent conversation-load failures over at least one minute,
+an idle browser with the same account, and no live worker activity. A successful
+load/send clears the failure evidence. Local loading cooldowns do not count as
+failed chats. Automatic replacements are spaced at least 30 minutes apart.
+
+A replacement uses `continue_task` to preserve the logical task, workspace,
+goal, model/effort, history, queue, plan, memory, journal, and resident commands.
+The old physical conversation is retired after the replacement claims ownership;
+the existing Codexify task remains in the sidebar. The goal's turn metrics show
+the number of failed physical chats. **Replace broken chat** is also available for
+a confirmed inaccessible conversation. Uncertain or accepted sends are never replayed.
+
+Creation publishes the pending owner and creation state together. Late polls from
+an older physical owner cannot cancel or downgrade the handoff. Starting a new
+pairing also clears the previous physical turn's clock and handoff in that same
+transaction, preserving the goal and durable progress. If preparation is
+interrupted before any browser action exists, recovery can retry the reservation
+without incrementing the failed-chat count. Interrupted sends retain
+uncertain-send protection and are not replayed automatically.
+
+The **Agents** button beside **Add goal** creates up to eight workers per request
+and 32 children per team. Workers inherit the parent's selected project and model/
+effort, with independent goals and progress. Give editing workers separate scopes;
+inspection workers default to read-only instructions. The team controls expose
+role, scope, status, and milestone reports. Reusing the same request ID is
+idempotent; changing its arguments is rejected.
+
+Agent teams are off by default in Settings → Chats & goals. After enabling
+them and opting into delegation for a chat, use `agent_spawn` for requested work. **Allow requested delegation** can explicitly
+disable or re-enable this behavior for a chat. Agents use `agent_status` to coordinate and
+`agent_report` for findings. Worker chats cannot recursively delegate by default.
+Explicitly enabled delegation is inherited by newly created descendants; a
+read-only worker can create only read-only assignments. Agent creation queues
+from the saved model/account selection without opening a model picker or waiting
+for another browser action. Dispatch still checks the live account and exact
+selection before sending.
+These are cooperative instructions, not an operating-system file-write sandbox.
+Failed initial creation is retried only after confirmed non-submission; unknown
+submission outcomes remain protected against duplication.
+
+The Agents panel shows the saved delegation mode and refreshes team progress while
+open. Creation errors stay beside the worker drafts, which retain their request
+ID for a safe retry. Its header and action footer remain visible while the worker
+cards scroll, with themed fields on desktop and mobile. Enabled parent briefs
+explicitly describe `agent_spawn`; referring to existing worker notes is not a
+substitute for creating and tracking a requested team.
+
+The sidebar groups recorded workers in a collapsible **Agents** section below
+their coordinator, with reserved setup slots, role/status summaries and a parent
+navigation button. Search includes worker roles and scopes. Pinned workers remain
+in Pinned; expansion and focused controls survive polling.
+
+An active goal continues through recoverable errors and managed handoffs until
+its result is implemented and verified. Coordinators inspect `agent_status`,
+review reports and actual task activity, and assign useful follow-up work rather
+than treating a completed audit as completion of the overall goal. Explicit user
+stops, approvals, retry deadlines and concrete external blockers still apply.
+
+Git checkpoint warnings are drained under the command deadline while retaining
+at most 64 KiB of stderr. Additional warnings are marked as omitted; the actual
+Git exit status still decides success, and stdout retains its protocol limit.
+Initial worker setup retries do not start the 30-minute interval between actual
+conversation replacements. The first replacement still requires three distinct
+confirmed-unsent failed loads spanning at least a minute, an idle same-account
+browser, and no live worker activity. Later replacements retain that interval.
+
+Parent coordinators also have `agent_control` and per-worker controls in the panel:
+instructions, goal updates, pause, resume and stop. Only the recorded parent can
+control its own children, within the same selected project and account. Workers
+can read sibling status but cannot control siblings or parents. Lifecycle and goal
+changes compare `expectedRevision` under the goal-store lock. Stable control IDs
+and durable receipts prevent duplicate instructions and old pause/stop replays.
+Messages never implicitly resume a stopped worker. A goal edit or pause retains
+any in-progress browser action and its accepted/uncertain-send ledger. Interrupted
+multi-step controls report their recorded change and require fresh status before
+any remaining action; they never claim completion or blindly replay a resume.
+Worker cards expose reports, errors, goal revisions, tool counts and stopped state.
+Polling preserves focused instructions and retry drafts.
+`agent_message` lets workers and their parent exchange focused dependency requests,
+answers and handoffs inside the recorded team. It has durable duplicate protection,
+checks current team/project/account membership, and never resumes a paused or
+finished recipient. `get_agent_brief` and new worker goals include the
+[team working agreement](AGENT_COORDINATION.md), covering job distribution, scopes,
+message format, independent work, conflict escalation and verified reporting.
+
+A real ChatGPT maximum-conversation-length banner enters the existing guarded
+broken-conversation replacement path. Detection requires the visible app error
+and Start new chat control, ignores quoted/hidden examples, preserves genuine
+drafts and approvals, and does not click Start new chat. Repeated confirmed-unsent
+probes, account/activity guards and the existing handoff verification still apply.
 
 **Pause retries** keeps the saved error but stops automatic retries for that
 failure across browsers and restarts. **Retry** (or **Continue**) starts a manual
@@ -3540,3 +3765,125 @@ path or Git URL with Create a worktree enabled. Its Git registration and backlin
 must validate against a source project under the configured access root. The
 new worktree retains that source project in its saved binding; its base commit
 is pinned without refreshing or substituting an upstream commit.
+
+### Windows upstream integration (2.3.15)
+
+The Windows branch includes upstream 2.3.15 (`ca9f41bd`) with the local
+continuation, broken-conversation recovery, worker delegation, and Stop recovery
+changes retained. Connector refresh keeps exclusive ownership throughout its
+120-second budget, including restoration; browser and native protocol versions
+must be upgraded together.
+
+Confirmed fallback selections now update the saved model/effort picker and usage
+attribution while preserving newer manual choices. Duplicate browser events keep
+the original send time. Queued browser-cooldown overrides are labelled Do now;
+failed actions retain Retry. These upstream changes retain the local activity,
+unsent-draft, Stop, and goal-handoff recovery guards.
+
+Upstream goal reports require both an explanation and next steps. The local
+infinite-goal blocker audit compares the concrete reason alone, so changing the
+next steps does not restart its three-turn, 60-second persistence check.
+
+Windows integration also retries transient credential publication locks and
+passes ordinary drive paths to Git when filesystem canonicalization returns a
+verbatim prefix. On narrow screens, goal metrics wrap below the goal text so
+the failed-chat count cannot hide the objective.
+
+Automatic recovery ignores hidden composer scaffolding and zero-width empty
+placeholders. Exact fixed goal-control prompts and unfinished app queries can be
+reset after account and conversation verification. Other unchanged prompts can
+be recovered after a browser restart only when a private hash-only draft journal
+records that Send had not started; the journal switches to uncertain before the
+Send click. Real user edits and uncertain sends containing user messages remain
+protected.
+
+An incomplete turn-handoff report cannot hold an active goal indefinitely. After
+ten minutes without native work, a real negative inspection of the same account
+and conversation can release that renewal gate and advertise a distinct goal
+continuation. Missing observations, pending tool calls, resident commands, waits,
+pauses, explicit stops and rate-limit deadlines continue to prevent interruption.
+This also covers an accepted renewal action, and a newer active owner goal saved
+during the old response. Recovery retains the accepted action identity and kind,
+binds the fresh continuation to the current goal revision, and allocates a new
+goal action instead of resending the renewal.
+Saved progress is restored through the normal goal and rollout tools; a missing
+handoff is never marked complete and accepted messages are never replayed.
+
+Confirmed-unsent interference uses the normal automatic retry backoff, including
+infinite mode, instead of requiring a manual Retry. Real edited drafts are still
+preserved on each attempt. Explicit pauses, cancellations, accepted/uncertain
+sends and delivered-message fences continue to block replay. Terminal attempts
+clear stale in-progress flags without resetting their retry counters.
+
+If an old response exposes End turn only after prompt insertion, recovery can
+remove the unchanged journal-owned unsent text, stop that response in place once,
+and rebuild the baseline, editor, model, connector and account checks before
+Send. It does not reload or steer an accepted message into the old turn.
+
+Browser recovery distinguishes failed observation from process failure. Health
+and handoff reads cancel without closing Chrome, renderer liveness requires
+repeated failed probes spanning a minute, and native recovery requires repeated
+explicit unavailable responses for the same live PID. HTTP observation timeouts
+retain that process. A closed/dead process remains immediately recoverable.
+Private Chrome orphan recovery also checks parent creation times to distinguish
+PID reuse from an actual live owner; unrelated profiles are never selected.
+
+A timed-out or cancelled existing-conversation load also preserves Chrome when
+the composer, model, connector and Send have not been reached. Its terminal
+receipt stays unsent, while the late navigation retains the action lease and
+blocks other UI mutations until it settles. Liveness uses real renderer probes
+during that cleanup. Cancellation is checked again after navigation, so late
+completion cannot submit the old prompt. Mutating or uncertain actions retain
+their existing recovery and acceptance guards.
+
+Account-session, billing and connector-maintenance observations also have
+cancellation deadlines. A stalled read releases maintenance without retiring
+Chrome; UI mutations retain their own deadlines and ownership checks.
+A saved pre-Send goal start whose browser receipt disappeared can recover after
+the start deadline only with fresh idle, authenticated, same-account browser
+health before and after an actual missing-action response, no live or queued
+action, and no recent native activity or resident commands. It becomes an
+uncertain terminal action and continues through a distinct goal turn. Accepted
+sends and user-message actions never take this path.
+
+The parent chat now has Auto mode: one objective enables delegated development,
+managed conversation recovery and a rolling implementation/verification plan.
+The parent keeps doing its own development while assigning concrete worker goals
+and owned scopes. Manually added workers default to inspection and testing; development access
+requires an explicit assignment choice or the team development-access switch. Goal reassignment
+can also update scope through `agent_control` with a fresh revision.
+
+Agents communicate through `agent_message`, `agent_report`, and `agent_status`.
+Messages are delivered directly with stable IDs and duplicate protection.
+Reports save full evidence and notify the coordinator through the same guarded
+message path; paused or stopped coordinators remain paused or stopped.
+`agent_status` returns compact progress by default; `includeReports: true`
+requests complete saved reports. No project coordination file is created.
+
+### Optional Windows additions
+
+All added features are off by default, including for older configurations that
+omit their keys. In Settings → Chats & goals, enable Agent teams, Auto mode,
+Agent folders, Conversation recovery, or Retry without a limit individually.
+AI agent control is a separate off-by-default switch. With Agent teams
+and browser automation enabled, it exposes `agent_client` for persistent team
+setup, worker control, reports, and reconnects from standard MCP clients.
+The service automatically starts and publishes one MCP/HTTP/JavaScript connection
+alongside its tunnel. `codexify agents connection` prints it, and
+`codexify agents instructions` prints short instructions for any AI.
+See [universal agent connection](CODING_APP_AGENTS.md) for usage and tool
+examples. There are no app-specific profiles. The connection has its own scoped
+credential and works in tunnel mode.
+Agent teams also requires the per-chat delegation setting before an agent may
+spawn workers; the owner can still explicitly create a team from the panel.
+Auto mode requires Agent teams and automatic retries. Conversation recovery has
+a separate per-chat switch; its global switch also governs manual replacement.
+
+In Settings → Browser, Browser simplicity selects Off, Simplified or Bones for the
+ChatGPT sidebar, typography, decoration, motion, and offscreen history rendering. Stalled
+browser recovery controls automatic draft/editor/Stop and incomplete-handoff
+recovery. Fresh configurations retain the full interface; existing minimalUi
+choices remain compatible. Request blocking remains a separate opt-in.
+Restart Codexify after changing these settings; refresh the connector after
+changing Agent teams so its agent tools match the selected setting. Selecting
+Use default removes the override and returns each added feature to off.

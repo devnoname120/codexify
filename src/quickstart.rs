@@ -295,6 +295,7 @@ where
         .as_object_mut()
         .ok_or_else(|| anyhow::anyhow!("agentChat.automation must be an object"))?
         .insert("connectorName".into(), serde_json::json!(connector_name));
+    crate::fast_setup::apply_missing(&mut file_config).map_err(anyhow::Error::msg)?;
     let migration_backup = pending_migration
         .as_ref()
         .map(crate::config_migration::PendingConfigMigration::backup_original)
@@ -1284,6 +1285,10 @@ mod tests {
         let config: Value =
             serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
         assert_eq!(config["schemaVersion"], json!(1));
+        assert_eq!(config["agentChat"]["automation"]["browserSimplicity"], "bones");
+        assert_eq!(config["agentChat"]["defaultMessageMode"], "steer");
+        assert_eq!(config["agentChat"]["features"]["agentTeams"], true);
+        assert_eq!(config["agentChat"]["turnRenewal"]["enabled"], true);
         assert_eq!(
             config["agentChat"]["automation"]["connectorName"],
             "Codexify"

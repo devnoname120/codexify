@@ -31,6 +31,17 @@ aside p { margin:5px 0 0; font-size:12px; color:var(--muted); }
 .conversation-row { position:relative; border-radius:10px; }
 .conversation-row:hover,.conversation-row:has(:focus-visible) { background:var(--bg); }
 .conversation-row[aria-current="true"] { background:var(--selected); }
+.agent-chat-group { margin:0 0 8px 19px; border-left:1px solid var(--line); padding-left:9px; }
+.agent-group-toggle { display:flex; align-items:center; gap:6px; width:100%; padding:7px 6px; border:0; border-radius:6px; background:transparent; color:var(--muted); text-align:left; font-size:12px; }
+.agent-group-toggle:hover,.agent-group-toggle:focus-visible { background:var(--bg); color:var(--ink); }
+.agent-group-toggle:focus-visible { outline:2px solid var(--accent); }
+.agent-group-chevron { display:inline-block; transition:transform .12s; }
+.agent-group-toggle[aria-expanded=true] .agent-group-chevron { transform:rotate(90deg); }
+.agent-group-status { margin-left:auto; font-size:11px; white-space:nowrap; }
+.agent-worker-row .conversation { padding:9px 6px; }
+.agent-worker-row .conversation-title { font-size:12px; }
+.agent-pending-row { padding:9px 6px; color:var(--muted); font-size:12px; overflow-wrap:anywhere; }
+.agent-pending-row small { display:block; font-size:11px; }
 .conversation-row[data-pinned="true"] .conversation { grid-template-columns:20px minmax(0,1fr) 36px; }
 .conversation-actions { position:absolute; right:7px; top:50%; transform:translateY(-50%); display:flex; gap:2px; }
 .conversation-action { display:grid; place-items:center; width:26px; height:28px; padding:0; color:var(--muted); background:transparent; border:0; border-radius:6px; opacity:0; pointer-events:none; }
@@ -215,7 +226,61 @@ dialog:modal{box-sizing:border-box;block-size:fit-content;margin:auto;inset-bloc
 #goal-icon { display:grid; place-items:center; flex:none; color:#159b27; }
 #goal-icon[data-state="blocked"] { color:var(--waiting); }
 #goal-icon[data-state="running"] .goal-outer-ring { transform-box:view-box; transform-origin:center; animation:stop-spin 2s linear infinite; }
-#goal-editor,#pairing-editor { position:absolute; bottom:calc(100% - 8px); left:18px; right:18px; max-height:60dvh; overflow:auto; z-index:5; padding:16px; border:1px solid var(--border); border-radius:16px; background:var(--surface); box-shadow:0 8px 24px #0002; }
+#goal-editor,#pairing-editor,#agents-editor,#auto-mode-editor { position:absolute; bottom:calc(100% - 8px); left:18px; right:18px; max-height:60dvh; overflow:auto; z-index:5; padding:16px; border:1px solid var(--border); border-radius:16px; background:var(--surface); box-shadow:0 8px 24px #0002; }
+#auto-mode-editor { max-width:640px; margin-left:auto; font:13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+#auto-mode-editor textarea { box-sizing:border-box; width:100%; min-height:130px; resize:vertical; padding:12px; border:1px solid var(--border); border-radius:10px; background:var(--surface); color:var(--ink); font:inherit; }
+#auto-mode-error { color:#ad2d30; }
+#agents-editor { max-width:640px; margin-left:auto; padding:0; max-height:min(620px,calc(var(--owner-viewport-height,100dvh) - 280px)); overflow:hidden; display:flex; flex-direction:column; font:13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; color:var(--ink); }
+#agents-editor .agents-heading { display:flex; align-items:center; gap:10px; padding:14px 18px; margin:0; border-bottom:1px solid var(--border); flex:none; }
+#agents-editor .agents-heading strong { font-size:15px; font-weight:600; }
+.agent-parent-link { border:0; border-radius:5px; background:transparent; color:var(--accent,#159b27); font:inherit; text-align:left; padding:3px 0; cursor:pointer; }
+.agent-parent-link:focus-visible { outline:2px solid var(--accent,#159b27); outline-offset:2px; }
+#agents-editor-close { margin-left:auto; width:30px; height:30px; padding:5px; }
+#agents-mode-status { padding:2px 8px; border-radius:6px; font-size:11px; color:var(--muted); background:var(--agent); }
+#agents-mode-status[data-enabled=true],#automation-agents[data-enabled=true] { color:var(--accent,#159b27); }
+#agents-body { min-height:0; overflow:auto; overscroll-behavior:contain; padding:16px 18px; }
+#agents-editor .automation-detail { margin:0 0 14px; font-size:12px; line-height:1.5; }
+#agents-editor .agents-toggle { display:flex; align-items:flex-start; gap:9px; margin-bottom:16px; cursor:pointer; }
+#agents-editor input[type=checkbox] { width:15px; height:15px; flex:none; margin:3px 0 0; accent-color:var(--accent,#159b27); }
+#agents-editor .agents-toggle small { display:block; font-size:12px; color:var(--muted); margin-top:2px; }
+#agents-team { border-bottom:1px solid var(--border); padding-bottom:14px; }
+.agent-card { padding:12px; margin:10px 0 0; border:1px solid var(--border); border-radius:10px; color:var(--ink); overflow-wrap:anywhere; }
+.agent-card h4 { display:flex; gap:8px; align-items:center; margin:0 0 5px; font-size:13px; }
+.agent-phase { margin-left:auto; font-size:11px; color:var(--muted); font-weight:400; }
+.agent-card p { margin:5px 0; white-space:pre-wrap; font-size:12px; }
+.agent-card .agent-meta { color:var(--muted); }
+.agent-card .agent-error { color:var(--error,#bf3a3a); }
+.agent-card details { margin-top:10px; }
+.agent-card summary { cursor:pointer; color:var(--muted); font-size:12px; }
+.agent-card label { display:block; margin:10px 0 5px; font-size:12px; color:var(--muted); }
+.agent-card .agent-actions { display:flex; flex-wrap:wrap; gap:6px; margin-top:8px; }
+.agent-card button { border:1px solid var(--border); border-radius:7px; padding:6px 10px; background:transparent; color:var(--ink); font:inherit; font-size:12px; }
+.agent-card button:hover { background:var(--agent); }
+.agent-card button[data-primary=true] { background:var(--accent,#159b27); border-color:transparent; color:var(--bg,#fff); }
+.agent-card textarea { min-height:66px !important; margin-top:5px; }
+.agent-card .agent-feedback { font-size:12px; min-height:0; }
+.agent-card .agent-feedback:empty { display:none; }
+.agents-worker { min-width:0; border:1px solid var(--border); border-radius:12px; margin:0 0 12px; padding:12px; }
+.agents-worker legend { padding:0 5px; font-size:12px; color:var(--muted); }
+#agents-editor .agents-fields { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+#agents-editor .agents-fields label { min-width:0; display:flex; flex-direction:column; gap:5px; margin:0; color:var(--muted); font-size:12px; }
+#agents-editor .agents-fields .agents-goal { grid-column:1/-1; }
+#agents-editor input:not([type=checkbox]),#agents-editor textarea { width:100%; box-sizing:border-box; padding:9px 11px; border:1px solid var(--border); border-radius:8px; background:var(--bg,var(--surface)); color:var(--ink); font:inherit; font-size:13px; line-height:1.5; }
+#agents-editor textarea { min-height:80px; max-height:220px; resize:vertical; }
+#agents-editor :is(input,textarea,button):focus-visible { outline:2px solid var(--accent,#159b27); outline-offset:2px; }
+#agents-editor .agents-worker-options { display:flex; align-items:center; justify-content:space-between; gap:10px; margin-top:10px; }
+#agents-editor .agents-worker-options label { display:flex; gap:8px; align-items:center; color:var(--muted); font-size:12px; }
+#agents-editor .agents-worker-options input { margin:0; }
+#agents-footer { flex:none; padding:12px 18px; border-top:1px solid var(--border); background:var(--surface); }
+#agents-footer .automation-actions { margin:0; display:flex; gap:8px; }
+#agents-footer button { padding:8px 12px; border:1px solid var(--border); border-radius:8px; font:inherit; font-size:13px; color:var(--ink); background:transparent; }
+#agents-footer button:hover { background:var(--agent); }
+#agents-footer #agents-start { margin-left:auto; background:var(--accent,#159b27); border-color:transparent; color:var(--bg,#fff); }
+#agents-editor button:disabled { opacity:.5; cursor:default; }
+#agents-footer #agents-status { margin:8px 0 0; }
+#agents-status:empty { display:none; }
+#agents-status[data-error=true] { color:var(--error,#bf3a3a); }
+@media(max-width:480px) { #agents-editor .agents-heading,#agents-body,#agents-footer { padding:12px; } #agents-editor .agents-fields { grid-template-columns:minmax(0,1fr); } }
 #automation-settings { --connection-panel:var(--panel,var(--bg)); --connection-wash:var(--surface); --connection-line:var(--line,var(--border)); width:min(700px,calc(100vw - 48px)); max-width:none; max-height:calc(100dvh - 64px); margin:auto; padding:0; overflow:hidden; border:1px solid var(--connection-line); border-radius:20px; background:var(--connection-panel); color:var(--ink); box-shadow:0 24px 90px #0003; font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
 #automation-settings[open] { display:flex; flex-direction:column; }
 #automation-settings::backdrop { background:#10191673; backdrop-filter:blur(5px); }
@@ -273,14 +338,19 @@ dialog:modal{box-sizing:border-box;block-size:fit-content;margin:auto;inset-bloc
 #rename-form.inline-rename button { font:inherit; padding:4px 7px; }
 #chat-title[role=button] { cursor:text; }
 #chat-title[role=button]:focus-visible { outline:2px solid var(--accent); outline-offset:3px; border-radius:3px; }
-.project-path { white-space:nowrap; font-family:ui-monospace,SFMono-Regular,monospace; font-size:11px; }
+#code-changes { display:inline-flex; align-items:center; gap:6px; margin-left:8px; font-size:12px; font-weight:600; white-space:nowrap; font-variant-numeric:tabular-nums; }
+#code-changes[hidden] { display:none; }
+#code-changes .added { color:light-dark(#18743b,#6ad18f); }
+#code-changes .removed { color:light-dark(#b13232,#ff9292); }
+.project-path { white-space:nowrap; font-family:ui-monospace,SFMono-Regular,monospace; font-size:11px; vertical-align:top; }
 .project-path::before { content:" · "; }
 #conversation-project-path { width:100%; padding:10px 11px; border:1px solid var(--connection-line); border-radius:8px; background:var(--connection-wash); color:var(--ink); font:13px ui-monospace,SFMono-Regular,monospace; }
 #rename-form label { display:block; margin-bottom:5px; }
 #rename-form p { color:var(--muted); font-size:12px; margin:5px 0; }
 #rename-chat svg { width:17px; height:17px; fill:none; stroke:currentColor; stroke-width:1.7; }
 [hidden] { display:none !important; }
-@media(max-width:480px) { .footer { padding:10px 8px; } #composer { padding:10px; } #goal-bar { margin-left:8px; margin-right:8px; gap:5px; } #goal-caption { max-width:90px; overflow:hidden; text-overflow:ellipsis; } #goal-editor,#pairing-editor { left:8px; right:8px; } #composer-tools { gap:2px; font-size:12px; } }
+@media(max-width:480px) { .footer { padding:10px 8px; } #composer { padding:10px; } #goal-bar { margin-left:8px; margin-right:8px; gap:5px; } #goal-caption { max-width:90px; overflow:hidden; text-overflow:ellipsis; } #goal-editor,#pairing-editor,#agents-editor { left:8px; right:8px; } #composer-tools { gap:2px; font-size:12px; } }
+@media(max-width:480px) { #goal-bar { flex-wrap:wrap; } #goal-metrics { order:1; flex-basis:100%; } }
 dialog:modal{box-sizing:border-box;block-size:fit-content;margin:auto;inset-block-start:calc(var(--owner-viewport-top,0px) + var(--owner-safe-top) + 12px);inset-block-end:calc(100dvh - var(--owner-viewport-height,100dvh) - var(--owner-viewport-top,0px) + var(--owner-safe-bottom) + 12px);inset-inline-start:calc(var(--owner-safe-left) + 12px);inset-inline-end:calc(var(--owner-safe-right) + 12px);max-height:calc(var(--owner-viewport-height,100dvh) - var(--owner-safe-top) - var(--owner-safe-bottom) - 24px)!important;max-width:calc(100vw - var(--owner-safe-left) - var(--owner-safe-right) - 24px)!important}
 </style></template>
 <!-- CHAT_TEMPLATE -->
@@ -336,6 +406,9 @@ dialog:modal{box-sizing:border-box;block-size:fit-content;margin:auto;inset-bloc
   const lastPresence = new Map();
   let automationEnabled = null;
   const organizing = new Set();
+  let agentGroupOpen = {};
+  try { agentGroupOpen=JSON.parse(localStorage.getItem("owner-chat-agent-groups-v1")||"{}");if(!agentGroupOpen||Array.isArray(agentGroupOpen)||typeof agentGroupOpen!=="object")agentGroupOpen={}; } catch {}
+  function saveAgentGroups(){try{localStorage.setItem("owner-chat-agent-groups-v1",JSON.stringify(agentGroupOpen));}catch{}}
   try { if (localStorage.getItem("owner-chat-list-view-v1") === "recent") listMode = "recent"; } catch {}
   const chatIdPattern = /^[0-9a-f]{64}$/;
   let accountPlan = null;
@@ -575,7 +648,55 @@ dialog:modal{box-sizing:border-box;block-size:fit-content;margin:auto;inset-bloc
     if (pairAction && ["navigating", "sending", "generating"].includes(action.status)) return "pairing";
     return pairing.creatingChat || pairing.status === "unverified" ? "failed" : "unpaired";
   }
+  function createCodeChangesCounter(id, scope) {
+    const counter = document.createElement("span");
+    counter.id = "code-changes"; counter.hidden = true;
+    const added = document.createElement("span"), removed = document.createElement("span");
+    added.className = "added"; removed.className = "removed";
+    counter.append(added, removed);
+    scope.querySelector(".heading h1").append(counter);
+    let closed = false, busy = false, timer = null, abort = null, lastAttempt = 0, epoch = 0;
+    async function refresh(force = false) {
+      clearTimeout(timer);
+      if (closed || busy || document.hidden) return;
+      const remaining = 20000 - (Date.now() - lastAttempt);
+      if (!force && remaining > 0) { timer = setTimeout(refresh, remaining); return; }
+      busy = true; lastAttempt = Date.now(); abort = new AbortController();
+      const requestedEpoch = epoch;
+      const deadline = setTimeout(() => abort?.abort(), 6000);
+      let next = 20000;
+      try {
+        const value = await (await api(`/api/chats/${id}/changes`, {signal:abort.signal})).json();
+        if (closed || requestedEpoch !== epoch) return;
+        const summary = value.summary;
+        if (value.available && Number.isSafeInteger(summary?.additions) && summary.additions >= 0 && Number.isSafeInteger(summary.deletions) && summary.deletions >= 0) {
+          added.textContent = `+${summary.additions.toLocaleString()}`;
+          removed.textContent = `−${summary.deletions.toLocaleString()}`;
+          const partial = summary.partial ? " Partial count: large or unreadable new files were skipped." : "";
+          const stale = value.stale ? " Last successful count; refresh is pending." : "";
+          counter.title = `Working-tree changes in this chat's project since its last commit, including other agents. ${summary.files} files; ${summary.binaryFiles || 0} binary.${partial}${stale}`;
+          counter.setAttribute("aria-label", `${summary.additions} lines added, ${summary.deletions} lines removed${summary.partial ? ", partial count" : ""}${value.stale ? ", last successful count" : ""}`);
+          counter.hidden = false;
+        } else counter.hidden = true;
+        if (value.refreshing) next = 1000;
+      } catch {
+        // Optional counters must never block chat, tools, or display fake zeroes.
+        if (!closed && requestedEpoch === epoch && !counter.hidden) counter.title = "Last successful working-tree count. Refresh temporarily unavailable.";
+      } finally {
+        clearTimeout(deadline); busy = false; abort = null;
+        if (!closed) timer = setTimeout(() => void refresh(true), requestedEpoch === epoch ? next : 0);
+      }
+    }
+    const onVisibility = () => { if (!document.hidden) void refresh(); else clearTimeout(timer); };
+    document.addEventListener("visibilitychange", onVisibility);
+    timer = setTimeout(() => void refresh(), 0);
+    return {
+      invalidate() { ++epoch; counter.hidden = true; lastAttempt = 0; abort?.abort(); void refresh(true); },
+      close() { closed = true; clearTimeout(timer); abort?.abort(); document.removeEventListener("visibilitychange", onVisibility); }
+    };
+  }
   function createAutomationPanel(id, scope) {
+    const changes = createCodeChangesCounter(id, scope);
     const panel = document.createElement("section");
     panel.id = "automation-panel";
     panel.hidden = true;
@@ -600,6 +721,7 @@ dialog:modal{box-sizing:border-box;block-size:fit-content;margin:auto;inset-bloc
           </section>
           <section class="connection-settings-card" aria-labelledby="connection-activity-heading">
             <div class="connection-card-heading"><h3 id="connection-activity-heading">Activity &amp; recovery</h3></div>
+            <div class="connection-card-content"><label><input type="checkbox" id="automation-recover-conversations"> Automatically replace repeatedly inaccessible chats</label><p class="automation-detail">Keep this task's workspace, goal, settings, and saved progress in the replacement.</p></div>
             <div class="connection-card-content"><p class="automation-detail"><span id="automation-presence"></span> · <span id="automation-action"></span> <span id="automation-queue" hidden></span></p><p id="automation-live-status" class="automation-detail"></p><p id="automation-live-commentary" class="automation-detail"></p><p id="automation-live-answer" class="automation-detail"></p><div class="automation-actions"><button type="button" id="automation-cancel-action">Cancel queued action</button><button type="button" id="automation-retry-action">Retry failed action</button></div></div>
           </section>
         </div>
@@ -611,13 +733,35 @@ dialog:modal{box-sizing:border-box;block-size:fit-content;margin:auto;inset-bloc
         <input id="pairing-editor-url" type="url" inputmode="url" autocomplete="off" spellcheck="false" placeholder="https://chatgpt.com/c/…" required>
         <div class="automation-actions"><button type="submit" id="pairing-editor-submit">Pair</button></div>
       </form>
+      <div id="agents-editor" hidden aria-label="Agent team">
+        <div class="agents-heading"><strong>Agents</strong><span id="agents-mode-status" role="status">Delegation off</span><button type="button" class="composer-button" id="agents-editor-close" aria-label="Close agents">✕</button></div>
+        <div id="agents-body">
+        <p class="automation-detail">Workers share this chat's project and model. Give each a clear goal and a separate scope.</p>
+        <label class="agents-toggle"><input type="checkbox" id="agents-allow-delegation"><span>Allow requested delegation<small>This chat can create workers when you ask it to split up work.</small></span></label>
+        <label class="agents-toggle"><input type="checkbox" id="agents-development-access"><span>Full development access<small>Existing and future workers can implement, build, test and debug their jobs.</small></span></label>
+        <div id="agents-team" class="automation-detail" aria-live="polite"></div>
+        <div id="agents-workers"></div>
+        </div><div id="agents-footer">
+        <div class="automation-actions"><button type="button" id="agents-add-worker">Add worker</button><button type="button" id="agents-start">Start workers</button></div>
+        <p id="agents-status" class="automation-detail" role="status"></p>
+        </div>
+      </div>
+      <form id="auto-mode-editor" hidden aria-label="Auto mode">
+        <div class="automation-heading"><strong>Auto mode</strong><button type="button" class="composer-button" id="auto-mode-close" aria-label="Close Auto mode">&#x2715;</button></div>
+        <p class="automation-detail">Describe the result. This chat implements changes, coordinates agents, tests results and keeps improving until the goal is verified.</p>
+        <label class="automation-field" for="auto-mode-prompt">What should be done?</label>
+        <textarea id="auto-mode-prompt" maxlength="6000" placeholder="Build or improve... Include the result you expect." required></textarea>
+        <p class="automation-detail">Agents can develop within their assigned project scope. You get concrete changes, milestones and questions that need your input. Your Stop and Pause controls still apply.</p>
+        <p id="auto-mode-error" role="alert" hidden></p>
+        <div class="automation-actions"><button type="submit" id="auto-mode-start">Start Auto mode</button></div>
+      </form>
       <div id="goal-editor" hidden>
         <div class="automation-heading"><strong>Goal</strong><button type="button" class="composer-button" id="goal-editor-close" aria-label="Close goal editor">✕</button></div>
         <label class="automation-field" for="automation-goal">Goal Markdown</label><textarea id="automation-goal" maxlength="10240" placeholder="Describe the task goal"></textarea>
         <div class="automation-actions"><button type="button" id="automation-set-goal">Set goal</button></div>
         <p id="goal-status" class="automation-detail"></p>
       </div>
-      <div id="automation-error-row"><div id="automation-error" role="alert" hidden></div><button type="button" class="composer-button" id="automation-retry-inline" hidden>Retry</button><button type="button" class="composer-button" id="automation-pause-retries" title="Keep this error and stop its automatic retries" hidden>Pause retries</button><button type="button" class="composer-button" id="automation-dismiss-inline" aria-label="Dismiss error" title="Clear this error and stop its automatic retries" hidden>Dismiss</button></div>
+      <div id="automation-error-row"><div id="automation-error" role="alert" hidden></div><button type="button" class="composer-button" id="automation-retry-inline" hidden>Retry</button><button type="button" class="composer-button" id="automation-replace-chat" hidden>Replace broken chat</button><button type="button" class="composer-button" id="automation-pause-retries" title="Keep this error and stop its automatic retries" hidden>Pause retries</button><button type="button" class="composer-button" id="automation-dismiss-inline" aria-label="Dismiss error" title="Clear this error and stop its automatic retries" hidden>Dismiss</button></div>
       <div id="goal-bar" hidden>
         <span id="goal-icon" aria-hidden="true"></span><span id="goal-caption"></span><span id="goal-text"></span><span id="goal-metrics" aria-label="Goal active time and turns" title="Counts while this goal is enabled and the agent is online, away, or waiting. Pauses when the agent is offline."></span>
         <button type="button" class="composer-button" id="goal-retry" hidden>Retry</button>
@@ -633,6 +777,21 @@ dialog:modal{box-sizing:border-box;block-size:fit-content;margin:auto;inset-bloc
     tools.hidden = true;
     tools.innerHTML = `<button type="button" class="composer-button" id="automation-settings-toggle" aria-label="Connection settings" title="Connection settings" aria-expanded="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 2h4l.7 3 2.5 1.4 2.9-.9 2 3.4-2.2 2.1v2l2.2 2.1-2 3.4-2.9-.9-2.5 1.4-.7 3h-4l-.7-3-2.5-1.4-2.9.9-2-3.4L4.1 13v-2L1.9 8.9l2-3.4 2.9.9L9.3 5Z"/><circle cx="12" cy="12" r="3"/></svg></button><button type="button" class="composer-button" id="automation-pair-chat" hidden>Pair chat</button><button type="button" class="composer-button" id="automation-add-goal">Add goal</button><select id="automation-model" aria-label="ChatGPT model"><option value="">Models unavailable</option></select><select id="automation-effort" aria-label="Reasoning effort"><option value="">Effort</option></select>`;
     composer.insertBefore(tools, scope.querySelector("#send"));
+    const agentsButton = document.createElement("button");
+    agentsButton.type = "button"; agentsButton.className = "composer-button";
+    agentsButton.hidden = true; agentsButton.id = "automation-agents"; agentsButton.textContent = "Agents";
+    agentsButton.setAttribute("aria-label", "Agents"); agentsButton.setAttribute("aria-expanded", "false");
+    tools.querySelector("#automation-add-goal").after(agentsButton);
+    const autoModeButton = document.createElement("button");
+    autoModeButton.type = "button"; autoModeButton.className = "composer-button";
+    autoModeButton.hidden = true; autoModeButton.id = "automation-auto-mode"; autoModeButton.textContent = "Auto mode";
+    autoModeButton.setAttribute("aria-label", "Auto mode");
+    agentsButton.after(autoModeButton);
+    const stopTeamButton=document.createElement("button");
+    stopTeamButton.type="button";stopTeamButton.className="composer-button";stopTeamButton.id="automation-stop-team";
+    stopTeamButton.textContent="Stop team";stopTeamButton.setAttribute("aria-label","Stop all agents");
+    stopTeamButton.title="Stop this coordinator and all its workers";stopTeamButton.style.color="var(--error,#b63b3b)";
+    autoModeButton.after(stopTeamButton);
     const settingsToggle = tools.querySelector("#automation-settings-toggle");
     settingsToggle.classList.add("icon-button");
     settingsToggle.hidden = true;
@@ -695,14 +854,17 @@ dialog:modal{box-sizing:border-box;block-size:fit-content;margin:auto;inset-bloc
       const until = Number.isSafeInteger(goal?.timerUntilMs) ? goal.timerUntilMs : now;
       const elapsed = (goal?.elapsedActiveMs || 0) + (goal?.status === "active" && Number.isSafeInteger(goal.activeSinceMs) ? Math.max(0, Math.min(now, until) - goal.activeSinceMs) : 0);
       const turns = Math.max(1, goal?.turnCount || 1);
-      byId("goal-metrics").textContent = goal ? `${goalDuration(elapsed)} (${turns} turn${turns === 1 ? "" : "s"})` : "";
+      const failedChats = Math.max(0,current?.conversationRecovery?.failedChatCount || 0);
+      byId("goal-metrics").textContent = goal ? `${goalDuration(elapsed)} (${turns} turn${turns === 1 ? "" : "s"} · ${failedChats} failed chat${failedChats === 1 ? "" : "s"})` : "";
     }
     function renderGoalBar(goal, {needsAttention=false,failure="",loading=false}={}) {
       byId("goal-icon").dataset.state = goal?.status === "blocked" || goal?.status === "error" ? "blocked" : goal?.status === "active" ? "running" : "paused";
       byId("goal-bar").hidden = !goal;
       byId("goal-caption").textContent = needsAttention ? "Goal needs attention" : goal?.status === "active" ? "Pursuing goal" : goal?.status === "configured" ? "Goal paused" : `Goal ${goal?.status || ""}`;
       byId("goal-caption").title = needsAttention ? failure : "";
-      byId("goal-text").textContent = goal?.markdown || "";
+      const autoGoal = goal?.markdown?.startsWith("Auto mode\n\nObjective:\n");
+      byId("goal-text").textContent = autoGoal ? goal.markdown.split("\n\nWorking agreement:")[0].slice("Auto mode\n\nObjective:\n".length) : goal?.markdown || "";
+      if (autoGoal && goal.status === "active" && !needsAttention) byId("goal-caption").textContent = "Auto mode";
       byId("goal-text").title = goal?.blockedReason || goal?.markdown || "";
       updateGoalMetrics();
       if (byId("goal-editor").hidden) nodes.goal.value = goal?.markdown || "";
@@ -755,12 +917,15 @@ dialog:modal{box-sizing:border-box;block-size:fit-content;margin:auto;inset-bloc
       // Goal controls can arrive after the history has already scrolled to its end.
       const atBottom = history.scrollHeight - history.scrollTop - history.clientHeight < 50;
       current = state;
+      byId("automation-recover-conversations").closest("label").hidden = state.features?.conversationRecovery !== true;
+      if(scope.activeElement!==byId("automation-recover-conversations"))byId("automation-recover-conversations").checked=state?.conversationRecovery?.enabled===true;
       const chat = chats.find(chat => chat.id === id);
       if (chat && Object.hasOwn(state, "goal")) chat.goal = state.goal;
       const setStateError = (message, waiting = false) => setError(message,errorSignature(message),waiting);
       panel.hidden = tools.hidden = !state?.enabled;
       settingsToggle.hidden = !state?.enabled;
       if (!state?.enabled) { showSettings(false); return; }
+      renderAgentsMode(state.agents?.allowDelegation === true, state.agents?.children?.filter(child=>child.retiredAtMs==null).length || 0);
       const waitingForBrowser = Number.isSafeInteger(state.action?.cooldownUntilMs);
       const automaticRetry = !waitingForBrowser && Number.isSafeInteger(state.action?.automaticRetryAtMs);
       const presenceState = presence(state.presence?.lastAgentCallAtMs, Date.now() + clockOffset, state.presence?.agentWaitingUntilMs, state.presence?.agentPresenceUntilMs, state.presence?.agentIdleUntilMs);
@@ -801,6 +966,11 @@ dialog:modal{box-sizing:border-box;block-size:fit-content;margin:auto;inset-bloc
       const explanation = !companion.authenticated ? "Sign in through Codexify settings → Browser to load available models." : savingSelection ? "Saving model and effort…" : !catalogLoaded ? "Model list unavailable. Refresh models in Codexify settings → Browser." : "Used for the next automatic turn.";
       nodes.model.title = nodes.effort.title = explanation;
       const goal = state.goal;
+      agentsButton.hidden = state.features?.agentTeams !== true;
+      if (agentsButton.hidden) byId("agents-editor").hidden = true;
+      autoModeButton.hidden = state.features?.autoMode !== true || state.features?.agentTeams !== true || !verified || Boolean(state.agents?.parentTaskKey);
+      if (autoModeButton.hidden) byId("auto-mode-editor").hidden = true;
+      autoModeButton.dataset.enabled = String(goal?.status === "active" && goal?.markdown?.startsWith("Auto mode\n\nObjective:\n"));
       byId("automation-add-goal").hidden = !verified || Boolean(goal);
       const actionFailed = !waitingForBrowser && !pairingWaiting && (pairingTimedOut || ["failed", "ambiguous", "stalled", "approval_required", "authentication_required", "conversation_unavailable", "rate_limited", "interference"].includes(state.action?.status));
       const actionNeedsAttention = !automaticRetry && actionFailed;
@@ -808,6 +978,9 @@ dialog:modal{box-sizing:border-box;block-size:fit-content;margin:auto;inset-bloc
       const cooldown = conversationCooldown(state.action, Date.now() + clockOffset);
       const failure = cooldown ? (automaticRetry && state.action.automaticRetryAtMs > cooldown.until ? cooldown.summary : cooldown.message) : state.action?.lastError || state.live?.status || (pairingTimedOut ? "Pairing verification has not arrived yet." : "The browser action did not finish.");
       renderGoalBar(goal, {needsAttention:goalNeedsAttention,failure});
+      if (goal?.status === "active" && state.blockerAudit?.revision === goal.revision) {
+        nodes.goalStatus.textContent = `Goal active · Checking blocker (${Math.min(3,state.blockerAudit.attempts)}/3): ${state.blockerAudit.reason}`;
+      }
       const retryMode = state.action && "retryMode" in state.action ? state.action.retryMode : state.action?.status === "failed" && state.action.kind !== "pair_verify" ? "retry" : null;
       const inlineRetry = byId("automation-retry-inline");
       inlineRetry.hidden = !retryMode;
@@ -823,9 +996,10 @@ dialog:modal{box-sizing:border-box;block-size:fit-content;margin:auto;inset-bloc
       byId("goal-retry").title = retryMode === "continue_goal" ? "Start a new goal turn without resending previous messages" : "Retry the action that failed before sending";
       const retrySeconds = automaticRetry ? Math.max(0, Math.ceil((state.action.automaticRetryAtMs - Date.now() - clockOffset) / 1000)) : null;
       const goalRetry = goal?.status === "active" && (state.action?.kind === "offline_goal" || state.action?.kind === "offline_combined" && state.action.sendAccepted && state.action.messagesFenced);
+      const infiniteRetries = state.action?.automaticRetriesInfinite === true;
       const retryLimit = state.action?.automaticRetryLimit ?? 5;
       const retryNow = retryMode === "continue_goal" ? " You can also continue now." : retryMode ? " You can also retry now." : "";
-      const retryStatus = automaticRetry ? (goalRetry ? `Retrying the goal automatically in ${retrySeconds}s.` : `Retrying automatically in ${retrySeconds}s (retry ${(state.action.automaticRetryAttempts || 0) + 1} of ${retryLimit}).`) + retryNow : "";
+      const retryStatus = automaticRetry ? (goalRetry ? `Retrying the goal automatically in ${retrySeconds}s.` : `Retrying automatically in ${retrySeconds}s (retry ${(state.action.automaticRetryAttempts || 0) + 1}${infiniteRetries ? "; unlimited" : ` of ${retryLimit}`}).`) + retryNow : "";
       const cooldownSeconds = waitingForBrowser ? Math.max(0,Math.ceil((state.action.cooldownUntilMs-Date.now()-clockOffset)/1000)) : 0;
       const queuePosition = Number.isSafeInteger(state.queue?.position) && state.queue.position > 0 ? ` (position in queue: ${state.queue.position})` : "";
       const waitingStatus = cooldownSeconds ? `Conversation loading available in ${cooldownSeconds}s${queuePosition}.` : `Waiting for the shared browser${queuePosition}.`;
@@ -845,7 +1019,7 @@ dialog:modal{box-sizing:border-box;block-size:fit-content;margin:auto;inset-bloc
       else if (actionNeedsAttention) {
         const preparation = state.action?.status === "authentication_required" ? "Sign in from Codexify settings → Browser, or replace pairing if the account changed. " : state.action?.status === "approval_required" ? "Open in ChatGPT to review the approval. " : state.action?.status === "rate_limited" && !cooldown ? "Wait for ChatGPT's limit to reset. " : "";
         const retryPolicy = state.action?.automaticRetryPaused ? "Automatic retries paused. " : state.action?.automaticRetriesEnabled === false ? "Automatic retries disabled in settings. " : "";
-        const exhausted = retryPolicy || (state.action?.automaticRetryAttempts >= retryLimit ? `All ${retryLimit} automatic retries failed. ` : "");
+        const exhausted = retryPolicy || (!infiniteRetries && state.action?.automaticRetryAttempts >= retryLimit ? `All ${retryLimit} automatic retries failed. ` : "");
         const nextStep = retryMode === "retry" ? `${preparation}${exhausted}Use Retry to try again. The message was not sent.` : retryMode === "continue_goal" ? `${exhausted}Use Continue to start another goal turn. Previously submitted messages will not be resent.` : state.action?.kind === "pair_verify" ? "Use Retry chat pairing to create a new verification request." : "Open in ChatGPT to check whether the message was sent before sending it again.";
         setStateError(`${failure} ${nextStep}`);
       } else if (state.action?.lastError) setStateError(failure);
@@ -853,6 +1027,7 @@ dialog:modal{box-sizing:border-box;block-size:fit-content;margin:auto;inset-bloc
       if (nodes.error.hidden) inlineRetry.hidden = true;
       byId("automation-dismiss-inline").hidden = nodes.error.hidden;
       byId("automation-pause-retries").hidden = !state.action?.canPauseRetries;
+      byId("automation-replace-chat").hidden = !(state.features?.conversationRecovery === true && state.goal?.status === "active" && state.action?.status === "conversation_unavailable" && state.action?.sendAccepted === false && state.action?.lastError === "ChatGPT conversation temporarily not accessible");
       if (atBottom) history.scrollTop = history.scrollHeight;
     }
     async function refreshState({ quiet = false } = {}) {
@@ -913,7 +1088,7 @@ dialog:modal{box-sizing:border-box;block-size:fit-content;margin:auto;inset-bloc
       }
       else { const wasOpen = settingsDialog.open; if (wasOpen) settingsDialog.close(); settingsDialog.hidden = true; if (wasOpen && !closed && !settingsToggle.hidden) settingsToggle.focus(); }
       settingsToggle.setAttribute("aria-expanded", String(visible));
-      byId("goal-editor").hidden = byId("pairing-editor").hidden = true;
+      byId("goal-editor").hidden = byId("pairing-editor").hidden = byId("agents-editor").hidden = true;
     };
     settingsDialog.addEventListener("close", () => { if (!settingsDialog.open) { settingsDialog.hidden = true; settingsToggle.setAttribute("aria-expanded", "false"); } });
     settingsDialog.addEventListener("cancel", event => { event.preventDefault(); showSettings(false); });
@@ -927,6 +1102,7 @@ dialog:modal{box-sizing:border-box;block-size:fit-content;margin:auto;inset-bloc
         if (closed) return;
         if (chat) Object.assign(chat,payload);
         input.value = payload.projectPath; input.dataset.savedPath = payload.projectPath;
+        changes.invalidate();
         renderList(); void refresh();
       } catch (failure) { error.textContent = failure.message; error.hidden = false; }
       finally { save.disabled = false; }
@@ -978,15 +1154,221 @@ dialog:modal{box-sizing:border-box;block-size:fit-content;margin:auto;inset-bloc
     byId("pairing-editor").addEventListener("submit", event => { event.preventDefault(); if (!byId("pairing-editor-submit").disabled) void submitPairing(byId("pairing-editor-url").value.trim()); });
     byId("automation-settings-close").addEventListener("click", () => showSettings(false));
     byId("automation-settings-done").addEventListener("click", () => showSettings(false));
+    let autoModeSubmission = null, autoModeSubmitting = false;
+    const autoPrompt = byId("auto-mode-prompt"), autoStart = byId("auto-mode-start");
+    autoModeButton.addEventListener("click", async () => {
+      try { if (!await ensureConnectorName()) return; } catch(error) { setError(error.message); return; }
+      showSettings(false);
+      for (const name of ["goal-editor","pairing-editor","agents-editor"]) byId(name).hidden = true;
+      const saved = current?.goal?.markdown || "";
+      if (!autoPrompt.value) autoPrompt.value = saved.startsWith("Auto mode\n\nObjective:\n") ? saved.split("\n\nWorking agreement:")[0].slice("Auto mode\n\nObjective:\n".length) : "";
+      byId("auto-mode-editor").hidden = false; autoPrompt.focus();
+    });
+    byId("auto-mode-close").addEventListener("click", () => { if (!autoModeSubmitting) byId("auto-mode-editor").hidden = true; });
+    autoPrompt.addEventListener("input", () => { autoModeSubmission = null; byId("auto-mode-error").hidden = true; });
+    byId("auto-mode-editor").addEventListener("submit", async event => {
+      event.preventDefault(); if (autoModeSubmitting || !autoPrompt.value.trim()) return;
+      autoModeSubmission ||= {requestId:requestId("auto-mode"), expectedRevision:current?.goal?.revision || 0, prompt:autoPrompt.value.trim()};
+      autoModeSubmitting = true; autoStart.disabled = true; autoPrompt.disabled = true;
+      byId("auto-mode-error").hidden = true;
+      try {
+        const result = await post("auto-mode", autoModeSubmission);
+        if (current) current.goal = result.goal;
+        autoModeSubmission = null; autoPrompt.value = ""; byId("auto-mode-editor").hidden = true;
+        await refreshState({quiet:true}); void refresh();
+      } catch(error) {
+        byId("auto-mode-error").textContent = error.message; byId("auto-mode-error").hidden = false;
+      } finally { autoModeSubmitting = false; autoStart.disabled = false; autoPrompt.disabled = false; }
+    });
     byId("automation-add-goal").addEventListener("click", editGoal);
     byId("automation-edit-goal").addEventListener("click", editGoal);
     byId("goal-editor-close").addEventListener("click", () => { byId("goal-editor").hidden = true; });
+    let agentsRequestId = null, agentsSubmitting = false, agentsSettingsSaving = false, agentsRefreshing = false, agentsRefreshedAt = 0;
+    let agentsFullDevelopmentAccess=false, agentsAccessRequest=null;
+    let stopTeamRequest=null;
+    stopTeamButton.addEventListener("click",()=>runAgents(async()=>{
+      stopTeamRequest ||= requestId("stop-team");stopTeamButton.disabled=true;stopTeamButton.textContent="Stopping...";
+      try{await post("agents/stop-all",{requestId:stopTeamRequest});stopTeamRequest=null;byId("agents-status").textContent="Coordinator and workers stopped. Resume work explicitly when ready.";}
+      finally{stopTeamButton.disabled=false;stopTeamButton.textContent="Stop team";}
+    }));
+    function renderDevelopmentAccess(team){
+      agentsFullDevelopmentAccess=team.fullDevelopmentAccess===true;
+      const toggle=byId("agents-development-access");
+      if(!agentsSettingsSaving)toggle.checked=agentsFullDevelopmentAccess;
+      toggle.disabled=agentsSettingsSaving||Boolean(team.parentTaskKey);
+      toggle.title=team.parentTaskKey?"Managed by the coordinating task":"";
+      for(const input of byId("agents-workers").querySelectorAll('[data-worker="readOnly"]')){
+        input.closest("label").hidden=agentsFullDevelopmentAccess;
+        if(agentsFullDevelopmentAccess)input.checked=false;
+      }
+    }
+    function renderAgentsMode(enabled, count) {
+      stopTeamButton.hidden=current?.features?.agentTeams!==true||Boolean(current?.agents?.parentTaskKey);
+      if (!agentsSettingsSaving) byId("agents-allow-delegation").checked = enabled;
+      const badge = byId("agents-mode-status"); badge.textContent = enabled ? "Delegation on" : "Delegation off";
+      badge.dataset.enabled = agentsButton.dataset.enabled = String(enabled);
+      agentsButton.textContent = count ? `Agents · ${count}` : "Agents";
+      agentsButton.title = `${count} worker${count === 1 ? "" : "s"} · requested delegation ${enabled ? "on" : "off"}`;
+    }
+    function workerButtons() {
+      const rows = [...byId("agents-workers").children];
+      rows.forEach((row, index) => { row.querySelector("legend").textContent = `Worker ${index + 1}`; });
+      byId("agents-add-worker").disabled = agentsSubmitting || rows.length >= 8;
+      byId("agents-start").disabled = agentsSubmitting || !rows.length;
+    }
+    async function runAgents(operation) {
+      byId("agents-status").dataset.error = "false";
+      try { await operation(); if (!closed) await refreshState({quiet:true}); }
+      catch (error) { if (!closed) { byId("agents-status").dataset.error = "true"; byId("agents-status").textContent = error.message || "Agent operation failed. Try again."; } }
+    }
+    function addWorker() {
+      const list = byId("agents-workers");
+      if (list.children.length >= 8) return;
+      const row = document.createElement("fieldset"); row.className = "agents-worker";
+      row.innerHTML = `<legend>Worker</legend><div class="agents-fields"><label>Role<input data-worker="role" maxlength="128" placeholder="e.g. Verification"></label><label>Owned scope<input data-worker="scope" maxlength="1000" placeholder="Files or responsibilities"></label><label class="agents-goal">Goal<textarea data-worker="goal" maxlength="6000" placeholder="Concrete result to achieve"></textarea></label></div><div class="agents-worker-options"><label><input type="checkbox" data-worker="readOnly"> Inspect and test only</label><button type="button" class="composer-button">Remove</button></div>`;
+      row.querySelector("button").addEventListener("click", () => { row.remove(); agentsRequestId = null; workerButtons(); });
+      row.addEventListener("input", () => { agentsRequestId = null; });
+      list.append(row);
+      if(agentsFullDevelopmentAccess)row.querySelector('[data-worker="readOnly"]').closest("label").hidden=true;
+      workerButtons();
+    }
+    const agentDrafts = new Map();
+    function agentDraft(key) {
+      if (!agentDrafts.has(key)) agentDrafts.set(key, {message:"",goal:null,open:false,pending:false,requests:new Map(),feedback:"",error:false});
+      return agentDrafts.get(key);
+    }
+    async function controlWorker(worker, action, content) {
+      const draft = agentDraft(worker.taskKey);
+      if (draft.pending) return;
+      const args = {workerTaskKey:worker.taskKey,action};
+      if (action !== "message") args.expectedRevision = worker.goal?.revision;
+      if (content !== undefined) args.content = content.trim();
+      if ((action === "message" || action === "set_goal") && !args.content) return;
+      const signature = JSON.stringify(args);
+      if (!draft.requests.has(signature)) draft.requests.set(signature,requestId("worker"));
+      draft.pending = true; draft.feedback = "Saving…"; draft.error = false;
+      const card = [...byId("agents-team").children].find(node=>node.dataset.taskKey===worker.taskKey);
+      card?.querySelectorAll("button,textarea").forEach(node=>node.disabled=true);
+      try {
+        await post("agents/control",{requestId:draft.requests.get(signature),...args});
+        if (action === "message") draft.message = "";
+        if (action === "set_goal") draft.goal = null;
+        draft.feedback = ({message:"Instruction saved for the worker.",set_goal:"Worker goal updated.",pause:"Worker paused.",resume:"Worker resumed.",stop:"Worker stopped.",retire:"Worker archived; reports preserved."})[action];
+      } catch(error) { draft.error = true; draft.feedback = error.message || "Worker control failed. Refresh status before retrying."; }
+      finally { draft.pending = false; await refreshAgents(true); }
+    }
+    function renderAgentCard(worker) {
+      const draft = agentDraft(worker.taskKey), card = document.createElement("section");
+      card.className = "agent-card"; card.dataset.taskKey = worker.taskKey;
+      const add = (tag,text,className) => { const node=document.createElement(tag);node.textContent=text;if(className)node.className=className;card.append(node);return node; };
+      const heading=add("h4",worker.role), phase=document.createElement("span");
+      const paused=worker.stopped || worker.goal?.status === "configured";
+      phase.className="agent-phase";
+      phase.textContent=paused ? "paused" : ["completed","blocked","error"].includes(worker.goal?.status) ? worker.goal.status : worker.action === "idle" && worker.goal?.status === "active" ? "working" : worker.action || "preparing";
+      heading.append(phase);
+      add("p",worker.scope + (worker.readOnly ? " · inspect and test only" : ""),"agent-meta");
+      if (worker.toolCallCount != null) add("p",`${worker.toolCallCount} tool calls${worker.queuePosition ? " · queued" : ""}`,"agent-meta");
+      if (worker.lastError) add("p",worker.lastError,"agent-error");
+      if (worker.report) add("p",worker.report,"agent-report");
+      if (worker.canControl) {
+        const details=document.createElement("details"),summary=document.createElement("summary");
+        summary.textContent="Coordinate worker";details.append(summary);details.open=draft.open;
+        details.addEventListener("toggle",()=>{draft.open=details.open;});card.append(details);
+        const textarea=(label,value,save) => {const text=document.createElement("label"),input=document.createElement("textarea");text.textContent=label;input.setAttribute("aria-label",`${label} · ${worker.role}`);input.maxLength=6000;input.value=value;input.disabled=draft.pending;input.addEventListener("input",()=>save(input.value));text.append(input);details.append(text);return input;};
+        const buttons=document.createElement("div");buttons.className="agent-actions";
+        const button=(label,action,content,parent=buttons) => {const node=document.createElement("button");node.type="button";node.textContent=label;node.setAttribute("aria-label",`${label} · ${worker.role}`);node.disabled=draft.pending;node.addEventListener("click",()=>void controlWorker(worker,action,content?.()));parent.append(node);return node;};
+        const instruction=textarea("Instruction",draft.message,value=>{draft.message=value;send.disabled=draft.pending||paused||!value.trim();});
+        instruction.placeholder="Give this worker a focused next step";
+        const send=button("Send instruction","message",()=>instruction.value);send.dataset.primary="true";send.disabled=draft.pending||paused||!draft.message.trim();
+        if (paused) button("Resume","resume");else if (worker.goal?.status === "active") {button("Pause","pause");button("Stop","stop");}
+        if(worker.goal?.status==="completed")button("Archive worker","retire");
+        details.append(buttons);
+        const goal=textarea("Worker goal",draft.goal ?? worker.goalText ?? "",value=>{draft.goal=value;saveGoal.disabled=draft.pending||paused||!value.trim()||value.trim()===(worker.goalText||"").trim();});
+        const goalActions=document.createElement("div");goalActions.className="agent-actions";
+        const saveGoal=button("Update goal","set_goal",()=>goal.value,goalActions);saveGoal.disabled=draft.pending||paused||!goal.value.trim()||goal.value.trim()===(worker.goalText||"").trim();details.append(goalActions);
+        if (paused) add("p","Resume this worker before sending instructions or updating its goal.","agent-meta");
+        const feedback=add("p",draft.feedback,"agent-feedback"+(draft.error?" agent-error":""));feedback.setAttribute("role","status");
+      }
+      return card;
+    }
+    async function refreshAgents(force=false) {
+      if (agentsRefreshing) return;
+      agentsRefreshing = true;
+      try {
+        const team = await (await api(`/api/chats/${id}/automation/agents`)).json();
+        if (closed) return;
+        agentsRefreshedAt = Date.now();
+        renderAgentsMode(team.allowDelegation === true, (team.workers || []).filter(worker=>!worker.retired).length);
+        renderDevelopmentAccess(team);
+        const list = byId("agents-team");
+        // Polling must never erase an instruction being typed or interrupt a control.
+        if (!force && (list.contains(document.activeElement) || [...agentDrafts.values()].some(draft=>draft.pending))) return;
+        const workers=(team.workers||[]).filter(worker=>!worker.retired);
+        list.replaceChildren(...workers.map(renderAgentCard));
+        if (!workers.length) list.textContent = "No active workers. Retired workers are preserved in the archive.";
+      } finally { agentsRefreshing = false; }
+    }
+    agentsButton.addEventListener("click", () => runAgents(async () => {
+      showSettings(false); byId("agents-editor").hidden = false;
+      agentsButton.setAttribute("aria-expanded", "true");
+      byId("agents-status").textContent = "";
+      if (!byId("agents-workers").children.length) addWorker();
+      await refreshAgents();
+    }));
+    byId("agents-editor-close").addEventListener("click", () => { byId("agents-editor").hidden = true; agentsButton.setAttribute("aria-expanded", "false"); agentsButton.focus(); });
+    byId("agents-editor").addEventListener("keydown", event => { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); byId("agents-editor-close").click(); } });
+    byId("agents-add-worker").addEventListener("click", addWorker);
+    byId("agents-development-access").addEventListener("change",()=>runAgents(async()=>{
+      const toggle=byId("agents-development-access"),enabled=toggle.checked;
+      if(!agentsAccessRequest||agentsAccessRequest.enabled!==enabled)agentsAccessRequest={enabled,requestId:requestId("development-access")};
+      agentsSettingsSaving=true;toggle.disabled=true;
+      try {await post("agents/settings",{requestId:agentsAccessRequest.requestId,fullDevelopmentAccess:enabled});agentsAccessRequest=null;}
+      catch(error){toggle.checked=!enabled;throw error;}
+      finally{agentsSettingsSaving=false;toggle.disabled=Boolean(current?.agents?.parentTaskKey);}
+      await refreshAgents(true);
+    }));
+    byId("agents-allow-delegation").addEventListener("change", () => runAgents(async () => {
+      const toggle = byId("agents-allow-delegation"), enabled = toggle.checked;
+      agentsSettingsSaving = true; toggle.disabled = true;
+      try {
+        await post("agents/settings", {requestId:requestId("agents-settings"), enabled});
+        if (current) current.agents = {...current.agents, allowDelegation:enabled};
+        byId("agents-status").textContent = enabled ? "Requested delegation enabled for this chat." : "Requested delegation disabled. Existing workers keep running.";
+      } catch (error) { toggle.checked = !enabled; throw error; }
+      finally { agentsSettingsSaving = false; toggle.disabled = false; }
+      await refreshAgents();
+    }));
+    byId("agents-start").addEventListener("click", () => runAgents(async () => {
+      if (agentsSubmitting) return;
+      const workers = [...byId("agents-workers").children].map(row => ({
+        role:row.querySelector('[data-worker="role"]').value.trim(),
+        goal:row.querySelector('[data-worker="goal"]').value.trim(),
+        scope:row.querySelector('[data-worker="scope"]').value.trim(),
+        readOnly:row.querySelector('[data-worker="readOnly"]').checked
+      }));
+      if (!workers.length || workers.some(worker => !worker.role || !worker.goal || !worker.scope)) throw new Error("Give every worker a role, goal, and separate scope.");
+      if (!await ensureConnectorName()) return;
+      agentsSubmitting = true; byId("agents-start").disabled = true;
+      byId("agents-add-worker").disabled = true;
+      byId("agents-workers").querySelectorAll("input,textarea,button").forEach(node => { node.disabled = true; });
+      agentsRequestId ||= requestId("agents"); byId("agents-status").textContent = "Preparing worker chats…";
+      try {
+        await post("agents", {requestId:agentsRequestId, workers});
+        byId("agents-status").textContent = `${workers.length} worker chat${workers.length === 1 ? "" : "s"} queued in this project.`;
+        byId("agents-workers").replaceChildren(); agentsRequestId = null;
+        await refreshAgents(); void refresh();
+      } finally {
+        agentsSubmitting = false; workerButtons();
+        byId("agents-workers").querySelectorAll("input,textarea,button").forEach(node => { node.disabled = false; });
+      }
+    }));
     const dismissEditors = event => {
       const path = event.composedPath();
-      for (const name of ["goal-editor","pairing-editor"]) {
+      for (const name of ["goal-editor","pairing-editor","agents-editor","auto-mode-editor"]) {
         const editor = byId(name);
         if (!editor.hidden && !path.includes(editor)) editor.hidden = true;
       }
+      agentsButton.setAttribute("aria-expanded", String(!byId("agents-editor").hidden));
     };
     document.addEventListener("pointerdown",dismissEditors);
     nodes.model.addEventListener("change", () => {
@@ -1005,6 +1387,12 @@ dialog:modal{box-sizing:border-box;block-size:fit-content;margin:auto;inset-bloc
     nodes.cancelAction.addEventListener("click", () => run(async () => { await post("action/cancel", { requestId:requestId("cancel"), actionId:current.action.id }); pairingSubmissionError = ""; }));
     nodes.retryAction.addEventListener("click", () => run(async () => { await post("action/retry", { requestId:requestId("retry"), actionId:current.action.id }); }));
     byId("automation-retry-inline").addEventListener("click", () => nodes.retryAction.click());
+    byId("automation-replace-chat").addEventListener("click",()=>run(async()=>{
+      await post("replace-conversation",{requestId:requestId("replace-chat"),actionId:current.action.id});
+    }));
+    byId("automation-recover-conversations").addEventListener("change",()=>run(async()=>{
+      await post("conversation-recovery",{requestId:requestId("recovery-settings"),enabled:byId("automation-recover-conversations").checked});
+    }));
     byId("automation-pause-retries").addEventListener("click", () => run(async () => {
       await post("action/pause-retries", {requestId:requestId("pause-retries"), actionId:current.action.id});
     }));
@@ -1035,18 +1423,47 @@ dialog:modal{box-sizing:border-box;block-size:fit-content;margin:auto;inset-bloc
       renderGoalBar(current.goal, {loading:true,needsAttention:current.goal?.status === "active" && Boolean(cachedChat.automationError) && !cachedChat.automationRetrying,failure:cachedChat.automationError || ""});
     }
     void refreshState();
-    timer = setInterval(() => { if (!document.hidden) void refreshState({ quiet:true }); }, 1500);
+    timer = setInterval(() => { if (!document.hidden) { void refreshState({ quiet:true }); if (!byId("agents-editor").hidden && !agentsSubmitting && Date.now() - agentsRefreshedAt >= 5000) void refreshAgents().catch(error => { if (!closed) { byId("agents-status").textContent = error.message || "Team status is unavailable."; byId("agents-status").dataset.error = "true"; } }); } }, 1500);
     const metricsTimer = setInterval(() => {
       if (!document.hidden) {
         if (current && (Number.isSafeInteger(current.action?.cooldownUntilMs) || conversationCooldown(current.action, Date.now() + clockOffset))) render(current);
         else updateGoalMetrics();
       }
     }, 1000);
-    return { close() { closed = true; showSettings(false); clearInterval(timer); clearInterval(metricsTimer); window.removeEventListener("codexify-browser-change",browserChanged); document.removeEventListener("pointerdown",dismissEditors); } };
+    return { close() { closed = true; changes.close(); showSettings(false); clearInterval(timer); clearInterval(metricsTimer); window.removeEventListener("codexify-browser-change",browserChanged); document.removeEventListener("pointerdown",dismissEditors); } };
   }
   function conversationDetail(chat) {
     const date = chat.lastEntryAtMs ? new Date(chat.lastEntryAtMs).toLocaleString() : "No messages";
     return `${chat.isScratch ? "Scratch conversation" : chat.workspace} · ${date}`;
+  }
+  function teamParent(chat) {
+    const parentOf=child=>chats.find(parent=>parent.id!==child.id&&parent.projectId===child.projectId
+      && parent.agentTeam?.taskKey===child.agentTeam?.parentTaskKey);
+    const parent=parentOf(chat);let cursor=parent;const seen=new Set([chat.id]);
+    while(cursor){if(seen.has(cursor.id))return null;seen.add(cursor.id);cursor=parentOf(cursor);}
+    return parent||null;
+  }
+  function teamChild(parent,member){return chats.find(chat=>chat.projectId===parent.projectId
+    && chat.agentTeam?.taskKey===member.taskKey&&chat.agentTeam?.parentTaskKey===parent.agentTeam?.taskKey
+    && teamParent(chat)?.id===parent.id);}
+  function teamHasActiveDescendant(parent){
+    for(const child of chats){if(child.archivedAtMs!=null)continue;let ancestor=teamParent(child);while(ancestor){if(ancestor.id===parent.id)return true;ancestor=teamParent(ancestor);}}
+    return false;
+  }
+  function teamMembers(parent){
+    const members=new Map((parent.agentTeam?.children||[]).map(member=>[member.taskKey,member]));
+    for(const child of chats)if(teamParent(child)?.id===parent.id&&!members.has(child.agentTeam.taskKey))members.set(child.agentTeam.taskKey,{taskKey:child.agentTeam.taskKey,role:child.agentTeam.role,scope:child.agentTeam.scope});
+    return [...members.values()];
+  }
+  function workerStatus(chat){
+    if(chat.agentTeam?.creating)return chat.agentTeam.actionStatus==="queued"?"Queued for setup":"Setting up";
+    if(chat.automationError)return chat.automationRetrying?"Retrying":"Needs attention";
+    if(chat.goalStatus==="completed")return "Completed";
+    if(chat.goalStatus==="blocked")return "Blocked";
+    if(chat.goalStatus==="configured")return "Paused";
+    if(chat.agentTeam?.actionStatus==="queued")return "Queued";
+    const state=presence(chat.lastAgentCallAtMs,Date.now()+clockOffset,chat.agentWaitingUntilMs,chat.agentPresenceUntilMs,chat.agentIdleUntilMs);
+    return state==="online"?"Working":state==="waiting"?"Waiting for input":"Idle";
   }
   function updateSelectedHeader() {
     const chat = chats.find(chat => chat.id === selected);
@@ -1057,6 +1474,12 @@ dialog:modal{box-sizing:border-box;block-size:fit-content;margin:auto;inset-bloc
     const settingsName = scope.getElementById("conversation-settings-name");
     if (settingsName) settingsName.textContent = settingsName.title = chat.title;
     subtitle.replaceChildren(textNode("span", "", conversationDetail(chat)));
+    const parent=teamParent(chat);
+    if(parent){
+      subtitle.append(textNode("span","",chat.agentTeam.role||"Worker"));
+      const back=textNode("button","agent-parent-link",`Parent: ${parent.title}`);back.type="button";back.title=chat.agentTeam.scope||"Open coordinating chat";
+      back.addEventListener("click",()=>select(parent.id));subtitle.append(back);
+    }
     if (chat.projectPath && !chat.isScratch) subtitle.append(textNode("span", "project-path", chat.projectPath));
     subtitle.title = chat.projectPath || conversationDetail(chat);
     const pathInput = scope.getElementById("conversation-project-path");
@@ -1068,7 +1491,13 @@ dialog:modal{box-sizing:border-box;block-size:fit-content;margin:auto;inset-bloc
   }
   function chatGroups() {
     const query = search.value.trim();
-    const visible = chats.filter(chat => (chat.archivedAtMs != null) === archiveView && (!query || matchedIds?.has(chat.id)));
+    let visible = chats.filter(chat => (chat.archivedAtMs != null) === archiveView && (!query || matchedIds?.has(chat.id)
+      || `${chat.agentTeam?.role||""} ${chat.agentTeam?.scope||""}`.toLowerCase().includes(query.toLowerCase())));
+    if(!archiveView){
+      const included=new Map(visible.map(chat=>[chat.id,chat]));
+      for(const chat of visible){let parent=teamParent(chat);while(parent){included.set(parent.id,parent);parent=teamParent(parent);}}
+      visible=[...included.values()].filter(chat=>{const parent=teamParent(chat);return !parent;});
+    }
     const byDate = (a,b) => b.lastEntryAtMs - a.lastEntryAtMs || a.id.localeCompare(b.id);
     if (archiveView) return [{ chats:visible.sort((a,b) => b.archivedAtMs - a.archivedAtMs || byDate(a,b)) }];
     const pinned = visible.filter(chat => chat.pinnedAtMs != null).sort((a,b) => b.pinnedAtMs - a.pinnedAtMs || byDate(a,b));
@@ -1150,6 +1579,7 @@ dialog:modal{box-sizing:border-box;block-size:fit-content;margin:auto;inset-bloc
     const focused = document.activeElement;
     const focusedChat = focused?.closest(".conversation-row")?.dataset.chatId;
     const focusedAction = focused?.dataset.action;
+    const focusedGroup=focused?.closest?.(".agent-group-toggle")?.dataset.parentId;
     list.replaceChildren();
     document.getElementById("sidebar-title").textContent = archiveView ? "Archived chats" : "Codexify";
     document.getElementById("archive-back").hidden = !archiveView;
@@ -1165,14 +1595,9 @@ dialog:modal{box-sizing:border-box;block-size:fit-content;margin:auto;inset-bloc
     }
     const groups = chatGroups();
     if (!groups.some(group => group.chats.length)) list.append(textNode("p", "list-empty", query ? "No matching chats." : archiveView ? "No archived chats." : "No persisted conversations yet."));
-    for (const group of groups) {
-      if (group.heading) {
-        const heading = textNode("h2", !archiveView && listMode === "recent" ? "recent-heading" : "project-heading", group.heading);
-        heading.title = group.title || group.heading;
-        list.append(heading);
-      }
-      for (const chat of group.chats) {
+    const appendChat=(chat,container,worker=false)=>{
       const row = textNode("div", "conversation-row", "");
+      if(worker)row.classList.add("agent-worker-row");
       row.dataset.chatId = chat.id; row.dataset.pinned = String(chat.pinnedAtMs != null); row.dataset.archived = String(chat.archivedAtMs != null);
       row.setAttribute("aria-current", String(chat.id === selected));
       const button = document.createElement("button");
@@ -1193,8 +1618,11 @@ dialog:modal{box-sizing:border-box;block-size:fit-content;margin:auto;inset-bloc
       icon.setAttribute("role", "img"); icon.setAttribute("aria-label", icon.title);
       if (state === "waking") { icon.title = chat.automationWake.description; icon.setAttribute("aria-label",`${chat.automationWake.label}: ${icon.title}`); }
       const content = textNode("span", "conversation-main", "");
-      content.append(textNode("span", "conversation-title", chat.title));
-      content.append(textNode("span", "conversation-detail", conversationDetail(chat)));
+      const parent=teamParent(chat);
+      content.append(textNode("span", "conversation-title", worker?(chat.agentTeam?.role||chat.title):chat.title));
+      const detail=parent?`${workerStatus(chat)} · ${chat.workspace} · ${worker?chat.title:"Agent for "+parent.title}`:conversationDetail(chat);
+      content.append(textNode("span", "conversation-detail",detail));
+      if(parent)button.title=`${chat.agentTeam?.role||chat.title}\nParent: ${parent.title}\nProject: ${chat.projectPath||chat.workspace}\n${chat.agentTeam?.scope||""}`;
       const dot = textNode("span", "unread", "");
       dot.hidden = chat.id === selected || (chat.lastIncomingEntryEnd || 0) <= readThrough(chat);
       dot.setAttribute("aria-label", "New chat entry");
@@ -1208,10 +1636,46 @@ dialog:modal{box-sizing:border-box;block-size:fit-content;margin:auto;inset-bloc
       };
       if (archiveView) actionButton("restore", "Unarchive chat");
       else { actionButton("archive", "Archive chat"); actionButton("pin", chat.pinnedAtMs != null ? "Unpin chat" : "Pin chat"); }
-      row.append(button, actions); list.append(row);
+      row.append(button, actions); container.append(row);
+    };
+    const appendTeam=(chat,container,worker=false)=>{
+      appendChat(chat,container,worker);
+      if(archiveView)return;
+      const members=teamMembers(chat).map(member=>({member,child:teamChild(chat,member)}))
+        .filter(({child})=>!child||child.archivedAtMs==null||teamHasActiveDescendant(child));
+      if(!members.length)return;
+      const folder=textNode("section","agent-chat-group","");folder.dataset.parentChatId=chat.id;
+      folder.setAttribute("aria-label",`Agents for ${chat.title}`);
+      const toggle=textNode("button","agent-group-toggle","");toggle.type="button";toggle.dataset.action="toggle-agents";toggle.dataset.parentId=chat.id;
+      const area=textNode("div","agent-group-members","");area.id=`agents-of-${chat.id}`;
+      toggle.setAttribute("aria-controls",area.id);
+      let selectedAncestor=chats.find(item=>item.id===selected);let containsSelection=false;
+      while(selectedAncestor){if(selectedAncestor.id===chat.id){containsSelection=true;break;}selectedAncestor=teamParent(selectedAncestor);}
+      const groupKey=chat.agentTeam?.taskKey||chat.id;
+      const opened=Boolean(search.value.trim())||(Object.hasOwn(agentGroupOpen,groupKey)?agentGroupOpen[groupKey]:Object.hasOwn(agentGroupOpen,chat.id)?agentGroupOpen[chat.id]:containsSelection);
+      toggle.setAttribute("aria-expanded",String(Boolean(opened)));area.hidden=!opened;
+      toggle.append(textNode("span","agent-group-chevron","›"),textNode("span","",`Agents (${members.length})`));
+      const attention=members.filter(({child})=>child?.automationError).length;
+      const starting=members.filter(({child})=>!child||child.agentTeam?.creating).length;
+      const unread=members.some(({child})=>child&&child.id!==selected&&(child.lastIncomingEntryEnd||0)>readThrough(child));
+      toggle.append(textNode("span","agent-group-status",attention?`${attention} need attention`:starting?`${starting} setting up`:unread?"New updates":""));
+      toggle.title=`${chat.projectPath||chat.workspace} · Workers supporting this chat`;
+      toggle.addEventListener("click",()=>{agentGroupOpen[groupKey]=toggle.getAttribute("aria-expanded")!=="true";saveAgentGroups();renderList();list.querySelector(`[data-parent-id="${chat.id}"]`)?.focus({preventScroll:true});});
+      for(const {member,child} of members){
+        if(child)appendTeam(child,area,true);
+        else {const pending=textNode("div","agent-pending-row",member.role||"Worker");pending.dataset.workerTaskKey=member.taskKey;pending.title=member.scope||"";pending.append(textNode("small","","Reserved · waiting for setup"));area.append(pending);}
       }
+      folder.append(toggle,area);container.append(folder);
+    };
+    for (const group of groups) {
+      if (group.heading) {
+        const heading = textNode("h2", !archiveView && listMode === "recent" ? "recent-heading" : "project-heading", group.heading);
+        heading.title = group.title || group.heading;list.append(heading);
+      }
+      for (const chat of group.chats) appendTeam(chat,list);
     }
     if (focusedChat && focusedAction) list.querySelector(`[data-chat-id="${focusedChat}"] [data-action="${focusedAction}"]`)?.focus({preventScroll:true});
+    else if(focusedGroup)list.querySelector(`[data-parent-id="${focusedGroup}"]`)?.focus({preventScroll:true});
   }
   function chatIdFromUrl() {
     const id = new URLSearchParams(location.search).get("chat");
@@ -1236,6 +1700,8 @@ dialog:modal{box-sizing:border-box;block-size:fit-content;margin:auto;inset-bloc
   }
   function select(id, updateUrl = true) {
     if (id === selected) return;
+    const parent=teamParent(chats.find(chat=>chat.id===id)||{});
+    if(parent){agentGroupOpen[parent.id]=true;saveAgentGroups();}
     if (list.getClientRects().length) chatListScrollTop = list.scrollTop;
     if (updateUrl) {
       const url = new URL(location.href);

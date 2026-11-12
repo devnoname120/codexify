@@ -1,6 +1,8 @@
 //! Tool implementations. Each file is one Codex-style MCP tool.
 
 pub mod apply_patch;
+pub mod agents;
+pub mod agent_client;
 pub mod automation_pair;
 pub mod chat_attachments;
 pub mod check_for_updates;

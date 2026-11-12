@@ -306,6 +306,10 @@ impl BrowserCompanionManager {
             .env("CODEXIFY_BROWSER_HOME", &self.layout.root)
             .env("CODEXIFY_BROWSER_DESCRIPTOR", &self.layout.descriptor_path)
             .env("CODEXIFY_BROWSER_BUILD", &runtime.manifest.build)
+            .env("CODEXIFY_BROWSER_ACTION_LANES", self.config.browser_action_lanes.to_string())
+            .env("CODEXIFY_BROWSER_MINIMAL_UI", if self.config.minimal_ui { "1" } else { "0" })
+            .env("CODEXIFY_BROWSER_SIMPLICITY", self.config.effective_browser_simplicity().as_str())
+            .env("CODEXIFY_BROWSER_RECOVERY_ENHANCEMENTS", if self.config.recovery_enhancements { "1" } else { "0" })
             .env(
                 "CODEXIFY_BROWSER_NAVIGATION_TIMINGS",
                 serde_json::json!({
@@ -1590,19 +1594,50 @@ fn terminate_process(pid: u32, force: bool) -> Result<(), String> {
 
 #[cfg(windows)]
 fn terminate_process(pid: u32, _force: bool) -> Result<(), String> {
-    use windows_sys::Win32::Foundation::CloseHandle;
-    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_TERMINATE, TerminateProcess};
+    use windows_sys::Win32::Foundation::{CloseHandle, ERROR_INVALID_PARAMETER, STILL_ACTIVE};
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
+        TerminateProcess,
+    };
 
-    let handle = unsafe { OpenProcess(PROCESS_TERMINATE, 0, pid) };
+    let handle = unsafe {
+        OpenProcess(
+            PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION,
+            0,
+            pid,
+        )
+    };
     if handle.is_null() {
+        if std::io::Error::last_os_error().raw_os_error() == Some(ERROR_INVALID_PARAMETER as i32) {
+            return Ok(());
+        }
         return Err("Could not open the browser companion process".into());
     }
     let terminated = unsafe { TerminateProcess(handle, 0) };
+    // Chrome or Electron may exit between identity verification and Stop.
+    // Windows reports access denied for TerminateProcess on an exited process;
+    // that already achieved the desired state and must not block recovery.
+    let mut exit_code = STILL_ACTIVE as u32;
+    let already_exited = terminated == 0
+        && unsafe { GetExitCodeProcess(handle, &mut exit_code) } != 0
+        && exit_code != STILL_ACTIVE as u32;
     unsafe { CloseHandle(handle) };
-    if terminated == 0 {
+    if terminated == 0 && !already_exited {
         return Err("Could not stop the browser companion process".into());
     }
     Ok(())
+}
+
+#[cfg(all(test, windows))]
+#[test]
+fn stopping_an_already_exited_browser_process_succeeds() {
+    let mut command = StdCommand::new("cmd.exe");
+    command.args(["/C", "exit", "0"]);
+    configure_detached_process(&mut command);
+    let mut child = command.spawn().unwrap();
+    child.wait().unwrap();
+    terminate_process(child.id(), true).unwrap();
+    terminate_process(child.id(), true).unwrap();
 }
 
 #[cfg(not(any(unix, windows)))]

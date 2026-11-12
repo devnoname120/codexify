@@ -1078,6 +1078,13 @@ impl ChatFile {
             .await
     }
 
+    /// Coordinator steering may never implicitly undo an explicit worker stop.
+    pub async fn append_worker_instruction(
+        self: &Arc<Self>, id: String, message: String,
+    ) -> Result<UserSendReceipt, String> {
+        self.run(move |chat| super::queue::append_steering_guarded(chat, id, message, Vec::new(), true)).await
+    }
+
     pub async fn append_user_with_attachments(
         self: &Arc<Self>,
         id: String,

@@ -47,6 +47,7 @@ fn fixture() -> (
         )),
         markdown_chat: Arc::new(MarkdownChatStore::default()),
         agent_automation: None,
+        agent_runtime:None,
         cancellation: CancellationToken::new(),
     };
     (root, config, SessionState::new(), context)

@@ -15,7 +15,10 @@ pub(crate) fn schema_version(config: &AppConfig) -> String {
     let mut version = format!("{}+continuation-v1", env!("CARGO_PKG_VERSION"));
     if config.markdown_chat.enabled {
         version.push_str("+markdown-chat-v6");
-        version.push_str("+agent-automation-v3");
+        version.push_str("+agent-automation-v4");
+    }
+    if config.markdown_chat.features.agent_teams {
+        version.push_str("+agent-status-v2");
     }
     if config.experimental.agent_tickets {
         version.push_str("+tickets-v1");
@@ -196,25 +199,25 @@ mod tests {
                 true,
                 false,
                 false,
-                "+continuation-v1+markdown-chat-v6+agent-automation-v3",
+                "+continuation-v1+markdown-chat-v6+agent-automation-v4",
             ),
             (
                 true,
                 false,
                 true,
-                "+continuation-v1+markdown-chat-v6+agent-automation-v3+workspace-v1",
+                "+continuation-v1+markdown-chat-v6+agent-automation-v4+workspace-v1",
             ),
             (
                 true,
                 true,
                 false,
-                "+continuation-v1+markdown-chat-v6+agent-automation-v3+tickets-v1",
+                "+continuation-v1+markdown-chat-v6+agent-automation-v4+tickets-v1",
             ),
             (
                 true,
                 true,
                 true,
-                "+continuation-v1+markdown-chat-v6+agent-automation-v3+tickets-v1+workspace-v1",
+                "+continuation-v1+markdown-chat-v6+agent-automation-v4+tickets-v1+workspace-v1",
             ),
         ] {
             let mut config = crate::config::default_config(PathBuf::from("/tmp/project"));

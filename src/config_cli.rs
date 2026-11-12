@@ -25,6 +25,7 @@ pub fn run(cli: &Cli, args: ConfigArgs) -> anyhow::Result<()> {
         Some(ConfigCommand::Set(args)) => set(&path, args),
         Some(ConfigCommand::Unset(args)) => unset(&path, args),
         Some(ConfigCommand::Edit) => edit(&path),
+        Some(ConfigCommand::FastSetup) => fast_setup(&path),
         Some(ConfigCommand::Validate) => validate_config_quiet(cli).map_err(anyhow::Error::msg),
     }
 }
@@ -58,6 +59,32 @@ fn set(path: &Path, args: ConfigSetArgs) -> anyhow::Result<()> {
     backup_migration(migration.as_ref())?;
     write_document(path, document.as_object().expect("root remains an object"))?;
     print_mutation("Set", &args.key, path)
+}
+
+fn fast_setup(path: &Path) -> anyhow::Result<()> {
+    let original = match fs::read(path) {
+        Ok(bytes) => Some(bytes),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error).context("read existing configuration"),
+    };
+    let (document, migration) = read_document_for_write(path)?;
+    let mut document = Value::Object(document);
+    for (key, value) in crate::fast_setup::changes() {
+        set_value(&mut document, &parse_key(&key)?, value)?;
+    }
+    let document = document.as_object().expect("fast setup keeps an object");
+    crate::global_settings::validate(path, document).map_err(anyhow::Error::msg)?;
+    let current = match fs::read(path) {
+        Ok(bytes) => Some(bytes),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error).context("verify existing configuration"),
+    };
+    if current != original {
+        bail!("Configuration changed while applying fast setup; retry with the current file");
+    }
+    backup_migration(migration.as_ref())?;
+    write_document(path, document)?;
+    print_mutation("Applied", "fast setup", path)
 }
 
 fn unset(path: &Path, args: ConfigUnsetArgs) -> anyhow::Result<()> {
@@ -472,6 +499,27 @@ fn executable_on_path(name: &OsStr) -> bool {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn fast_setup_cli_validates_before_writing_and_preserves_unrelated_settings() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("config.json");
+        let limits = json!([{"model":"gpt-6-sol","effort":"high","minutes":42,"enabled":false}]);
+        fs::write(&path, json!({"workDir":root.path(),"codexMcp":{"enabled":false},
+            "exec":{"maxSessions":6},"agentChat":{"turnRenewal":{"limits":limits}}}).to_string()).unwrap();
+        fast_setup(&path).unwrap();
+        let document = Value::Object(read_document(&path).unwrap());
+        assert_eq!(document["agentChat"]["automation"]["browserSimplicity"], "bones");
+        assert_eq!(document["agentChat"]["defaultMessageMode"], "steer");
+        assert_eq!(document["agentChat"]["turnRenewal"]["limits"], limits);
+        assert_eq!(document["exec"]["maxSessions"], 6);
+        assert_eq!(document["agentChat"]["features"]["externalAgentControl"], Value::Null);
+
+        let invalid = json!({"workDir":root.path(),"command":{"maxTimeout":-1}}).to_string();
+        fs::write(&path, &invalid).unwrap();
+        assert!(fast_setup(&path).is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), invalid);
+    }
 
     #[test]
     fn dotted_paths_support_escaped_dots_and_backslashes() {

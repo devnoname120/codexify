@@ -2,7 +2,7 @@ import { z } from "zod";
 
 export const PROTOCOL_VERSION = 1 as const;
 export const COMPANION_KIND = "codexify-browser-companion" as const;
-export const PROTOCOL_SCHEMA_HASH = "6387026e06e437edb53caa5fe7e15f613c1303d6071ada224f3b0cbeff078e68" as const;
+export const PROTOCOL_SCHEMA_HASH = "7d1f04ca4cb844940820aeeb703a42c36363cee5e5f7209d46c5907f26c5ce05" as const;
 export const PROTOCOL_BUILD_SUFFIX = `+protocol.${PROTOCOL_SCHEMA_HASH}` as const;
 export const MAX_DESCRIPTOR_BYTES = 8 * 1024;
 export const MAX_JSON_BYTES = 1024 * 1024;
@@ -164,9 +164,9 @@ function unreadClause(messages: readonly CompanionUnreadMessage[]): string {
 
 const goalClause = [
   "This task also has an active Codexify goal. Call `goal_read` for the current",
-  "revision. If it is complete, call `goal_finish` with status `completed`, a summary of work/results/verification, and nextSteps (explicitly none if appropriate). If work",
+  "revision. Continue autonomously until the goal is implemented and verified. Never stop at a plan, partial result, recoverable error, or because a turn or context is running out. Diagnose failures, try alternatives, and keep doing independent work. Preserve progress with rollout_update and resume through managed handoffs; respect user stops, pauses, approvals, genuine blockers, and server retry deadlines. When delegation is enabled, create agents at any stage without waiting for the Agents tab, give distinct scopes, and verify their work. If it is complete, call `goal_finish` with status `completed`, a summary of work/results/verification, and nextSteps (explicitly none if appropriate). If work",
   "cannot proceed, call `goal_finish` with status `blocked` and explain the concrete",
-  "blocker in reason and the exact action/input/change needed in nextSteps. Both reports appear inline. After completed call `turn_completed`; after blocked call `chat_await`. Repeat waits on timeout/cancellation without input; never end the assistant turn or write a normal final answer merely because of elapsed time. Otherwise continue working toward the goal. Do not request a separate",
+  "blocker in reason and the exact action/input/change needed in nextSteps. Both reports appear inline. After completed call `turn_completed`; after blocked call `chat_await`. Repeat waits on timeout/cancellation without input; never end the assistant turn or write a normal final answer merely because of elapsed time. Infinite goals require the identical concrete blocker to persist across three distinct goal turns spanning at least 60 seconds. Check alternatives, continue independent work, and restore progress with rollout_read after context loss. Otherwise continue working toward the goal. Do not request a separate",
   "turn merely to evaluate goal status.",
 ].join(" ");
 
@@ -284,6 +284,9 @@ export const healthSchema = z.strictObject({
   authenticated: z.boolean(),
   accountFingerprint: opaqueIdSchema.nullable(),
   activeActionId: opaqueIdSchema.nullable(),
+  actionCapacity:z.number().int().min(1).max(4).optional(),
+  availableActionSlots:z.number().int().min(0).max(4).optional(),
+  activeActionIds:z.array(opaqueIdSchema).max(4).optional(),
 });
 export type CompanionHealth = z.infer<typeof healthSchema>;
 

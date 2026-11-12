@@ -1,16 +1,23 @@
+import {observeReadOnly,RendererProbeGate} from "./observation";
 import type { Frame, Locator, Page } from "patchright";
-import {completedHandoff} from "./turn-renewal";
-import {classifyPlan,readBillingPlan,identifyConnectorApp,observedConnectorApp,inspectConnectorSettings,setConnectorAllowAll,verifyConnectorAllowAll,beginConnectorToolRefresh,type ConnectorRefreshObservation,type AccountPlan} from "./account-settings";
+import {completedHandoff,createCompletedHandoffVerifier} from "./turn-renewal";
+import {classifyPlan,identifyConnectorApp,observedConnectorApp,inspectConnectorSettings,setConnectorAllowAll,verifyConnectorAllowAll,beginConnectorToolRefresh,type ConnectorRefreshObservation,type AccountPlan} from "./account-settings";
 import {ConnectorAppCache} from "./connector-cache";
+import {DraftRecoveryJournal} from './draft-recovery';
 import {approveConversationCard,throwIfConversationApproval} from "./conversation-approval";
 import {openNewChat, createdChatUrl, assertNewChatDraft} from "./new-chat";
 import { HealthAccountCache, readChatGptAccount, type ChatGptAccount } from "./account";
 import { throwIfSessionAttention, toolApprovalVisible } from "./browser-session";
-import {navigatePage,recordConversationAvailable} from "./navigation";
+import {navigatePage,recordConversationAvailable,acquireSubmissionSlot} from "./navigation";
+import {waitForConversationComposer} from "./conversation-readiness";
+import {refreshConversationEditor} from "./editor-recovery";
+import {inspectPresentation} from "./presentation";
+import {observeSubmissionNetwork,submissionTracingEnabled} from "./submission-network";
+import {stopControls,END_TURN_CONTROL_NAME,traceStopControls} from "./stop-controls";
 import type { BrowserDriver, DriverExecution, BrowserStepRunner, StopProgressStep } from "./browser-window";
-import { activeComposer, composerText, insertExactPrompt, isPairingVerificationDraft, uniqueSendButton } from "./composer";
+import { activeComposer, composerText, ensureEmptyOwnedComposer, insertExactPrompt, isPairingVerificationDraft, isAutomationGoalDraft, uniqueSendButton } from "./composer";
 import { clearComposerState, connectorIsSelected, ConnectorMenuUnavailableError, SELECTED_CONNECTOR_SELECTOR, selectConnector, type SelectedConnector } from "./connector-selection";
-import { asCompanionError, BrowserCompanionError } from "./errors";
+import { asCompanionError, BrowserCompanionError,ModelOptionUnavailableError, CONVERSATION_UNAVAILABLE_MESSAGE } from "./errors";
 import { uiLabelPattern } from "./ui-localization";
 import { assertSelectedModelAndEffort, selectAvailableModelAndEffort } from "./model-selection";
 import { selectPairingMedium, type PairingMediumSelection } from "./pairing-model";
@@ -28,12 +35,15 @@ import {
 } from "./turn-binding";
 
 export interface SingleBrowserSurface {
+  setPresentationStyle?(css:string,signal?:AbortSignal):Promise<unknown>;
+  readonly requireSubmissionNetworkProof?:boolean;
   page(): Promise<Page>;
   navigate(url: string, signal?: AbortSignal): Promise<Page>;
   reveal(): Promise<void>;
   beginAction(): Promise<void>;
   endAction(): Promise<void>;
   close(): Promise<void>;
+  closeActionPage?():Promise<void>;
 }
 
 
@@ -49,14 +59,16 @@ export function responseCompletionReady(input: {
     && input.completionActionVisible;
 }
 
-async function generationRunning(page: Page): Promise<boolean> {
-  return page.locator(CHATGPT_STOP_BUTTON_SELECTOR).filter({ visible:true }).count()
+async function generationRunning(page: Page,signal?:AbortSignal): Promise<boolean> {
+  return observeReadOnly(stopControls(page).count(),signal)
     .then(count => count > 0)
-    .catch(() => false);
+    .catch(error=>{throw new BrowserCompanionError("ChatGPT's turn state could not be verified before continuing","editor_unavailable",{cause:error});});
 }
 
-async function clearExistingDraft(page:Page,signal?:AbortSignal):Promise<Locator> {
+async function clearExistingDraft(page:Page,signal?:AbortSignal,expectedText?:string):Promise<Locator> {
   const composer=await activeComposer(page,30_000,signal);
+  if(expectedText!==undefined && await composerText(composer)!==expectedText)
+    throw new BrowserCompanionError('ChatGPT draft was edited during automatic recovery','external_interference');
   const hasDraft=await composer.evaluate(element=>{
     if(element instanceof HTMLTextAreaElement||element instanceof HTMLInputElement)return element.value.length>0;
     const clone=element.cloneNode(true) as HTMLElement;
@@ -106,17 +118,41 @@ async function visibleStopDialogs(page:Page):Promise<Locator[]> {
   return dialogs;
 }
 
-async function stopLingeringResponse(
+export async function stopLingeringResponse(
   page: Page,
   signal: AbortSignal,
   expected: { canonicalUrl:string; accountFingerprint:string },
   emit: DriverExecution["emit"],
+  options:{mayReload?:boolean;budgetMs?:number}={},
 ): Promise<void> {
   if (signal.aborted) throw new DOMException("Browser action aborted", "AbortError");
-  if (!await generationRunning(page) && !(await visibleStopDialogs(page)).length) return;
+  const assertTarget = async () => {
+    signal.throwIfAborted();
+    await observeReadOnly(throwIfSessionAttention(page),signal);
+    await observeReadOnly(throwIfConversationApproval(page),signal);
+    await observeReadOnly(assertAuthenticatedChatGptPage(page),signal);
+    if (canonicalChatGptConversationUrl(page.url()) !== expected.canonicalUrl) {
+      throw new BrowserCompanionError("ChatGPT changed conversations while stopping the previous response", "conversation_unavailable");
+    }
+    if ((await observeReadOnly(readChatGptAccount(page),signal)).fingerprint !== expected.accountFingerprint) {
+      throw new BrowserCompanionError("ChatGPT account changed while stopping the previous response", "authentication_required");
+    }
+    signal.throwIfAborted();
+  };
+  await ensureEmptyOwnedComposer(await activeComposer(page,1_500,signal));
+  const idleSettleMs=1_500;
+  const initiallyIdleAt=Date.now();
+  // A hydrated composer can precede Work's End turn control by over a second.
+  // Require a quiet interval, rather than one missing-control observation.
+  while (!await generationRunning(page,signal) && !(await observeReadOnly(visibleStopDialogs(page),signal)).length) {
+    if(Date.now()-initiallyIdleAt>=idleSettleMs){await assertTarget();return;}
+    await new Promise(resolve=>setTimeout(resolve,100));
+    signal.throwIfAborted();
+  }
   const settleMs = 20_000;
+  const confirmationSettleMs=20_000;
   // Three bounded Stop attempts, one optional confirmation, and recovery work.
-  const recoveryMs = settleMs * 4 + 10_000;
+  const recoveryMs = options.budgetMs??90_000;
   const deadline = Date.now() + recoveryMs;
   const boundedSignal = AbortSignal.any([signal, AbortSignal.timeout(recoveryMs)]);
   const timeout = (limit:number) => Math.max(1, Math.min(limit, deadline - Date.now()));
@@ -134,29 +170,19 @@ async function stopLingeringResponse(
     }
     emit({type:"composer_ready"});
   };
-  const assertTarget = async () => {
-    await throwIfSessionAttention(page);
-    await throwIfConversationApproval(page);
-    await assertAuthenticatedChatGptPage(page);
-    if (canonicalChatGptConversationUrl(page.url()) !== expected.canonicalUrl) {
-      throw new BrowserCompanionError("ChatGPT changed conversations while stopping the previous response", "conversation_unavailable");
-    }
-    if ((await readChatGptAccount(page)).fingerprint !== expected.accountFingerprint) {
-      throw new BrowserCompanionError("ChatGPT account changed while stopping the previous response", "authentication_required");
-    }
-  };
   let confirmationSubmitted = false;
-  const waitForStopped = async (stop:Locator) => {
-    let settleDeadline = Math.min(deadline,(lastStopRequestedAt||Date.now())+settleMs);
+  const waitForStopped = async () => {
+    let settleDeadline = Math.min(deadline,Math.max(lastStopRequestedAt,Date.now())+settleMs);
+    let absentSince:number|undefined;
     while (!boundedSignal.aborted) {
-      const dialogs = await visibleStopDialogs(page);
+      const dialogs = await observeReadOnly(visibleStopDialogs(page),signal);
       const count = dialogs.length;
       if (count) {
         const dialog = dialogs[0]!;
         // A previous action or the user may already have opened this dialog.
         // Its generic shell also serves other actions: require the exact shape
         // and a localized Stop submit button before confirming it.
-        if (count !== 1 || !await dialog.evaluate(element => {
+        if (count !== 1 || !await observeReadOnly(dialog.evaluate(element => {
           if (!element.matches('.codex-dialog[role="dialog"][aria-modal="true"][data-state="open"]')) return false;
           const forms = element.querySelectorAll('form');
           if (forms.length !== 1) return false;
@@ -169,12 +195,13 @@ async function stopLingeringResponse(
             || submits.length !== 1 || !submits[0]!.matches('.bg-primary-solid.text-primary-solid')) return false;
           const actions = submits[0]!.parentElement!;
           return actions.querySelectorAll('button').length === 2 && actions.querySelectorAll('button[type="button"]').length === 1;
-        })) {
+        }),boundedSignal)) {
           throw new BrowserCompanionError("ChatGPT has an unexpected dialog while stopping the response", "external_interference");
         }
         const confirm = dialog.locator('form button[type="submit"].bg-primary-solid')
-          .and(dialog.getByRole('button',{name:uiLabelPattern('stopControl')}));
-        if (await confirm.count() !== 1) {
+          .and(dialog.getByRole('button',{name:uiLabelPattern('stopControl')})
+            .or(dialog.getByRole('button',{name:END_TURN_CONTROL_NAME})));
+        if (await observeReadOnly(confirm.count(),boundedSignal) !== 1) {
           throw new BrowserCompanionError("ChatGPT has an unexpected dialog while stopping the response", "external_interference");
         }
         if (!confirmationSubmitted) {
@@ -185,12 +212,15 @@ async function stopLingeringResponse(
           await requested("confirmation");
           // Confirmation is a fresh Stop request. Its full settling window starts
           // here, even when the dialog appeared near the first click's deadline.
-          settleDeadline = Math.min(deadline,lastStopRequestedAt+settleMs);
+          settleDeadline = Math.min(deadline,lastStopRequestedAt+confirmationSettleMs);
         }
       }
       // Confirmation can remove its entire iframe. Re-scan on the next poll
       // instead of waiting on a detached locator and retrying Stop prematurely.
-      if (!count && !await stop.isVisible()) return;
+      if (!count && !await generationRunning(page,signal)) {
+        absentSince??=Date.now();
+        if(Date.now()-absentSince>=idleSettleMs)return;
+      } else absentSince=undefined;
       if (Date.now() >= settleDeadline) throw new Error("ChatGPT Stop has not completed");
       await new Promise(resolve => setTimeout(resolve,50));
     }
@@ -200,28 +230,31 @@ async function stopLingeringResponse(
   for (let attempt = 0; attempt < 3 && !boundedSignal.aborted; attempt++) {
     await assertTarget();
     if (boundedSignal.aborted) break;
-    const stop = page.locator(CHATGPT_STOP_BUTTON_SELECTOR).filter({ visible:true });
-    const count = await stop.count();
-    const dialogCount = (await visibleStopDialogs(page)).length;
-    if (count === 0 && dialogCount === 0) {emit({type:"stop_progress",step:"complete"});return;}
-    if (count !== 1 && dialogCount === 0) {
+    const stop = stopControls(page);
+    const count = await observeReadOnly(stop.count(),boundedSignal);
+    const dialogCount = (await observeReadOnly(visibleStopDialogs(page),signal)).length;
+    if (count > 1 && dialogCount === 0) {
       throw new BrowserCompanionError("ChatGPT does not have one visible Stop control", "selector_drift");
     }
     try {
-      if (dialogCount === 0 && await stop.isEnabled()) {
-        await stop.click({ timeout:timeout(750), signal:boundedSignal });
+      if (dialogCount === 0 && count === 1) {
+        // Stop can mount disabled while ChatGPT reconciles a steered turn.
+        // Let the UI enable it; skipping it here waits without ever requesting Stop.
+        await stop.click({ timeout:timeout(8_000), signal:boundedSignal });
         await requested((["initial","retry","recovery"] as const)[attempt]!);
       }
-      await waitForStopped(stop);
+      await waitForStopped();
+      await assertTarget();
+      await ensureEmptyOwnedComposer(await activeComposer(page,timeout(1_000),boundedSignal));
       emit({type:"stop_progress",step:"complete"});
       return;
     } catch (error) {
       if (signal.aborted || error instanceof BrowserCompanionError) throw error;
       lastError = error;
     }
-    if (confirmationSubmitted && (await visibleStopDialogs(page)).length) break;
-    if (attempt === 1 && !boundedSignal.aborted) {
-      if ((await visibleStopDialogs(page)).length) break;
+    if (confirmationSubmitted && (await observeReadOnly(visibleStopDialogs(page),signal)).length) break;
+    if (attempt === 1 && !boundedSignal.aborted && options.mayReload!==false) {
+      if ((await observeReadOnly(visibleStopDialogs(page),signal)).length) break;
       // Rehydrate a stuck Stop control only before inserting our prompt.
       await assertTarget();
       let composer:Locator;
@@ -232,11 +265,11 @@ async function stopLingeringResponse(
         lastError = error;
         break;
       }
-      if ((await composerText(composer)).trim()) {
-        await clearExistingDraft(page,boundedSignal);
-      }
+      await ensureEmptyOwnedComposer(composer);
       try {
-        await navigatePage(page,page.url(),{reload:true,timeout:timeout(2_000),signal:boundedSignal});
+        emit({type:"stop_progress",step:"recovery"});
+        await navigatePage(page,page.url(),{reload:true,timeout:timeout(10_000),signal:boundedSignal});
+        await waitForConversationComposer(page,boundedSignal,timeout(8_000));
       } catch (error) {
         if (signal.aborted) throw error;
         lastError = error;
@@ -257,6 +290,7 @@ async function exactConversationPage(
   requestedUrl: string,
   expectedUrl: string,
   signal?: AbortSignal,
+  progress?:(step:"document_loaded"|"editor_ready")=>void,
 ): Promise<{ page:Page; canonicalUrl:string }> {
   validateChatGptConversationUrl(requestedUrl);
   validateChatGptConversationUrl(expectedUrl);
@@ -272,28 +306,23 @@ async function exactConversationPage(
         &&(error.code==="conversation_unavailable"||error.code==="authentication_required")))throw error;
       recoveryNeeded=true;
     }
-    // This is also reported as an authentication failure below. Without a
-    // recovery load, retries of an unrecognized no-composer page never progress.
+    // Give an existing page a short hydration window before deciding it needs
+    // a recovery load. Reloading a healthy shell resets its loading work.
     if(!recoveryNeeded){
-      try {await assertAuthenticatedChatGptPage(page);}catch{recoveryNeeded=true;}
+      try {await waitForConversationComposer(page,signal,3_000);}
+      catch(error){
+        if(!(error instanceof BrowserCompanionError && ["editor_unavailable","authentication_required","conversation_unavailable"].includes(error.code)))throw error;
+        recoveryNeeded=true;
+      }
     }
     if(recoveryNeeded){
       // A known load or sign-in failure needs one deliberate recovery load.
       await navigatePage(page,requestedUrl,{signal,reload:page.url()===requestedUrl});
     }
   }
-  await throwIfSessionAttention(page);
-  try {
-    await assertAuthenticatedChatGptPage(page);
-  } catch (error) {
-    // The load-failure surface may have appeared since the first inspection.
-    await throwIfSessionAttention(page);
-    throw new BrowserCompanionError(
-      "ChatGPT authentication could not be verified for the paired conversation",
-      "authentication_required",
-      { cause:error },
-    );
-  }
+  progress?.("document_loaded");
+  await waitForConversationComposer(page,signal);
+  progress?.("editor_ready");
   const canonicalUrl = canonicalChatGptConversationUrl(page.url());
   if (canonicalUrl !== canonicalChatGptConversationUrl(expectedUrl)) {
     throw new BrowserCompanionError(
@@ -310,45 +339,89 @@ export class ChatGptBrowserDriver implements BrowserDriver {
   private maintenance?: {page:Page;account:ChatGptAccount};
   private pendingRefresh?: {page:Page;url:string;account:ChatGptAccount};
   private pendingSubmission?: {actionId:string;mayHaveSent:boolean};
-  private planCache?: {epoch:string;plan:AccountPlan};
+  private planCache?: {epoch:string;planType:string;plan:AccountPlan};
   private capabilitiesCache?: {
     accountFingerprint:string;
+    planType:string;
+    observedAtMs:number;
     capabilities:AccountCapabilities;
     catalog:CapabilityCatalog;
   };
 
   private readonly connectorApps:ConnectorAppCache;
-  constructor(private readonly surface: SingleBrowserSurface, private readonly build: string,connectorCachePath?:string) {
-    this.connectorApps=new ConnectorAppCache(connectorCachePath);
+  private readonly draftRecovery:DraftRecoveryJournal;
+  constructor(private readonly surface: SingleBrowserSurface, private readonly build: string,connectorCachePath?:string,
+    private readonly recoveryEnhancements=process.env.CODEXIFY_BROWSER_RECOVERY_ENHANCEMENTS==="1",
+    shared?:{connectorApps:ConnectorAppCache;draftRecovery:DraftRecoveryJournal}) {
+    this.connectorApps=shared?.connectorApps??new ConnectorAppCache(connectorCachePath);
+    this.draftRecovery=shared?.draftRecovery??new DraftRecoveryJournal(this.recoveryEnhancements&&connectorCachePath?`${connectorCachePath}.drafts.json`:undefined);
   }
+
+  fork(surface:SingleBrowserSurface):ChatGptBrowserDriver {
+    return new ChatGptBrowserDriver(surface,this.build,undefined,this.recoveryEnhancements,
+      {connectorApps:this.connectorApps,draftRecovery:this.draftRecovery});
+  }
+
+  private readonly rendererProbes=new RendererProbeGate();
+  private readonly preparationTimings:Array<{actionId:string;totalMs:number;steps:Array<{name:string;atMs:number}>}>=[];
+  private preparationTrace(actionId:string):(name:string)=>void {
+    const started=performance.now();
+    const timing={actionId,totalMs:0,steps:[] as Array<{name:string;atMs:number}>};
+    this.preparationTimings.push(timing);
+    if(this.preparationTimings.length>8)this.preparationTimings.shift();
+    return name=>{timing.totalMs=Math.round(performance.now()-started);timing.steps.push({name,atMs:timing.totalMs});};
+  }
+  async presentation(signal?:AbortSignal,screenshot=false):Promise<unknown> {
+    const page=await this.surface.page();
+    return {...await inspectPresentation(page,signal,screenshot),preparations:this.preparationTimings.slice(-8)};
+  }
+  async setPresentationStyle(css:string,signal?:AbortSignal):Promise<unknown> {
+    if(!this.surface.setPresentationStyle)throw new Error("Live fast presentation is unavailable");
+    return this.surface.setPresentationStyle(css,signal);
+  }
+  private healthInspection?:ReturnType<ChatGptBrowserDriver["inspectHealth"]>;
 
   async liveness():Promise<boolean> {
-    let timeout:ReturnType<typeof setTimeout>|undefined;
     try {
-      return await Promise.race([
-        this.surface.page().then(page=>page.evaluate(()=>true)),
-        new Promise<false>(resolve=>{timeout=setTimeout(()=>resolve(false),1500);}),
-      ]);
+      const page=await this.surface.page();
+      if(page.isClosed())return false;
+      const responsive=await observeReadOnly(page.evaluate(()=>true),undefined,1500).catch(()=>false);
+      return this.rendererProbes.record(responsive);
     }catch{return false;}
-    finally{if(timeout)clearTimeout(timeout);}
   }
 
-  async approvePendingConversation(request:ConversationApprovalRequest,signal:AbortSignal):Promise<boolean> {
+  async approvePendingConversation(request:ConversationApprovalRequest,signal:AbortSignal,once=false):Promise<boolean> {
     const page = await this.surface.page();
     await this.surface.beginAction();
     try {
-      return await approveConversationCard(page,request,this.connectorApps.get(request.expectedAccountFingerprint,request.connectorName),signal);
+      return await approveConversationCard(page,request,this.connectorApps.get(request.expectedAccountFingerprint,request.connectorName),signal,once?'once':'conversation');
     } finally { await this.surface.endAction(); }
   }
 
-  async health(): Promise<{
+  async health(signal?:AbortSignal):Promise<Awaited<ReturnType<ChatGptBrowserDriver["inspectHealth"]>>> {
+    const pending=this.healthInspection??=this.inspectHealth();
+    void pending.finally(()=>{if(this.healthInspection===pending)this.healthInspection=undefined;}).catch(()=>{});
+    try {return await observeReadOnly(pending,signal);}
+    catch(error){
+      if(signal?.aborted)throw error;
+      const failure=asCompanionError(error);
+      return {authenticated:false,accountFingerprint:null,status:failure.code==='editor_unavailable'?"busy":"unavailable",detail:failure.message};
+    }
+  }
+
+  private async inspectHealth(): Promise<{
     authenticated:boolean;
     accountFingerprint:string | null;
     status:"idle" | "busy" | "authentication_required" | "unavailable";
     detail:string | null;
   }> {
+    const signal=AbortSignal.timeout(5_000);
+    const read=<T>(operation:()=>Promise<T>):Promise<T>=>{
+      signal.throwIfAborted();return observeReadOnly(operation(),signal);
+    };
     try {
-      const page = await this.surface.page();
+      const page = await read(()=>this.surface.page());
+      if(page.isClosed())throw new BrowserCompanionError("The shared Chrome ChatGPT window was closed","external_interference");
       if (this.maintenance?.page === page) {
         return {authenticated:true,accountFingerprint:this.maintenance.account.fingerprint,
           status:"busy",detail:"The shared ChatGPT tab is performing account maintenance"};
@@ -361,24 +434,21 @@ export class ChatGptBrowserDriver implements BrowserDriver {
       }
       let account:ChatGptAccount;
       try {
-        account = await this.healthAccount.read(page);
+        account = await read(()=>this.healthAccount.read(page));
       } catch (error) {
         if (page.isClosed()) throw new BrowserCompanionError("The shared Chrome ChatGPT window was closed", "external_interference", {cause:error});
-        if (!await page.locator(CHATGPT_COMPOSER_SELECTOR).filter({visible:true}).count()) {
-          throw new BrowserCompanionError(
-            "ChatGPT authentication could not be verified in the shared browser window",
-            "authentication_required",
-            { cause:error },
-          );
-        }
+        // Missing/hydrating editors do not prove sign-out. Only explicit
+        // authentication UI may turn a failed session observation into that
+        // state; a slow API read must preserve the live browser and account.
+        await throwIfSessionAttention(page,signal);
         throw error;
       }
       try {
-        await throwIfSessionAttention(page);
+        await throwIfSessionAttention(page,signal);
       } catch (error) {
-        if (error instanceof BrowserCompanionError && error.code === "conversation_unavailable") {
+        if (error instanceof BrowserCompanionError && (error.code === "conversation_unavailable"||error.code==="rate_limited")) {
           // The account was verified independently. Keep it signed in; the
-          // shared navigation budget enforces the conversation-load cooldown.
+          // shared navigation budget enforces conversation and server cooldowns.
           return {authenticated:true, accountFingerprint:account.fingerprint, status:"idle", detail:error.message};
         }
         if (error instanceof BrowserCompanionError && error.code === "authentication_required") {
@@ -397,23 +467,10 @@ export class ChatGptBrowserDriver implements BrowserDriver {
           detail:asCompanionError(error).message,
         };
       }
-      // A verified account remains available for navigation and maintenance
-      // when this conversation has failed to render its composer. Actions
-      // still verify the target page and a fresh account before any Send.
-      if (!await page.locator(CHATGPT_COMPOSER_SELECTOR).filter({visible:true}).count()) {
-        return {authenticated:true,accountFingerprint:account.fingerprint,status:"idle",
-          detail:"The current ChatGPT page has no composer; navigation is available"};
-      }
-      const composer = await activeComposer(page, 2_000).catch(() => null);
-      if (!composer) {
-        return {
-          authenticated:true,
-          accountFingerprint:account.fingerprint,
-          status:"unavailable",
-          detail:"The shared ChatGPT window has no unique usable composer",
-        };
-      }
-      recordConversationAvailable(page);
+      // Health checks the browser/session, not the current chat's editor.
+      // Every action waits for and validates its actual target composer after
+      // navigation. Repeating that here adds RPCs and false first-attempt
+      // failures while React temporarily disables or duplicates an editor.
       return {
         authenticated:true,
         accountFingerprint:account.fingerprint,
@@ -447,45 +504,61 @@ export class ChatGptBrowserDriver implements BrowserDriver {
   }
 
   async prepareNewChat(projectUrl:string | null, signal?:AbortSignal): Promise<CapabilityCatalog> {
+    const trace=this.preparationTrace('setup-chat');
     await this.surface.beginAction();
     try {
+      trace('opening new chat');
       await openNewChat(this.surface, projectUrl,signal);
+      trace('clearing setup draft');
       await clearExistingDraft(await this.surface.page(),signal);
-      return await this.capabilities(signal);
+      trace('checking setup account');
+      const account=await readChatGptAccount(await this.surface.page(),signal);
+      const cache=this.capabilitiesCache;
+      // Batch-created workers share one account and usually prepare within a
+      // minute. Reuse the catalogue hint, not model/effort authority: every
+      // Send still verifies its actual live picker. Explicit refreshes below
+      // always rescan, and account/plan changes never reuse this snapshot.
+      if(cache&&cache.accountFingerprint===account.fingerprint&&cache.planType===account.planType
+        &&Date.now()-cache.observedAtMs<60_000){trace('reusing verified catalogue');return structuredClone(cache.catalog);}
+      return await this.capabilities(signal,trace);
     }
     finally { await this.surface.endAction(); }
   }
 
-  async capabilities(signal?:AbortSignal): Promise<CapabilityCatalog> {
+  async capabilities(signal?:AbortSignal,progress?:(name:string)=>void): Promise<CapabilityCatalog> {
+    const trace=progress??this.preparationTrace('capabilities');
     signal?.throwIfAborted();
     let page = await this.surface.page();
     if (new URL(page.url()).origin !== "https://chatgpt.com") {
       page = await this.surface.navigate("https://chatgpt.com/",signal);
     }
+    trace('checking session attention');
     await throwIfSessionAttention(page);
-    try {
-      await assertAuthenticatedChatGptPage(page);
-    } catch (error) {
-      throw new BrowserCompanionError("Sign in to ChatGPT before refreshing browser capabilities", "authentication_required", { cause:error });
-    }
-    const account = await readChatGptAccount(page);
-    const capabilities = await detectChatGptAccountCapabilities(page,{signal});
-    const planKind = this.planCache?.plan.accountFingerprint === account.fingerprint
+    trace('checking catalogue account');
+    const account = await readChatGptAccount(page,signal);
+    // Authentication is proven by the session API, not a composer that React
+    // may not have mounted yet. Hydration gets one bounded readiness wait.
+    trace('waiting for setup composer');
+    await waitForConversationComposer(page,signal);
+    const capabilities = await detectChatGptAccountCapabilities(page,{signal,onProgress:trace});
+    const planKind = this.planCache?.plan.accountFingerprint === account.fingerprint&&this.planCache.planType===account.planType
       ? this.planCache.plan.kind : classifyPlan(account.planType).kind;
     const catalog = buildCapabilityCatalog(capabilities, account.fingerprint, this.build, planKind);
-    this.capabilitiesCache = { accountFingerprint:account.fingerprint, capabilities, catalog };
+    this.capabilitiesCache = { accountFingerprint:account.fingerprint,planType:account.planType,observedAtMs:Date.now(),capabilities,catalog };
+    trace('setup ready');
     return catalog;
   }
 
   async accountPlan(epoch:string, signal?:AbortSignal):Promise<AccountPlan> {
     signal?.throwIfAborted();
-    const main=await this.surface.page(),account=await readChatGptAccount(main);
-    if(this.planCache?.epoch===epoch&&this.planCache.plan.accountFingerprint===account.fingerprint)return this.planCache.plan;
-    return this.withMaintenancePage(main,account,async page=>{
-      const plan=await readBillingPlan(page,signal);
-      if(plan.accountFingerprint!==account.fingerprint)throw new Error("ChatGPT account changed during plan inspection");
-      this.planCache={epoch,plan};return plan;
-    },signal,{clearDraft:false});
+    const main=await this.surface.page(),account=await readChatGptAccount(main,signal);
+    if(this.planCache?.epoch===epoch&&this.planCache.plan.accountFingerprint===account.fingerprint&&this.planCache.planType===account.planType)return this.planCache.plan;
+    // This is polled automatically at startup. Visiting billing in the single
+    // shared tab can hold Setup Chat and real work behind a 30-second UI probe.
+    // The authenticated session supplies the plan family; exact model/effort
+    // availability is still discovered and verified from the live picker.
+    const plan={...classifyPlan(account.planType),accountFingerprint:account.fingerprint};
+    this.planCache={epoch,planType:account.planType,plan};return plan;
   }
 
   async refreshConnector(name:string, signal?:AbortSignal) {
@@ -497,24 +570,32 @@ export class ChatGptBrowserDriver implements BrowserDriver {
     let expectedAccount:string|undefined;
     const step = <T>(label:string,operation:(page:Page,account:ChatGptAccount,signal:AbortSignal)=>Promise<T>,maintenance=true)=>run(async operationSignal=>{
       operationSignal.throwIfAborted();
-      const page=await this.surface.page(),account=await readChatGptAccount(page);
+      const page=await this.surface.page(),account=await readChatGptAccount(page,operationSignal);
       if(expectedAccount&&expectedAccount!==account.fingerprint)throw new BrowserCompanionError("ChatGPT account changed during connector maintenance","authentication_required");
       expectedAccount=account.fingerprint;
       return maintenance?this.withMaintenancePage(page,account,main=>operation(main,account,operationSignal),operationSignal):operation(page,account,operationSignal);
     },signal).catch(error=>{
+      if(error instanceof Error&&!(error instanceof BrowserCompanionError)){
+        // Keep a bounded private diagnostic for framework failures that are
+        // intentionally hidden behind the public generic operation error.
+        const detail=error.message.split(/\r?\n/u,1)[0]!.replace(/https?:\/\/\S+/gu,'[url]')
+          .replace(/[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}/gu,'[email]').slice(0,200);
+        console.error(`[connector-maintenance] ${label}: ${error.name}: ${detail}`);
+      }
       const failure=asCompanionError(error);
       throw new BrowserCompanionError(`${label}: ${failure.message}`,failure.code,{cause:error});
     });
     const appId=await step("Identify connector",async(page,account,signal)=>{
       const cached=this.connectorApps.get(account.fingerprint,name);
       if(cached)return cached;
-      const discovered=await observedConnectorApp(page,name)??await this.withMaintenancePage(page,account,main=>identifyConnectorApp(main,name,account.fingerprint,signal),signal);
+      const discovered=await observedConnectorApp(page,name,signal)??await this.withMaintenancePage(page,account,main=>identifyConnectorApp(main,name,account.fingerprint,signal),signal);
       this.connectorApps.remember(account.fingerprint,name,discovered);return discovered;
     },false);
     if(this.pendingRefresh)throw new BrowserCompanionError("Browser companion is busy with a connector refresh");
     let originalUrl!:string;
     let pending:{page:Page;url:string;account:ChatGptAccount}|undefined;
     let observation:ConnectorRefreshObservation|undefined;
+    let refreshFailure:unknown;
     const phase=<T>(label:string,operation:(page:Page,account:ChatGptAccount,signal:AbortSignal)=>Promise<T>)=>step(label,async(page,account,operationSignal)=>{
       if(this.pendingRefresh&&this.pendingRefresh!==pending)throw new BrowserCompanionError("Browser companion is busy with another connector refresh");
       if(pending&&(pending.page!==page||pending.url!==page.url()))throw new BrowserCompanionError("Another browser action changed pages during connector refresh","external_interference");
@@ -547,7 +628,8 @@ export class ChatGptBrowserDriver implements BrowserDriver {
       // restoration below; other operations must not navigate away mid-refresh.
       const refreshObserved=await Promise.race([observation.wait(waitSignal),interrupted]);
       return {appId,permissionChanged,refreshObserved,schemaVerified:false as const};
-    }finally {
+    }catch(error){refreshFailure=error;throw error;}
+    finally {
       waitSignal.removeEventListener("abort",onAbort);
       // Restore only if the shared page is still ours. Never undo another
       // action's navigation or overwrite a draft typed while refresh waited.
@@ -555,12 +637,16 @@ export class ChatGptBrowserDriver implements BrowserDriver {
         const page=await this.surface.page();
         if(!pending||page!==pending.page||page.url()!==pending.url)return;
         await observation?.dispose();
-        if(page.url()===originalUrl||await page.locator(CHATGPT_COMPOSER_SELECTOR).filter({visible:true}).count())return;
+        if(page.url()===originalUrl||await observeReadOnly(page.locator(CHATGPT_COMPOSER_SELECTOR).filter({visible:true}).count(),operationSignal))return;
         await this.surface.beginAction();
         try{await this.surface.navigate(originalUrl,operationSignal);}finally{await this.surface.endAction();}
       });}catch(error){
         // An intervening submission can own the page while observation ends.
-        if(!(error instanceof Error&&error.message.toLowerCase().includes("busy")))throw error;
+        if(!refreshFailure&&!(error instanceof Error&&error.message.toLowerCase().includes("busy"))
+          && !(error instanceof BrowserCompanionError&&error.code==="conversation_cooldown")) {
+          const failure=asCompanionError(error);
+          throw new BrowserCompanionError(`Restore connector page: ${failure.message}`,failure.code,{cause:error});
+        }
       }finally{if(this.pendingRefresh===pending)this.pendingRefresh=undefined;}
     }
   }
@@ -572,14 +658,14 @@ export class ChatGptBrowserDriver implements BrowserDriver {
     let started=false;
     let completed=false;
     try {
-      try { await throwIfSessionAttention(page); }
+      try { await observeReadOnly(throwIfSessionAttention(page),signal); }
       catch(error) {
         // A page-local load failure must not prevent opening global settings.
-        if (!(error instanceof BrowserCompanionError && error.code === "conversation_unavailable")) throw error;
+        if (!(error instanceof BrowserCompanionError && (error.code === "conversation_unavailable"||error.code==="rate_limited"))) throw error;
       }
       // Ownership tracks our UI operation, never ChatGPT's response lifetime.
       const composers=page.locator(CHATGPT_COMPOSER_SELECTOR).filter({visible:true});
-      const count=await composers.count();
+      const count=await observeReadOnly(composers.count(),signal);
       if(count>1)throw new BrowserCompanionError("Browser companion is busy; the shared composer is ambiguous");
       if(await this.surface.page()!==page||page.url()!==previousUrl)throw new BrowserCompanionError("ChatGPT changed pages before account maintenance", "external_interference");
       this.maintenance={page,account};started=true;
@@ -614,6 +700,7 @@ export class ChatGptBrowserDriver implements BrowserDriver {
       // Preserve a pending approval rather than discard its in-memory card.
       await throwIfConversationApproval(page);
       await navigatePage(page,request.url,{signal,reload:page.url()===request.url});
+      await waitForConversationComposer(page,signal);
     } finally {await this.surface.endAction();}
   }
 
@@ -639,15 +726,19 @@ export class ChatGptBrowserDriver implements BrowserDriver {
       let page=await this.surface.page(),same=false;
       try {same=canonicalChatGptConversationUrl(page.url())===target;}catch{}
       if(!same){
-        if((await readChatGptAccount(page)).fingerprint!==account)return false;
-        if(Date.now()<(this.handoffProbes.get(key)??0))return false;
-        this.handoffProbes.delete(key);this.handoffProbes.set(key,Date.now()+180_000);
+        if((await observeReadOnly(readChatGptAccount(page),signal)).fingerprint!==account)throw new BrowserCompanionError('ChatGPT account changed before handoff inspection','authentication_required');
+        if(Date.now()<(this.handoffProbes.get(key)??0))throw new BrowserCompanionError('Handoff inspection is waiting for its next real probe','editor_unavailable');
+        this.handoffProbes.delete(key);this.handoffProbes.set(key,Date.now()+1_000);
         if(this.handoffProbes.size>256)this.handoffProbes.delete(this.handoffProbes.keys().next().value!);
         // A bounded visit can discover a final after another chat took the tab.
         // Repeated polls of the current conversation never reload its document.
         page=await this.surface.navigate(url,signal);
       }
-      const complete=await completedHandoff(page,url,account,handoffId,signal);
+      await observeReadOnly(throwIfSessionAttention(page),signal);
+      await observeReadOnly(throwIfConversationApproval(page),signal);
+      if(canonicalChatGptConversationUrl(page.url())!==target)throw new BrowserCompanionError('ChatGPT changed conversations during handoff inspection','conversation_unavailable');
+      if((await observeReadOnly(readChatGptAccount(page),signal)).fingerprint!==account)throw new BrowserCompanionError('ChatGPT account changed during handoff inspection','authentication_required');
+      const complete=await observeReadOnly(completedHandoff(page,url,account,handoffId,signal),signal,10_000);
       if(complete)this.handoffProbes.delete(key);
       return complete;
     } finally {await this.surface.endAction();}
@@ -660,6 +751,8 @@ export class ChatGptBrowserDriver implements BrowserDriver {
     let sendActivated = false;
     let sendAccepted = false;
     let submissionSettlesAt = 0;
+    let submissionNetwork:ReturnType<typeof observeSubmissionNetwork>|undefined;
+    let submissionSlot:Awaited<ReturnType<typeof acquireSubmissionSlot>>|undefined;
     const settleSubmission = async () => {
       const remaining = submissionSettlesAt - Date.now();
       // Keep ownership even if cancelled after Send: navigating away can abort
@@ -675,9 +768,15 @@ export class ChatGptBrowserDriver implements BrowserDriver {
     let pairingSelection: PairingMediumSelection | undefined;
     let restoreUrl: string | undefined;
     let submissionStep = "opening conversation";
+    const preparationStarted=performance.now();
+    const timing={actionId:execution.request.actionId,totalMs:0,steps:[] as Array<{name:string;atMs:number}>};
+    this.preparationTimings.push(timing);
+    if(this.preparationTimings.length>8)this.preparationTimings.shift();
     const step = (name:string) => {
       submissionStep = name;
-      if (process.env.CODEXIFY_BROWSER_TRACE_SUBMISSION === "1") console.error(`[submission-step] ${execution.request.actionId} ${name}`);
+      timing.totalMs=Math.round(performance.now()-preparationStarted);
+      timing.steps.push({name,atMs:timing.totalMs});
+      if (submissionTracingEnabled()) console.error(`[submission-step] ${execution.request.actionId} ${name}`);
     };
     try {
       const creating = execution.request.prompt.kind === "create_chat";
@@ -695,38 +794,63 @@ export class ChatGptBrowserDriver implements BrowserDriver {
         }
       }
       execution.emit({ type:"navigating" });
-      const opened = creating ? await openNewChat(this.surface, execution.request.url === "https://chatgpt.com/new" ? null : execution.request.url, execution.signal) : null;
-      const exact = opened ? {page:opened, canonicalUrl:opened.url()} : await exactConversationPage(this.surface, execution.request.url, execution.request.expectedUrl, execution.signal);
+      step("loading conversation");
+      const navigationProgress=(stage:"document_loaded"|"editor_ready")=>execution.emit({type:"navigation_progress",step:stage});
+      const opened = creating ? await openNewChat(this.surface, execution.request.url === "https://chatgpt.com/new" ? null : execution.request.url, execution.signal,navigationProgress) : null;
+      const exact = opened ? {page:opened, canonicalUrl:opened.url()} : await exactConversationPage(this.surface, execution.request.url, execution.request.expectedUrl, execution.signal,navigationProgress);
+      execution.signal.throwIfAborted();
       const page = exact.page;
       let canonicalUrl = exact.canonicalUrl;
       restoreUrl = canonicalUrl;
+      step("checking account");
       const account = await readChatGptAccount(page);
       if (account.fingerprint !== execution.request.expectedAccountFingerprint) {
         throw new BrowserCompanionError("ChatGPT account changed before the action could start", "authentication_required");
       }
+      execution.emit({type:"navigation_progress",step:"account_verified"});
       ownedPage = page;
       await throwIfConversationApproval(page);
       recordConversationAvailable(page);
       const renewal=execution.request.prompt.kind === "turn_renewal" ? execution.request.prompt : null;
+      const verifyRenewal=renewal?createCompletedHandoffVerifier(page,canonicalUrl,account.fingerprint,renewal.handoffId,execution.signal):undefined;
       const verifyHandoff=async()=>{
-        if(renewal && !await completedHandoff(page,canonicalUrl,account.fingerprint,renewal.handoffId,execution.signal)) {
+        if(verifyRenewal && !await verifyRenewal()) {
           throw new BrowserCompanionError("Turn handoff is not complete; continuation was not sent","external_interference");
         }
       };
       await verifyHandoff();
       if (execution.request.prompt.kind === "pair_verify") await this.replacePairingDraft(execution.request);
-      if (execution.request.prompt.kind !== "pair_verify" && !creating && !renewal) {
+      if(this.recoveryEnhancements && !creating && execution.request.prompt.kind!=='pair_verify'){
+        const draft=await composerText(await activeComposer(page,3_000,execution.signal));
+        const staleConnectorQuery=draft.trim()===`@${execution.request.connectorName}`;
+        const ownedUnsent=this.draftRecovery.recoverable(account.fingerprint,canonicalUrl,draft);
+        const ownedHandoffDraft=Boolean(renewal&&this.draftRecovery.recoverableHandoffDraft(account.fingerprint,canonicalUrl,draft));
+        if(draft && ((!renewal&&isAutomationGoalDraft(draft))||staleConnectorQuery||ownedUnsent||ownedHandoffDraft)){
+          // This fresh native request has not clicked Send. A previous browser
+          // deadline/restart can leave fixed goal-control prose behind; its exact
+          // identity is recoverable without discarding user text or replaying a batch.
+          if(ownedHandoffDraft)await verifyHandoff();
+          await clearExistingDraft(page,execution.signal,draft);
+          console.warn(`[composer-recovery] reclaimed ${ownedUnsent?'confirmed unsent draft':staleConnectorQuery?'connector query':'fixed automation goal draft'} chars=${draft.length}`);
+        }
+      }
+      if (this.recoveryEnhancements && execution.request.prompt.kind !== "pair_verify" && !creating && !renewal) {
         // Offline actions are dispatched after tool-call inactivity. Stop only
         // while preparing this send; ongoing conversations need no observation.
+        step("stopping previous response");
+        await traceStopControls(page,"before-stop");
         await stopLingeringResponse(page, execution.signal, { canonicalUrl, accountFingerprint:account.fingerprint }, execution.emit);
         if (canonicalChatGptConversationUrl(page.url()) !== canonicalUrl) {
           throw new BrowserCompanionError("ChatGPT changed conversations while stopping the previous response", "conversation_unavailable");
         }
-      } else {
+      } else if(creating||execution.request.prompt.kind==="pair_verify") {
         await clearExistingDraft(page,execution.signal);
       }
       const cache = this.capabilitiesCache;
-      await clearExistingDraft(page,execution.signal);
+      step("checking draft");
+      if(!creating&&execution.request.prompt.kind!=="pair_verify")
+        await ensureEmptyOwnedComposer(await activeComposer(page,3_000,execution.signal));
+      else await clearExistingDraft(page,execution.signal);
       execution.emit({ type:"composer_ready" });
       const verifyFallbackDestination=async()=>{
         execution.signal.throwIfAborted();
@@ -738,29 +862,68 @@ export class ChatGptBrowserDriver implements BrowserDriver {
         }
       };
       let selected: Awaited<ReturnType<typeof selectAvailableModelAndEffort>> | null = null;
+      let editorRecovered=false;
+      const recoverEditor=async()=>{
+        if(!this.recoveryEnhancements||editorRecovered)return false;
+        editorRecovered=true;
+        step("refreshing stuck editor");
+        if(pairingSelection) {
+          await this.restorePairingSelection(page,pairingSelection,canonicalUrl,execution.request.expectedAccountFingerprint);
+          pairingSelection=undefined;
+        }
+        await page.keyboard.press("Escape");
+        await refreshConversationEditor(page,canonicalUrl,account.fingerprint,execution.signal,
+          recoveryStep=>execution.emit({type:"editor_recovery",step:recoveryStep}),
+          creating?{projectUrl:execution.request.url==="https://chatgpt.com/new"?null:execution.request.url}:undefined);
+        if(creating){canonicalUrl=page.url();restoreUrl=canonicalUrl;}
+        if(creating||execution.request.prompt.kind==="pair_verify")pairingSelection=await selectPairingMedium(page,execution.signal);
+        await verifyHandoff();
+        return true;
+      };
+      const selectModel=async()=>{
+        if(execution.request.model===null||execution.request.effort===null)return null;
+        step("selecting model");
+        return selectAvailableModelAndEffort(page,execution.request.model,execution.request.effort,
+          cache?.accountFingerprint===account.fingerprint?cache.capabilities:undefined,execution.signal,verifyFallbackDestination,true);
+      };
       if (!creating && execution.request.prompt.kind !== "pair_verify"
         && execution.request.model !== null && execution.request.effort !== null) {
-        selected = await selectAvailableModelAndEffort(
-        page,
-        execution.request.model,
-        execution.request.effort,
-        cache?.accountFingerprint === account.fingerprint ? cache.capabilities : undefined,
-        execution.signal,
-        verifyFallbackDestination,
-      );
-      execution.emit({ type:"model_verified", model:selected.id, effort:selected.effort });
+        try {selected=await selectModel();}
+        catch(error) {
+          if(!(error instanceof BrowserCompanionError)||error.code!=="model_unavailable"
+            ||error instanceof ModelOptionUnavailableError||!await recoverEditor())throw error;
+          selected=await selectModel();
+        }
+        execution.emit({ type:"model_verified", model:selected!.id, effort:selected!.effort });
       }
       if (creating || execution.request.prompt.kind === "pair_verify") {
         pairingSelection = await selectPairingMedium(page, execution.signal);
       }
-      try {
-        selectedConnector = await selectConnector(page, execution.request.connectorName, execution.signal);
-      } catch(error) {
-        // selectConnector has cleared the unsuccessful mention search. A missing
-        // menu row does not require another page load or another submission.
-        if (!(error instanceof ConnectorMenuUnavailableError)) throw error;
-        execution.signal.throwIfAborted();
-        execution.emit({type:"connector_omitted"});
+      // A verified existing conversation already carries its connector tools.
+      // Reopening the app picker for every wake can hang React on long histories.
+      // Preserve a selected chip if present; require selection for new/pairing
+      // conversations, where tool availability has not yet been established.
+      const requiresConnector=creating||execution.request.prompt.kind==="pair_verify";
+      const hasConnectorChip=await (await activeComposer(page,3_000,execution.signal))
+        .locator(SELECTED_CONNECTOR_SELECTOR).filter({visible:true}).count()>0;
+      if(!requiresConnector&&!hasConnectorChip)execution.emit({type:"connector_omitted"});
+      for(let attempt=0;(requiresConnector||hasConnectorChip)&&attempt<2;attempt++) {
+        try {
+          step("selecting connector");
+          selectedConnector=await selectConnector(page,execution.request.connectorName,execution.signal,
+            connectorStep=>{step(`connector ${connectorStep}`);execution.emit({type:"connector_progress",step:connectorStep});});
+          break;
+        } catch(error) {
+          if(!(error instanceof BrowserCompanionError)||error.code!=="connector_unavailable")throw error;
+          execution.signal.throwIfAborted();
+          if(attempt===0&&await recoverEditor()) {
+            if(selected){selected=await selectModel();execution.emit({type:"model_verified",model:selected!.id,effort:selected!.effort});}
+            continue;
+          }
+          if(creating||execution.request.prompt.kind==="pair_verify")throw error;
+          execution.emit({type:"connector_omitted"});
+          break;
+        }
       }
       if(selectedConnector) {
         this.connectorApps.remember(account.fingerprint,execution.request.connectorName,selectedConnector.identity);
@@ -771,10 +934,20 @@ export class ChatGptBrowserDriver implements BrowserDriver {
       step("reading submission baseline");
       await verifyHandoff();
       await throwIfConversationApproval(page);
-      const baseline = await captureSubmissionBaseline(page, execution.renderedPrompt);
+      if(!creating&&execution.request.prompt.kind!=="pair_verify"&&await generationRunning(page)) {
+        if(!this.recoveryEnhancements)throw new BrowserCompanionError("ChatGPT's previous turn is still running; the continuation was not sent","editor_unavailable");
+        // A control can arrive while the model/app picker is being prepared.
+        // Stop before inserting our prompt; preserve that selected UI in place.
+        step("stopping late previous response");
+        await stopLingeringResponse(page,execution.signal,{canonicalUrl,accountFingerprint:account.fingerprint},execution.emit,
+          {mayReload:false,budgetMs:20_000});
+      }
+      let baseline = await captureSubmissionBaseline(page, execution.renderedPrompt, execution.signal);
+      this.draftRecovery.prepare(account.fingerprint,canonicalUrl,execution.request.actionId,execution.renderedPrompt);
       insertionAttempted = true;
       step("inserting prompt");
-      try {await insertExactPrompt(selectedConnector?.composer ?? await activeComposer(page,30_000,execution.signal), execution.renderedPrompt);}
+      const preparedComposer=selectedConnector?.composer ?? await activeComposer(page,30_000,execution.signal);
+      try {await insertExactPrompt(preparedComposer, execution.renderedPrompt);}
       catch(error){
         execution.signal.throwIfAborted();
         await throwIfConversationApproval(page);
@@ -782,17 +955,30 @@ export class ChatGptBrowserDriver implements BrowserDriver {
         throw new BrowserCompanionError("ChatGPT did not accept the message in its editor; nothing was sent","editor_unavailable",{cause:error});
       }
       step("waiting for Send control");
-      const send = await uniqueSendButton(await activeComposer(page, 30_000, execution.signal), 30_000, execution.signal,
+      let send = await uniqueSendButton(preparedComposer, 30_000, execution.signal,
         () => throwIfConversationApproval(page));
       await throwIfConversationApproval(page);
       step("checking model and connector");
       if (pairingSelection) await pairingSelection.verify(execution.signal);
       else if (selected) await assertSelectedModelAndEffort(page, selected, execution.signal, creating);
-      if (!await connectorMatches(await activeComposer(page, 30_000, execution.signal))) {
+      // Locators resolve against the current DOM after any picker rerender.
+      // Revalidate uniqueness/editability here once, then read the connector
+      // and exact draft from that same locator without repeated readiness RPCs.
+      const finalComposer=await activeComposer(page,30_000,execution.signal);
+      if (!await connectorMatches(finalComposer)) {
         throw new BrowserCompanionError("ChatGPT changed the selected connector before Send", "external_interference");
       }
       step("checking prompt and conversation");
-      if (await composerText(await activeComposer(page, 30_000, execution.signal)) !== execution.renderedPrompt) {
+      submissionSlot=await acquireSubmissionSlot(page,execution.signal);
+      // Another page may have prepared a model or the account may have changed
+      // while this page waited for the shared Send boundary.
+      if((await readChatGptAccount(page,execution.signal)).fingerprint!==execution.request.expectedAccountFingerprint)
+        throw new BrowserCompanionError("ChatGPT account changed before Send","authentication_required");
+      if(pairingSelection)await pairingSelection.verify(execution.signal);
+      else if(selected)await assertSelectedModelAndEffort(page,selected,execution.signal,creating);
+      if(!await connectorMatches(await activeComposer(page,3_000,execution.signal)))
+        throw new BrowserCompanionError("ChatGPT changed the selected connector before Send","external_interference");
+      if (await composerText(finalComposer) !== execution.renderedPrompt) {
         throw new BrowserCompanionError("ChatGPT composer text changed before Send", "external_interference");
       }
       if (creating) await assertNewChatDraft(page, execution.request.url === "https://chatgpt.com/new" ? null : execution.request.url);
@@ -802,23 +988,58 @@ export class ChatGptBrowserDriver implements BrowserDriver {
       await throwIfConversationApproval(page);
       execution.signal.throwIfAborted();
       await verifyHandoff();
+      if(!creating&&execution.request.prompt.kind!=="pair_verify"&&await generationRunning(page)) {
+        if(!this.recoveryEnhancements || renewal || !this.draftRecovery.recoverable(account.fingerprint,canonicalUrl,await composerText(await activeComposer(page,3_000,execution.signal))))
+          throw new BrowserCompanionError("ChatGPT's previous turn is still running; the continuation was not sent","editor_unavailable");
+        // Work can reveal End turn only after editor input. Nothing has clicked
+        // Send: remove only our exact, journal-owned prompt, stop in place once,
+        // then rebuild the baseline and all pre-Send proof against the new DOM.
+        step("stopping response revealed after insertion");
+        await verifyFallbackDestination();
+        await throwIfConversationApproval(page);
+        if(await composerText(await activeComposer(page,3_000,execution.signal))!==execution.renderedPrompt)
+          throw new BrowserCompanionError('ChatGPT draft was edited before Stop recovery','external_interference');
+        await clearComposerState(page,execution.request.connectorName,execution.signal);
+        await stopLingeringResponse(page,execution.signal,{canonicalUrl,accountFingerprint:account.fingerprint},execution.emit,{mayReload:false,budgetMs:20_000});
+        await ensureEmptyOwnedComposer(await activeComposer(page,3_000,execution.signal));
+        if(selectedConnector)selectedConnector=await selectConnector(page,execution.request.connectorName,execution.signal);
+        baseline=await captureSubmissionBaseline(page,execution.renderedPrompt,execution.signal);
+        await insertExactPrompt(await activeComposer(page,3_000,execution.signal),execution.renderedPrompt);
+        send=await uniqueSendButton(await activeComposer(page,3_000,execution.signal),10_000,execution.signal,()=>throwIfConversationApproval(page));
+        await verifyFallbackDestination();
+        await throwIfConversationApproval(page);
+        if(selected)await assertSelectedModelAndEffort(page,selected,execution.signal);
+        const composer=await activeComposer(page,3_000,execution.signal);
+        if(await composerText(composer)!==execution.renderedPrompt || !await connectorMatches(composer))
+          throw new BrowserCompanionError('ChatGPT changed the prepared continuation after Stop','external_interference');
+        if(await generationRunning(page))throw new BrowserCompanionError("ChatGPT's previous turn is still running; the continuation was not sent","editor_unavailable");
+      }
+      if(this.surface.requireSubmissionNetworkProof)submissionNetwork=observeSubmissionNetwork(page);
+      submissionSlot.markSent();
+      this.draftRecovery.beforeSend(execution.request.actionId);
       sendActivated = true;
       if(this.pendingSubmission?.actionId===execution.request.actionId)this.pendingSubmission.mayHaveSent=true;
       step("clicking Send");
       submissionSettlesAt = Date.now() + 5_000;
       await send.click({ timeout:10_000, signal:execution.signal });
+      submissionSlot.release();submissionSlot=undefined;
+      execution.emit({type:"submission_progress",step:"send_clicked"});
       submissionSettlesAt = Date.now() + 5_000;
       step("confirming Send acceptance");
       try {
-        await waitForSubmissionAcceptance(page, baseline, Date.now() + 30_000, execution.signal);
+        await Promise.all([
+          waitForSubmissionAcceptance(page, baseline, Date.now() + 25_000, execution.signal),
+          submissionNetwork?.wait(execution.signal),
+        ]);
       } catch (error) {
         throw new BrowserCompanionError(
-          "ChatGPT Send may have been accepted, but semantic acceptance could not be proven",
+          error instanceof BrowserCompanionError ? error.message : "ChatGPT Send may have been accepted, but semantic acceptance could not be proven",
           "ambiguous_send",
           { sendAccepted:true, cause:error },
         );
       }
       sendAccepted = true;
+      this.draftRecovery.forget(execution.request.actionId);
       execution.emit({ type:"send_accepted" });
       if (creating) {
         const created = new URL(await createdChatUrl(page, execution.signal)); created.search = ""; created.hash = ""; canonicalUrl = created.href;
@@ -846,8 +1067,31 @@ export class ChatGptBrowserDriver implements BrowserDriver {
       await settleSubmission();
       execution.signal.throwIfAborted();
       execution.emit({ type:"submission_complete", canonicalUrl });
+      timing.totalMs=Math.round(performance.now()-preparationStarted);
     } catch (error) {
-      if (process.env.CODEXIFY_BROWSER_TRACE_SUBMISSION === "1") console.error(`[submission-step] ${execution.request.actionId} failed at ${submissionStep}; sendActivated=${sendActivated}; sendAccepted=${sendAccepted}`);
+      if(ownedPage&&error instanceof BrowserCompanionError&&error.message.includes("routed the message into the previous turn")) {
+        await traceStopControls(ownedPage,"unexpected-steer");
+        if(this.recoveryEnhancements && execution.request.prompt.kind==="offline_goal") {
+          // A stale backend turn may expose Stop only after a steering request.
+          // End that turn through its verified UI, but retain the ambiguous send:
+          // no reload, draft clearing, acceptance claim, or same-action resend.
+          try {
+            await settleSubmission();
+            await stopLingeringResponse(ownedPage,execution.signal,{
+              canonicalUrl:canonicalChatGptConversationUrl(execution.request.expectedUrl),
+              accountFingerprint:execution.request.expectedAccountFingerprint,
+            },event=>{if(event.type==="stop_progress")execution.emit(event);},{mayReload:false,budgetMs:20_000});
+            await traceStopControls(ownedPage,"after-steer-stop");
+          } catch { /* Preserve the original uncertain-send result. */ }
+        }
+      }
+      if (submissionTracingEnabled()) {
+        const details=(error instanceof AggregateError?error.errors:[error]).map(failure=>{
+          const value=asCompanionError(failure);
+          return `${value.code}: ${value.message.split(/\r?\n/)[0]!.slice(0,240)}`;
+        }).join("; ");
+        console.error(`[submission-step] ${execution.request.actionId} failed at ${submissionStep}; sendActivated=${sendActivated}; sendAccepted=${sendAccepted}; ${details}`);
+      }
       if (!sendActivated && insertionAttempted && ownedPage) {
         // A failed readiness check must not leave our own unchanged prompt blocking retries.
         // Never clear a draft that was edited, moved, or might already have been submitted.
@@ -858,6 +1102,7 @@ export class ChatGptBrowserDriver implements BrowserDriver {
             if (await composerText(composer) === execution.renderedPrompt
               && await connectorMatches(composer)) {
               await clearComposerState(ownedPage, execution.request.connectorName);
+              this.draftRecovery.forget(execution.request.actionId);
             }
           }
         } catch { /* Preserve the original failure when safe cleanup is unavailable. */ }
@@ -880,8 +1125,14 @@ export class ChatGptBrowserDriver implements BrowserDriver {
       if (sendAccepted && error instanceof BrowserCompanionError && !error.sendAccepted) {
         throw new BrowserCompanionError(error.message, error.code, { sendAccepted:true, cause:error });
       }
+      if(!sendActivated && submissionStep==="loading conversation" && execution.request.prompt.kind!=="create_chat"
+        && ((error instanceof Error && error.name==="TimeoutError")
+          || (error instanceof BrowserCompanionError && error.code==="editor_unavailable"))) {
+        throw new BrowserCompanionError(CONVERSATION_UNAVAILABLE_MESSAGE,"conversation_unavailable",{cause:error});
+      }
       throw error;
     } finally {
+      submissionSlot?.release();
       try {
         await settleSubmission();
         if (pairingSelection && ownedPage && restoreUrl) {
@@ -891,6 +1142,7 @@ export class ChatGptBrowserDriver implements BrowserDriver {
           }
         }
       } finally {
+        submissionNetwork?.close();
         if(this.pendingSubmission?.actionId===execution.request.actionId)this.pendingSubmission=undefined;
         await this.surface.endAction();
       }
@@ -916,7 +1168,7 @@ export class ChatGptBrowserDriver implements BrowserDriver {
 
   async close(): Promise<void> {
     this.healthAccount.dispose();
-    await this.surface.close();
+    await (this.surface.closeActionPage?.()??this.surface.close());
   }
 
 }

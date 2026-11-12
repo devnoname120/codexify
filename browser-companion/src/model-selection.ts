@@ -9,6 +9,7 @@ import { readModelOptionRows, browserEffortIdFromLabel, modelsFromDiscoveredEffo
 import { BrowserCompanionError, ModelOptionUnavailableError } from "./errors";
 import { canonicalChatGptConversationUrl } from "./protocol";
 import { modelFallbacks } from "./model-fallback";
+import {observeReadOnly} from "./observation";
 
 type EffortMenu = Awaited<ReturnType<typeof activateChatGptEffortMenu>>;
 
@@ -20,8 +21,8 @@ function familyError(family: BrowserModelFamily, cause?: unknown): BrowserCompan
   );
 }
 
-async function familyOption(menu: EffortMenu, family: BrowserModelFamily) {
-  await readModelOptionRows(menu.menu);
+async function familyOption(menu: EffortMenu, family: BrowserModelFamily,signal?:AbortSignal) {
+  await observeReadOnly(readModelOptionRows(menu.menu),signal);
   return menu.menu.locator(`[role="menuitemradio"][data-browser-model-family="${family}"]`);
 }
 
@@ -34,7 +35,7 @@ export async function selectChatGptModelFamily(
 ): Promise<EffortMenu> {
   try {
     signal?.throwIfAborted();
-    const option = await familyOption(menu, family);
+    const option = await familyOption(menu, family,signal);
     if (await option.count() > 1) throw familyError(family);
     if (await option.count() === 1 && (await option.getAttribute("aria-disabled") === "true" || await option.getAttribute("disabled") !== null)) {
       throw new ModelOptionUnavailableError(`ChatGPT model ${family} is unavailable`,family);
@@ -56,7 +57,7 @@ export async function selectChatGptModelFamily(
       if (await trigger.getAttribute("aria-expanded") === "false") await trigger.click({ timeout: 5_000,signal });
     }
     if (await option.count() === 0) {
-      const rows=await readModelOptionRows(menu.menu);
+      const rows=await observeReadOnly(readModelOptionRows(menu.menu),signal);
       if (rows.some(row=>row.family)) {
         throw new ModelOptionUnavailableError(`ChatGPT model ${family} is not offered in this conversation`,family);
       }
@@ -70,7 +71,8 @@ export async function selectChatGptModelFamily(
     const selected = await activate();
     const deadline = Date.now() + 1_000;
     do {
-      const current = await familyOption(selected, family);
+      signal?.throwIfAborted();
+      const current = await familyOption(selected, family,signal);
       if (await current.count() > 1) throw familyError(family);
       if (await current.count() === 1 && await current.getAttribute("aria-checked") === "true") return selected;
       await new Promise(resolve => setTimeout(resolve, 50));
@@ -127,17 +129,19 @@ export async function assertChatGptModelFamily(
   effort: BrowserEffort,
   effortIndex: number,
   settleMs = 0,
+  signal?:AbortSignal,
 ): Promise<void> {
   const deadline = Date.now() + settleMs;
   do {
-    const option = await familyOption(menu, family);
+    signal?.throwIfAborted();
+    const option = await familyOption(menu, family,signal);
     const checked = await option.count() === 1 && await option.getAttribute("aria-checked") === "true";
     const state = parseChatGptEffortSliderState(
       await menu.slider.getAttribute("aria-valuemin"), await menu.slider.getAttribute("aria-valuemax"),
       await menu.slider.getAttribute("aria-valuenow"),
     );
-    const descriptions = await readChatGptModelAnnouncements(menu.slider);
-    const familyLabel = checked ? (await readModelOptionRows(menu.menu)).find(row=>row.checked&&row.family===family)?.label??null : null;
+    const descriptions = await readChatGptModelAnnouncements(menu.slider,signal);
+    const familyLabel = checked ? (await observeReadOnly(readModelOptionRows(menu.menu),signal)).find(row=>row.checked&&row.family===family)?.label??null : null;
     if (state && state.value === state.min + effortIndex && chatGptModelSelectionMatches(descriptions, family, effort, checked, familyLabel)) return;
     if (Date.now() >= deadline) break;
     await new Promise(resolve => setTimeout(resolve, 50));
@@ -146,7 +150,7 @@ export async function assertChatGptModelFamily(
 }
 
 export interface SelectedBrowserModel extends ResolvedBrowserModel {
-  selection: { url:string; label:string } | null;
+  selection: { url:string; label:string; origin?:number } | null;
 }
 
 async function thinkControls(form:Locator):Promise<Locator> {
@@ -211,8 +215,8 @@ async function setLunaThinkMode(
   }
 }
 
-async function availableEffort(menu: EffortMenu, index: number): Promise<Awaited<ReturnType<typeof readChatGptEffortSnapshot>>> {
-  const state = await readChatGptEffortSnapshot(menu.sliderContainer).catch(error => {
+async function availableEffort(menu: EffortMenu, index: number,signal?:AbortSignal): Promise<Awaited<ReturnType<typeof readChatGptEffortSnapshot>>> {
+  const state = await readChatGptEffortSnapshot(menu.sliderContainer,1_000,signal).catch(error => {
     throw new BrowserCompanionError(
       "ChatGPT effort availability could not be verified",
       "model_unavailable",
@@ -230,7 +234,7 @@ async function availableEffort(menu: EffortMenu, index: number): Promise<Awaited
 
 /** Resolve only the requested effort on the selected destination family. */
 async function requestedEffort(menu: EffortMenu, effort: string, cachedIndex: number | null | undefined, signal?: AbortSignal) {
-  const state = await readChatGptEffortSnapshot(menu.sliderContainer);
+  const state = await readChatGptEffortSnapshot(menu.sliderContainer,1_000,signal);
   const matches = state.labels.flatMap((label, index) => label && browserEffortIdFromLabel(label) === effort ? [index] : []);
   if (matches.length > 1) throw new Error("ChatGPT exposed duplicate effort labels");
   const direct = matches[0];
@@ -240,7 +244,7 @@ async function requestedEffort(menu: EffortMenu, effort: string, cachedIndex: nu
   }
   // Some picker versions label only the selected tick. Use a cached position as
   // a hint, verifying its live announcement; never treat the cache as authority.
-  const currentLabel = await readCurrentEffortLabel(menu);
+  const currentLabel = await readCurrentEffortLabel(menu,signal);
   if (browserEffortIdFromLabel(currentLabel) === effort) {
     if (!state.available[state.value-state.min]) throw new ModelOptionUnavailableError("ChatGPT locks the requested effort");
     return {id:effort, label:currentLabel, index:state.value - state.min, available:true, reason:null};
@@ -251,9 +255,9 @@ async function requestedEffort(menu: EffortMenu, effort: string, cachedIndex: nu
   for (const index of candidates) {
     if (state.min + index === state.value) continue;
     await moveChatGptEffortSlider(menu, state.min + index, signal);
-    const live = await readChatGptEffortSnapshot(menu.sliderContainer);
+    const live = await readChatGptEffortSnapshot(menu.sliderContainer,1_000,signal);
     if (live.min !== state.min || live.max !== state.max) throw new Error("ChatGPT changed its effort range");
-    const label = await readCurrentEffortLabel(menu);
+    const label = await readCurrentEffortLabel(menu,signal);
     if (browserEffortIdFromLabel(label) === effort) return {id:effort, label, index, available:true, reason:null};
   }
   throw new ModelOptionUnavailableError("ChatGPT did not expose the requested effort");
@@ -265,6 +269,7 @@ export async function selectModelAndEffort(
   effort: string,
   capabilities?: AccountCapabilities,
   signal?: AbortSignal,
+  deferConfirmation=false,
 ): Promise<SelectedBrowserModel> {
   const family = /^gpt-(5\.5|5\.6|6)-(?:sol|astra)$/.exec(model)?.[1] as BrowserModelFamily | undefined;
   const luna = model === "gpt-5.6-luna" && capabilities ? resolveBrowserModel(model, effort, capabilities) : null;
@@ -282,13 +287,17 @@ export async function selectModelAndEffort(
     await setLunaThinkMode(composer, luna.lunaThink, signal);
     return { ...luna, selection:null };
   }
-  await controls.first().waitFor({ state:"visible", timeout:70_000, signal });
+  try {await controls.first().waitFor({ state:"visible", timeout:8_000, signal });}
+  catch(error) {
+    signal?.throwIfAborted();
+    throw new BrowserCompanionError("ChatGPT's model control did not finish loading; nothing was sent","model_unavailable",{cause:error});
+  }
   if (await controls.count() !== 1) {
     throw new BrowserCompanionError("ChatGPT did not expose one model/effort control", "model_unavailable");
   }
   const control = controls.first();
-  let menu = await activateChatGptEffortMenu(page, control);
-  menu = await selectChatGptModelFamily(menu, family!, () => activateChatGptEffortMenu(page, control),signal);
+  let menu = await activateChatGptEffortMenu(page, control,{signal});
+  menu = await selectChatGptModelFamily(menu, family!, () => activateChatGptEffortMenu(page, control,{signal}),signal);
   let resolved: ResolvedBrowserModel;
   try {
     const option = await requestedEffort(menu, effort, capabilities?.models.find(candidate => candidate.id === model)
@@ -302,29 +311,33 @@ export async function selectModelAndEffort(
   }
   const effortIndex = resolved.effortIndex;
   if (effortIndex === null) throw new BrowserCompanionError("ChatGPT did not identify the requested effort position", "model_unavailable");
-  const slider = await availableEffort(menu, effortIndex);
+  const slider = await availableEffort(menu, effortIndex,signal);
   const origin = slider.min;
   const target = origin + effortIndex;
   await moveChatGptEffortSlider(menu, target, signal);
   const selectedUrl = page.url();
   await page.keyboard.press("Escape");
-  const label = (await control.innerText()).trim();
-  if (!label || await control.getAttribute("aria-expanded") !== "false") {
+  const label = (await control.innerText({timeout:1_500}).catch(()=>"")).trim();
+  signal?.throwIfAborted();
+  if (!label || await control.getAttribute("aria-expanded",{timeout:500}) !== "false") {
     throw new BrowserCompanionError("ChatGPT did not close the model picker with a selected effort", "model_unavailable");
   }
-  const confirmation = await activateChatGptEffortMenu(page, control);
-  const confirmed = await availableEffort(confirmation, effortIndex);
-  if (confirmed.min !== origin || confirmed.value !== target) {
-    throw new BrowserCompanionError("ChatGPT did not persist the requested effort", "model_unavailable");
+  if(!deferConfirmation){
+    const confirmation = await activateChatGptEffortMenu(page, control,{signal});
+    const confirmed = await availableEffort(confirmation, effortIndex,signal);
+    if (confirmed.min !== origin || confirmed.value !== target) {
+      throw new BrowserCompanionError("ChatGPT did not persist the requested effort", "model_unavailable");
+    }
+    await assertChatGptModelFamily(confirmation, resolved.family!, resolved.effort, effortIndex, 1_000,signal);
+    await page.keyboard.press("Escape");
   }
-  await assertChatGptModelFamily(confirmation, resolved.family!, resolved.effort, effortIndex, 1_000);
-  await page.keyboard.press("Escape");
-  return { ...resolved, selection:{ url:selectedUrl, label } };
+  return { ...resolved, selection:{ url:selectedUrl, label, origin } };
 }
 
 export async function selectAvailableModelAndEffort(
   page:Page,model:string,effort:string,capabilities?:AccountCapabilities,signal?:AbortSignal,
   verifyFallbackDestination?:()=>Promise<void>,
+  deferConfirmation=false,
 ):Promise<SelectedBrowserModel> {
   const missingFamilies=new Set<string>();
   const candidates=[{model,effort},...modelFallbacks(model,effort)];
@@ -335,7 +348,7 @@ export async function selectAvailableModelAndEffort(
     if (candidate.model==="gpt-5.6-luna"&&!capabilities?.models.some(option=>option.id===candidate.model)) continue;
     signal?.throwIfAborted();
     if (index>0) { await verifyFallbackDestination?.(); await page.keyboard.press("Escape"); }
-    try { return await selectModelAndEffort(page,candidate.model,candidate.effort,capabilities,signal); }
+    try { return await selectModelAndEffort(page,candidate.model,candidate.effort,capabilities,signal,deferConfirmation); }
     catch(error) {
       signal?.throwIfAborted();
       if (!(error instanceof ModelOptionUnavailableError)) throw error;
@@ -369,10 +382,13 @@ export async function assertSelectedModelAndEffort(
     || await control.getAttribute("aria-expanded") !== "false") {
     throw new BrowserCompanionError("ChatGPT did not retain the selected model and effort", "external_interference");
   }
-  const menu = await activateChatGptEffortMenu(page, control);
+  const menu = await activateChatGptEffortMenu(page, control,{signal});
   try {
-    await availableEffort(menu, selected.effortIndex);
-    await assertChatGptModelFamily(menu, selected.family!, selected.effort, selected.effortIndex);
+    const confirmed=await availableEffort(menu, selected.effortIndex,signal);
+    if(confirmed.value!==confirmed.min+selected.effortIndex
+      ||selected.selection.origin!==undefined&&confirmed.min!==selected.selection.origin)
+      throw new BrowserCompanionError("ChatGPT did not retain the requested effort before Send","model_unavailable");
+    await assertChatGptModelFamily(menu, selected.family!, selected.effort, selected.effortIndex,0,signal);
   } finally {
     await page.keyboard.press("Escape");
   }

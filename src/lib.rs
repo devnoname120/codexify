@@ -28,6 +28,7 @@ pub mod diff_ui;
 pub mod doctor;
 pub mod environment;
 pub mod exec_sessions;
+mod fast_setup;
 pub mod filesystem;
 pub mod global_settings;
 pub mod ignore_rules;

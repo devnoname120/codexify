@@ -14,23 +14,27 @@ export function validateNewChatProjectUrl(value: string | null): string | null {
   return url.href;
 }
 
-export async function openNewChat(surface: SingleBrowserSurface, projectUrl: string | null, signal?: AbortSignal): Promise<Page> {
+export async function openNewChat(surface: SingleBrowserSurface, projectUrl: string | null, signal?: AbortSignal,
+  progress?:(step:"document_loaded"|"editor_ready")=>void): Promise<Page> {
   const destination = validateNewChatProjectUrl(projectUrl) || "https://chatgpt.com/";
   let page=await surface.page();
   const current=new URL(page.url()),target=new URL(destination);
   const projectKey=(url:URL)=>url.pathname.split('/')[2]?.replace(/^(g-p-[0-9a-f]{32}).*$/,'$1');
   const localDraft=/\/c\/local-chatgpt(?::|%3A)/i.test(current.pathname);
-  const sameDestination=current.origin===target.origin&&(projectUrl
+  const sameDestination=current.origin===target.origin&&current.searchParams.get('temporary-chat')!=='true'&&(projectUrl
     ? projectKey(current)===projectKey(target)&&(current.pathname.replace(/\/$/,'').endsWith('/project')||localDraft)
     : current.pathname==='/'||localDraft&&current.pathname.startsWith('/c/'));
   if(sameDestination && !await page.locator('[data-message-author-role="user"], [data-message-author-role="assistant"], [data-user-message-bubble], [data-codex-approval-surface="true"]').count()){
+    progress?.("document_loaded");
     await assertAuthenticatedChatGptPage(page);
     const composer=await activeComposer(page,30_000,signal);
-    if(!(await composerText(composer)).trim())return page;
+    if(!(await composerText(composer)).trim()){progress?.("editor_ready");return page;}
   }
   if(page.url()===destination)await navigatePage(page,destination,{reload:true,signal});
   else page=await surface.navigate(destination,signal);
+  progress?.("document_loaded");
   const composer = await activeComposer(page, 30_000, signal);
+  progress?.("editor_ready");
   await assertAuthenticatedChatGptPage(page);
   if (projectUrl) {
     const project = new URL(projectUrl).pathname.split('/')[2]!.replace(/^(g-p-[0-9a-f]{32}).*$/, '$1');
@@ -64,7 +68,7 @@ export async function createdChatUrl(page: Page, signal: AbortSignal): Promise<s
     if (signal.aborted) throw new DOMException("Browser action aborted", "AbortError");
     const url = new URL(page.url());
     const match = /^\/(?:g\/[^/]+\/)?c\/([^/]+)\/?$/.exec(url.pathname);
-    if (url.origin === 'https://chatgpt.com' && match && !decodeURIComponent(match[1]!).startsWith('local-chatgpt:')) return url.href;
+    if (url.origin === 'https://chatgpt.com' && url.searchParams.get('temporary-chat')!=='true' && match && !decodeURIComponent(match[1]!).startsWith('local-chatgpt:')) return url.href;
     await new Promise(resolve => setTimeout(resolve, 50));
   } while (Date.now() < deadline);
   throw new BrowserCompanionError("ChatGPT accepted the new chat but its conversation URL could not be confirmed", "ambiguous_send", {sendAccepted:true});
@@ -76,7 +80,7 @@ export async function assertNewChatDraft(page: Page, projectUrl: string | null):
   const valid = current.origin === 'https://chatgpt.com' && (projectUrl
     ? projectKey(current) === projectKey(new URL(projectUrl))
     : current.pathname === '/' || /^\/c\/[^/]+\/?$/.test(current.pathname));
-  if (!valid || await page.locator('[data-message-author-role="user"], [data-user-message-bubble]').count()) {
+  if (!valid || current.searchParams.get('temporary-chat')==='true' || await page.locator('[data-message-author-role="user"], [data-user-message-bubble]').count()) {
     throw new BrowserCompanionError('ChatGPT left the new chat before Send', 'conversation_unavailable');
   }
 }

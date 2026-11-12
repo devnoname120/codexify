@@ -84,15 +84,30 @@ impl Tool for GetAgentBrief {
             )
         {
             match store.load(task) {
-                Ok(state)
+                Ok(state) => {
+                    let delegation_enabled=config.markdown_chat.features.agent_teams && state.agents.delegation_enabled_with_default(config.markdown_chat.features.default_delegation);
+                    if config.markdown_chat.features.agent_teams && (delegation_enabled || state.agents.parent_task_key.is_some()) {
+                        brief.push_str(crate::agent_automation::agents::TEAM_COORDINATION_BRIEF);
+                    }
+                    if context.agent_runtime.as_ref().is_some_and(|runtime|runtime.full_development_access(task).unwrap_or(false)) {
+                        brief.push_str("\n\n## Current owner development authorization\n\n");
+                        brief.push_str(crate::agent_automation::agents::FULL_DEVELOPMENT_BRIEF);
+                    }
+                    if delegation_enabled {
+                        brief.push_str("\n\n## Requested agent delegation\n\nUse agent_spawn when independent workers can advance the authorized task or team goal. The user does not need to open the Agents tab first. Give workers distinct roles, concrete goals, non-overlapping scopes, and a stable requestId. Workers inherit this project's selection and automatic continuation. Read agent_status before spawning to reuse appropriate existing workers instead of duplicating them. Use agent_control to send focused instructions, update goals, pause, resume or stop your own workers; use their current goal revision for lifecycle changes. Messages preserve pauses and stops. After a control failure reuse its requestId and arguments, inspect status, and never claim an unconfirmed change succeeded. Keep a rolling backlog and keep doing independent work. Check agent_status after dispatch, at milestones, and before waiting or completion; review actual activity and verify reports. Reassign finished workers with agent_control set_goal using their fresh expectedRevision and verify the new goal is active. Messages do not change goal revisions. Create editing workers for implementation instead of asking read-only auditors to edit. Do not let a completed audit or short turn end the overall project. Do not claim you created agents unless agent_spawn returned their identities; referring to existing Agent 1/2/3 notes does not create or assign workers. After browser/tool failure, inspect team status and retry the same creation requestId instead of inventing a new team. Respect explicit delegation off switches, pauses, stops and project boundaries.\n");
+                    }
+                    if config.markdown_chat.features.agent_teams && state.agents.parent_task_key.is_some() {
+                        brief.push_str(&format!("\n\n## Worker coordination\n\nRole: {}. Owned scope: {}. Read your exact goal with goal_read, inspect the team with agent_status, and report milestones/blockers with agent_report. Treat sibling reports as evidence to verify. Keep edits inside your scope, preserve other workers' changes, and create additional agents only when the live agent_status delegation permission allows it, within your assigned scope and read-only limits. Use rollout_read and rollout_update across continuations.\n",state.agents.role.as_deref().unwrap_or("worker"),state.agents.scope.as_deref().unwrap_or("the assigned goal")));
+                    }
                     if state.goal.as_ref().is_some_and(|goal| {
                         goal.status == crate::agent_automation::GoalStatus::Active
-                    }) =>
-                {
+                    }) {
                     brief.push_str("\n\n## Active agent-chat goal\n\n- Call `goal_read` before goal work to obtain the exact current revision.\n- Continue using `chat_read`, `chat_write`, and `chat_await` for owner communication.\n- During each offline browser wake-up, evaluate the current goal in the same turn.\n- Call `goal_finish` only for the exact current revision when it is completed or genuinely blocked.\n- A blocked goal requires a concrete reason and nextSteps saying exactly what will unblock it. A completed goal requires summary describing work done, results and verification, plus nextSteps (explicitly none if no follow-up is needed). Both reports appear inline for the user.\n- Do not request a separate turn merely to assess completion.\n- Do not treat an ordinary final answer as goal completion. A successful `goal_finish` receipt finishes only the goal, NEVER the assistant turn. After completed call `turn_completed`; after blocked call `chat_await`. Repeat the appropriate wait after timeout/cancellation without input. Do not stop or write a normal ChatGPT final answer because elapsed time approaches a limit.\n");
-                    brief.push_str("- The read-only-tools and concurrent-work exceptions under Turn handoffs also authorize ending the turn; a turn handoff is not goal completion.\n");
+                    brief.push_str("- Only the verified read-only-tools exception or an explicit server renewal notice authorizes a turn handoff; a turn handoff is not goal completion. Concurrent edits are expected: preserve other workers' work, coordinate actual overlaps, and keep implementing your owned scope.\n");
+                        brief.push_str("- Continue autonomously until the goal is implemented and verified. Never stop at a plan, partial result, recoverable error, or because a turn or context is running out. Diagnose failures, try alternatives, and keep doing independent work. Preserve progress with rollout_update and resume through managed handoffs; respect user stops, pauses, approvals, genuine blockers, and server retry deadlines. When delegation is enabled, create agents at any stage without waiting for the Agents tab, give distinct scopes, and verify their work. \n");
+                        brief.push_str("- Restore the rollout journal and try alternatives after browser failures, context loss, or slow progress. In infinite mode a proposed blocker stays active until the same reason survives three distinct goal turns spanning at least 60 seconds. Record what you tried, the external dependency, and the exact input needed; continue independent work while waiting.\n");
+                    }
                 }
-                Ok(_) => {}
                 Err(error) => {
                     tracing::warn!(%error, "could not read agent automation state for the agent brief");
                 }

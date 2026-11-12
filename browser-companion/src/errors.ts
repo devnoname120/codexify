@@ -13,6 +13,9 @@ export type BrowserFailureCode =
   | "cancelled"
   | "failed";
 
+// Native recovery counts distinct confirmed-unsent loads with this diagnosis.
+export const CONVERSATION_UNAVAILABLE_MESSAGE = "ChatGPT conversation temporarily not accessible";
+
 export class BrowserCompanionError extends Error {
   readonly code: BrowserFailureCode;
   readonly sendAccepted: boolean;

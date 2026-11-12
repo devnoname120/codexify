@@ -10,10 +10,39 @@ fn task(name: &str) -> ConversationIdentity {
     ConversationIdentity::from_openai_session(name).unwrap()
 }
 
+#[cfg(windows)]
+#[test]
+fn windows_temporary_reader_does_not_lose_a_goal_update() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let store = AgentAutomationStore::new(root.path().join("state")).unwrap();
+    let task = task("windows-publish-recovery");
+    store.set_goal(&task, "Original goal", 1).unwrap();
+    let path = store.task_directory(&task).unwrap().join("automation.json");
+    // Permit readers/writers but temporarily deny file replacement, as a
+    // Windows scanner or a UI reader without FILE_SHARE_DELETE can do.
+    let reader = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(3)
+        .open(&path)
+        .unwrap();
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(80));
+        drop(reader);
+    });
+    store.set_goal(&task, "Updated goal", 2).unwrap();
+    release.join().unwrap();
+    assert_eq!(
+        store.load(&task).unwrap().goal.unwrap().markdown,
+        "Updated goal"
+    );
+}
+
 #[test]
 fn automatic_retry_requires_confirmed_unsent_work_and_an_active_matching_goal() {
     use codexify::agent_automation::{AutomationActionState, AutomationTaskState};
     let mut state = AutomationTaskState::default();
+    state.retry_timings.infinite_retries = false;
     state.action = AutomationActionState {
         id: Some("stop-failure".into()),
         kind: Some(AutomationActionKind::OfflineChat),
@@ -94,6 +123,24 @@ fn automatic_retry_requires_confirmed_unsent_work_and_an_active_matching_goal() 
     active.revision += 1;
     state.goal = Some(active);
     assert!(state.automatic_retry_at_ms().is_none());
+}
+
+#[test]
+fn confirmed_unsent_interference_retries_without_user_input_but_preserves_send_and_pause_guards() {
+    use codexify::agent_automation::{AutomationActionState, AutomationTaskState};
+    let mut state=AutomationTaskState::default();
+    state.retry_timings.infinite_retries=true;
+    state.retry_timings.action_delays_seconds=vec![30];
+    state.action=AutomationActionState {id:Some("draft-recovery".into()),kind:Some(AutomationActionKind::OfflineChat),status:AutomationActionStatus::Interference,send_accepted:Some(false),updated_at_ms:Some(100),last_error:Some("ChatGPT composer contains an existing draft; automation will not overwrite it".into()),..Default::default()};
+    for attempt in [0,100,u32::MAX] {
+        state.action.automatic_retry_attempts=attempt;
+        assert!(state.automatic_retry_at_ms().is_some());
+        assert_eq!(state.retry_mode(),Some("retry"));
+    }
+    for sent in [None,Some(true)] { let mut protected=state.clone();protected.action.send_accepted=sent;assert!(protected.automatic_retry_at_ms().is_none()); }
+    let mut paused=state.clone();paused.action.automatic_retry_paused=true;assert!(paused.automatic_retry_at_ms().is_none());
+    let mut fenced=state.clone();fenced.action.messages_fenced=true;assert!(fenced.automatic_retry_at_ms().is_none());
+    state.retry_timings.infinite_retries=false;assert!(state.automatic_retry_at_ms().is_none());
 }
 
 #[test]
@@ -1775,6 +1822,7 @@ fn created_urls_survive_expired_verification_but_project_urls_and_superseded_req
 fn authentication_retries_use_six_separate_intervals_and_never_replay_uncertain_messages() {
     use codexify::agent_automation::{AutomationActionState, AutomationTaskState};
     let mut state = AutomationTaskState::default();
+    state.retry_timings.infinite_retries = false;
     state.action = AutomationActionState {
         id: Some("authentication-failure".into()),
         kind: Some(AutomationActionKind::OfflineChat),
@@ -1962,6 +2010,7 @@ fn configured_retry_timings_survive_restart_and_shortening_without_changing_send
     let root = tempfile::tempdir().unwrap();
     let mut config = codexify::config::default_config(root.path().to_owned());
     let timings = &mut config.markdown_chat.automation.retry_timings;
+    timings.infinite_retries = false;
     timings.action_delays_seconds = vec![7, 19];
     timings.chatgpt_access_delays_seconds = vec![11, 23, 37, 41, 43, 47, 53];
     timings.goal_recovery_delays_seconds = vec![13, 29, 31, 59];

@@ -187,6 +187,14 @@ async fn run(mut cli: Cli) -> anyhow::Result<()> {
                 println!("{}", codexify::owner_chat::dashboard_url().await?);
                 return Ok(());
             }
+            CliCommand::Agents { command: codexify::config::AgentsCommand::Connection } => {
+                println!("{}", codexify::owner_chat::agent_connection_profile().await?);
+                return Ok(());
+            }
+            CliCommand::Agents { command: codexify::config::AgentsCommand::Instructions } => {
+                println!("{}", codexify::owner_chat::AGENT_CLIENT_INSTRUCTIONS);
+                return Ok(());
+            }
             CliCommand::Config(args) => {
                 return codexify::config_cli::run(&cli, args);
             }

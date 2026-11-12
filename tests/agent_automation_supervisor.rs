@@ -27,7 +27,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 const COMPANION_TOKEN: &str = "YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE";
-const COMPANION_BUILD: &str = "supervisor-fake-build+protocol.6387026e06e437edb53caa5fe7e15f613c1303d6071ada224f3b0cbeff078e68";
+const COMPANION_BUILD: &str = "supervisor-fake-build+protocol.7d1f04ca4cb844940820aeeb703a42c36363cee5e5f7209d46c5907f26c5ce05";
 
 struct FakeExecutor {
     calls: AtomicUsize,
@@ -130,6 +130,7 @@ struct PreSendFailureExecutor {
 struct StopFailureThenSuccessExecutor {
     calls: AtomicUsize,
     snapshot_failure: bool,
+    interference: bool,
 }
 
 #[async_trait]
@@ -156,7 +157,7 @@ impl AutomationExecutor for StopFailureThenSuccessExecutor {
             return Err(AutomationExecutionError {
                 message: message.into(),
                 send_accepted: false,
-                failure_status: None,
+                failure_status: self.interference.then_some(AutomationActionStatus::Interference),
             });
         }
         for (index, kind) in [
@@ -775,13 +776,19 @@ async fn conversation_approval_resumes_the_existing_turn_without_sending_or_cons
 #[tokio::test]
 async fn conversation_approval_honors_disabled_auto_approval_stopped_agents_and_unverified_pairings()
  {
-    for mode in ["disabled", "stopped", "unverified"] {
+    for mode in ["disabled", "stopped", "unverified", "completed"] {
         let f = fixture().await;
         if mode == "stopped" {
             f.chat
                 .request_agent_stop("stop-approval".into())
                 .await
                 .unwrap();
+        }
+        if mode=="completed" {
+            let goal=f.store.set_goal(&f.task,"Finished assignment",103).unwrap();
+            f.store.run_goal(&f.task,goal.revision,104).unwrap();
+            f.store.finish_goal(&f.task,goal.revision,GoalFinish::Completed{summary:Some("Verified; next steps: none".into())},105).unwrap();
+            f.chat.read(true).await.unwrap();
         }
         if mode == "unverified" {
             f.store.unlink_pairing(&f.task, 103).unwrap();
@@ -821,6 +828,12 @@ async fn fixture_with_queue_limit(max_queued_actions: usize) -> Fixture {
     config.memory.dir = Some(root.path().join("state").display().to_string());
     config.markdown_chat.enabled = true;
     config.markdown_chat.automation.enabled = true;
+    config.markdown_chat.automation.recovery_enhancements = true;
+    config
+        .markdown_chat
+        .automation
+        .retry_timings
+        .infinite_retries = false;
     config.markdown_chat.automation.connector_name = "Codexify".into();
     config.markdown_chat.automation.max_queued_actions = max_queued_actions;
     config.markdown_chat.automation.descriptor_path = root
@@ -1042,9 +1055,12 @@ async fn offline_attachment_prompts_include_metadata_and_tool_reminders_once() {
         let ActionPrompt::OfflineChat { messages, .. } = &executions[0].request.prompt else {
             panic!("attachment prompt must wake the conversation")
         };
+        // Attachment metadata is embedded as JSON: on Windows path backslashes
+        // must be escaped, while the decoded path remains exact.
+        let encoded_path = serde_json::to_string(&file.path).unwrap();
         for text in [
             "Analyze the attachment",
-            file.path.as_str(),
+            encoded_path.as_str(),
             file.unique_name.as_str(),
             "analysis.txt",
             "createdAt",
@@ -1985,6 +2001,164 @@ async fn unread_chat_is_queued_ahead_of_goal_only_work_across_tasks() {
 }
 
 #[tokio::test]
+async fn five_simultaneous_chats_keep_their_own_messages_and_action_ids() {
+    let fixture = fixture().await;
+    fixture.chat.record_agent_call(1_000).await.unwrap();
+    fixture
+        .chat
+        .append_user("parallel-0".into(), "Message zero".into())
+        .await
+        .unwrap();
+    for index in 1..5 {
+        let name = format!("parallel-chat-{index}");
+        let (_, chat) = add_task(
+            &fixture,
+            &name,
+            &format!("https://chatgpt.com/c/parallel-{index}"),
+        )
+        .await;
+        chat.record_agent_call(1_000).await.unwrap();
+        chat.append_user(format!("parallel-{index}"), format!("Message {index}"))
+            .await
+            .unwrap();
+    }
+    let now = 1_000 + AUTOMATION_OFFLINE_AFTER_MS;
+    fixture.supervisor.scan_once(now).await.unwrap();
+    assert_eq!(fixture.supervisor.queued_count().await, 5);
+    let mut ids = std::collections::HashSet::new();
+    for _ in 0..5 {
+        let response = fixture.supervisor.run_next(now + 1).await.unwrap().unwrap();
+        assert!(ids.insert(response.action_id));
+    }
+    assert_eq!(ids.len(), 5);
+    assert_eq!(fixture.supervisor.queued_count().await, 0);
+    assert_eq!(fixture.executor.executions.lock().unwrap().len(), 5);
+}
+
+#[tokio::test]
+async fn transient_state_read_failure_never_discards_a_queued_chat_send() {
+    let fixture = fixture().await;
+    fixture.chat.record_agent_call(1_000).await.unwrap();
+    fixture
+        .chat
+        .append_user("recovery-message".into(), "Deliver exactly once".into())
+        .await
+        .unwrap();
+    let now = 1_000 + AUTOMATION_OFFLINE_AFTER_MS;
+    fixture.supervisor.scan_once(now).await.unwrap();
+    assert_eq!(fixture.supervisor.queued_count().await, 1);
+    let state_path = fixture
+        .store
+        .task_directory(&fixture.task)
+        .unwrap()
+        .join("automation.json");
+    let original = std::fs::read(&state_path).unwrap();
+    std::fs::write(&state_path, b"broken pending write").unwrap();
+    let attempt = fixture.supervisor.run_next(now + 1).await.unwrap();
+    assert!(attempt.is_none(), "invalid durable state must fail closed");
+    assert_eq!(
+        fixture.supervisor.queued_count().await,
+        1,
+        "send disappeared after failed read"
+    );
+    assert_eq!(fixture.executor.executions.lock().unwrap().len(), 0);
+    std::fs::write(&state_path, original).unwrap();
+    fixture.supervisor.run_next(now + 2).await.unwrap().unwrap();
+    assert_eq!(fixture.supervisor.queued_count().await, 0);
+    assert_eq!(fixture.executor.executions.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn unreadable_chat_state_does_not_starve_other_queued_conversations() {
+    let fixture = fixture().await;
+    let (_other, other_chat) = add_task(
+        &fixture,
+        "healthy-chat-after-corruption",
+        "https://chatgpt.com/c/healthy-after-corruption",
+    )
+    .await;
+    fixture.chat.record_agent_call(1_000).await.unwrap();
+    other_chat.record_agent_call(1_000).await.unwrap();
+    fixture
+        .chat
+        .append_user("corrupt-message".into(), "Keep for recovery".into())
+        .await
+        .unwrap();
+    other_chat
+        .append_user("healthy-message".into(), "Still deliver this one".into())
+        .await
+        .unwrap();
+    let now = 1_000 + AUTOMATION_OFFLINE_AFTER_MS;
+    fixture.supervisor.scan_once(now).await.unwrap();
+    assert_eq!(fixture.supervisor.queued_count().await, 2);
+
+    let state_path = fixture
+        .store
+        .task_directory(&fixture.task)
+        .unwrap()
+        .join("automation.json");
+    let original = std::fs::read(&state_path).unwrap();
+    std::fs::write(&state_path, b"interrupted state write").unwrap();
+    fixture.supervisor.run_next(now + 1).await.unwrap().unwrap();
+    assert_eq!(fixture.supervisor.queued_count().await, 1);
+    assert_eq!(fixture.executor.executions.lock().unwrap().len(), 1);
+    assert!(
+        fixture
+            .supervisor
+            .run_next(now + 2)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(fixture.supervisor.queued_count().await, 1);
+
+    std::fs::write(&state_path, original).unwrap();
+    fixture.supervisor.run_next(now + 3).await.unwrap().unwrap();
+    assert_eq!(fixture.supervisor.queued_count().await, 0);
+    assert_eq!(fixture.executor.executions.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn a_corrupt_chat_does_not_abort_discovery_for_healthy_chats() {
+    let fixture = fixture().await;
+    let (_other, healthy) = add_task(
+        &fixture,
+        "healthy-chat-discovery",
+        "https://chatgpt.com/c/healthy-discovery",
+    )
+    .await;
+    fixture.chat.record_agent_call(1_000).await.unwrap();
+    healthy.record_agent_call(1_000).await.unwrap();
+    fixture
+        .chat
+        .append_user("broken-data".into(), "Recover me".into())
+        .await
+        .unwrap();
+    healthy
+        .append_user("healthy-data".into(), "Do not starve me".into())
+        .await
+        .unwrap();
+
+    let path = fixture
+        .store
+        .task_directory(&fixture.task)
+        .unwrap()
+        .join("automation.json");
+    let original = std::fs::read(&path).unwrap();
+    std::fs::write(&path, b"partial disk state").unwrap();
+    let now = 1_000 + AUTOMATION_OFFLINE_AFTER_MS;
+    fixture.supervisor.scan_once(now).await.unwrap();
+    assert_eq!(fixture.supervisor.queued_count().await, 1);
+    fixture.supervisor.run_next(now + 1).await.unwrap().unwrap();
+    assert_eq!(fixture.executor.executions.lock().unwrap().len(), 1);
+    std::fs::write(&path, original).unwrap();
+    fixture.supervisor.scan_once(now + 2).await.unwrap();
+    assert_eq!(fixture.supervisor.queued_count().await, 1);
+    fixture.supervisor.run_next(now + 3).await.unwrap().unwrap();
+    assert_eq!(fixture.executor.executions.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
 async fn concurrent_run_next_calls_still_execute_only_one_global_action_at_a_time() {
     let fixture = fixture().await;
     let (other_task, other_chat) = add_task(
@@ -2798,11 +2972,12 @@ async fn failed_send_notifies_once_across_scans_and_reopening_the_chat() {
 
 #[tokio::test]
 async fn confirmed_stop_failures_retry_after_backoff_without_losing_or_duplicating_messages() {
-    for snapshot_failure in [false, true] {
+    for (snapshot_failure, interference) in [(false,false),(true,false),(false,true)] {
         let f = fixture().await;
         let executor = Arc::new(StopFailureThenSuccessExecutor {
             calls: AtomicUsize::new(0),
             snapshot_failure,
+            interference,
         });
         let supervisor = AgentAutomationSupervisor::new(
             f.config.markdown_chat.automation.clone(),
@@ -2834,7 +3009,7 @@ async fn confirmed_stop_failures_retry_after_backoff_without_losing_or_duplicati
         supervisor.scan_once(began).await.unwrap();
         let _ = supervisor.run_next(began + 1).await;
         let failed = f.store.load(&f.task).unwrap();
-        assert_eq!(failed.action.status, AutomationActionStatus::Failed);
+        assert_eq!(failed.action.status, if interference {AutomationActionStatus::Interference} else {AutomationActionStatus::Failed});
         assert!(failed.is_automatically_retrying());
         assert_eq!(failed.action.send_accepted, Some(false));
         assert_eq!(failed.goal.as_ref().unwrap().turn_count, 1);
@@ -3282,14 +3457,25 @@ async fn superseded_combined_action_still_fences_its_accepted_unread_batch() {
 }
 
 #[tokio::test]
-async fn real_executor_defers_only_an_unowned_busy_pairing_window_to_companion_validation() {
-    for (pairing, session_status, active_id, authenticated, expected_execute_calls) in [
+async fn real_executor_defers_shared_browser_contention_without_consuming_send_retries() {
+    for (pairing, session_status, active_id, authenticated, expected_execute_calls, pool) in [
         (true, "busy", None, true, 1),
         (false, "busy", None, true, 0),
         (true, "busy", Some("other-action"), true, 0),
+        (true, "busy", Some("other-action"), false, 0),
+        (false, "busy", Some("other-action"), false, 0),
+        (false, "unavailable", Some("other-action"), false, 0),
+        (false, "idle", Some("other-action"), true, 0),
+        (false, "busy", Some("draft-replacement"), true, 1),
+        (false, "busy", Some("draft-replacement"), false, 0),
         (true, "unavailable", None, true, 0),
         (true, "unavailable", None, false, 0),
-    ] {
+    ].into_iter().map(|(a,b,c,d,e)|(a,b,c,d,e,false)).chain([
+        (false,"idle",Some("other-page-action"),true,1,true),
+        (false,"busy",Some("other-page-action"),true,1,true),
+        (false,"busy",Some("other-page-action"),false,0,true),
+        (false,"idle",Some("other-page-action"),false,0,true),
+    ]) {
         let execute_calls = Arc::new(AtomicUsize::new(0));
         let execute_counter = execute_calls.clone();
         let app = Router::new()
@@ -3301,12 +3487,18 @@ async fn real_executor_defers_only_an_unowned_busy_pairing_window_to_companion_v
                 }))
             }))
             .route("/v1/health", get(move || async move {
-                axum::Json(serde_json::json!({
+                let mut health=serde_json::json!({
                     "protocolVersion":codexify::agent_automation::PROTOCOL_VERSION,
                     "kind":"codexify-browser-companion", "build":COMPANION_BUILD,
                     "status":session_status, "authenticated":authenticated,
                     "accountFingerprint":if authenticated {Some("account-1")} else {None}, "activeActionId":active_id
-                }))
+                });
+                if pool {
+                    health["actionCapacity"]=serde_json::json!(2);
+                    health["availableActionSlots"]=serde_json::json!(1);
+                    health["activeActionIds"]=serde_json::json!([active_id.unwrap()]);
+                }
+                axum::Json(health)
             }))
             .route("/v1/actions/execute", post(move || {
                 let execute_counter = execute_counter.clone();
@@ -3375,6 +3567,24 @@ async fn real_executor_defers_only_an_unowned_busy_pairing_window_to_companion_v
             let snapshot = outcome.unwrap();
             assert!(!snapshot.send_accepted);
             assert_eq!(snapshot.state, CompanionActionState::ExternalInterference);
+        } else if active_id == Some("draft-replacement") && !authenticated {
+            let error = outcome.err().unwrap();
+            assert!(error.send_accepted);
+        } else if pool && session_status=="idle" && !authenticated {
+            let error=outcome.err().unwrap();
+            assert!(!error.send_accepted);
+            assert_eq!(error.failure_status,Some(AutomationActionStatus::AuthenticationRequired));
+        } else if session_status == "busy" || active_id.is_some() {
+            let waiting = outcome.unwrap();
+            assert_eq!(waiting.action_id, "draft-replacement");
+            assert_eq!(waiting.state, CompanionActionState::Waiting);
+            assert!(!waiting.send_accepted);
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64;
+            assert!(waiting.cooldown_until_ms.unwrap() > now);
+            assert_eq!(waiting.last_event_sequence, 0);
         } else {
             let error = outcome.err().unwrap();
             assert!(!error.send_accepted);
@@ -5942,6 +6152,72 @@ async fn background_worker_scans_notified_tasks_and_runs_the_global_queue() {
 }
 
 #[tokio::test]
+async fn notified_owner_steering_enters_before_remaining_worker_goals_without_interrupting_send() {
+    struct DispatchExecutor {
+        started: mpsc::UnboundedSender<String>,
+        release: Semaphore,
+        approvals: AtomicUsize,
+    }
+    #[async_trait]
+    impl AutomationExecutor for DispatchExecutor {
+        async fn approve_pending_conversation(&self, _: &str, _: &str, _: &str) -> Result<bool, String> {
+            self.approvals.fetch_add(1, Ordering::SeqCst);
+            Ok(false)
+        }
+        async fn execute(
+            &self,
+            execution: AutomationExecution,
+            _: mpsc::UnboundedSender<CompanionEvent>,
+            _: CancellationToken,
+        ) -> Result<CompanionActionSnapshot, AutomationExecutionError> {
+            self.started.send(execution.task_key[..24].to_owned()).unwrap();
+            self.release.acquire().await.unwrap().forget();
+            Ok(snapshot_for(execution))
+        }
+    }
+    let fixture = fixture().await;
+    let (other_task, other_chat) = add_task(&fixture, "dispatch-worker-two", "https://chatgpt.com/c/worker-two").await;
+    let (owner_task, owner_chat) = add_task(&fixture, "dispatch-owner-steer", "https://chatgpt.com/c/owner-steer").await;
+    for task in [&fixture.task, &other_task] {
+        let goal = fixture.store.set_goal(task, "Implement and verify the owned worker scope", 100).unwrap();
+        fixture.store.run_goal(task, goal.revision, 101).unwrap();
+    }
+    let (started, mut starts) = mpsc::unbounded_channel();
+    let executor = Arc::new(DispatchExecutor {
+        started, release: Semaphore::new(0), approvals: AtomicUsize::new(0),
+    });
+    let mut config = fixture.config.markdown_chat.automation.clone();
+    config.auto_approve_tool_calls = true;
+    let supervisor = AgentAutomationSupervisor::new(config, executor.clone());
+    for (task, chat) in [
+        (fixture.task.clone(), fixture.chat.clone()),
+        (other_task.clone(), other_chat),
+        (owner_task.clone(), owner_chat.clone()),
+    ] {
+        chat.record_agent_call(1).await.unwrap();
+        supervisor.register_task(AutomationTaskHandle::new(task, 0, fixture.store.clone(), chat)).await.unwrap();
+    }
+    let worker = supervisor.start();
+    let first = tokio::time::timeout(Duration::from_secs(2), starts.recv()).await.unwrap().unwrap();
+    assert!(first == fixture.task.audit_hash() || first == other_task.audit_hash());
+    let initial_approvals = executor.approvals.load(Ordering::SeqCst);
+    owner_chat.append_user("urgent-owner-steering".into(), "Handle this owner request next".into()).await.unwrap();
+    supervisor.notify();
+    assert!(tokio::time::timeout(Duration::from_millis(50), starts.recv()).await.is_err(),
+        "a new instruction must not interrupt the current Send");
+    executor.release.add_permits(1);
+    let second = tokio::time::timeout(Duration::from_secs(2), starts.recv()).await.unwrap().unwrap();
+    assert_eq!(second, owner_task.audit_hash(), "new owner steering must outrank remaining goal-only work");
+    assert_eq!(executor.approvals.load(Ordering::SeqCst), initial_approvals,
+        "notification scans must not add passive browser approval checks");
+    executor.release.add_permits(1);
+    let third = tokio::time::timeout(Duration::from_secs(2), starts.recv()).await.unwrap().unwrap();
+    assert_ne!(third, first);
+    assert!(third == fixture.task.audit_hash() || third == other_task.audit_hash());
+    drop(worker);
+}
+
+#[tokio::test]
 async fn offline_message_without_model_override_or_previous_agent_call_is_sent_once() {
     let fixture = fixture().await;
     fixture.store.clear_selection(&fixture.task).unwrap();
@@ -6476,6 +6752,89 @@ async fn a_recovered_goal_without_agent_progress_waits_for_the_retry_interval() 
         .await
         .unwrap();
     assert_eq!(restarted.queued_count().await, 0);
+}
+
+struct MissingGoalStartExecutor {
+    proof: Result<bool, String>,
+}
+#[async_trait]
+impl AutomationExecutor for MissingGoalStartExecutor {
+    async fn missing_goal_start(&self, _: &str, _: &str) -> Result<bool, String> {
+        self.proof.clone()
+    }
+    async fn execute(
+        &self, _: AutomationExecution, _: mpsc::UnboundedSender<CompanionEvent>,
+        _: CancellationToken,
+    ) -> Result<CompanionActionSnapshot, AutomationExecutionError> {
+        panic!("Recovery must queue a distinct action, not execute during a probe")
+    }
+}
+
+#[tokio::test]
+async fn missing_goal_start_requires_proof_and_preserves_stops_activity_and_send_uncertainty() {
+    for case in ["missing", "probe_failed", "busy", "recent_activity", "accepted", "counted", "paused", "stopped", "too_young", "user_message"] {
+        let f = orphaned_goal_fixture(false).await;
+        // Reproduce a saved pre-Send start in an isolated temporary task.
+        let path = f.store.task_directory(&f.task).unwrap().join("automation.json");
+        let mut state = f.store.load(&f.task).unwrap();
+        state.action.goal_turn_counted = false;
+        state.action.send_accepted = Some(false);
+        let now = 2001 + AUTOMATION_OFFLINE_AFTER_MS + 120_000;
+        match case {
+            "recent_activity" => {f.chat.record_agent_call(now - 1000).await.unwrap();}
+            "accepted" => {state.action.send_accepted = Some(true);}
+            "counted" => {state.action.goal_turn_counted = true;}
+            "paused" => {f.store.stop_goal(&f.task, 1, 3001).unwrap();}
+            "stopped" => {f.chat.request_agent_stop("explicit-stop".into()).await.unwrap();}
+            "too_young" => {state.action.updated_at_ms = Some(now - 1000);}
+            "user_message" => {state.action.kind = Some(codexify::agent_automation::AutomationActionKind::OfflineCombined);}
+            _ => {}
+        }
+        if case != "paused" {
+            std::fs::write(&path, serde_json::to_vec(&state).unwrap()).unwrap();
+        }
+        let executor = Arc::new(MissingGoalStartExecutor {
+            proof: if case == "probe_failed" {Err("observation timeout".into())} else {Ok(case != "busy")},
+        });
+        let restarted = AgentAutomationSupervisor::new(f.config.markdown_chat.automation.clone(), executor);
+        restarted.register_task(AutomationTaskHandle::new(f.task.clone(), 0, f.store.clone(), f.chat.clone())).await.unwrap();
+        restarted.scan_once(now).await.unwrap();
+        assert_eq!(restarted.queued_count().await, usize::from(case == "missing"), "{case}");
+        if case == "missing" {
+            let saved = f.store.load(&f.task).unwrap();
+            assert_ne!(saved.action.id.as_deref(), Some("orphaned-goal-action"));
+            assert_eq!(saved.action.kind, Some(codexify::agent_automation::AutomationActionKind::OfflineGoal));
+            assert!(saved.chat_mirror.message_ids.is_empty());
+        }
+    }
+}
+
+#[tokio::test]
+async fn missing_goal_start_requires_an_idle_same_account_404() {
+    for case in ["missing", "exists", "busy", "account_changed", "server_error"] {
+        let reads = Arc::new(AtomicUsize::new(0));
+        let counter = reads.clone();
+        let app = Router::new().route("/v1/health", get(move || async move {
+            axum::Json(serde_json::json!({"protocolVersion":1,"kind":"codexify-browser-companion","build":COMPANION_BUILD,"status":if case=="busy"{"busy"}else{"idle"},"authenticated":true,"accountFingerprint":if case=="account_changed"{"other-account"}else{"account-1"},"activeActionId":null}))
+        })).route("/v1/actions/{id}", get(move || {let counter=counter.clone();async move {
+            counter.fetch_add(1, Ordering::SeqCst);
+            if case == "missing" {StatusCode::NOT_FOUND.into_response()}
+            else if case == "server_error" {StatusCode::INTERNAL_SERVER_ERROR.into_response()}
+            else {axum::Json(serde_json::json!({"protocolVersion":1,"build":COMPANION_BUILD,"actionId":"orphaned-goal-action","state":"idle","sendAccepted":true,"lastEventSequence":10})).into_response()}
+        }}));
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {axum::serve(listener, app).await.unwrap()});
+        let root = tempfile::tempdir().unwrap();
+        let descriptor = write_companion_descriptor(root.path(), &endpoint);
+        let executor = BrowserAutomationExecutor::new(codexify::markdown_chat::AgentAutomationConfig {
+            enabled:true, descriptor_path:descriptor.display().to_string(), ..Default::default()
+        });
+        let proof = executor.missing_goal_start("orphaned-goal-action", "account-1").await;
+        assert_eq!(proof == Ok(true), case == "missing", "{case}: {proof:?}");
+        if case == "busy" || case == "account_changed" {assert_eq!(reads.load(Ordering::SeqCst), 0);}
+        server.abort();
+    }
 }
 
 struct PausingRecoveryExecutor {

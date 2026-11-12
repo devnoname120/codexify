@@ -8,7 +8,7 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::markdown_chat::{MAX_AUTOMATIC_RETRY_ATTEMPTS, RetryTimings};
+use crate::markdown_chat::RetryTimings;
 use crate::project_bindings::ConversationIdentity;
 use crate::types::AppConfig;
 
@@ -301,6 +301,10 @@ pub struct SuspendedRetryState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields, rename_all = "camelCase")]
 pub struct AutomationTaskState {
+    pub agents: super::agents::AgentTeamState,
+    pub conversation_recovery: super::conversation_recovery::ConversationRecoveryState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blocker_audit: Option<super::goal_blocking::BlockerAudit>,
     pub creation_request_digest: Option<String>,
     pub version: u32,
     pub pairing: PairingState,
@@ -329,6 +333,9 @@ pub struct AutomationTaskState {
 impl Default for AutomationTaskState {
     fn default() -> Self {
         Self {
+            agents: Default::default(),
+            conversation_recovery: Default::default(),
+            blocker_audit: None,
             creation_request_digest: None,
             version: STATE_VERSION,
             pairing: PairingState::default(),
@@ -383,6 +390,14 @@ impl AutomationTaskState {
             && self.pairing.verified_owner_generation == Some(owner_generation)
     }
 
+    fn recovered_goal_renewal(&self) -> bool {
+        self.action.kind==Some(AutomationActionKind::TurnRenewal)
+            && self.action.status==AutomationActionStatus::Stalled
+            && self.action.send_accepted==Some(true)
+            && self.action.last_error.as_deref()==Some(super::turn_renewal::INCOMPLETE_HANDOFF_ERROR)
+            && self.turn_renewal.is_empty()
+    }
+
     fn offline_goal_retry_eligible(&self) -> bool {
         let Some(goal) = self.goal.as_ref() else {
             return false;
@@ -405,7 +420,8 @@ impl AutomationTaskState {
                 || action.kind == Some(AutomationActionKind::OfflineCombined)
                     && action.status != AutomationActionStatus::Cancelled
                     && action.send_accepted == Some(true)
-                    && action.messages_fenced)
+                    && action.messages_fenced
+                || self.recovered_goal_renewal())
         {
             return false;
         }
@@ -421,17 +437,15 @@ impl AutomationTaskState {
             return None;
         }
         let delay = if confirmed_unsent_failure(&self.action) {
-            *self
-                .retry_timings
-                .action_delays_seconds
-                .get(self.action.automatic_retry_attempts as usize)?
-                * 1000
+            self.retry_timings.delay_at(
+                &self.retry_timings.action_delays_seconds,
+                self.action.automatic_retry_attempts,
+            )? * 1000
         } else {
-            *self
-                .retry_timings
-                .goal_recovery_delays_seconds
-                .get(self.goal_wake.recovery_attempts as usize)?
-                * 1000
+            self.retry_timings.delay_at(
+                &self.retry_timings.goal_recovery_delays_seconds,
+                self.goal_wake.recovery_attempts,
+            )? * 1000
         };
         let last = self
             .action
@@ -460,11 +474,10 @@ impl AutomationTaskState {
         {
             return None;
         }
-        let delay = self
-            .retry_timings
-            .goal_recovery_delays_seconds
-            .get(self.goal_wake.recovery_attempts as usize)?
-            * 1000;
+        let delay = self.retry_timings.delay_at(
+            &self.retry_timings.goal_recovery_delays_seconds,
+            self.goal_wake.recovery_attempts,
+        )? * 1000;
         let last = self
             .action
             .updated_at_ms
@@ -482,6 +495,7 @@ impl AutomationTaskState {
 
     pub(crate) fn goal_recovery_exhausted(&self) -> bool {
         self.browser_cooldown_until_ms().is_none()
+            && !self.retry_timings.infinite_retries
             && self.offline_goal_retry_eligible()
             && !confirmed_unsent_failure(&self.action)
             && self.goal_wake.recovery_attempts as usize
@@ -537,11 +551,10 @@ impl AutomationTaskState {
         {
             return None;
         }
-        let delay = *self
-            .retry_timings
-            .chatgpt_access_delays_seconds
-            .get(action.chatgpt_access_retry_attempts as usize)?
-            * 1000;
+        let delay = self.retry_timings.delay_at(
+            &self.retry_timings.chatgpt_access_delays_seconds,
+            action.chatgpt_access_retry_attempts,
+        )? * 1000;
         Some(retry_deadline(
             action,
             action.chatgpt_access_retry_attempts,
@@ -614,7 +627,8 @@ impl AutomationTaskState {
             return Some(deadline);
         }
         let action = &self.action;
-        if action.status != AutomationActionStatus::Failed
+        if !matches!(action.status, AutomationActionStatus::Failed | AutomationActionStatus::Interference)
+            || action_retry_mode(self) != Some("retry")
             || action.send_accepted != Some(false)
             || action.messages_fenced
             || action.goal_turn_counted
@@ -632,11 +646,10 @@ impl AutomationTaskState {
                 }) => {}
             _ => return None,
         }
-        let delay = self
-            .retry_timings
-            .action_delays_seconds
-            .get(action.automatic_retry_attempts as usize)?
-            * 1000;
+        let delay = self.retry_timings.delay_at(
+            &self.retry_timings.action_delays_seconds,
+            action.automatic_retry_attempts,
+        )? * 1000;
         action.updated_at_ms.map(|finished| {
             retry_deadline(
                 action,
@@ -727,7 +740,7 @@ fn retry_deadline(
 }
 
 fn confirmed_unsent_failure(action: &AutomationActionState) -> bool {
-    action.status == AutomationActionStatus::Failed
+    matches!(action.status, AutomationActionStatus::Failed | AutomationActionStatus::Interference)
         && action.send_accepted == Some(false)
         && !action.messages_fenced
         && !action.goal_turn_counted
@@ -791,6 +804,7 @@ fn action_retry_mode(state: &AutomationTaskState) -> Option<&'static str> {
     if state.goal.as_ref().is_some_and(|goal| {
         goal.status == GoalStatus::Active && action.goal_revision == Some(goal.revision)
     }) && (action.kind == Some(AutomationActionKind::OfflineGoal)
+        || state.recovered_goal_renewal()
         || (action.kind == Some(AutomationActionKind::OfflineCombined)
             && action.send_accepted == Some(true)
             && action.messages_fenced))
@@ -808,6 +822,7 @@ pub struct AgentAutomationStore {
     notification_workspace: String,
     pub(super) renewal_config: super::turn_renewal::TurnRenewalConfig,
     pub(super) settings_path: Option<PathBuf>,
+    pub(super) recovery_enhancements: bool,
     automatic_retries: bool,
     retry_timings: RetryTimings,
     pub(super) usage_options: crate::usage_analytics::Options,
@@ -868,6 +883,7 @@ impl AgentAutomationStore {
             notification_workspace: "Agent chat".into(),
             renewal_config: Default::default(),
             settings_path: None,
+            recovery_enhancements: false,
             automatic_retries: true,
             retry_timings: RetryTimings::default(),
             usage_options: Default::default(),
@@ -878,6 +894,7 @@ impl AgentAutomationStore {
         self.notifications = config.markdown_chat.notifications.clone();
         self.renewal_config = config.markdown_chat.turn_renewal.clone();
         self.settings_path = config.loaded_config_path.clone();
+        self.recovery_enhancements = config.markdown_chat.automation.recovery_enhancements;
         self.automatic_retries = config.markdown_chat.automation.automatic_retries;
         self.retry_timings = config.markdown_chat.automation.retry_timings.clone();
         self.usage_options = crate::usage_analytics::Options::from_config(config);
@@ -1147,6 +1164,10 @@ impl AgentAutomationStore {
                 completed_tool_call_count: None,
             };
             state.goal = Some(goal.clone());
+            // Status reports describe one assignment. Keep prior evidence in
+            // chat history instead of presenting it as this new goal's result.
+            state.agents.latest_report = None;
+            state.agents.report_at_ms = None;
             state.goal_wake = GoalWakeState::default();
             if state.action.goal_revision.is_some() {
                 state.action = AutomationActionState::default();
@@ -1224,7 +1245,22 @@ impl AgentAutomationStore {
         command: OwnerGoalCommand,
         now_ms: u64,
     ) -> Result<OwnerGoalCommandReceipt, String> {
-        self.owner_goal_command(task, request_id, command, now_ms, false, None)
+        self.owner_goal_command(task, request_id, command, now_ms, false, None, false, false)
+    }
+
+    pub(crate) fn start_auto_mode(
+        &self, task: &ConversationIdentity, request_id: &str, expected_revision: u64,
+        markdown: String, now_ms: u64,
+    ) -> Result<OwnerGoalCommandReceipt, String> {
+        self.owner_goal_command(task, request_id, OwnerGoalCommand::Set { markdown }, now_ms,
+            false, Some(expected_revision), true, true)
+    }
+
+    pub(crate) fn apply_parent_goal_command(
+        &self, task: &ConversationIdentity, request_id: &str,
+        expected_revision: u64, command: OwnerGoalCommand, now_ms: u64,
+    ) -> Result<OwnerGoalCommandReceipt, String> {
+        self.owner_goal_command(task, request_id, command, now_ms, false, Some(expected_revision), true, false)
     }
 
     /// Agent mutations share the owner's activation rules and durable receipts,
@@ -1255,6 +1291,8 @@ impl AgentAutomationStore {
             now_ms,
             false,
             Some(expected_revision),
+            false,
+            false,
         )
     }
 
@@ -1264,7 +1302,7 @@ impl AgentAutomationStore {
         request_id: &str,
         now_ms: u64,
     ) -> Result<OwnerGoalCommandReceipt, String> {
-        self.owner_goal_command(task, request_id, OwnerGoalCommand::Stop, now_ms, true, None)
+        self.owner_goal_command(task, request_id, OwnerGoalCommand::Stop, now_ms, true, None, false, false)
     }
 
     fn owner_goal_command(
@@ -1275,6 +1313,8 @@ impl AgentAutomationStore {
         now_ms: u64,
         agent_stop: bool,
         expected_revision: Option<u64>,
+        preserve_action: bool,
+        auto_mode: bool,
     ) -> Result<OwnerGoalCommandReceipt, String> {
         if !valid_opaque(request_id) {
             return Err("Agent-chat goal command request ID is invalid".into());
@@ -1304,6 +1344,7 @@ impl AgentAutomationStore {
         } else {
             owner_goal_command_digest(&command)?
         };
+        let command_digest = if auto_mode { format!("{:x}", Sha256::digest(format!("auto-mode-v1\0{command_digest}"))) } else { command_digest };
         self.mutate(task, move |state| {
             if let Some(record) = state
                 .owner_goal_requests
@@ -1359,8 +1400,27 @@ impl AgentAutomationStore {
                         completed_tool_call_count: None,
                     };
                     state.goal = Some(goal.clone());
+                    state.agents.latest_report = None;
+                    state.agents.report_at_ms = None;
+                    if auto_mode {
+                        state.agents.allow_delegation = true;
+                        state.agents.delegation_disabled = false;
+                        state.conversation_recovery.enabled = true;
+                    }
                     state.goal_wake = GoalWakeState::default();
-                    if state.action.goal_revision.is_some() {
+                    // Parent reassignment preserves owned Sends, but a terminal,
+                    // confirmed-unsent goal failure cannot retry after its revision
+                    // changes. Release that old dispatch so the new goal can start.
+                    // Message batches, uncertainty, active retries and explicit
+                    // retry pauses keep their existing ownership and receipts.
+                    let superseded_unsent_goal = state.action.kind == Some(AutomationActionKind::OfflineGoal)
+                        && state.action.goal_revision.is_some_and(|bound| bound < revision)
+                        && state.action.send_accepted == Some(false)
+                        && matches!(state.action.status, AutomationActionStatus::Failed | AutomationActionStatus::ConversationUnavailable)
+                        && !state.action.automatic_retry_in_progress
+                        && !state.action.automatic_retry_paused
+                        && state.suspended_retry.is_none();
+                    if (!preserve_action && state.action.goal_revision.is_some()) || superseded_unsent_goal {
                         state.action = AutomationActionState::default();
                     }
                     (OwnerGoalCommandKind::Set, Some(goal))
@@ -1406,7 +1466,7 @@ impl AgentAutomationStore {
                     }
                     let goal = goal.clone();
                     state.goal_wake = GoalWakeState::default();
-                    if state.action.goal_revision == Some(revision) {
+                    if !preserve_action && state.action.goal_revision == Some(revision) {
                         state.action = AutomationActionState::default();
                     }
                     (OwnerGoalCommandKind::Stop, Some(goal))
@@ -1497,8 +1557,11 @@ impl AgentAutomationStore {
                 goal.clone()
             };
             state.goal_wake = GoalWakeState::default();
+            super::turn_renewal::clear_pending_renewal(state);
             if state.action.goal_revision == Some(expected_revision) {
-                state.action.status = AutomationActionStatus::Idle;
+                if state.action.status != AutomationActionStatus::Cancelled {
+                    state.action.status = AutomationActionStatus::Idle;
+                }
                 state.action.automatic_retry_in_progress = false;
                 state.action.chatgpt_access_retry_in_progress = false;
                 state.action.updated_at_ms = Some(now_ms);
@@ -1522,6 +1585,27 @@ impl AgentAutomationStore {
         owner_generation: u64,
         now_ms: u64,
     ) -> Result<PairingIssue, String> {
+        self.issue_pairing_with_creation(task, candidate_url, owner_generation, now_ms, false)
+    }
+
+    pub fn issue_creation_pairing(
+        &self,
+        task: &ConversationIdentity,
+        candidate_url: &str,
+        owner_generation: u64,
+        now_ms: u64,
+    ) -> Result<PairingIssue, String> {
+        self.issue_pairing_with_creation(task, candidate_url, owner_generation, now_ms, true)
+    }
+
+    fn issue_pairing_with_creation(
+        &self,
+        task: &ConversationIdentity,
+        candidate_url: &str,
+        owner_generation: u64,
+        now_ms: u64,
+        creating_chat: bool,
+    ) -> Result<PairingIssue, String> {
         let candidate_url = normalize_chatgpt_url(candidate_url)?;
         let reference = generate_reference()?;
         let digest = reference_digest(&reference);
@@ -1542,7 +1626,7 @@ impl AgentAutomationStore {
                 .checked_add(PAIRING_REFERENCE_TTL_MS)
                 .ok_or("Agent-chat pairing expiry overflow")?;
             state.pairing = PairingState {
-                creating_chat: false,
+                creating_chat,
                 last_attempted_url: conversation_url_for_retry(&candidate_url).map(str::to_owned),
                 candidate_url: Some(candidate_url),
                 canonical_url: None,
@@ -1565,6 +1649,9 @@ impl AgentAutomationStore {
                 updated_at_ms: Some(now_ms),
                 ..Default::default()
             };
+            // Turn clocks and handoffs belong to the previous physical pairing.
+            // Keeping its owner here makes registration revoke the new pairing.
+            state.turn_renewal = Default::default();
             validate_state(&state)?;
             persist_state(path, &state)?;
             self.publish_pairing_index(&digest, &task_key)?;
@@ -1951,6 +2038,10 @@ impl AgentAutomationStore {
                 updated_at_ms: Some(now_ms),
                 ..Default::default()
             };
+            // A handoff changes the physical owner. The old owner's send clock
+            // and pending renewal must not trigger a continuation for the new
+            // owner after it re-pairs; the stable goal/chat state is preserved.
+            state.turn_renewal = Default::default();
             validate_state(&state)?;
             persist_state(path, &state)?;
             if let Some(previous_digest) = previous_digest {
@@ -2108,13 +2199,16 @@ impl AgentAutomationStore {
             }
             if let Some(previous) = &state.suspended_retry {
                 if chatgpt_access_failure(previous.action.status) {
-                    state.action.chatgpt_access_retry_attempts =
-                        previous.action.chatgpt_access_retry_attempts + 1;
+                    state.action.chatgpt_access_retry_attempts = previous
+                        .action
+                        .chatgpt_access_retry_attempts
+                        .saturating_add(1);
                 } else if confirmed_unsent_failure(&previous.action) {
                     state.action.automatic_retry_attempts =
-                        previous.action.automatic_retry_attempts + 1;
+                        previous.action.automatic_retry_attempts.saturating_add(1);
                 } else {
-                    state.goal_wake.recovery_attempts = previous.goal_wake.recovery_attempts + 1;
+                    state.goal_wake.recovery_attempts =
+                        previous.goal_wake.recovery_attempts.saturating_add(1);
                 }
             }
             state.action.cooldown_until_ms = None;
@@ -2236,6 +2330,10 @@ impl AgentAutomationStore {
                 state.action.last_stable_answer = Some(answer.to_string());
             }
             state.action.updated_at_ms = Some(now_ms);
+            if !matches!(state.action.status, AutomationActionStatus::Queued | AutomationActionStatus::Navigating | AutomationActionStatus::Sending | AutomationActionStatus::Generating) {
+                state.action.automatic_retry_in_progress = false;
+                state.action.chatgpt_access_retry_in_progress = false;
+            }
             if state.action.status == AutomationActionStatus::Idle {
                 state.action.automatic_retry_attempts = 0;
                 state.action.chatgpt_access_retry_attempts = 0;
@@ -2440,14 +2538,15 @@ impl AgentAutomationStore {
             // ledger so continuing a goal never replays an earlier user batch.
             let unsent = confirmed_unsent_failure(&state.action);
             if !unsent {
-                state.goal_wake.recovery_attempts += 1;
+                state.goal_wake.recovery_attempts =
+                    state.goal_wake.recovery_attempts.saturating_add(1);
             }
             state.action = AutomationActionState {
                 updated_at_ms: Some(now_ms),
                 automatic_retry_in_progress: true,
                 chatgpt_access_retry_attempts: state.action.chatgpt_access_retry_attempts,
                 automatic_retry_attempts: if unsent {
-                    state.action.automatic_retry_attempts + 1
+                    state.action.automatic_retry_attempts.saturating_add(1)
                 } else {
                     0
                 },
@@ -2542,14 +2641,50 @@ impl AgentAutomationStore {
             let access_retry = chatgpt_access_failure(state.action.status);
             state.action = AutomationActionState {
                 updated_at_ms: Some(now_ms),
-                automatic_retry_attempts: state.action.automatic_retry_attempts
-                    + u32::from(!access_retry),
-                chatgpt_access_retry_attempts: state.action.chatgpt_access_retry_attempts
-                    + u32::from(access_retry),
+                automatic_retry_attempts: state
+                    .action
+                    .automatic_retry_attempts
+                    .saturating_add(u32::from(!access_retry)),
+                chatgpt_access_retry_attempts: state
+                    .action
+                    .chatgpt_access_retry_attempts
+                    .saturating_add(u32::from(access_retry)),
                 chatgpt_access_retry_in_progress: access_retry,
                 automatic_retry_in_progress: true,
                 ..Default::default()
             };
+            Ok(true)
+        })
+    }
+
+    /// An independently verified missing goal-only start becomes uncertain,
+    /// never confirmed-unsent. Ordinary goal recovery allocates a distinct turn.
+    pub(crate) fn reconcile_missing_goal_start(
+        &self,
+        task: &ConversationIdentity,
+        expected: &AutomationTaskState,
+        owner_generation: u64,
+    ) -> Result<bool, String> {
+        if !self.recovery_enhancements { return Ok(false); }
+        self.mutate(task, |state| {
+            if state.action != expected.action
+                || state.pairing != expected.pairing
+                || state.action.kind != Some(AutomationActionKind::OfflineGoal)
+                || state.action.status != AutomationActionStatus::Navigating
+                || state.action.send_accepted != Some(false)
+                || state.action.messages_fenced
+                || state.action.goal_turn_counted
+                || state.pairing.verified_owner_generation != Some(owner_generation)
+                || state.selection.account_fingerprint != state.pairing.account_fingerprint
+                || state.goal.as_ref().is_none_or(|goal| {
+                    goal.status != GoalStatus::Active
+                        || Some(goal.revision) != state.action.goal_revision
+                })
+            {
+                return Ok(false);
+            }
+            state.action.status = AutomationActionStatus::Ambiguous;
+            state.action.last_error = Some("The previous browser no longer retains this goal-only start. Continue in a distinct goal turn; the old prompt was not replayed.".into());
             Ok(true)
         })
     }
@@ -3016,6 +3151,17 @@ impl AgentAutomationStore {
         })
     }
 
+    // Race fixtures outside this module still use validated, locked persistence.
+    // Keep arbitrary state mutation private in production builds.
+    #[cfg(test)]
+    pub(crate) fn mutate_test_state<R>(
+        &self,
+        task: &ConversationIdentity,
+        mutation: impl FnOnce(&mut AutomationTaskState) -> Result<R, String>,
+    ) -> Result<R, String> {
+        self.mutate(task, mutation)
+    }
+
     pub(super) fn mutate<R>(
         &self,
         task: &ConversationIdentity,
@@ -3302,6 +3448,9 @@ fn start_goal(
         }
     }
     let result = goal.clone();
+    if was_blocked {
+        state.blocker_audit = None;
+    }
     state.goal_wake = GoalWakeState::default();
     if state.can_resume_cancelled_action()
         || (was_blocked
@@ -3639,6 +3788,14 @@ fn persist_private_record(path: &Path, record: &impl Serialize) -> Result<(), St
     if bytes.len() as u64 > MAX_STATE_BYTES {
         return Err("Agent automation state is too large".into());
     }
+    // Renewal checks and supervisor scans often leave the durable record
+    // unchanged. Keep validation and the caller's writer lock, but avoid an
+    // atomic replacement and sync_all for identical bytes. Comparing the
+    // serialized record also preserves migrations and ignores runtime-only
+    // fields rather than confusing them with durable changes.
+    if read_private_record(path)?.as_deref() == Some(bytes.as_slice()) {
+        return Ok(());
+    }
     let mut temporary = tempfile::NamedTempFile::new_in(parent)
         .map_err(|error| format!("Could not create agent automation state: {error}"))?;
     set_private_file_permissions(temporary.path(), "temporary agent automation state")?;
@@ -3646,9 +3803,30 @@ fn persist_private_record(path: &Path, record: &impl Serialize) -> Result<(), St
         .write_all(&bytes)
         .and_then(|_| temporary.as_file().sync_all())
         .map_err(|error| format!("Could not write agent automation state: {error}"))?;
-    temporary
-        .persist(path)
-        .map_err(|error| format!("Could not publish agent automation state: {}", error.error))?;
+    #[cfg(windows)]
+    let mut retry_delay_ms = 10;
+    loop {
+        match temporary.persist(path) {
+            Ok(_) => break,
+            Err(error) => {
+                // Short-lived Windows readers and virus scanners can deny
+                // replacement even while we own the task's writer lock. Keep
+                // the complete temporary record and retry the atomic publish.
+                #[cfg(windows)]
+                if matches!(error.error.raw_os_error(), Some(5 | 32 | 33)) && retry_delay_ms <= 320
+                {
+                    temporary = error.file;
+                    std::thread::sleep(std::time::Duration::from_millis(retry_delay_ms));
+                    retry_delay_ms *= 2;
+                    continue;
+                }
+                return Err(format!(
+                    "Could not publish agent automation state: {}",
+                    error.error
+                ));
+            }
+        }
+    }
     set_private_file_permissions(path, "agent automation state")?;
     #[cfg(unix)]
     if let Ok(directory) = File::open(parent) {
@@ -3700,6 +3878,32 @@ fn set_private_file_permissions(path: &Path, label: &str) -> Result<(), String> 
 }
 
 fn validate_state(state: &AutomationTaskState) -> Result<(), String> {
+    super::agents::validate_team(&state.agents)?;
+    if state.blocker_audit.as_ref().is_some_and(|audit| {
+        audit.revision == 0
+            || audit.reason.trim().is_empty()
+            || audit.reason.len() > MAX_GOAL_RESULT_BYTES
+            || audit.attempts == 0
+    }) {
+        return Err("Goal blocker audit is invalid".into());
+    }
+    let recovery = &state.conversation_recovery;
+    if recovery.previous_urls.len() > 8
+        || recovery.failed_chat_count < (recovery.previous_urls.len() as u32)
+        || recovery
+            .previous_urls
+            .iter()
+            .chain(recovery.failed_url.iter())
+            .any(|url| {
+                normalize_chatgpt_url(url).is_err() || conversation_url_for_retry(url).is_none()
+            })
+        || recovery
+            .last_failure_action_id
+            .as_deref()
+            .is_some_and(|id| !valid_opaque(id))
+    {
+        return Err("Conversation recovery state is invalid".into());
+    }
     if state.version != STATE_VERSION {
         return Err(format!(
             "Unsupported agent automation state version {}",
@@ -3786,9 +3990,7 @@ fn validate_action(action: &AutomationActionState) -> Result<(), String> {
     {
         return Err("Browser cooldown deadline is invalid".into());
     }
-    if action.automatic_retry_attempts as usize > MAX_AUTOMATIC_RETRY_ATTEMPTS
-        || action.chatgpt_access_retry_attempts as usize > MAX_AUTOMATIC_RETRY_ATTEMPTS
-        || action.chatgpt_access_retry_in_progress && !action.automatic_retry_in_progress
+    if action.chatgpt_access_retry_in_progress && !action.automatic_retry_in_progress
         || action
             .id
             .as_deref()
@@ -3846,9 +4048,6 @@ fn validate_action(action: &AutomationActionState) -> Result<(), String> {
 }
 
 fn validate_goal_wake(wake: &GoalWakeState) -> Result<(), String> {
-    if wake.recovery_attempts as usize > MAX_AUTOMATIC_RETRY_ATTEMPTS {
-        return Err("Agent automation goal recovery count is invalid".into());
-    }
     for value in [wake.activity_epoch.as_deref(), wake.nudged_epoch.as_deref()]
         .into_iter()
         .flatten()
@@ -4119,4 +4318,133 @@ fn valid_opaque(value: &str) -> bool {
 
 fn bounded_private(value: &str) -> bool {
     value.len() <= MAX_PRIVATE_TEXT_BYTES && !value.contains('\0')
+}
+
+#[cfg(test)]
+mod parent_goal_reassignment_tests {
+    use super::*;
+
+    fn old_goal_action(kind: AutomationActionKind, status: AutomationActionStatus, accepted: Option<bool>) -> AutomationActionState {
+        AutomationActionState {
+            id: Some("old-goal-action".into()), kind: Some(kind), status,
+            pairing_generation: Some(1),
+            goal_revision: matches!(kind, AutomationActionKind::OfflineGoal | AutomationActionKind::OfflineCombined).then_some(1),
+            send_accepted: accepted,
+            updated_at_ms: Some(10), ..Default::default()
+        }
+    }
+
+    fn reassign(action: AutomationActionState) -> (AutomationTaskState, OwnerGoalCommandReceipt) {
+        let directory = tempfile::tempdir().unwrap();
+        let store = AgentAutomationStore::new(directory.path().join("chats")).unwrap();
+        let task = ConversationIdentity::from_openai_session("parent-reassignment").unwrap();
+        let goal = store.set_goal(&task, "Old source-only assignment", 1).unwrap();
+        store.run_goal(&task, goal.revision, 2).unwrap();
+        store.mutate(&task, |state| { state.action = action; Ok(()) }).unwrap();
+        let command = OwnerGoalCommand::Set { markdown: "New private proof assignment".into() };
+        let receipt = store.apply_parent_goal_command(&task, "reassign-proof", 1, command.clone(), 20).unwrap();
+        let replay = store.apply_parent_goal_command(&task, "reassign-proof", 1, command, 30).unwrap();
+        assert!(replay.replayed);
+        assert_eq!(replay.goal.unwrap().revision, 2);
+        (store.load(&task).unwrap(), receipt)
+    }
+
+    #[test]
+    fn parent_goal_reassignment_releases_confirmed_unsent_old_goal_failures() {
+        for status in [AutomationActionStatus::Failed, AutomationActionStatus::ConversationUnavailable] {
+            let (state, receipt) = reassign(old_goal_action(AutomationActionKind::OfflineGoal, status, Some(false)));
+            assert_eq!(receipt.goal.unwrap().revision, 2);
+            assert_eq!(state.goal.unwrap().status, GoalStatus::Active);
+            assert_eq!(state.action, AutomationActionState::default(), "old failed dispatch must not block the new goal: {status:?}");
+        }
+    }
+
+    #[test]
+    fn parent_goal_reassignment_preserves_owned_uncertain_and_message_actions() {
+        for (kind, status, accepted) in [
+            (AutomationActionKind::OfflineGoal, AutomationActionStatus::ConversationUnavailable, Some(true)),
+            (AutomationActionKind::OfflineGoal, AutomationActionStatus::ConversationUnavailable, None),
+            (AutomationActionKind::OfflineGoal, AutomationActionStatus::Ambiguous, Some(false)),
+            (AutomationActionKind::OfflineGoal, AutomationActionStatus::Queued, Some(false)),
+            (AutomationActionKind::OfflineGoal, AutomationActionStatus::Navigating, Some(false)),
+            (AutomationActionKind::OfflineGoal, AutomationActionStatus::Sending, Some(false)),
+            (AutomationActionKind::OfflineGoal, AutomationActionStatus::Generating, Some(false)),
+            (AutomationActionKind::OfflineGoal, AutomationActionStatus::Cancelled, Some(false)),
+            (AutomationActionKind::OfflineGoal, AutomationActionStatus::Stalled, Some(false)),
+            (AutomationActionKind::OfflineGoal, AutomationActionStatus::RateLimited, Some(false)),
+            (AutomationActionKind::OfflineCombined, AutomationActionStatus::Failed, Some(false)),
+            (AutomationActionKind::OfflineChat, AutomationActionStatus::Failed, Some(false)),
+            (AutomationActionKind::TurnRenewal, AutomationActionStatus::Failed, Some(false)),
+        ] {
+            let action = old_goal_action(kind, status, accepted);
+            let (state, _) = reassign(action.clone());
+            assert_eq!(state.action, action, "preserve {kind:?}/{status:?}/{accepted:?}");
+        }
+        let mut retry = old_goal_action(AutomationActionKind::OfflineGoal, AutomationActionStatus::Failed, Some(false));
+        retry.automatic_retry_in_progress = true;
+        assert_eq!(reassign(retry.clone()).0.action, retry);
+        retry.automatic_retry_in_progress = false;
+        retry.automatic_retry_paused = true;
+        assert_eq!(reassign(retry.clone()).0.action, retry);
+    }
+}
+
+#[cfg(test)]
+mod persistence_tests {
+    use super::*;
+    use std::time::{Duration, SystemTime};
+
+    fn mark_old(path: &Path) -> SystemTime {
+        let old = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000_000);
+        File::options().write(true).open(path).unwrap().set_modified(old).unwrap();
+        std::fs::metadata(path).unwrap().modified().unwrap()
+    }
+
+    #[test]
+    fn unchanged_private_records_do_not_replace_the_file_but_edits_are_durable() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.json");
+        let record = serde_json::json!({"revision":1,"message":"evidence ".repeat(4000)});
+        persist_private_record(&path, &record).unwrap();
+        let old = mark_old(&path);
+        let started = std::time::Instant::now();
+        for _ in 0..25 {
+            persist_private_record(&path, &record).unwrap();
+            assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), old);
+        }
+        eprintln!("25 unchanged {}-byte records: {:?}; 25 atomic replacements avoided", std::fs::metadata(&path).unwrap().len(), started.elapsed());
+        let changed = serde_json::json!({"revision":2,"message":"new evidence"});
+        persist_private_record(&path, &changed).unwrap();
+        assert_ne!(std::fs::metadata(&path).unwrap().modified().unwrap(), old);
+        assert_eq!(read_private_record(&path).unwrap().unwrap(), serde_json::to_vec(&changed).unwrap());
+    }
+
+    #[test]
+    fn state_noops_ignore_runtime_flags_but_still_validate_and_normalize_bytes() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("automation.json");
+        let mut state = AutomationTaskState::default();
+        persist_state(&path, &state).unwrap();
+        let canonical = std::fs::read(&path).unwrap();
+        let old = mark_old(&path);
+        state.automatic_retries_enabled = !state.automatic_retries_enabled;
+        persist_state(&path, &state).unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), old);
+        state.version = STATE_VERSION + 1;
+        assert!(persist_state(&path, &state).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), canonical);
+        state.version = STATE_VERSION;
+        std::fs::write(&path, serde_json::to_vec_pretty(&state).unwrap()).unwrap();
+        persist_state(&path, &state).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), canonical);
+    }
+
+    #[test]
+    fn unchanged_write_optimization_does_not_accept_non_regular_records() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("not-a-file");
+        std::fs::create_dir(&path).unwrap();
+        assert!(persist_private_record(&path, &serde_json::json!({})).is_err());
+        assert!(path.is_dir());
+    }
 }

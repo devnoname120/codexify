@@ -3,10 +3,11 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { mkdtemp } from "node:fs/promises";
 import { expect, test } from "bun:test";
-import type { CapabilityCatalog, ConversationApprovalRequest } from "../src/protocol";
+import type { CapabilityCatalog, ConversationApprovalRequest, ExecuteActionRequest } from "../src/protocol";
 import { SingleWindowCoordinator, type BrowserDriver, type DriverExecution } from "../src/browser-window";
 import { startControlServer } from "../src/control-server";
 import { protocolBuild } from "../src/protocol";
+import { BrowserCompanionError } from "../src/errors";
 
 const TEST_BUILD = protocolBuild("test-build");
 
@@ -66,7 +67,7 @@ class PrivateFailureDriver extends ImmediateDriver {
   }
 }
 
-function executeBody() {
+function executeBody():ExecuteActionRequest {
   return {
     actionId:"control-action",
     idempotencyKey:"control-execute",
@@ -82,6 +83,59 @@ function executeBody() {
   };
 }
 
+test('explicit readiness HTTP waits for actual verified health instead of a warming response',async()=>{
+  let release!:()=>void,settled=false;
+  const gate=new Promise<void>(resolve=>release=resolve);
+  class SlowHealthDriver extends ImmediateDriver {override async health(){await gate;return super.health();}}
+  const root=await mkdtemp(join(tmpdir(),'ready-health-control-'));
+  const coordinator=new SingleWindowCoordinator(new SlowHealthDriver(),TEST_BUILD);
+  const server=await startControlServer(coordinator,join(root,'descriptor.json'));
+  try {
+    const pending=fetch(server.endpoint+'/v1/health?ready=1',{headers:{Authorization:'Bearer '+server.token}});
+    void pending.then(()=>settled=true);await Bun.sleep(300);expect(settled).toBe(false);
+    release();const response=await pending;expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({status:'idle',authenticated:true,accountFingerprint:'account-test'});
+  }finally{release();await server.close();}
+});
+
+test("presentation diagnostics require private bearer auth and defer while an action owns the page",async()=>{
+  class PresentationDriver extends BlockingDriver {
+    reads=0;
+    async presentation(_signal?:AbortSignal,screenshot=false){this.reads++;return {mode:"fast-v2",badgeVisible:true,screenshotRequested:screenshot};}
+    async setPresentationStyle(css:string){return {applied:true,cssBytes:css.length};}
+  }
+  const root=await mkdtemp(join(tmpdir(),"presentation-control-"));
+  const driver=new PresentationDriver(),coordinator=new SingleWindowCoordinator(driver,TEST_BUILD);
+  const server=await startControlServer(coordinator,join(root,"descriptor.json"));
+  try {
+    const url=server.endpoint+"/v1/diagnostics/presentation";
+    const headers={Authorization:`Bearer ${server.token}`};
+    expect((await fetch(url)).status).toBe(401);
+    expect((await fetch(url+"?screenshot=other",{headers})).status).toBe(400);
+    const reply=await fetch(url+"?screenshot=1",{headers});
+    expect(await reply.json()).toEqual({mode:"fast-v2",badgeVisible:true,screenshotRequested:true});
+    const update=()=>fetch(server.endpoint+'/v1/presentation/style',{method:'POST',headers:{...headers,'Content-Type':'application/json'},body:JSON.stringify({css:'#sidebar{display:none;}'})});
+    expect((await update()).status).toBe(200);
+    await coordinator.execute(executeBody());
+    expect((await fetch(url,{headers})).status).toBe(409);
+    expect((await update()).status).toBe(409);
+    expect(driver.reads).toBe(1);
+    await coordinator.cancel({actionId:"control-action",idempotencyKey:"presentation-stop"});
+  }finally{await server.close();}
+});
+
+test("connector refresh yields a retryable status after another action takes the page",async()=>{
+ class RefreshRaceDriver extends ImmediateDriver {
+  async refreshConnector():Promise<never>{throw new BrowserCompanionError("Inspect connector settings: Another browser action changed pages during connector refresh","external_interference");}
+ }
+ const root=await mkdtemp(join(tmpdir(),"connector-refresh-race-"));
+ const server=await startControlServer(new SingleWindowCoordinator(new RefreshRaceDriver(),TEST_BUILD),join(root,"descriptor.json"));
+ try {
+  const response=await fetch(`${server.endpoint}/v1/connectors/refresh`,{method:"POST",headers:{Authorization:`Bearer ${server.token}`,"Content-Type":"application/json"},body:JSON.stringify({name:"Codexify"})});
+  expect(response.status).toBe(423);
+ }finally{await server.close();}
+});
+
 test("conversation approvals require the private bearer and a strict conversation/account/connector request",async()=>{
   class ApprovalDriver extends ImmediateDriver {
     checks:ConversationApprovalRequest[]=[];
@@ -91,8 +145,10 @@ test("conversation approvals require the private bearer and a strict conversatio
   const driver=new ApprovalDriver(),coordinator=new SingleWindowCoordinator(driver,TEST_BUILD);
   const server=await startControlServer(coordinator,join(root,"descriptor.json"));
   try {
+    for(const path of ['/v1/approvals/conversation','/v1/approvals/recover-conversation']) {
+    driver.checks.length=0;
     const body={url:"https://chatgpt.com/c/approval",expectedAccountFingerprint:"account-test",connectorName:"Fixture connector"};
-    const post=(payload:unknown,authorized=true)=>fetch(`${server.endpoint}/v1/approvals/conversation`,{
+    const post=(payload:unknown,authorized=true)=>fetch(`${server.endpoint}${path}`,{
       method:"POST",headers:{"Content-Type":"application/json",...(authorized?{Authorization:`Bearer ${server.token}`}:{})},body:JSON.stringify(payload)});
     expect((await post(body,false)).status).toBe(401);
     expect((await post({...body,extra:true})).status).toBe(400);
@@ -103,6 +159,7 @@ test("conversation approvals require the private bearer and a strict conversatio
     const response=await post(body);expect(response.status).toBe(200);
     expect(await response.json()).toEqual({protocolVersion:1,build:TEST_BUILD,approved:true});
     expect(driver.checks).toEqual([body]);
+    }
   } finally {await server.close();}
 });
 
@@ -150,7 +207,7 @@ test("private loopback server enforces bearer auth and streams bounded NDJSON", 
   expect(await readFile(descriptorPath, "utf8").catch(() => null)).toBeNull();
 });
 
-test("request schemas are strict and descriptor symlinks fail closed", async () => {
+test("request schemas reject browser JavaScript fields", async () => {
   const root = await mkdtemp(join(tmpdir(), "codexify-browser-control-"));
   const coordinator = new SingleWindowCoordinator(new ImmediateDriver(), TEST_BUILD);
   const server = await startControlServer(coordinator, join(root, "descriptor.json"));
@@ -162,7 +219,11 @@ test("request schemas are strict and descriptor symlinks fail closed", async () 
     expect(bad.status).toBe(400);
     expect(await bad.text()).not.toContain("document.cookie");
   } finally { await server.close(); }
+});
 
+test.skipIf(process.platform === "win32")("descriptor symlinks fail closed", async () => {
+  const root = await mkdtemp(join(tmpdir(), "codexify-browser-control-"));
+  const coordinator = new SingleWindowCoordinator(new ImmediateDriver(), TEST_BUILD);
   const target = join(root, "target.json");
   const linked = join(root, "linked.json");
   await Bun.write(target, "unchanged");

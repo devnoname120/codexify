@@ -5,6 +5,7 @@ import {selectConnector,SELECTED_CONNECTOR_SELECTOR,clearComposerState} from "./
 import {CHATGPT_COMPOSER_SELECTOR} from "./session";
 import {BrowserCompanionError,selectorDrift} from "./errors";
 import {navigatePage} from "./navigation";
+import {observeReadOnly} from "./observation";
 
 export type AccountPlan = {label:string; sourceLabel:string; kind:"free"|"go"|"pro"|"unknown"; accountFingerprint:string};
 function traceRefresh(phase:string):void {
@@ -33,7 +34,7 @@ export function classifyPlan(sourceLabel:string): Omit<AccountPlan,"accountFinge
 }
 
 async function markAccountMenuButton(page:Page):Promise<boolean> {
-  return page.evaluate(()=>{
+  return page.locator('html').evaluate(()=>{
     for(const node of document.querySelectorAll('[data-account-plan-menu-target]'))node.removeAttribute('data-account-plan-menu-target');
     const visible=(node:Element)=>node.getClientRects().length>0;
     const direct=[...document.querySelectorAll('[data-testid="accounts-profile-button"],[data-testid="profile-button"],[data-testid="account-menu-button"]')].filter(visible);
@@ -48,7 +49,7 @@ async function markAccountMenuButton(page:Page):Promise<boolean> {
     }
     if(candidates.length!==1)return false;
     candidates[0]!.setAttribute('data-account-plan-menu-target','true');return true;
-  });
+  },undefined,{timeout:1_500});
 }
 
 async function readAccountMenuPlan(page:Page,previousUrl:string,signal?:AbortSignal):Promise<string|null> {
@@ -61,11 +62,11 @@ async function readAccountMenuPlan(page:Page,previousUrl:string,signal?:AbortSig
   const trigger=page.locator('[data-account-plan-menu-target="true"]');
   let opened=false;
   try {
-    if(await trigger.getAttribute('aria-expanded')!=="true") {
+    if(await observeReadOnly(trigger.getAttribute('aria-expanded'),signal)!=="true") {
       await trigger.click({timeout:1_000,signal});opened=true;
     }
     await page.locator('[role="menu"]').filter({visible:true}).first().waitFor({state:"visible",timeout:1_000,signal});
-    return await page.evaluate(()=>{
+    return await observeReadOnly(page.evaluate(()=>{
       const visible=(node:Element)=>node.getClientRects().length>0;
       const menus=[...document.querySelectorAll('[role="menu"]')].filter(visible).filter(node=>!node.parentElement?.closest('[role="menu"]'));
       if(menus.length!==1)return null;
@@ -91,10 +92,10 @@ async function readAccountMenuPlan(page:Page,previousUrl:string,signal?:AbortSig
         Math.abs(previous.rect.left-text.rect.left)<4&&previous.rect.bottom<=text.rect.top+2,
       )).map(text=>text.label);
       return labels.length===1?labels[0]!:null;
-    });
+    }),signal);
   } finally {
-    if(opened)await page.keyboard.press('Escape').catch(()=>{});
-    await trigger.evaluate(node=>node.removeAttribute('data-account-plan-menu-target')).catch(()=>{});
+    if(opened)await trigger.press('Escape',{timeout:1_000}).catch(()=>{});
+    await trigger.evaluate(node=>node.removeAttribute('data-account-plan-menu-target'),undefined,{timeout:1_000}).catch(()=>{});
   }
 }
 
@@ -105,11 +106,11 @@ export async function readBillingPlan(page:Page,signal?:AbortSignal):Promise<Acc
     const plan=classifyPlan(menuLabel);
     // A plain Pro label does not identify its billing tier. Keep the billing
     // fallback for that case instead of silently replacing Pro 20x with Pro.
-    if(new RegExp(planLabelPattern,"iu").test(menuLabel)&&(plan.kind!=="pro"||plan.label!=="Pro"))return {...plan,accountFingerprint:(await readChatGptAccount(page)).fingerprint};
+    if(new RegExp(planLabelPattern,"iu").test(menuLabel)&&(plan.kind!=="pro"||plan.label!=="Pro"))return {...plan,accountFingerprint:(await readChatGptAccount(page,signal)).fingerprint};
   }
   let billingReady=false;
   try {
-    if(page.url()!=="https://chatgpt.com/settings/billing"&&await page.locator(CHATGPT_COMPOSER_SELECTOR).filter({visible:true}).count()===1)await clearComposerState(page,"",signal);
+    if(page.url()!=="https://chatgpt.com/settings/billing"&&await observeReadOnly(page.locator(CHATGPT_COMPOSER_SELECTOR).filter({visible:true}).count(),signal)===1)await clearComposerState(page,"",signal);
     await navigatePage(page,"https://chatgpt.com/settings/billing",{timeout:5_000,signal});
     await page.locator("body").waitFor({state:"visible",timeout:1_000,signal});
     billingReady=true;
@@ -117,14 +118,14 @@ export async function readBillingPlan(page:Page,signal?:AbortSignal):Promise<Acc
     signal?.throwIfAborted();
     await navigatePage(page,previousUrl,{timeout:2_000,signal});
   }
-  const account=await readChatGptAccount(page);
+  const account=await readChatGptAccount(page,signal);
   let sourceLabel:string|null|undefined;
   if(billingReady) {
     // Leave room for account verification and restoring the shared tab within the 10s action budget.
     const deadline=Date.now()+2_500;
     do {
     signal?.throwIfAborted();
-    sourceLabel=await page.evaluate(({headingPattern,labelPattern})=>{
+    sourceLabel=await observeReadOnly(page.evaluate(({headingPattern,labelPattern})=>{
       const visible=(node:Element)=>node.getClientRects().length>0;
       const uniquePlan=(labels:string[])=>new Set(labels.map(label=>label.replace(/^ChatGPT\s+/i,"").toLowerCase())).size===1
         ? labels.find(label=>/^ChatGPT\s+/i.test(label))??labels[0] : null;
@@ -137,7 +138,7 @@ export async function readBillingPlan(page:Page,signal?:AbortSignal):Promise<Acc
       const labels=[...document.querySelectorAll('p,span,strong,div')].filter(visible)
         .map(node=>node.textContent?.replace(/\s+/g," ").trim()).filter((text):text is string=>Boolean(text&&new RegExp(labelPattern,"iu").test(text)));
       return uniquePlan(labels);
-    },{headingPattern:planHeadingPattern,labelPattern:planLabelPattern});
+    },{headingPattern:planHeadingPattern,labelPattern:planLabelPattern}),signal);
     if(sourceLabel)break;
     await new Promise(resolve=>setTimeout(resolve,100));
     }while(Date.now()<deadline);
@@ -145,14 +146,14 @@ export async function readBillingPlan(page:Page,signal?:AbortSignal):Promise<Acc
   if(!sourceLabel) {
     try {sourceLabel=menuLabel??await readAccountMenuPlan(page,previousUrl,signal);}
     catch {signal?.throwIfAborted();}
-    if((await readChatGptAccount(page)).fingerprint!==account.fingerprint)throw new BrowserCompanionError("ChatGPT account changed during plan inspection","authentication_required");
+    if((await readChatGptAccount(page,signal)).fingerprint!==account.fingerprint)throw new BrowserCompanionError("ChatGPT account changed during plan inspection","authentication_required");
   }
   if(process.env.CODEXIFY_BROWSER_MAINTENANCE_TRACE==="1")console.info(`[account-plan] ${JSON.stringify({sourceLabel:sourceLabel??null})}`);
   return {...classifyPlan(sourceLabel??""),accountFingerprint:account.fingerprint};
 }
 
 async function markRefreshButton(page:Page):Promise<void> {
-  const marked=await page.evaluate(()=>{
+  const marked=await page.locator('html').evaluate(()=>{
     for(const button of document.querySelectorAll('button'))button.removeAttribute('data-refresh-tools-target');
     const direct=[...document.querySelectorAll<HTMLButtonElement>('button[data-testid*="refresh"],button[data-action="refresh-tools"],button[name="refresh_tools"]')].filter(button=>button.getClientRects().length>0);
     if(direct.length===1){direct[0]!.setAttribute('data-refresh-tools-target','true');return true;}
@@ -167,16 +168,16 @@ async function markRefreshButton(page:Page):Promise<void> {
     }
     if(candidates.size===1){[...candidates][0]!.setAttribute('data-refresh-tools-target','true');return true;}
     return false;
-  });
+  },undefined,{timeout:1_500});
   if(!marked)throw selectorDrift("ChatGPT did not expose one identifiable tool-refresh control");
 }
 
 async function allowAllChoice(page:Page,signal?:AbortSignal) {
   const radios=page.locator('[role="radio"],input[type="radio"]').filter({visible:true});
   await radios.first().waitFor({state:"visible",timeout:10_000,signal});
-  if(await radios.count()!==4)throw selectorDrift("ChatGPT permission choices changed; Allow all was not selected");
+  if(await observeReadOnly(radios.count(),signal)!==4)throw selectorDrift("ChatGPT permission choices changed; Allow all was not selected");
   const choice=radios.nth(3);
-  const checked=()=>choice.getAttribute("aria-checked").then(value=>value==="true").then(async value=>value||await choice.isChecked().catch(()=>false));
+  const checked=()=>observeReadOnly(choice.getAttribute("aria-checked").then(value=>value==="true").then(async value=>value||await choice.isChecked().catch(()=>false)),signal);
   return {choice,checked};
 }
 
@@ -191,8 +192,8 @@ async function ensureAllowAll(page:Page,assertPage:()=>Promise<void>,signal?:Abo
   return changed;
 }
 
-export async function observedConnectorApp(page:Page,name:string):Promise<string|undefined> {
-  const identities=await page.evaluate(name=>{
+export async function observedConnectorApp(page:Page,name:string,signal?:AbortSignal):Promise<string|undefined> {
+  const identities=await observeReadOnly(page.evaluate(name=>{
     const ids=new Set<string>();
     for(const node of document.querySelectorAll('a[href], [app-mention-path], [data-id^="plugin:"]')) {
       if(!node.getClientRects().length)continue;
@@ -209,21 +210,21 @@ export async function observedConnectorApp(page:Page,name:string):Promise<string
       if(/^asdk_app_[A-Za-z0-9_]{1,128}$/.test(id))ids.add(id);
     }
     return [...ids];
-  },name);
+  },name),signal);
   if(identities.length>1)throw selectorDrift("ChatGPT exposed conflicting connector App IDs");
   return identities[0];
 }
 
 export async function identifyConnectorApp(page:Page,connectorName:string,expectedAccountFingerprint:string,signal?:AbortSignal):Promise<string> {
   signal?.throwIfAborted();
-  const observed=await observedConnectorApp(page,connectorName);
+  const observed=await observedConnectorApp(page,connectorName,signal);
   if(observed)return observed;
   const current=new URL(page.url());
   if(current.origin!=="https://chatgpt.com"||current.pathname!=="/"||current.search)await navigatePage(page,"https://chatgpt.com/",{timeout:30_000,signal});
-  if((await readChatGptAccount(page)).fingerprint!==expectedAccountFingerprint)throw new BrowserCompanionError("ChatGPT account changed before connector maintenance", "authentication_required");
+  if((await readChatGptAccount(page,signal)).fingerprint!==expectedAccountFingerprint)throw new BrowserCompanionError("ChatGPT account changed before connector maintenance", "authentication_required");
   const selection=await selectConnector(page,connectorName,signal);
   const mention=selection.composer.locator(SELECTED_CONNECTOR_SELECTOR).filter({visible:true});
-  const identity=await mention.getAttribute("app-mention-path")||await mention.getAttribute("data-id");
+  const identity=await observeReadOnly(mention.getAttribute("app-mention-path"),signal)||await observeReadOnly(mention.getAttribute("data-id"),signal);
   const appId=identity?.replace(/^app:\/\//,"").replace(/^plugin:/,"");
   if(!appId||!/^asdk_app_[A-Za-z0-9_]{1,128}$/.test(appId))throw selectorDrift("ChatGPT did not expose the selected connector's App ID");
   return appId;
@@ -235,7 +236,7 @@ async function connectorPage(page:Page,appId:string,account:string,permissions:b
   const assertPage=async()=>{
     signal?.throwIfAborted();
     if(new URL(page.url()).origin!=="https://chatgpt.com"||new URL(page.url()).pathname!==new URL(url).pathname)throw selectorDrift("ChatGPT changed the plugin page during connector maintenance");
-    if((await readChatGptAccount(page)).fingerprint!==account)throw selectorDrift("ChatGPT account changed during connector maintenance");
+    if((await readChatGptAccount(page,signal)).fingerprint!==account)throw selectorDrift("ChatGPT account changed during connector maintenance");
   };
   await navigatePage(page,url,{timeout:30_000,signal});
   await assertPage();
@@ -282,22 +283,21 @@ export async function beginConnectorToolRefresh(page:Page,appId:string,name:stri
     })};
     host.__refreshWatch=watch;
     watch.observer.observe(target,{attributes:true,attributeOldValue:true,childList:true,subtree:true});
-  });
-  const progress=()=>page.evaluate(()=>{
+  },undefined,{timeout:1_500});
+  const progress=(signal?:AbortSignal)=>observeReadOnly(page.evaluate(()=>{
     const watch=(window as typeof window & {__refreshWatch?:{observed:boolean;target:HTMLButtonElement;find:()=>HTMLButtonElement|undefined}}).__refreshWatch;
     if(!watch)return null;
     const target=watch.target.isConnected?watch.target:watch.find();
     const pending=!target||target.disabled||target.getAttribute('aria-disabled')==='true'||Boolean(target.querySelector('.animate-spin,[role="progressbar"],[data-state="loading"]'));
-    watch.observed ||= Boolean(target&&pending);
-    return {observed:watch.observed,pending,replaced:!watch.target.isConnected};
-  });
+    return {observed:watch.observed||Boolean(target&&pending),pending,replaced:!watch.target.isConnected};
+  }),signal);
   const url=page.url();
   const dispose=async()=>{
     if(page.isClosed()||page.url()!==url)return;
-    await page.evaluate(()=>{
+    await page.locator('html').evaluate(()=>{
       const host=window as typeof window & {__refreshWatch?:{observer:MutationObserver}};
       host.__refreshWatch?.observer.disconnect();delete host.__refreshWatch;
-    }).catch(()=>{});
+    },undefined,{timeout:1_500}).catch(()=>{});
   };
   try {
     traceRefresh("click refresh");await button.click({timeout:5_000,noWaitAfter:true,signal});
@@ -307,7 +307,7 @@ export async function beginConnectorToolRefresh(page:Page,appId:string,name:stri
       while(Date.now()<deadline) {
         signal?.throwIfAborted();
         if(page.isClosed()||page.url()!==url)throw selectorDrift("Tool refresh was requested; its completion was not confirmed before another browser action changed pages");
-        const state=await progress();
+        const state=await progress(signal);
         if(!state)throw selectorDrift("Tool refresh was requested; its completion was not confirmed before ChatGPT reloaded the page");
         const summary=`loading ${state.observed?"observed":"unobserved"}, ${state.pending?"pending":"idle"}${state.replaced?", control replaced":""}`;
         if(summary!==previous){traceRefresh(summary);previous=summary;}
@@ -329,8 +329,8 @@ export async function verifyConnectorAllowAll(page:Page,appId:string,account:str
   if(!await (await allowAllChoice(page,signal)).checked())throw selectorDrift("Allow all tools was not confirmed after reloading plugin settings");
 }
 
-export async function connectorPermissionSummary(page:Page):Promise<{summary:string;allowAll:boolean}|null> {
-  return page.evaluate(()=>{
+export async function connectorPermissionSummary(page:Page,signal?:AbortSignal):Promise<{summary:string;allowAll:boolean}|null> {
+  return observeReadOnly(page.evaluate(()=>{
     const candidates=new Set<Element>();
     const direct=[...document.querySelectorAll('[data-permission],[data-action="plugin-permissions"],a[href$="/permissions"]')].filter(node=>node.getClientRects().length>0);
     for(const node of direct)candidates.add(node);
@@ -349,19 +349,23 @@ export async function connectorPermissionSummary(page:Page):Promise<{summary:str
     if(candidates.size!==1)return null;
     const control=[...candidates][0]!;
     return {summary:(control.textContent??'').normalize('NFKC').replace(/\s+/g,' ').trim(),allowAll:control.getAttribute('data-permission')==='allow_all'};
-  });
+  }),signal);
 }
 
 export type PermissionWitness={summary?:string;remember:(summary:string)=>void};
 export async function inspectConnectorSettings(page:Page,appId:string,name:string,account:string,signal?:AbortSignal) {
   if(!/^asdk_app_[A-Za-z0-9_]{1,128}$/.test(appId))throw selectorDrift("Invalid connector App ID");
   traceRefresh("open settings");
-  await connectorPage(page,appId,account,false,signal);
+  const assertPage=await connectorPage(page,appId,account,false,signal);
   traceRefresh("settings opened");
-  await page.getByText(name,{exact:true}).and(page.locator(':visible')).first().waitFor({state:"visible",timeout:5_000,signal});
+  // The document can finish while settings still shows only a loading shell.
+  // Hydration gets a bounded read inside the coordinator's existing phase
+  // deadline; recheck account/URL before targeting any maintenance control.
+  await observeReadOnly(page.getByText(name,{exact:true}).and(page.locator(':visible')).first().waitFor({state:"visible",timeout:15_000,signal}),signal,15_000);
+  await assertPage();signal?.throwIfAborted();
   traceRefresh("connector name visible");
   await markRefreshButton(page);
-  return connectorPermissionSummary(page);
+  return connectorPermissionSummary(page,signal);
 }
 
 export async function prepareConnectorRefresh(page:Page,name:string,expectedAccountFingerprint?:string,signal?:AbortSignal,knownAppId?:string,witness?:PermissionWitness):Promise<{appId:string;permissionChanged:boolean;observation:ConnectorRefreshObservation}> {

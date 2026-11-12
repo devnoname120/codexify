@@ -2,6 +2,7 @@
 // src/chatgpt-session.ts at f9ad4ae83a579287105ad822dd0c3e0029b04ef6.
 // Keep selector and verification changes structurally reviewable against upstream.
 import type { Locator, Page } from "patchright";
+import {observeReadOnly} from "./observation";
 import {parseEffortAnnouncement,uiLabels} from "./ui-localization";
 import { composerText } from "./composer";
 import { browserEffortIdFromLabel, readModelOptionRows, modelsFromDiscoveredEfforts, type AccountCapabilities, type BrowserModelFamily, type DiscoveredBrowserEffort } from "./models";
@@ -20,9 +21,10 @@ export const CHATGPT_COMPOSER_SELECTOR = [
   'form[data-chatgpt-composer] [data-composer-markdown][contenteditable="true"][role="textbox"]',
 ].join(", ");
 export const CHATGPT_EFFORT_CONTROL_SELECTOR = [
+  'button[data-codexify-effort-control="true"][aria-haspopup="menu"]',
   'button[aria-haspopup="menu"][data-tone="neutral"]',
   'button[data-testid="model-switcher-dropdown-button"][aria-haspopup="menu"]',
-  'button[data-codex-intelligence-trigger="true"][data-composer-navigation-target="reasoning"][aria-haspopup="menu"]',
+  'button[data-composer-navigation-target="reasoning"][aria-haspopup="menu"]',
 ].join(", ");
 export const CHATGPT_EFFORT_MENU_SELECTOR = [
   '[data-testid="composer-intelligence-picker-content"]:has([role="menuitemradio"], [data-model-reasoning-effort-slider])',
@@ -46,8 +48,8 @@ export function parseChatGptModelAnnouncement(text: string): {
 }
 
 /** Read model evidence only from the slider's own active picker. */
-export async function readChatGptModelAnnouncements(slider: Locator): Promise<string[]> {
-  return slider.evaluate(element => {
+export async function readChatGptModelAnnouncements(slider: Locator,signal?:AbortSignal): Promise<string[]> {
+  return observeReadOnly(slider.evaluate(element => {
     const doc = element.ownerDocument;
     const descriptions = (element.closest('[role="menuitem"]')?.getAttribute("aria-describedby") ?? "")
       .split(/\s+/).filter(Boolean).map(id => doc.getElementById(id)?.textContent ?? "");
@@ -78,11 +80,11 @@ export async function readChatGptModelAnnouncements(slider: Locator): Promise<st
       descriptions.push(words.join(" "));
     }
     return descriptions;
-  });
+  }),signal);
 }
 /** Resolve only inside the verified composer's form; multiple submitters are an error. */
 export const CHATGPT_SEND_BUTTON_SELECTOR = '[data-testid="send-button"]:not(:has(svg use[href*="#voice-"])), button[type="submit"]:not(:has(svg use[href*="#voice-"]))';
-export const CHATGPT_STOP_BUTTON_SELECTOR = '[data-testid="stop-button"], form[data-chatgpt-composer] button[type="button"]:is('+uiLabels('stopControl').map(label=>'[aria-label='+JSON.stringify(label)+']').join(',')+')';
+export const CHATGPT_STOP_BUTTON_SELECTOR = '[data-testid="stop-button"], [data-testid="end-turn-button"], button[aria-label="End turn"], form[data-chatgpt-composer] button[type="button"]:is('+uiLabels('stopControl').map(label=>'[aria-label='+JSON.stringify(label)+']').join(',')+')';
 // The new footer is shared with user messages. Response extraction additionally requires
 // this control to FOLLOW the last assistant answer, excluding the user's earlier footer.
 export const CHATGPT_COMPLETION_ACTION_SELECTOR = 'button[data-testid="copy-turn-action-button"], [data-turn-key] .turn-action-controls button';
@@ -132,9 +134,9 @@ function effortMenuSelectorForId(menuId: string): string {
 }
 
 export async function chatGptEffortMenuForControl(page: Page, control: Locator): Promise<Locator> {
-  const menuId = await control.getAttribute("aria-controls").catch(() => null);
+  const menuId = await control.getAttribute("aria-controls",{timeout:500}).catch(() => null);
   if (menuId) return page.locator(effortMenuSelectorForId(menuId));
-  const controlId = await control.getAttribute("id").catch(() => null);
+  const controlId = await control.getAttribute("id",{timeout:500}).catch(() => null);
   if (controlId) return page.locator(`[role="menu"][aria-labelledby~=${JSON.stringify(controlId)}]`).filter({ visible: true });
   return page.locator(CHATGPT_EFFORT_MENU_SELECTOR).filter({ visible: true });
 }
@@ -145,8 +147,8 @@ async function visibleEffortSurface(
 ): Promise<Omit<ChatGptEffortActivation, "method"> | undefined> {
   // The exit animation keeps a closed menu's slider visible after Escape. Read the
   // owner state first: selecting that outgoing range races its removal from the DOM.
-  const expanded = await control.getAttribute("aria-expanded").catch(() => null);
-  const state = await control.getAttribute("data-state").catch(() => null);
+  const expanded = await control.getAttribute("aria-expanded",{timeout:500}).catch(() => null);
+  const state = await control.getAttribute("data-state",{timeout:500}).catch(() => null);
   if (expanded === "false" || state === "closed") return undefined;
   const menu = await chatGptEffortMenuForControl(page, control);
   if (!await menu.isVisible().catch(() => false)) return undefined;
@@ -159,10 +161,12 @@ async function waitForEffortSurface(
   page: Page,
   control: Locator,
   timeoutMs: number,
+  signal?:AbortSignal,
 ): Promise<Omit<ChatGptEffortActivation, "method"> | undefined> {
   const deadline = Date.now() + timeoutMs;
   do {
-    const surface = await visibleEffortSurface(page, control);
+    signal?.throwIfAborted();
+    const surface = await observeReadOnly(visibleEffortSurface(page, control),signal);
     if (surface) return surface;
     if (Date.now() >= deadline) return undefined;
     await new Promise(resolveSleep => setTimeout(resolveSleep, 50));
@@ -170,10 +174,10 @@ async function waitForEffortSurface(
 }
 
 async function clearGhostEffortState(page: Page, control: Locator): Promise<void> {
-  const expanded = await control.getAttribute("aria-expanded").catch(() => null);
-  const state = await control.getAttribute("data-state").catch(() => null);
+  const expanded = await control.getAttribute("aria-expanded",{timeout:500}).catch(() => null);
+  const state = await control.getAttribute("data-state",{timeout:500}).catch(() => null);
   if (expanded === "true" || state === "open") {
-    await page.keyboard.press("Escape").catch(() => {});
+    await control.press("Escape",{timeout:1_000}).catch(() => {});
   }
 }
 
@@ -182,14 +186,19 @@ export async function activateChatGptEffortMenu(
   control: Locator,
   options: { settleMs?: number; signal?:AbortSignal } = {},
 ): Promise<ChatGptEffortActivation> {
-  const openSurface = await visibleEffortSurface(page, control);
+  options.signal?.throwIfAborted();
+  // Presentation attributes can change while opening the picker. Keep the
+  // verified control addressable without relying on its closed-state styling.
+  await control.evaluate(element=>element.setAttribute("data-codexify-effort-control","true"),undefined,{timeout:1_500});
+  options.signal?.throwIfAborted();
+  const openSurface = await observeReadOnly(visibleEffortSurface(page, control),options.signal);
   if (openSurface) return { method: "already-open", ...openSurface };
 
   const settleMs = options.settleMs ?? 3_000;
   await clearGhostEffortState(page, control);
   options.signal?.throwIfAborted();
   await control.click({ force: true, timeout: Math.max(1, settleMs),signal:options.signal });
-  const clickedSurface = await waitForEffortSurface(page, control, settleMs);
+  const clickedSurface = await waitForEffortSurface(page, control, settleMs,options.signal);
   if (clickedSurface) return { method: "click", ...clickedSurface };
 
   await clearGhostEffortState(page, control);
@@ -199,8 +208,8 @@ export async function activateChatGptEffortMenu(
     buttons: 1,
     pointerType: "mouse",
     isPrimary: true,
-  });
-  const pointerSurface = await waitForEffortSurface(page, control, settleMs);
+  },{timeout:Math.max(1,settleMs)});
+  const pointerSurface = await waitForEffortSurface(page, control, settleMs,options.signal);
   if (pointerSurface) return { method: "pointerdown", ...pointerSurface };
   throw new Error(
     "ChatGPT effort control did not expose its owned menu or structural slider after click and primary pointerdown",
@@ -231,12 +240,13 @@ export function parseChatGptEffortSliderState(
 export async function readChatGptEffortSnapshot(
   sliderContainer: Locator,
   timeoutMs = 1_000,
+  signal?:AbortSignal,
 ): Promise<ChatGptEffortSliderState & { available: boolean[]; labels: (string | null)[] }> {
   const deadline = Date.now() + timeoutMs;
   do {
     // Read the range, selection and locks in one DOM revision. Separate Playwright
     // reads can straddle hydration and combine a five-step range with four ticks.
-    const snapshot = await sliderContainer.evaluate(container => {
+    const snapshot = await observeReadOnly(sliderContainer.evaluate(container => {
       const sliders = container.querySelectorAll('[role="slider"]');
       const slider = sliders.length === 1 ? sliders[0] : undefined;
       const power = container.hasAttribute("data-model-picker-power-slider")
@@ -250,7 +260,7 @@ export async function readChatGptEffortSnapshot(
         labels: Array.from(container.querySelectorAll("[data-selected]"), tick =>
           (tick.getAttribute("aria-label") ?? tick.getAttribute("title") ?? tick.textContent)?.trim() || null),
       };
-    });
+    }),signal);
     const state = parseChatGptEffortSliderState(snapshot.min, snapshot.max, snapshot.value);
     if (!state) throw new Error("ChatGPT effort slider exposed an invalid ARIA range");
     if (snapshot.locks.some(lock => lock !== "true" && lock !== "false")) break;
@@ -269,11 +279,11 @@ export function chatGptEffortLabelFromAnnouncement(text: string, state: ChatGptE
   return parseChatGptModelAnnouncement(announcement.label)?.mode??announcement.label;
 }
 
-export async function readCurrentEffortLabel(menu: ChatGptEffortActivation): Promise<string> {
+export async function readCurrentEffortLabel(menu: ChatGptEffortActivation,signal?:AbortSignal): Promise<string> {
   const deadline = Date.now() + 1_000;
   do {
-    const state = await readChatGptEffortSnapshot(menu.sliderContainer);
-    const valueText = await menu.slider.getAttribute("aria-valuetext");
+    const state = await readChatGptEffortSnapshot(menu.sliderContainer,1_000,signal);
+    const valueText = await observeReadOnly(menu.slider.getAttribute("aria-valuetext",{timeout:1_500}),signal);
     if (valueText?.trim()) {
       const counted = chatGptEffortLabelFromAnnouncement(valueText, state);
       if (counted) return counted;
@@ -281,7 +291,7 @@ export async function readCurrentEffortLabel(menu: ChatGptEffortActivation): Pro
         return parseChatGptModelAnnouncement(valueText)?.mode ?? valueText.trim();
       }
     }
-    const labels = (await readChatGptModelAnnouncements(menu.slider))
+    const labels = (await readChatGptModelAnnouncements(menu.slider,signal))
       .map(text => chatGptEffortLabelFromAnnouncement(text, state)).filter((label): label is string => Boolean(label));
     if (new Set(labels).size === 1) return labels[0]!;
     if (Date.now() >= deadline) break;
@@ -295,7 +305,7 @@ export async function moveChatGptEffortSlider(
   target: number,
   signal?: AbortSignal,
 ): Promise<void> {
-  let state = await readChatGptEffortSnapshot(menu.sliderContainer);
+  let state = await readChatGptEffortSnapshot(menu.sliderContainer,1_000,signal);
   const { min, max } = state;
   if (target < min || target > max || !state.available[target - min]) throw new Error("ChatGPT locks the requested effort");
   const control = menu.slider.locator("xpath=ancestor::*[@role='menuitem'][1]");
@@ -306,7 +316,7 @@ export async function moveChatGptEffortSlider(
     await control.press(direction > 0 ? "ArrowRight" : "ArrowLeft", { timeout:5_000, signal });
     const deadline = Date.now() + 5_000;
     do {
-      state = await readChatGptEffortSnapshot(menu.sliderContainer);
+      state = await readChatGptEffortSnapshot(menu.sliderContainer,1_000,signal);
       if (state.min !== min || state.max !== max || !state.available[target - min]) throw new Error("ChatGPT changed its effort range or availability");
       if (state.value !== before) break;
       await new Promise(resolve => setTimeout(resolve, 50));
@@ -318,7 +328,7 @@ export async function moveChatGptEffortSlider(
 }
 
 export async function discoverChatGptEfforts(menu: ChatGptEffortActivation, signal?:AbortSignal): Promise<DiscoveredBrowserEffort[]> {
-  const initial = await readChatGptEffortSnapshot(menu.sliderContainer);
+  const initial = await readChatGptEffortSnapshot(menu.sliderContainer,1_000,signal);
   const efforts: DiscoveredBrowserEffort[] = [];
   try {
     for (let index = 0; index < initial.available.length; index += 1) {
@@ -327,16 +337,20 @@ export async function discoverChatGptEfforts(menu: ChatGptEffortActivation, sign
       let label = initial.labels[index];
       if (available) {
         await moveChatGptEffortSlider(menu, initial.min + index,signal);
-        label = await readCurrentEffortLabel(menu);
+        label = await readCurrentEffortLabel(menu,signal);
       }
       // An unlabeled locked tick does not establish an effort name. Do not invent one.
       if (!label) continue;
       const id = browserEffortIdFromLabel(label);
       if (efforts.some(effort => effort.id === id)) throw new Error("ChatGPT exposed duplicate effort labels");
-      const observedModelName=available?(await readChatGptModelAnnouncements(menu.slider)).map(parseChatGptModelAnnouncement).find(model=>model?.name)?.name:undefined;
+      const observedModelName=available?(await readChatGptModelAnnouncements(menu.slider,signal)).map(parseChatGptModelAnnouncement).find(model=>model?.name)?.name:undefined;
       efforts.push({ id, label, index, available, reason:available ? null : "not_available_for_account",...(observedModelName?{observedModelName}:{}) });
     }
-  } finally { await moveChatGptEffortSlider(menu, initial.value); }
+  } finally {
+    // The caller may have released its operation deadline. Never start a new
+    // picker mutation after cancellation, including a well-intended restore.
+    if(!signal?.aborted)await moveChatGptEffortSlider(menu, initial.value,signal);
+  }
   if (efforts.length === 0) throw new Error("ChatGPT did not expose any discoverable effort labels");
   return efforts;
 }
@@ -373,8 +387,10 @@ export async function assertNewChatPage(page: Page, useSavedChats = false): Prom
 
 export async function detectChatGptAccountCapabilities(
   page: Page,
-  options: { selectorTimeoutMs?: number; stableAbsenceMs?: number; signal?:AbortSignal } = {},
+  options: { selectorTimeoutMs?: number; stableAbsenceMs?: number; signal?:AbortSignal; onProgress?:(step:string)=>void } = {},
 ): Promise<AccountCapabilities> {
+  options.signal?.throwIfAborted();
+  options.onProgress?.("waiting for effort control");
   const composers = page.locator(CHATGPT_COMPOSER_SELECTOR).filter({ visible: true });
   const composer = composers;
   const composerForm = composer.locator("xpath=ancestor::form[1]");
@@ -385,7 +401,7 @@ export async function detectChatGptAccountCapabilities(
   let presenceObservations = 0;
   while (true) {
     options.signal?.throwIfAborted();
-    const effortVisible = await effortButton.isVisible();
+    const effortVisible = await observeReadOnly(effortButton.isVisible(),options.signal);
     if (effortVisible) {
       presenceObservations += 1;
       absenceSince = undefined;
@@ -394,9 +410,9 @@ export async function detectChatGptAccountCapabilities(
       continue;
     }
     presenceObservations = 0;
-    const composerReady = await composers.count().then(count => count === 1).catch(() => false);
-    const formReady = await composerForm.count().then(count => count === 1).catch(() => false);
-    const documentReady = await page.evaluate(() => document.readyState === "complete").catch(() => false);
+    const composerReady = await observeReadOnly(composers.count(),options.signal).then(count => count === 1);
+    const formReady = await observeReadOnly(composerForm.count(),options.signal).then(count => count === 1);
+    const documentReady = await observeReadOnly(page.evaluate(() => document.readyState === "complete"),options.signal);
     if (composerReady && formReady && documentReady) {
       absenceSince ??= Date.now();
     } else {
@@ -412,32 +428,38 @@ export async function detectChatGptAccountCapabilities(
     }
     await new Promise(resolveSleep => setTimeout(resolveSleep, 100));
   }
-  if ((await composerText(composer)).trim()) throw new Error("ChatGPT capability discovery requires an empty composer");
+  if ((await observeReadOnly(composerText(composer),options.signal)).trim()) throw new Error("ChatGPT capability discovery requires an empty composer");
+  options.onProgress?.("opening model picker");
   let menu = await activateChatGptEffortMenu(page, effortButton,{signal:options.signal});
   let originalFamily: BrowserModelFamily | undefined;
   let originalValue: number | undefined;
   try {
-    const rows = await readModelOptionRows(menu.menu);
+    options.onProgress?.("reading models");
+    const rows = await observeReadOnly(readModelOptionRows(menu.menu),options.signal);
     const modelFamilies = [...new Set(rows.flatMap(row=>row.family?[row.family]:[]))];
     if (modelFamilies.length === 0) throw new Error("ChatGPT model picker did not expose a supported model family");
     const checked=rows.filter(row=>row.checked);
     originalFamily=checked.length===1?checked[0]!.family:undefined;
     if (!originalFamily) throw new Error("ChatGPT did not identify its selected model family");
-    originalValue = (await readChatGptEffortSnapshot(menu.sliderContainer)).value;
+    originalValue = (await readChatGptEffortSnapshot(menu.sliderContainer,1_000,options.signal)).value;
     const models: AccountCapabilities["models"][number][] = [];
     for (const family of modelFamilies) {
       options.signal?.throwIfAborted();
+      options.onProgress?.(`reading efforts ${family}`);
       menu = await selectChatGptModelFamily(menu, family, () => activateChatGptEffortMenu(page, effortButton,{signal:options.signal}),options.signal);
-      const familyLabel=(await readModelOptionRows(menu.menu)).find(row=>row.family===family)?.label;
+      const familyLabel=(await observeReadOnly(readModelOptionRows(menu.menu),options.signal)).find(row=>row.family===family)?.label;
       models.push(...modelsFromDiscoveredEfforts(family, await discoverChatGptEfforts(menu,options.signal),familyLabel));
     }
     return { models };
   } finally {
     try {
-      if (originalFamily !== undefined && originalValue !== undefined) {
-        menu = await selectChatGptModelFamily(menu, originalFamily, () => activateChatGptEffortMenu(page, effortButton));
-        await moveChatGptEffortSlider(menu, originalValue);
+      if (!options.signal?.aborted && originalFamily !== undefined && originalValue !== undefined) {
+        options.onProgress?.("restoring picker");
+        menu = await selectChatGptModelFamily(menu, originalFamily, () => activateChatGptEffortMenu(page, effortButton,{signal:options.signal}),options.signal);
+        await moveChatGptEffortSlider(menu, originalValue,options.signal);
       }
-    } finally { await page.keyboard.press("Escape").catch(() => {}); }
+    } finally {
+      if(!options.signal?.aborted)await effortButton.press("Escape",{timeout:1_000,signal:options.signal}).catch(() => {});
+    }
   }
 }

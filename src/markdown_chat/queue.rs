@@ -334,6 +334,12 @@ pub(super) fn append_steering(
     message: String,
     attachment_ids: Vec<String>,
 ) -> Result<UserSendReceipt, String> {
+    append_steering_guarded(chat, id, message, attachment_ids, false)
+}
+
+pub(super) fn append_steering_guarded(
+    chat: &ChatFile, id: String, message: String, attachment_ids: Vec<String>, respect_stop: bool,
+) -> Result<UserSendReceipt, String> {
     with_queue(chat, false, |state| {
         if state.messages.iter().any(|m| m.id == id) {
             return Err("This message is queued; use its Steer action to send it".into());
@@ -350,6 +356,9 @@ pub(super) fn append_steering(
         if let Some(pending) = &state.pending {
             let committed =
                 chat.with_cursor(|_, file| widget::contains_user_message(file, &pending.id))?;
+            if respect_stop && !committed {
+                return Err("Worker has an unresolved queued send; wait for its receipt before steering".into());
+            }
             if committed || pending.mode == MessageMode::Steer {
                 let _ = repair_pending(chat, state)?;
             } else {
@@ -359,6 +368,9 @@ pub(super) fn append_steering(
             }
         }
         let sent = chat.with_cursor(|cursor, file| {
+            if respect_stop && cursor.agent_stop_requested {
+                return Err("Worker is explicitly stopped; resume it before sending instructions".into());
+            }
             widget::append_user_locked(chat, cursor, file, id, message, attachment_ids)
         })?;
         if state.completed_waiting || state.input_waiting {

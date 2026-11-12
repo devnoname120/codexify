@@ -1,4 +1,7 @@
+pub mod agents;
 mod companion;
+pub mod conversation_recovery;
+pub mod goal_blocking;
 mod install;
 mod model_fallback;
 mod process;

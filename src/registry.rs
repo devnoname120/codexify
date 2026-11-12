@@ -33,6 +33,16 @@ pub fn load_tools_for_config(config: &AppConfig) -> Vec<Box<dyn Tool>> {
         config.ui_widgets,
         config.artifact_ingress.max_concurrent_downloads,
     );
+    if config.markdown_chat.enabled && config.markdown_chat.automation.enabled && config.markdown_chat.features.agent_teams {
+        tools.push(Box::new(tools::agents::AgentTool::Spawn));
+        tools.push(Box::new(tools::agents::AgentTool::Status));
+        tools.push(Box::new(tools::agents::AgentTool::Report));
+        tools.push(Box::new(tools::agents::AgentTool::Control));
+        tools.push(Box::new(tools::agents::AgentTool::Message));
+        if config.markdown_chat.features.external_agent_control {
+            tools.push(Box::new(tools::agent_client::AgentClient));
+        }
+    }
     if config.markdown_chat.enabled && config.ui_widgets {
         tools.push(Box::new(tools::markdown_chat_ui::ChatUiTool::Send));
         tools.push(Box::new(tools::markdown_chat_ui::ChatUiTool::State));
@@ -153,6 +163,40 @@ fn load_tools_with_options(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn agent_tools_require_explicit_settings_opt_in() {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = crate::config::default_config(root.path().into());
+        for enabled in [false, true, false] {
+            config.markdown_chat.features.agent_teams = enabled;
+            let tools = load_tools_for_config(&config);
+            for name in ["agent_spawn", "agent_status", "agent_report", "agent_control", "agent_message"] {
+                assert_eq!(tools.iter().any(|tool|tool.name()==name), enabled, "{name}");
+            }
+        }
+    }
+
+    #[test]
+    fn coding_app_tool_requires_all_feature_dependencies() {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = crate::config::default_config(root.path().into());
+        assert!(!config.markdown_chat.features.external_agent_control);
+        for chats in [false, true] {
+            for browser in [false, true] {
+                for teams in [false, true] {
+                    for clients in [false, true] {
+                        config.markdown_chat.enabled = chats;
+                        config.markdown_chat.automation.enabled = browser;
+                        config.markdown_chat.features.agent_teams = teams;
+                        config.markdown_chat.features.external_agent_control = clients;
+                        assert_eq!(load_tools_for_config(&config).iter().any(|tool| tool.name() == "agent_client"),
+                            chats && browser && teams && clients);
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn workspace_picker_is_independent_of_agent_chat_and_preserves_authorization() {

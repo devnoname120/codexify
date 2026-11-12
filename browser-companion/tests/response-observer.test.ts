@@ -1,5 +1,17 @@
 import { expect, test } from "bun:test";
 import { ChatGptVisibleTraceTracker, isChatGptTraceControl, stripChatGptTraceControlSuffix } from "../src/response-observer";
+import {responseDomSnapshot} from "../src/response-observer";
+import type {Locator} from "patchright";
+
+test("a hung response projection propagates cancellation instead of proving an absent final",async()=>{
+  let reads=0;
+  const locator={evaluate:()=>{reads++;return new Promise(()=>{});}} as unknown as Locator;
+  const controller=new AbortController(),pending=responseDomSnapshot(locator,{},controller.signal);
+  controller.abort(new Error("cancelled final inspection"));
+  await expect(pending).rejects.toThrow("cancelled final inspection");
+  await expect(responseDomSnapshot(locator,{},controller.signal)).rejects.toThrow("cancelled final inspection");
+  expect(reads).toBe(1);
+});
 
 test("stable visible status and commentary stream without hidden reasoning", () => {
   const tracker = new ChatGptVisibleTraceTracker(100);

@@ -5,6 +5,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { installChrome } = require("./install-chrome.cjs");
+const { stageWindowsApplication } = require("./package-stage.cjs");
 
 const root = path.resolve(__dirname, "..");
 const repositoryRoot = path.resolve(root, "..");
@@ -139,15 +140,18 @@ try {
   } else {
     unpacked = singleDirectory(builderOutput, name => name.endsWith("-unpacked"), "unpacked Electron application");
   }
-  fs.mkdirSync(appRoot, { recursive:true, mode:0o700 });
   if (targetPlatform === "darwin") {
+    fs.mkdirSync(appRoot, { recursive:true, mode:0o700 });
     const appBundle = singleDirectory(unpacked, name => name.endsWith(".app"), "macOS application bundle");
     fs.cpSync(appBundle, path.join(appRoot, path.basename(appBundle)), {
       recursive:true,
       dereference:false,
       verbatimSymlinks:true,
     });
+  } else if (targetPlatform === "win32") {
+    stageWindowsApplication(scratch, unpacked, appRoot);
   } else {
+    fs.mkdirSync(appRoot, { recursive:true, mode:0o700 });
     fs.cpSync(unpacked, appRoot, { recursive:true, dereference:false, verbatimSymlinks:true });
   }
   const executable = executableRelativePath(targetPlatform, appRoot);
@@ -177,7 +181,8 @@ try {
   const artifact = path.join(artifactsDirectory, artifactName);
   fs.rmSync(artifact, { force:true });
   if (targetPlatform === "win32") {
-    runChecked("tar", ["-a", "-cf", artifact, "-C", packageStage, packageRootName]);
+    const zipOptions=process.env.CODEXIFY_BROWSER_FAST_LOCAL_PACKAGE==="1"?["--options","zip:compression-level=1"]:[];
+    runChecked("tar", ["-a", "-cf", artifact,...zipOptions, "-C", packageStage, packageRootName]);
   } else {
     runChecked("tar", ["-czf", artifact, "-C", packageStage, packageRootName], {
       env:{ ...process.env, COPYFILE_DISABLE:"1" },
@@ -185,5 +190,5 @@ try {
   }
   process.stdout.write(`${artifact}\n`);
 } finally {
-  fs.rmSync(scratch, { recursive:true, force:true });
+  fs.rmSync(scratch, { recursive:true, force:true, maxRetries:8, retryDelay:200 });
 }

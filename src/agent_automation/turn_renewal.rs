@@ -1,11 +1,29 @@
 //! Opt-in, durable turn renewal. Browser idleness alone never proves completion.
-use super::{AgentAutomationStore, AutomationActionKind, AutomationActionStatus};
+use super::{AgentAutomationStore, AutomationActionKind, AutomationActionStatus, AutomationTaskState, GoalStatus};
 use crate::project_bindings::ConversationIdentity;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+pub(super) const INCOMPLETE_HANDOFF_ERROR: &str = "Turn handoff report did not complete; recovering the active goal in a new turn from saved progress";
+
 pub const NOTICE_FIELD: &str = "turn_renewal_required";
 pub const NOTICE_DESCRIPTION: &str = "Turn renewal overrides the ordinary non-terminal chat protocol: write the requested handoff as a normal final ChatGPT answer and end this turn. Codexify will continue automatically after that answer is complete.";
+
+pub(super) fn clear_pending_renewal(state: &mut AutomationTaskState) {
+    state.turn_renewal = Default::default();
+    // A queued renewal has not sent anything. Keep accepted/in-flight receipts
+    // intact; the dispatch guard separately fences a goal that finishes later.
+    if state.action.kind == Some(AutomationActionKind::TurnRenewal)
+        && state.action.status == AutomationActionStatus::Queued
+        && state.action.send_accepted == Some(false)
+    {
+        state.action.status = AutomationActionStatus::Cancelled;
+        state.action.cooldown_until_ms = None;
+        state.action.automatic_retry_in_progress = false;
+        state.action.chatgpt_access_retry_in_progress = false;
+        state.action.last_error = None;
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -311,6 +329,10 @@ impl AgentAutomationStore {
             return Ok(None);
         }
         self.mutate(task, |state| {
+            if state.goal.as_ref().is_some_and(|goal| goal.status != GoalStatus::Active) {
+                clear_pending_renewal(state);
+                return Ok(None);
+            }
             let Some(send) = &state.turn_renewal.send else {return Ok(None)};
             let Some(minutes) = config.minutes(send.model.as_deref(), send.effort.as_deref()) else {return Ok(None)};
             if send.pairing_generation != state.pairing.generation
@@ -365,12 +387,12 @@ impl AgentAutomationStore {
             });
             if state.action.send_accepted == Some(false) {
                 state.action = super::AutomationActionState {
-                    automatic_retry_attempts: state.action.automatic_retry_attempts + 1,
+                    automatic_retry_attempts: state.action.automatic_retry_attempts.saturating_add(1),
                     automatic_retry_in_progress: true,
                     ..Default::default()
                 };
             } else {
-                state.goal_wake.recovery_attempts += 1;
+                state.goal_wake.recovery_attempts = state.goal_wake.recovery_attempts.saturating_add(1);
                 state.goal_wake.activity_epoch = Some(activity_epoch.into());
                 state.goal_wake.activity_sequence = Some(activity_sequence);
                 state.goal_wake.nudged_epoch = None;
@@ -400,10 +422,142 @@ impl AgentAutomationStore {
             Ok(false)
         })
     }
+
+    pub(crate) fn recover_stalled_goal_handoff(
+        &self,
+        task: &ConversationIdentity,
+        expected: &super::AutomationTaskState,
+        last_activity_at_ms: Option<u64>,
+        now_ms: u64,
+    ) -> Result<bool, String> {
+        if !self.recovery_enhancements { return Ok(false); }
+        self.mutate(task, |state| {
+            let Some(handoff) = state.turn_renewal.handoff.as_ref() else { return Ok(false) };
+            let Some(goal) = state.goal.as_ref().filter(|goal|goal.status==super::GoalStatus::Active) else {return Ok(false)};
+            let revision=goal.revision;
+            let accepted_renewal=state.action.kind==Some(AutomationActionKind::TurnRenewal)
+                && state.action.goal_revision.is_none_or(|bound|bound<=revision)
+                && state.turn_renewal.send.as_ref().is_some_and(|send|
+                    state.action.id.as_deref()==Some(send.action_id.as_str())
+                    && send.pairing_generation==state.pairing.generation
+                    && state.action.pairing_generation==Some(send.pairing_generation)
+                    && state.pairing.verified_owner_generation==Some(send.owner_generation));
+            let accepted_goal=(state.action.kind==Some(AutomationActionKind::OfflineGoal)
+                || state.action.kind==Some(AutomationActionKind::OfflineCombined) && state.action.messages_fenced)
+                && state.action.goal_revision.is_some_and(|bound|bound<=revision)
+                && state.action.pairing_generation==Some(state.pairing.generation);
+            // Real native progress can legitimately clear the accepted action
+            // while retaining this turn's send clock and renewal request. No
+            // uncertain or queued action may enter this path. A verified old
+            // send and later native activity authorize ordinary active-goal
+            // scheduling after the same negative-probe/inactivity guards.
+            // A cleared action may retain its last diagnostic update time.
+            // That timestamp is not a Send identity or evidence of live work;
+            // all other action fields and the native inactivity guards remain required.
+            let mut cleared_action=state.action.clone();
+            cleared_action.updated_at_ms=None;
+            let cleared_native_turn=cleared_action==super::AutomationActionState::default()
+                && state.turn_renewal.send.as_ref().is_some_and(|send|
+                    send.pairing_generation==state.pairing.generation
+                    && state.pairing.verified_owner_generation==Some(send.owner_generation)
+                    && handoff.requested_at_ms>=send.at_ms
+                    && last_activity_at_ms.is_some_and(|last|last>=send.at_ms));
+            let last = handoff.requested_at_ms.max(last_activity_at_ms.unwrap_or(0));
+            if state.action != expected.action || state.pairing != expected.pairing
+                || state.turn_renewal != expected.turn_renewal || state.goal != expected.goal
+                || handoff.report_complete || now_ms.saturating_sub(last) < 10 * 60_000
+                || !state.automatic_retries_enabled || state.action.automatic_retry_paused
+                || state.browser_cooldown_until_ms().is_some()
+                || !(accepted_goal || accepted_renewal || cleared_native_turn)
+                || state.action.status != AutomationActionStatus::Idle
+                || !cleared_native_turn && state.action.send_accepted != Some(true)
+            { return Ok(false); }
+            // The report was actually probed and was incomplete; do not invent
+            // completion or replay the accepted Send. Release only the renewal
+            // gate and advertise the existing distinct-goal-turn recovery path.
+            state.turn_renewal = Default::default();
+            if cleared_native_turn {
+                // Leave the cleared action untouched. The supervisor allocates
+                // a fresh action ID and fences any new unread batch normally.
+                return Ok(true);
+            }
+            // The fresh CAS-checked active goal authorizes the next distinct
+            // turn, including an explicit owner goal update during the old
+            // response. Keep the old Send's identity, kind and accepted bit.
+            state.action.goal_revision=Some(revision);
+            state.action.status = AutomationActionStatus::Stalled;
+            state.action.last_error = Some(INCOMPLETE_HANDOFF_ERROR.into());
+            state.action.updated_at_ms = Some(now_ms);
+            Ok(true)
+        })
+    }
     pub fn clear_turn_renewal(&self, task: &ConversationIdentity) -> Result<(), String> {
         self.mutate(task, |state| {
-            state.turn_renewal = Default::default();
+            clear_pending_renewal(state);
             Ok(())
         })
+    }
+}
+
+#[cfg(test)]
+mod completed_goal_renewal_tests {
+    use super::*;
+    use crate::agent_automation::GoalFinish;
+
+    #[test]
+    fn completing_a_goal_cancels_its_unsent_renewal_and_suppresses_new_notices() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = AgentAutomationStore::new(root.path().join("chats")).unwrap();
+        store.renewal_config = TurnRenewalConfig {
+            enabled: true,
+            limits: vec![ModelTurnLimit {
+                model: "gpt-6-sol".into(), effort: "xhigh".into(), minutes: 1, enabled: true,
+            }],
+        };
+        let task = ConversationIdentity::from_openai_session("completed-renewal-fixture").unwrap();
+        let now = crate::markdown_chat::now_ms();
+        let url = "https://chatgpt.com/c/completed-renewal-fixture";
+        let pair = store.issue_pairing(&task, url, 0, now).unwrap();
+        store.record_pairing_canonical_url(&task, pair.generation, url, now).unwrap();
+        store.verify_pairing(&task, pair.generation, 0, &pair.reference, now).unwrap();
+        let goal = store.set_goal(&task, "Complete the isolated assignment", now).unwrap();
+        store.run_goal(&task, goal.revision, now).unwrap();
+        store.queue_action(&task, "delivered-goal", AutomationActionKind::OfflineGoal,
+            pair.generation, Some(goal.revision), now).unwrap();
+        store.update_action_status(&task, "delivered-goal", AutomationActionStatus::Idle,
+            None, None, now).unwrap();
+        store.record_turn_send(&task, TurnSend {
+            action_id: "delivered-goal".into(), at_ms: now - 120_000,
+            model: Some("gpt-6-sol".into()), effort: Some("xhigh".into()),
+            pairing_generation: pair.generation, owner_generation: 0,
+        }).unwrap();
+        assert!(store.turn_renewal_notice(&task, now).unwrap().is_some());
+        store.queue_action(&task, "unsent-renewal", AutomationActionKind::TurnRenewal,
+            pair.generation, Some(goal.revision), now).unwrap();
+        let finished = store.finish_goal(&task, goal.revision, GoalFinish::Completed {
+            summary: Some("Assignment verified; no next assignment authorized".into()),
+        }, now).unwrap();
+        assert_eq!(finished.status, GoalStatus::Completed);
+        let state = store.load(&task).unwrap();
+        assert!(state.turn_renewal.is_empty());
+        assert_eq!(state.action.status, AutomationActionStatus::Cancelled);
+        assert_eq!(state.action.send_accepted, Some(false));
+        assert!(store.turn_renewal_notice(&task, now + 120_000).unwrap().is_none());
+        assert_eq!(store.load(&task).unwrap().goal.unwrap(), finished);
+    }
+
+    #[test]
+    fn clearing_renewal_preserves_accepted_and_in_flight_action_receipts() {
+        for status in [AutomationActionStatus::Queued, AutomationActionStatus::Navigating,
+            AutomationActionStatus::Generating, AutomationActionStatus::Idle] {
+            let mut state = AutomationTaskState::default();
+            state.action.kind = Some(AutomationActionKind::TurnRenewal);
+            state.action.status = status;
+            state.action.send_accepted = Some(true);
+            let receipt = state.action.clone();
+            clear_pending_renewal(&mut state);
+            assert_eq!(state.action, receipt);
+            assert!(state.turn_renewal.is_empty());
+        }
     }
 }
