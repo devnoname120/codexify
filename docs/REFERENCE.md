@@ -753,6 +753,7 @@ For a read-only Windows autowork snapshot, run
 supervisor count, free disk space, active goals, last tool activity, and retry
 errors. Use `-ChatPrefix` to follow particular conversation IDs. State reads
 allow atomic replacement, so monitoring does not block goal updates.
+
 The Windows supervisor begins liveness monitoring after the server first answers
 `/health` successfully. Six consecutive failed probes (with a five-second pause
 between them and a three-second request timeout) restart the contained server process tree. A slow
