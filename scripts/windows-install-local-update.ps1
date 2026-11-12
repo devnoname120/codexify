@@ -8,6 +8,10 @@ param(
   [switch]$FastSetup,
   [switch]$NativeOnly,
   [switch]$UseExistingTaskRecovery,
+  [string[]]$ConfigSet=@(),
+  # Interrupt running native commands instead of waiting for them. Agents rerun
+  # interrupted commands after the restart; the browser must still be idle.
+  [switch]$AllowActiveCommands,
   [string]$ExpectedAccountFingerprint
 )
 $ErrorActionPreference='Stop'
@@ -41,6 +45,9 @@ function Invoke-Cli([string]$File,[string[]]$Arguments) {
   $err=Join-Path $Backup "cli-$counter.stderr"
   $process=Start-Process -FilePath $File -ArgumentList $Arguments -WindowStyle Hidden -PassThru `
     -RedirectStandardOutput $out -RedirectStandardError $err
+  # Windows PowerShell 5.1 reports a null ExitCode unless the handle is opened
+  # before the process exits.
+  $null=$process.Handle
   # Wait for the CLI itself, not its persistent browser/service descendants.
   if(-not $process.WaitForExit(180000)){throw "CLI timed out: $($Arguments -join ' ')"}
   $process.Refresh()
@@ -230,17 +237,26 @@ try {
   Record 'waiting_for_idle' 'Waiting for an idle browser and completion of active native commands'
   $ready=$false
   for($i=0;$i -lt 300;$i++){
-    if((Browser-Idle) -and (Active-Commands $live.ProcessId).Count -eq 0 -and (Server-RequestsIdle)){$ready=$true;break}
+    if((Browser-Idle) -and ($AllowActiveCommands -or ((Active-Commands $live.ProcessId).Count -eq 0 -and (Server-RequestsIdle)))){$ready=$true;break}
     Start-Sleep -Seconds 2
   }
   if(-not $ready){throw 'Active work did not settle; live service was not interrupted'}
   Record 'closing_browser_cleanly' 'Closing the verified private Chrome profile normally before stopping its Windows job'
+  $runtimeRoot=[IO.Path]::GetFullPath((Join-Path $root 'browser\runtime')).TrimEnd('\')+'\'
+  $managedBrowser=@(Get-CimInstance Win32_Process | Where-Object {$_.ExecutablePath -and [IO.Path]::GetFullPath($_.ExecutablePath).StartsWith($runtimeRoot,[StringComparison]::OrdinalIgnoreCase)})
+  if(-not $managedBrowser.Count){
+    # Already stopped: no Chrome owns the profile, so back it up directly.
+    $profileCopy=Join-Path $Backup 'browser-profile'
+    Copy-Item -LiteralPath (Join-Path $root 'browser\chrome-profile') -Destination $profileCopy -Recurse
+    $receipt=@{graceful=$true;profileBackupVerified=(Test-Path -LiteralPath (Join-Path $profileCopy 'Local State'))}
+  } else {
   $receipt=Stop-ManagedBrowserGracefully -BrowserRoot (Join-Path $root 'browser') -NativeExe $exe -BackupDirectory $Backup -ExpectedAccountFingerprint $ExpectedAccountFingerprint
+  }
   if(-not $receipt.graceful -or -not $receipt.profileBackupVerified){throw 'Clean browser shutdown was not verified'}
   $browserQuiesced=$true
   if($UseExistingTaskRecovery -and (Get-Content -LiteralPath (Join-Path $root 'browser\lifecycle.json') -Raw | ConvertFrom-Json).automaticStart -ne $false){throw 'Browser autostart was not disabled; existing task recovery update deferred'}
   Record 'browser_profile_saved' 'Chrome closed cleanly; encrypted cookies, Local State and profile files backed up and verified'
-  if((Active-Commands $live.ProcessId).Count -ne 0 -or -not (Server-RequestsIdle)){throw 'Native work became active during the profile snapshot; service replacement was deferred'}
+  if(-not $AllowActiveCommands -and ((Active-Commands $live.ProcessId).Count -ne 0 -or -not (Server-RequestsIdle))){throw 'Native work became active during the profile snapshot; service replacement was deferred'}
   if($UseExistingTaskRecovery){$null=Confirm-ExistingTaskRecovery $live}
   $stopped=$true
   if(-not $UseExistingTaskRecovery){$null=Invoke-Cli $exe @('service','stop')}
@@ -261,7 +277,12 @@ try {
   Record 'snapshot' 'Saving configuration and durable chat state before replacement'
   foreach($name in @('codexify.config.json','owner-chat.json','projects','conversation-continuations','conversation-projects')){
     $source=Join-Path $root $name
-    if(Test-Path -LiteralPath $source){Copy-Item -LiteralPath $source -Destination (Join-Path $Backup $name) -Recurse}
+    if(Test-Path -LiteralPath $source -PathType Leaf){Copy-Item -LiteralPath $source -Destination (Join-Path $Backup $name)}
+    elseif(Test-Path -LiteralPath $source){
+      # Chat state can exceed MAX_PATH; robocopy handles long paths natively.
+      $null=& robocopy.exe $source (Join-Path $Backup $name) /E /R:1 /W:1 /NFL /NDL /NJH /NJS /NP
+      if($LASTEXITCODE -ge 8){throw "Snapshot copy failed for $name (robocopy $LASTEXITCODE)"}
+    }
   }
   if($candidateHash -eq $oldHash){
     $null=Backup-NativeForBrowserOnlyUpdate -Executable $exe -Candidate $Candidate -BackupExecutable $oldExe
@@ -300,6 +321,17 @@ try {
     $null=Invoke-Cli $exe @('--config',(Join-Path $root 'codexify.config.json'),'config','fast-setup')
     Record 'fast_setup_applied' 'Validated fast setup applied; model choices and renewal limits preserved'
   }
+  if($ConfigSet.Count){
+    # Apply validated settings between replacement and restart, so the updated
+    # server and browser start once with the final configuration.
+    foreach($entry in $ConfigSet){
+      $separator=$entry.IndexOf('=')
+      if($separator -lt 1){throw "ConfigSet entries must be key=value: $entry"}
+      $null=Invoke-Cli $exe @('--config',(Join-Path $root 'codexify.config.json'),'config','set',$entry.Substring(0,$separator),$entry.Substring($separator+1))
+    }
+    $null=Invoke-Cli $exe @('--config',(Join-Path $root 'codexify.config.json'),'config','validate')
+    Record 'config_set_applied' ('Applied validated settings: '+($ConfigSet -join ', '))
+  }
   if($NativeOnly){
     Record 'browser_runtime_preserved' 'Native-only update: keeping the existing installed browser runtime'
   } else {
@@ -331,7 +363,16 @@ try {
     }
     Record 'waiting_for_existing_task_recovery' 'Waiting up to 120 seconds for the unchanged scheduled task to recover the updated native service'
   } else {
-    $null=Invoke-Cli $exe @('service','start')
+    try {$null=Invoke-Cli $exe @('service','start')}
+    catch {
+      # A newer binary upgrades the task launcher on start. An elevated task
+      # cannot be modified without admin rights; it can still be started, and
+      # its unchanged action runs the replaced executable.
+      $startError=Get-Content -LiteralPath (Join-Path $Backup "cli-$counter.stderr") -Raw
+      if($startError -notmatch 'Access is denied'){throw}
+      Record 'task_launcher_preserved' 'Scheduled task launcher could not be upgraded without admin rights; starting the existing task'
+      Start-ScheduledTask -TaskName 'Codexify'
+    }
   }
   $healthy=Wait-NativeHealthy $(if($UseExistingTaskRecovery){120}else{60})
   if(-not $healthy){throw 'Updated server never became healthy'}
@@ -377,7 +418,7 @@ try {
         Move-Item -LiteralPath $exe -Destination (Join-Path $Backup 'codexify.failed-update.exe')
         Move-Item -LiteralPath $oldExe -Destination $exe
       } elseif(-not(Test-Path -LiteralPath $exe) -and (Test-Path -LiteralPath $oldExe)) {Move-Item -LiteralPath $oldExe -Destination $exe}
-      if(($TuneAutowork -or $FastSetup) -and (Test-Path -LiteralPath (Join-Path $Backup 'codexify.config.json'))){
+      if(($TuneAutowork -or $FastSetup -or $ConfigSet.Count) -and (Test-Path -LiteralPath (Join-Path $Backup 'codexify.config.json'))){
         Copy-Item -LiteralPath (Join-Path $Backup 'codexify.config.json') -Destination (Join-Path $root 'codexify.config.json') -Force
       }
       if($UseExistingTaskRecovery){

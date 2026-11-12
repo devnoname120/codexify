@@ -4,7 +4,7 @@ function Test-CleanBrowserStopExitRace([string]$BrowserRoot,[string]$DescriptorP
   # launcher exits, then fail its PID/path lookup. Accept only that exact error
   # plus independently verified absence of EVERY managed browser process.
   if(-not(Test-Path -LiteralPath $StopErrorPath)){return $false}
-  if((Get-Content -LiteralPath $StopErrorPath -Raw).Trim() -ne 'Error: Could not verify the browser companion executable'){return $false}
+  if(([string](Get-Content -LiteralPath $StopErrorPath -Raw)).Trim() -ne 'Error: Could not verify the browser companion executable'){return $false}
   if(Get-CimInstance Win32_Process -Filter ("ProcessId="+$OriginalLauncherPid)){return $false}
   $runtime=[IO.Path]::GetFullPath((Join-Path $BrowserRoot 'runtime')).TrimEnd('\')+'\'
   $remaining=@(Get-CimInstance Win32_Process | Where-Object {$_.ExecutablePath -and [IO.Path]::GetFullPath($_.ExecutablePath).StartsWith($runtime,[StringComparison]::OrdinalIgnoreCase)})
@@ -53,6 +53,8 @@ function Stop-ManagedBrowserGracefully([string]$BrowserRoot,[string]$NativeExe,[
     # The supported Stop command records automaticStart=false before waiting
     # for this lock. It cannot force-stop Chrome while we close it normally.
     $stop=Start-Process -FilePath $NativeExe -ArgumentList @('browser','stop') -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $BackupDirectory 'graceful-stop.stdout') -RedirectStandardError (Join-Path $BackupDirectory 'graceful-stop.stderr')
+    # Windows PowerShell 5.1 reports a null ExitCode unless the handle is opened early.
+    $null=$stop.Handle
     $deadline=[DateTime]::UtcNow.AddSeconds(10);$disabled=$false
     do {
       if(Test-Path -LiteralPath $lifecycle){$disabled=-not (Get-Content -LiteralPath $lifecycle -Raw|ConvertFrom-Json).automaticStart}
@@ -70,7 +72,17 @@ function Stop-ManagedBrowserGracefully([string]$BrowserRoot,[string]$NativeExe,[
     if($current.ExecutablePath -ine $chrome[0].ExecutablePath -or $current.ParentProcessId -ne $descriptor.pid){throw 'Managed Chrome identity changed'}
     $owner.Refresh()
     if(-not $owner.CloseMainWindow()){throw 'Chrome declined clean shutdown; no forced termination attempted'}
-    if(-not $owner.WaitForExit(45000)){throw 'Chrome did not close cleanly; no forced termination attempted'}
+    if(-not $owner.WaitForExit(45000)){
+      # Closing the last window can leave Chrome's background process alive.
+      # Accept that only when no window or renderer remains, then allow a
+      # further 30 seconds for profile and cookie writes before native stop.
+      $owner.Refresh()
+      $renderers=@(Get-CimInstance Win32_Process -Filter "Name='chrome.exe'" | Where-Object {$_.ParentProcessId -eq $chromeId -and $_.CommandLine -like '*--type=renderer*'})
+      if($owner.MainWindowHandle -ne [IntPtr]::Zero -or $renderers.Count){throw 'Chrome did not close cleanly; no forced termination attempted'}
+      if(-not $owner.WaitForExit(30000)){
+        @{windowClosed=$true;backgroundProcessRetained=$chromeId;atUtc=[DateTime]::UtcNow.ToString('o')}|ConvertTo-Json|Set-Content -LiteralPath (Join-Path $BackupDirectory 'chrome-background-after-close.json')
+      }
+    }
     $launcher=Get-Process -Id ([int]$descriptor.pid) -ErrorAction SilentlyContinue
     # Chrome has saved and closed its profile. The native stop command owns
     # launcher shutdown and must acquire this lock before it can finish.
@@ -79,7 +91,7 @@ function Stop-ManagedBrowserGracefully([string]$BrowserRoot,[string]$NativeExe,[
     if(-not $stop.WaitForExit(15000)){throw 'Native stop receipt did not finish after clean shutdown'}
     $stop.Refresh()
     if($stop.ExitCode -ne 0){
-      $settle=[DateTime]::UtcNow.AddSeconds(5);$gone=$false
+      $settle=[DateTime]::UtcNow.AddSeconds(30);$gone=$false
       do {
         $gone=Test-CleanBrowserStopExitRace -BrowserRoot $BrowserRoot -DescriptorPath $descriptorPath -OriginalLauncherPid ([int]$descriptor.pid) -StopErrorPath (Join-Path $BackupDirectory 'graceful-stop.stderr')
         if(-not $gone){Start-Sleep -Milliseconds 250}
