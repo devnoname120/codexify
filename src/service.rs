@@ -1026,7 +1026,7 @@ fn windows_install_script(spec: &ServiceSpec) -> String {
     let working_dir = powershell_quote(&spec.working_dir.to_string_lossy());
     let task = powershell_quote(WINDOWS_TASK);
     format!(
-        "$ErrorActionPreference = 'Stop'\n$taskName = {task}\n$existing = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue\nif ($existing) {{ Stop-ScheduledTask -InputObject $existing -ErrorAction SilentlyContinue }}\n$identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name\n$engine = (Get-Process -Id $PID).Path\n$action = New-ScheduledTaskAction -Execute $engine -Argument {arguments} -WorkingDirectory {working_dir}\n$trigger = New-ScheduledTaskTrigger -AtLogOn -User $identity\n$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew\n$principal = New-ScheduledTaskPrincipal -UserId $identity -LogonType Interactive -RunLevel Limited\nRegister-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Force | Out-Null\nEnable-ScheduledTask -TaskName $taskName | Out-Null\nStart-ScheduledTask -TaskName $taskName\n"
+        "$ErrorActionPreference = 'Stop'\n$taskName = {task}\n$existing = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue\nif ($existing) {{ Stop-ScheduledTask -InputObject $existing -ErrorAction SilentlyContinue }}\n$identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name\n$engine = (Get-Process -Id $PID).Path\n$action = New-ScheduledTaskAction -Execute $engine -Argument {arguments} -WorkingDirectory {working_dir}\n$trigger = New-ScheduledTaskTrigger -AtLogOn -User $identity\n$settings = New-ScheduledTaskSettingsSet -Priority 4 -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew\n$principal = New-ScheduledTaskPrincipal -UserId $identity -LogonType Interactive -RunLevel Limited\nRegister-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Force | Out-Null\nEnable-ScheduledTask -TaskName $taskName | Out-Null\nStart-ScheduledTask -TaskName $taskName\n"
     )
 }
 
@@ -1903,12 +1903,15 @@ fn taskkill(pid: u32, force: bool) {
 
 #[cfg(windows)]
 fn windows_server_creation_flags() -> u32 {
-    windows_sys::Win32::System::Threading::CREATE_NO_WINDOW
+    // Task Scheduler can start the supervisor BelowNormal. Give the native
+    // server Normal priority explicitly instead of inheriting that class.
+    use windows_sys::Win32::System::Threading::{CREATE_NO_WINDOW, NORMAL_PRIORITY_CLASS};
+    CREATE_NO_WINDOW | NORMAL_PRIORITY_CLASS
 }
 
 #[cfg(all(test, not(windows)))]
 fn windows_server_creation_flags() -> u32 {
-    0x0800_0000
+    0x0800_0020
 }
 
 #[cfg(windows)]
@@ -2026,19 +2029,44 @@ async fn shutdown_signal() {
     std::future::pending::<()>().await;
 }
 
+fn acquire_supervisor_lock(path: &Path) -> anyhow::Result<File> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).context("create the service lock directory")?;
+    }
+    let mut options = OpenOptions::new();
+    options.create(true).truncate(false).read(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let lock = options
+        .open(path)
+        .context("open the service supervisor lock")?;
+    lock.try_lock()
+        .context("another Codexify service supervisor is already running")?;
+    Ok(lock)
+}
+
 pub async fn run_supervisor(config: PathBuf) -> anyhow::Result<()> {
     if !config.is_absolute() {
         bail!("service supervisor requires an absolute --config path");
     }
     let config = normalize_native_path(config);
     validate_native_path(&config)?;
+    // Keep the OS lock for this process's lifetime. Native task restarts can
+    // leave an older supervisor alive; it must never race the new supervisor
+    // to launch children against the same ports or rotate the shared log.
+    let service_log_path = log_path()?;
+    let _supervisor_lock =
+        acquire_supervisor_lock(&service_log_path.with_extension("supervisor.lock"))?;
     let executable = std::env::current_exe()
         .context("locate the running codexify executable")?
         .canonicalize()
         .context("canonicalize the running codexify executable")?;
     let executable = normalize_native_path(executable);
     let log = Arc::new(StdMutex::new(RotatingLog::open(
-        log_path()?,
+        service_log_path,
         LOG_MAX_BYTES,
         LOG_GENERATIONS,
     )?));
@@ -2362,6 +2390,22 @@ pub async fn print_logs(follow: bool) -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn supervisor_lock_excludes_duplicates_and_survives_stale_files() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("logs/codexify.supervisor.lock");
+        let first = acquire_supervisor_lock(&path).unwrap();
+        let error = acquire_supervisor_lock(&path).unwrap_err();
+        assert!(error.to_string().contains("already running"));
+        drop(first);
+        // An exited or killed supervisor leaves the file but releases the OS
+        // lock. Recovery must not require deleting a stale PID/lock file.
+        assert!(path.exists());
+        let recovered = acquire_supervisor_lock(&path).unwrap();
+        assert!(acquire_supervisor_lock(&path).is_err());
+        drop(recovered);
+    }
+
     fn spec(root: &Path) -> ServiceSpec {
         ServiceSpec {
             executable: root.join("bin/codexify"),
@@ -2522,6 +2566,7 @@ mod tests {
 
         let script = windows_install_script(&spec);
         assert!(script.contains("New-ScheduledTaskTrigger -AtLogOn"));
+        assert!(script.contains("New-ScheduledTaskSettingsSet -Priority 4 "));
         assert!(script.contains("-RestartCount 999"));
         assert!(script.contains("New-TimeSpan -Minutes 1"));
         assert!(script.contains("-WindowStyle Hidden"));
@@ -2535,7 +2580,7 @@ mod tests {
         let launcher = windows_hidden_service_script(&spec);
         assert!(launcher.contains(&powershell_quote(&spec.executable.to_string_lossy())));
         assert!(launcher.contains(&powershell_quote(&spec.config.to_string_lossy())));
-        assert_eq!(windows_server_creation_flags(), 0x0800_0000);
+        assert_eq!(windows_server_creation_flags(), 0x0800_0020);
     }
 
     #[test]
