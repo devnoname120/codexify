@@ -27,21 +27,35 @@ const fixture = `<!doctype html><style>#prompt-textarea{min-height:24px}[data-mo
  const control=document.getElementById('effort'), picker=document.getElementById('picker'), range=document.getElementById('range');
  function render() {
   const model=definitions[family], index=model.value-model.min;
-  range.innerHTML='<div data-model-reasoning-effort-slider><span role="slider" aria-valuemin="'+model.min+'" aria-valuemax="'+(model.min+model.labels.length-1)+'" aria-valuenow="'+model.value+'"></span>'+model.labels.map((label,i)=>'<span data-selected="'+(i===index)+'" data-locked="'+model.locked.includes(i)+'" aria-label="'+label+'"></span>').join('')+'</div>';
+  range.innerHTML='<div data-model-reasoning-effort-slider><div data-orientation="horizontal" aria-disabled="false" style="width:230px;height:24px"><span role="slider" tabindex="0" aria-valuemin="'+model.min+'" aria-valuemax="'+(model.min+model.labels.length-1)+'" aria-valuenow="'+model.value+'"></span></div>'+model.labels.map((label,i)=>'<span data-selected="'+(i===index)+'" data-locked="'+model.locked.includes(i)+'" aria-label="'+label+'"></span>').join('')+'</div>';
   document.getElementById('effort-description').textContent=document.body.hasAttribute('data-break-effort-announcement')?'Unknown effort':family+' '+model.labels[index]+', '+(index+1)+' of '+model.labels.length+'.';
   control.textContent=model.labels[index];
   document.querySelectorAll('[data-family]').forEach(row=>row.setAttribute('aria-checked',String(row.dataset.family===family)));
  }
  control.onclick=()=>{picker.hidden=false;control.setAttribute('aria-expanded','true');};
  document.querySelectorAll('[data-family]').forEach(row=>row.onclick=()=>{family=row.dataset.family;render();});
- range.onkeydown=event=>{
-  if (!['ArrowLeft','ArrowRight'].includes(event.key)) return;
-  event.preventDefault();const model=definitions[family], step=event.key==='ArrowRight'?1:-1;
+  range.onkeydown=event=>{
+    if (!['ArrowLeft','ArrowRight'].includes(event.key)) return;
+    if (document.body.dataset.pointerOnly==='true') return;
+    if (document.body.dataset.sliderOnly==='true' && event.target.getAttribute('role')!=='slider') return;
+    document.body.dataset.sliderKeys=String(+(document.body.dataset.sliderKeys||0)+1);
+    event.preventDefault();const model=definitions[family], step=event.key==='ArrowRight'?1:-1;
   let next=model.value+step;
   while(next>=model.min&&next<model.min+model.labels.length&&model.locked.includes(next-model.min)) next+=step;
   if(next>=model.min&&next<model.min+model.labels.length) model.value=next;
-  render();
- };
+    render();
+  };
+  range.onpointerdown=event=>{
+    if (document.body.dataset.pointerOnly!=='true') return;
+    const track=event.target.closest('[data-orientation="horizontal"]');
+    if (!track) return;
+    const rect=track.getBoundingClientRect(), model=definitions[family];
+    const margin=14, ratio=Math.max(0,Math.min(1,(event.clientX-rect.left-margin)/(rect.width-2*margin)));
+    const index=Math.round(ratio*(model.labels.length-1));
+    if (model.locked.includes(index)) return;
+    document.body.dataset.pointerSteps=String(+(document.body.dataset.pointerSteps||0)+1);
+    model.value=model.min+index;render();
+  };
  document.addEventListener('keydown',event=>{if(event.key==='Escape'){picker.hidden=true;control.setAttribute('aria-expanded','false');}});
  render();
 </script>`;
@@ -50,7 +64,8 @@ test.skipIf(process.env.CODEXIFY_TEST_BROWSER_COMPANION_CHROME !== "1")(
   "Chrome discovers each family's native effort range, labels and locks and restores the original selection",
   async () => {
     const profilePath = await mkdtemp(join(tmpdir(), "native-effort-discovery-"));
-    const executablePath = await privateChromeExecutable(join(import.meta.dirname, "../.browsers", `${process.platform}-${process.arch}`));
+    const executablePath = process.env.CODEXIFY_TEST_BROWSER_COMPANION_CHROME_PATH
+      ?? await privateChromeExecutable(join(import.meta.dirname, "../.browsers", `${process.platform}-${process.arch}`));
     const context = await chromium.launchPersistentContext(profilePath, {channel:"chrome",executablePath,headless:true,viewport:null});
     try {
       await context.route("https://chatgpt.com/**", route => route.fulfill({contentType:"text/html",body:fixture}));
@@ -86,3 +101,32 @@ test.skipIf(process.env.CODEXIFY_TEST_BROWSER_COMPANION_CHROME !== "1")(
     } finally { await context.close(); await rm(profilePath, {recursive:true,force:true}); }
   }, 30_000,
 );
+
+for (const mode of ["sliderOnly", "pointerOnly"] as const) {
+  test.skipIf(process.env.CODEXIFY_TEST_BROWSER_COMPANION_CHROME !== "1")(
+    `Chrome effort discovery works with ${mode} interaction and restores selection`,
+    async () => {
+      const profilePath = await mkdtemp(join(tmpdir(), `native-effort-${mode}-`));
+      const executablePath = process.env.CODEXIFY_TEST_BROWSER_COMPANION_CHROME_PATH
+        ?? await privateChromeExecutable(join(import.meta.dirname, "../.browsers", `${process.platform}-${process.arch}`));
+      const context = await chromium.launchPersistentContext(profilePath, {channel:"chrome",executablePath,headless:true,viewport:null});
+      try {
+        await context.route("https://chatgpt.com/**", route => route.fulfill({contentType:"text/html",body:fixture}));
+        const page = context.pages()[0] ?? await context.newPage();
+        await page.goto("https://chatgpt.com/");
+        await page.evaluate(mode => { document.body.dataset[mode] = "true"; }, mode);
+        await page.locator("#prompt-textarea").focus();
+        const capabilities = await detectChatGptAccountCapabilities(page);
+        expect(capabilities.models.some(model => model.family === "6")).toBe(true);
+        expect(await page.locator('[role="slider"]').getAttribute("aria-valuenow")).toBe("2");
+        expect(await page.locator("#effort").getAttribute("aria-expanded")).toBe("false");
+        const count = await page.evaluate(mode => Number(document.body.dataset[mode === "sliderOnly" ? "sliderKeys" : "pointerSteps"] || "0"), mode);
+        expect(count).toBeGreaterThan(0);
+      } finally {
+        await context.close();
+        await rm(profilePath, {recursive:true,force:true});
+      }
+    },
+    60_000,
+  );
+}
