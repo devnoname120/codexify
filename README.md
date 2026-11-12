@@ -105,6 +105,12 @@ standard installation. A running background service is restarted after the
 verified replacement; a stopped service stays stopped. The command reports when
 the installation is already up to date and never downgrades a newer version.
 
+For a native Windows launcher that reuses your saved setup, double-click
+`Launch Codexify.cmd` in this checkout. It starts chat, the OpenAI tunnel and the
+browser companion, with live status and an optional Windows sign-in shortcut.
+See the [Windows launcher guide](docs/WINDOWS_LAUNCHER.md) to install desktop and
+Start menu shortcuts.
+
 ### 2. Connect to ChatGPT
 
 ```sh
