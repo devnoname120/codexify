@@ -1754,9 +1754,9 @@ fn validate_batch(batch_id: &str, messages: &[CompanionUnreadMessage]) -> Result
 fn render_action_prompt(prompt: &ActionPrompt) -> String {
     const GOAL_CLAUSE: &str = concat!(
         "This task also has an active Codexify goal. Call `goal_read` for the current ",
-        "revision. If it is complete, call `goal_finish` with status `completed`, a summary of work/results/verification, and nextSteps (explicitly none if appropriate). If work ",
+        "revision. Continue autonomously until the goal is implemented and verified. Never stop at a plan, partial result, recoverable error, or because a turn or context is running out. Diagnose failures, try alternatives, and keep doing independent work. Preserve progress with rollout_update and resume through managed handoffs; respect user stops, pauses, approvals, genuine blockers, and server retry deadlines. When delegation is enabled, create agents at any stage without waiting for the Agents tab, give distinct scopes, and verify their work. If it is complete, call `goal_finish` with status `completed`, a summary of work/results/verification, and nextSteps (explicitly none if appropriate). If work ",
         "cannot proceed, call `goal_finish` with status `blocked` and explain the concrete ",
-        "blocker in reason and the exact action/input/change needed in nextSteps. Both reports appear inline. After completed call `turn_completed`; after blocked call `chat_await`. Repeat waits on timeout/cancellation without input; never end the assistant turn or write a normal final answer merely because of elapsed time. Otherwise continue working toward the goal. Do not request a separate ",
+        "blocker in reason and the exact action/input/change needed in nextSteps. Both reports appear inline. After completed call `turn_completed`; after blocked call `chat_await`. Repeat waits on timeout/cancellation without input; never end the assistant turn or write a normal final answer merely because of elapsed time. Infinite goals require the identical concrete blocker to persist across three distinct goal turns spanning at least 60 seconds. Check alternatives, continue independent work, and restore progress with rollout_read after context loss. Otherwise continue working toward the goal. Do not request a separate ",
         "turn merely to evaluate goal status."
     );
 

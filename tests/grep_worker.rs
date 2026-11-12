@@ -99,6 +99,7 @@ impl Fixture {
                 self.root.path().join("artifact-state"),
             )),
             agent_automation: None,
+            agent_runtime: None,
             cancellation,
         }
     }

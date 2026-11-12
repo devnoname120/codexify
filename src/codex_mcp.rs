@@ -90,6 +90,17 @@ fn default_true() -> bool {
     true
 }
 
+fn is_codexify_agent_endpoint(spec: &McpServerSpec) -> bool {
+    spec.url
+        .as_deref()
+        .and_then(|url| reqwest::Url::parse(url).ok())
+        .is_some_and(|url| {
+            url.scheme() == "http"
+                && matches!(url.host_str(), Some("127.0.0.1" | "localhost" | "[::1]"))
+                && url.path().trim_end_matches('/') == "/mcp/agents"
+        })
+}
+
 fn run_codex_command(
     command: &OsStr,
     cwd: Option<&Path>,
@@ -278,6 +289,9 @@ where
         }
 
         match codex_cli_server_to_spec(server, env_lookup) {
+            Ok(spec) if is_codexify_agent_endpoint(&spec) => {
+                outcome.report.push(format!("{name} -> skipped: local Codexify agent controller must not be bridged back into Codexify"));
+            }
             Ok(spec) => {
                 let suffix = if spec.disabled { " (disabled)" } else { "" };
                 outcome.servers.insert(name.clone(), spec);
@@ -465,6 +479,10 @@ fn parse_codex_mcp_table(
                 spec,
                 ignored_fields,
             }) => {
+                if is_codexify_agent_endpoint(&spec) {
+                    outcome.report.push(format!("{name} -> skipped: local Codexify agent controller must not be bridged back into Codexify"));
+                    continue;
+                }
                 let mut line = if spec.disabled {
                     format!("{name} -> imported from Codex config (disabled)")
                 } else {
@@ -785,6 +803,37 @@ fn optional_string_map(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn coding_app_controller_is_not_imported_back_from_codex_config_or_cli() {
+        let contents = r#"
+[mcp_servers.codexify_agents]
+url = "http://127.0.0.1:3120/mcp/agents"
+[mcp_servers.codexify_agents.http_headers]
+Authorization = "Bearer private-agent-token"
+[mcp_servers.other]
+url = "https://example.invalid/mcp/agents"
+"#;
+        let imported = parse_codex_mcp_servers(contents, &|_| None).unwrap();
+        assert!(!imported.servers.contains_key("codexify_agents"));
+        assert!(imported.servers.contains_key("other"));
+        assert!(!imported.report.join(" ").contains("private-agent-token"));
+        let mut runner = |args: &[OsString]| {
+            Ok(match args.get(1).and_then(|arg|arg.to_str()) {
+            Some("list") => br#"[{"name":"codexify_agents"}]"#.to_vec(),
+            Some("get") => br#"{"name":"codexify_agents","enabled":true,"transport":{"type":"streamable_http","url":"http://127.0.0.1:3120/mcp/agents"}}"#.to_vec(),
+            _ => panic!("Unexpected CLI call"),
+        })
+        };
+        let imported = discover_additional_codex_mcp_servers_with_runner(
+            &HashMap::new(),
+            &|_| None,
+            &mut runner,
+        )
+        .unwrap();
+        assert!(imported.servers.is_empty());
+        assert!(imported.report.join(" ").contains("must not be bridged"));
+    }
 
     #[test]
     fn imports_stdio_fields_and_filters_without_leaking_values() {

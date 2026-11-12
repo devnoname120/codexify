@@ -1342,30 +1342,30 @@ for (const [engineName, engine] of [["Chromium", chromium], ["WebKit", webkit]])
       });
       await page.goto(`http://127.0.0.1:43213/?chat=${chat.id}#test-token`);
       const metrics = page.locator("#goal-metrics");
-      await metrics.getByText("3s (1392 turns)", { exact:true }).waitFor();
+      await metrics.getByText("3s (1392 turns · 0 failed chats)", { exact:true }).waitFor();
       failState = true; clock += 1000; await page.clock.fastForward(1000);
-      await metrics.getByText("4s (1392 turns)", { exact:true }).waitFor();
+      await metrics.getByText("4s (1392 turns · 0 failed chats)", { exact:true }).waitFor();
       clock += 60000; await page.clock.fastForward(60000);
-      await metrics.getByText("1m 4s (1392 turns)", { exact:true }).waitFor();
+      await metrics.getByText("1m 4s (1392 turns · 0 failed chats)", { exact:true }).waitFor();
       await page.getByRole("button", { name:"Pause goal", exact:true }).click();
       await page.getByRole("button", { name:"Run goal", exact:true }).waitFor();
       failState = true; clock += 10000; await page.clock.fastForward(10000);
-      assert.equal(await metrics.textContent(), "1m 4s (1392 turns)");
+      assert.equal(await metrics.textContent(), "1m 4s (1392 turns · 0 failed chats)");
       await page.getByRole("button", { name:"Run goal", exact:true }).click();
       await page.getByRole("button", { name:"Pause goal", exact:true }).waitFor();
       failState = true; clock += 3000; await page.clock.fastForward(3000);
-      await metrics.getByText("1m 7s (1392 turns)", { exact:true }).waitFor();
+      await metrics.getByText("1m 7s (1392 turns · 0 failed chats)", { exact:true }).waitFor();
       goal.elapsedActiveMs += clock - goal.activeSinceMs;
       goal.activeSinceMs = null; goal.status = "blocked"; goal.blockedReason = "Waiting for input";
       failState = false; clock += 2000; await page.clock.fastForward(2000);
       await page.getByText("Goal blocked", { exact:true }).waitFor();
-      assert.equal(await metrics.textContent(), "1m 7s (1392 turns)");
+      assert.equal(await metrics.textContent(), "1m 7s (1392 turns · 0 failed chats)");
       const play = page.getByRole("button", { name:"Run goal", exact:true });
       assert.equal(await play.isEnabled(), true, "blocked goals must allow Play");
       await play.click();
       await page.getByText("Pursuing goal", { exact:true }).waitFor();
       failState = true; clock += 3000; await page.clock.fastForward(3000);
-      await metrics.getByText("1m 10s (1392 turns)", { exact:true }).waitFor();
+      await metrics.getByText("1m 10s (1392 turns · 0 failed chats)", { exact:true }).waitFor();
       const remaining = goal.timerUntilMs - clock;
       clock += remaining; await page.clock.fastForward(remaining);
       const atOffline = await metrics.textContent();
@@ -1379,7 +1379,7 @@ for (const [engineName, engine] of [["Chromium", chromium], ["WebKit", webkit]])
       assert.notEqual(await metrics.textContent(), atOffline, "fresh agent activity resumes the timer");
       failState = false; goal.turnCount = 0;
       await page.clock.fastForward(2000);
-      await metrics.getByText(/\(1 turn\)$/).waitFor();
+      await metrics.getByText(/\(1 turn · 0 failed chats\)$/).waitFor();
     } finally { await browser.close(); }
   });
 }

@@ -201,6 +201,29 @@ connector name. If it is missing, Codexify asks for it in a popup, saves it in
 a restart. Cancelling leaves the action untouched. Quickstart saves the name
 you enter during setup; no connector name is assumed automatically.
 
+For a lighter managed ChatGPT window, use **Settings → Browser → Browser
+simplicity**: **Simplified** reduces decoration and defers offscreen history;
+**Bones** adds compact navigation, plain messages/code and a minimal composer.
+Both preserve model/apps menus, Stop, Copy and tool approvals. **Off** restores
+the full interface. Existing simplification settings remain compatible; restart
+Codexify to apply a level.
+
+**Fast setup** in Settings → General or Browser applies the complete recommended
+configuration in one save: Bones, Steer delivery, stalled-browser recovery,
+automatic retries and turn renewal, progress tracking and agent controls. It also
+reduces animations, sounds and recap interruptions. Restart once using the
+existing button; tool refresh is queued automatically when needed. Model/effort
+choices, renewal limits and explicit per-chat stops remain yours. New quickstart
+setups receive these defaults automatically; reruns preserve saved choices.
+For scripted setup, `codexify config fast-setup` applies the same validated preset
+in one command. Use `--config <path>` to target a particular installation.
+
+Healthy conversation switching now defaults to a one-second interval; actual
+HTTP 429 and Retry-After backoffs still apply. An explicitly saved interval is
+preserved: set **Conversation loading interval (seconds)** to `1` for this policy.
+Long tasks should retain an active saved goal and rollout journal so automatic
+continuation can resume the same objective after an interrupted turn.
+
 **Turn renewal** is independent of the progress journal and is **off by default**.
 Enable it in **Settings → Chats & goals → Turn renewal**. Its per-model/effort
 limits have individual enable switches and remain editable while disabled.
@@ -565,6 +588,7 @@ Report reproducible bugs in [GitHub Issues](https://github.com/devnoname120/code
 | Setup and usage guides | [Wiki](https://github.com/devnoname120/codexify/wiki) |
 | CLI options, configuration, and tool behavior | [Technical reference](docs/REFERENCE.md) |
 | Additional MCP servers and reusable workflows | [MCP bridging](docs/REFERENCE.md#bridging-other-mcp-servers) · [Skills](docs/REFERENCE.md#skills) |
+| Control agents from any AI client | [Universal agent connection](docs/CODING_APP_AGENTS.md) |
 | Building or contributing | [Architecture](docs/ARCHITECTURE.md) · [Development commands](docs/REFERENCE.md#dev-commands) |
 
 ## License

@@ -1,13 +1,20 @@
 //! Local-only owner view of the persisted agent chats. This is deliberately not
 //! nested under `/mcp` and never shares the connector's tunnel listener.
 
+mod agent_client;
+mod agents;
+pub use agent_client::INSTRUCTIONS as AGENT_CLIENT_INSTRUCTIONS;
+pub use agent_client::connection_profile as agent_connection_profile;
 mod analytics;
 mod attachments;
+mod changes;
 mod creation;
+mod listing;
 mod pwa;
 mod schema_refresh;
 pub(crate) use schema_refresh::start as start_schema_refresh;
 mod readiness;
+mod recovery;
 mod settings;
 mod wake;
 
@@ -449,7 +456,29 @@ fn load_or_create_runtime(path: &FilePath, port: u16) -> anyhow::Result<RuntimeI
     };
     if info.port != port {
         info.port = port;
-        prepare_runtime(parent, &info)?.persist(path)?;
+        let mut temporary = prepare_runtime(parent, &info)?;
+        #[cfg(windows)]
+        let mut retry_delay_ms = 10;
+        loop {
+            match temporary.persist(path) {
+                Ok(_) => break,
+                Err(error) => {
+                    // Concurrent startup readers can briefly deny replacement
+                    // on Windows. Retry the complete atomic record, retaining
+                    // the credential already adopted above.
+                    #[cfg(windows)]
+                    if matches!(error.error.raw_os_error(), Some(5 | 32 | 33))
+                        && retry_delay_ms <= 320
+                    {
+                        temporary = error.file;
+                        std::thread::sleep(std::time::Duration::from_millis(retry_delay_ms));
+                        retry_delay_ms *= 2;
+                        continue;
+                    }
+                    return Err(error.into());
+                }
+            }
+        }
     }
     Ok(info)
 }
@@ -646,6 +675,7 @@ fn wrap(value: Value) -> Json<Value> {
 #[serde(rename_all = "camelCase")]
 struct ChatListing {
     id: String,
+    agent_team: Option<Value>,
     title: String,
     custom_title: Option<String>,
     pinned_at_ms: Option<u64>,
@@ -765,7 +795,11 @@ async fn list_chats(State(state): State<OwnerState>, Query(query): Query<ListQue
             "Search must be a single line of at most 1 KiB".into(),
         ));
     }
-    let located_chats = locate(&state.config, &state.project_bindings);
+    let discovery = state.clone();
+    let (located_chats, project_groups) =
+        tokio::task::spawn_blocking(move || listing::discover(&discovery))
+            .await
+            .map_err(internal_error)?;
     let mut matched = if query.is_empty() {
         None
     } else {
@@ -775,173 +809,14 @@ async fn list_chats(State(state): State<OwnerState>, Query(query): Query<ListQue
                 .map_err(internal_error)?,
         )
     };
-    let mut list = Vec::new();
-    let mut project_groups = std::collections::HashMap::new();
-    for located in located_chats {
-        let chat = state
-            .chats
-            .chat_at_path(located.path.clone(), true)
-            .map_err(internal_error)?;
-        let summary = match chat.owner_summary().await {
-            Ok(summary) => summary,
-            Err(error) => {
-                tracing::warn!("owner chat transcript unavailable: {error}");
-                let metadata = std::fs::metadata(&located.path).map_err(internal_error)?;
-                OwnerChatSummary {
-                    title: "Conversation unavailable".into(),
-                    custom_title: None,
-                    pinned_at_ms: None,
-                    archived_at_ms: None,
-                    owner_read_through: 0,
-                    last_entry_end: metadata.len(),
-                    last_incoming_entry_end: 0,
-                    last_entry_at_ms: metadata
-                        .modified()
-                        .ok()
-                        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-                        .map(|duration| duration.as_millis() as u64)
-                        .unwrap_or_default(),
-                    last_agent_call_at_ms: None,
-                    last_user_entry_end: 0,
-                    last_user_entry_at_ms: None,
-                    agent_stop_requested: false,
-                    agent_waiting_until_ms: None,
-                    agent_idle_until_ms: None,
-                    agent_presence_until_ms: None,
-                    total_tool_calls: 0,
-                }
+    let mut list = listing::read_chats(state.clone(), located_chats, project_groups).await?;
+    if let Some(matched) = matched.as_mut() {
+        let lower_query = query.to_lowercase();
+        for chat in &list {
+            if chat.title.to_lowercase().contains(&lower_query) {
+                matched.insert(chat.id.clone());
             }
-        };
-        let wake_activity = wake::Activity::from(&summary)
-            .with_offline_timeout(state.config.markdown_chat.offline_after_ms());
-        let OwnerChatSummary {
-            title,
-            custom_title,
-            pinned_at_ms,
-            archived_at_ms,
-            owner_read_through,
-            last_entry_end,
-            last_incoming_entry_end,
-            last_entry_at_ms,
-            last_user_entry_end,
-            last_user_entry_at_ms,
-            last_agent_call_at_ms,
-            agent_waiting_until_ms,
-            agent_idle_until_ms,
-            agent_presence_until_ms,
-            total_tool_calls,
-            ..
-        } = summary;
-        if title.to_lowercase().contains(&query.to_lowercase())
-            && let Some(matched) = matched.as_mut()
-        {
-            matched.insert(located.id.clone());
         }
-        let workspace_path = located.work_dir.as_ref().unwrap_or(&located.state_root);
-        let project_group = project_groups
-            .entry(workspace_path.clone())
-            .or_insert_with(|| {
-                project_group(
-                    &state.config,
-                    workspace_path,
-                    &located.workspace,
-                    located.is_scratch,
-                )
-            })
-            .clone();
-        let project_path = workspace_path.to_string_lossy().into_owned();
-        let project_id = format!("{:x}", Sha256::digest(project_path.as_bytes()));
-        // Read persisted goal/action state without registering browser work.
-        let goal_task = automation_task(&located)?;
-        let goal_config = state.config.clone();
-        let goal_root = located.state_root.clone();
-        let automation = tokio::task::spawn_blocking(move || {
-            AgentAutomationStore::for_state_root(&goal_config, &goal_root)?.load(&goal_task)
-        })
-        .await;
-        let (automation, state_error) = match automation {
-            Ok(Ok(automation)) => (automation, None),
-            Ok(Err(error)) => {
-                tracing::warn!(chat_id=%located.id, %error, "owner chat automation state unavailable");
-                (Default::default(), Some(error))
-            }
-            Err(error) => {
-                tracing::warn!(chat_id=%located.id, %error, "owner chat automation state task failed");
-                (
-                    Default::default(),
-                    Some("Automation state is unavailable; saved data was preserved".into()),
-                )
-            }
-        };
-        let automation_retrying = state_error.is_none() && automation.is_automatically_retrying();
-        let automation_error = state_error.or_else(|| {
-            automation
-                .action_needs_attention_at(crate::markdown_chat::now_ms())
-                .then(|| {
-                    automation
-                        .action
-                        .last_error
-                        .clone()
-                        .unwrap_or_else(|| "Browser action needs attention".into())
-                })
-        });
-        let automation_waiting_for_browser =
-            automation_error.is_none() && automation.browser_cooldown_until_ms().is_some();
-        let now = crate::markdown_chat::now_ms();
-        let enabled = state.config.markdown_chat.automation.enabled;
-        let pending_queue = if enabled && automation_error.is_none() && wake_activity.offline(now) {
-            chat.has_wakeable_queued_messages().await.unwrap_or(false)
-        } else {
-            false
-        };
-        let automation_wake =
-            wake::status(&automation, &wake_activity, pending_queue, enabled, now);
-        let goal = automation.goal;
-        let goal_status = goal.as_ref().map(|goal| goal.status);
-        let goal_completion_dismissed = goal.as_ref().is_some_and(|goal| {
-            goal.status == crate::agent_automation::GoalStatus::Completed
-                && goal.completed_chat_end.map_or_else(
-                    || {
-                        last_user_entry_at_ms
-                            .zip(goal.finished_at_ms)
-                            .is_some_and(|(message, completed)| message > completed)
-                    },
-                    |completed_end| last_user_entry_end > completed_end,
-                )
-        });
-        let completed_goal = goal
-            .as_ref()
-            .filter(|goal| goal.status == crate::agent_automation::GoalStatus::Completed);
-        list.push(ChatListing {
-            id: located.id,
-            title,
-            custom_title,
-            pinned_at_ms,
-            archived_at_ms,
-            owner_read_through,
-            workspace: located.workspace,
-            project_id,
-            project_path,
-            project_group,
-            is_scratch: located.is_scratch,
-            last_entry_end,
-            last_incoming_entry_end,
-            last_entry_at_ms,
-            last_agent_call_at_ms,
-            agent_waiting_until_ms,
-            agent_idle_until_ms,
-            agent_presence_until_ms,
-            goal_status,
-            goal_completion_dismissed,
-            goal_completed_at_ms: completed_goal.and_then(|goal| goal.finished_at_ms),
-            goal_completed_chat_end: completed_goal.and_then(|goal| goal.completed_chat_end),
-            goal,
-            automation_error,
-            automation_retrying,
-            automation_waiting_for_browser,
-            automation_wake,
-            total_tool_calls,
-        });
     }
     list.sort_by(|a, b| {
         b.last_entry_at_ms
@@ -1251,7 +1126,10 @@ async fn automation_state(State(state): State<OwnerState>, Path(id): Path<String
     public_action["automaticRetryAtMs"] = json!(automation.automatic_retry_at_ms());
     public_action["cooldownUntilMs"] = json!(automation.browser_cooldown_until_ms());
     public_action["automaticRetryAttempts"] = json!(automation.automatic_retry_attempts());
-    public_action["automaticRetryLimit"] = json!(automation.automatic_retry_limit());
+    public_action["automaticRetriesInfinite"] = json!(automation.retry_timings.infinite_retries);
+    public_action["automaticRetryLimit"] = json!(
+        (!automation.retry_timings.infinite_retries).then(|| automation.automatic_retry_limit())
+    );
     if public_action["lastError"].is_null()
         && let Some(message) = live.as_ref().and_then(|live| live.status.as_ref())
         && matches!(
@@ -1303,6 +1181,7 @@ async fn automation_state(State(state): State<OwnerState>, Path(id): Path<String
     Ok(Json(json!({
         "enabled": true,
         "ownerGeneration": context.owner_generation,
+        "features": state.config.markdown_chat.features,
         "pairing": public_pairing(&automation.pairing, context.owner_generation),
         "selection": {
             "model": automation.selection.model,
@@ -1310,6 +1189,13 @@ async fn automation_state(State(state): State<OwnerState>, Path(id): Path<String
             "catalogRevision": automation.selection.catalog_revision
         },
         "goal": automation.goal,
+        "conversationRecovery": automation.conversation_recovery,
+        "blockerAudit": automation.blocker_audit,
+        "agents": ({
+            let mut agents = automation.agents.clone();
+            agents.allow_delegation = state.config.markdown_chat.features.agent_teams && agents.delegation_enabled_with_default(state.config.markdown_chat.features.default_delegation);
+            agents
+        }),
         "action": public_action,
         "live": live,
         "queue": queue,
@@ -2256,6 +2142,7 @@ async fn authorize(
     next: Next,
 ) -> Response {
     let content_request = attachments::is_content_path(request.uri().path());
+    let coding_app_request = agent_client::is_control_path(request.uri().path());
     let host_ok = request
         .headers()
         .get(header::HOST)
@@ -2264,30 +2151,30 @@ async fn authorize(
     if !host_ok {
         return StatusCode::FORBIDDEN.into_response();
     }
+    let expected_token = if coding_app_request {
+        agent_client::bearer(&state.token)
+    } else {
+        state.token.clone()
+    };
     let bearer_authenticated = request
         .headers()
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
-        == Some(format!("Bearer {}", state.token).as_str());
+        == Some(format!("Bearer {}", expected_token).as_str());
     let secure_cookie = request
         .headers()
         .get("x-forwarded-proto")
         .and_then(|v| v.to_str().ok())
         == Some("https");
-    if request.uri().path() != "/" && !pwa::is_asset(request.uri().path()) {
-        let expected = format!("Bearer {}", state.token);
-        if request
-            .headers()
-            .get(header::AUTHORIZATION)
-            .and_then(|value| value.to_str().ok())
-            != Some(&expected)
-            && !attachments::authorized_cookie(&request, &state.token)
-        {
-            return StatusCode::UNAUTHORIZED.into_response();
-        }
+    if request.uri().path() != "/"
+        && !pwa::is_asset(request.uri().path())
+        && !bearer_authenticated
+        && (coding_app_request || !attachments::authorized_cookie(&request, &state.token))
+    {
+        return StatusCode::UNAUTHORIZED.into_response();
     }
     let mut response = next.run(request).await;
-    if bearer_authenticated {
+    if bearer_authenticated && !coding_app_request {
         let secure = if secure_cookie { "; Secure" } else { "" };
         if let Ok(value) = format!(
             "codexify-attachment={}; Path=/api/chats/; HttpOnly; SameSite=Strict{secure}",
@@ -2434,7 +2321,10 @@ async fn maintain_chat_automation(state: OwnerState, interval: std::time::Durati
         match tokio::task::spawn_blocking(move || locate(&scan.config, &scan.project_bindings))
             .await
         {
-            Ok(chats) => restore_missing_automation(&state, &chats).await,
+            Ok(chats) => {
+                restore_missing_automation(&state, &chats).await;
+                recovery::maintain(&state, &chats).await;
+            }
             Err(error) => {
                 tracing::warn!(%error, "persisted chat discovery failed; discovery will retry")
             }
@@ -2487,8 +2377,16 @@ pub(crate) async fn start_with_automation(
         open_browser: Arc::new(|url| open::that(url)),
         catalog_cache: Arc::default(),
         global: Arc::default(),
-        token: info.token,
+        token: info.token.clone(),
     };
+    if let Some(path) = agent_client::publish(&state, &info, &agent_client::connection_directory())?
+    {
+        println!(
+            "Agent connection: {} (MCP, HTTP, JavaScript)",
+            path.display()
+        );
+        println!("  Instructions: codexify agents instructions");
+    }
     let maintenance = tokio::spawn(maintain_chat_automation(
         state.clone(),
         std::time::Duration::from_secs(30),
@@ -2515,6 +2413,7 @@ async fn bind_owner_listener(config: &AppConfig) -> anyhow::Result<tokio::net::T
 
 fn router(state: OwnerState) -> Router {
     Router::new()
+        .merge(agent_client::router(&state))
         .route("/", get(page))
         .route("/manifest.webmanifest", get(pwa::serve))
         .route("/icons/{name}", get(pwa::serve))
@@ -2551,6 +2450,7 @@ fn router(state: OwnerState) -> Router {
             post(creation::retry_creation),
         )
         .route("/api/chats/{id}", get(chat_state))
+        .route("/api/chats/{id}/changes", get(changes::read))
         .route("/api/chats/{id}/title", post(rename_chat))
         .route("/api/chats/{id}/organization", post(organize_chat))
         .route("/api/chats/{id}/read", post(mark_chat_read))
@@ -2573,6 +2473,34 @@ fn router(state: OwnerState) -> Router {
         .route("/api/chats/{id}/automation/unlink", post(automation_unlink))
         .route("/api/chats/{id}/automation/login", post(automation_login))
         .route("/api/chats/{id}/automation/reveal", post(automation_reveal))
+        .route(
+            "/api/chats/{id}/automation/conversation-recovery",
+            post(recovery::settings),
+        )
+        .route(
+            "/api/chats/{id}/automation/replace-conversation",
+            post(recovery::replace),
+        )
+        .route(
+            "/api/chats/{id}/automation/agents",
+            get(agents::status).post(agents::spawn),
+        )
+        .route(
+            "/api/chats/{id}/automation/agents/settings",
+            post(agents::settings),
+        )
+        .route(
+            "/api/chats/{id}/automation/agents/control",
+            post(agents::control),
+        )
+        .route(
+            "/api/chats/{id}/automation/agents/stop-all",
+            post(agents::stop_team),
+        )
+        .route(
+            "/api/chats/{id}/automation/auto-mode",
+            post(agents::auto_mode),
+        )
         .route(
             "/api/chats/{id}/automation/action",
             get(automation_action_state),
@@ -2628,9 +2556,14 @@ pub async fn dashboard_url() -> anyhow::Result<String> {
     })?;
     let url = format!("http://127.0.0.1:{}/", info.port);
     let response = reqwest::Client::builder()
+        // The owner dashboard is a fixed loopback service. System proxy/PAC
+        // discovery can otherwise consume its entire readiness timeout.
+        .no_proxy()
         .timeout(Duration::from_secs(2))
         .build()?
-        .get(format!("{url}api/chats"))
+        // Readiness must not enumerate every transcript/agent state. The
+        // connector settings route verifies the same private bearer cheaply.
+        .get(format!("{url}api/settings/connector"))
         .bearer_auth(&info.token)
         .send()
         .await?;
@@ -2638,8 +2571,8 @@ pub async fn dashboard_url() -> anyhow::Result<String> {
         || !response
             .json::<Value>()
             .await?
-            .get("chats")
-            .is_some_and(Value::is_array)
+            .get("configured")
+            .is_some_and(Value::is_boolean)
     {
         anyhow::bail!(
             "Owner chat is unavailable; start the Codexify service with agentChat enabled"
@@ -2650,6 +2583,7 @@ pub async fn dashboard_url() -> anyhow::Result<String> {
 
 #[cfg(test)]
 mod tests {
+    include!("owner_chat_agent_client_tests.rs");
     include!("owner_chat_catalog_tests.rs");
     use super::*;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -3263,6 +3197,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let mut config = crate::config::default_config(temp.path().into());
         config.markdown_chat.enabled = true;
+        config.markdown_chat.features.agent_folders = true;
         config.markdown_chat.default_message_mode = crate::markdown_chat::MessageMode::Steer;
         config.markdown_chat.default_message_mode = crate::markdown_chat::MessageMode::Queue;
         config.memory.dir = Some(temp.path().join("state").display().to_string());
@@ -3273,6 +3208,24 @@ mod tests {
             .unwrap();
         chat.ensure().await.unwrap();
         chat.queue_agent_work(false).await.unwrap();
+        // Sidebar membership includes reserved workers before their first chat exists.
+        let team_store = AgentAutomationStore::for_config(&config).unwrap();
+        let mut team_state = team_store.load(&identity).unwrap();
+        let child_key =
+            ConversationIdentity::from_openai_session("reserved-sidebar-worker").unwrap();
+        team_state.agents.children=serde_json::from_value(json!([{
+            "taskKey":child_key.stable_key(),"requestId":"sidebar-team","requestDigest":"a".repeat(64),
+            "role":"Material auditor","scope":"Read-only renderer","goal":"Audit material parity",
+            "readOnly":true,"createdAtMs":1
+        }])).unwrap();
+        std::fs::write(
+            team_store
+                .task_directory(&identity)
+                .unwrap()
+                .join("automation.json"),
+            serde_json::to_vec(&team_state).unwrap(),
+        )
+        .unwrap();
         let artifacts = Arc::new(ArtifactEgressStore::new_at(
             config.artifact_egress.clone(),
             temp.path().join("artifacts"),
@@ -3391,6 +3344,23 @@ mod tests {
         assert_eq!(list["chats"].as_array().unwrap().len(), 1);
         let id = list["chats"][0]["id"].as_str().unwrap();
         assert_eq!(list["chats"][0]["title"], "Untitled conversation");
+        assert_eq!(
+            list["chats"][0]["agentTeam"]["taskKey"],
+            identity.stable_key()
+        );
+        assert_eq!(
+            list["chats"][0]["agentTeam"]["children"][0]["role"],
+            "Material auditor"
+        );
+        assert_eq!(
+            list["chats"][0]["agentTeam"]["children"][0]["taskKey"],
+            child_key.stable_key()
+        );
+        assert!(
+            list["chats"][0]["agentTeam"]["children"][0]
+                .get("goal")
+                .is_none()
+        );
         let waiting: Value = client
             .get(format!("{base}/api/chats/{id}"))
             .bearer_auth("test-token")
@@ -4399,6 +4369,144 @@ mod tests {
         task.abort();
     }
 
+    #[tokio::test]
+    async fn auto_mode_is_authenticated_idempotent_and_preserves_live_sends_and_later_stops() {
+        crate::tls::ensure_crypto_provider();
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("project");
+        std::fs::create_dir(&root).unwrap();
+        let mut config = crate::config::default_config(root.clone());
+        config.markdown_chat.enabled = true;
+        config.markdown_chat.automation.enabled = true;
+        config.markdown_chat.features.agent_teams = true;
+        config.markdown_chat.features.auto_mode = true;
+        config.markdown_chat.features.conversation_recovery = true;
+        config.markdown_chat.automation.connector_name = "Codexify".into();
+        config.memory.dir = Some(temp.path().join("state").display().to_string());
+        let task = ConversationIdentity::from_openai_session("auto-mode-api-test").unwrap();
+        let bindings = Arc::new(crate::project_bindings::ProjectBindingStore::new(
+            temp.path().join("bindings"),
+        ));
+        bindings
+            .select_project_root(
+                &crate::tools::set_project_root::selection_config(&config, Some(false)),
+                &task,
+                &root.to_string_lossy(),
+            )
+            .await
+            .unwrap();
+        let effective = bindings.effective_config(&config, &task).unwrap();
+        let chats = Arc::new(MarkdownChatStore::default());
+        let chat = chats
+            .chat(&effective, Some(&task), &SessionState::new())
+            .unwrap();
+        chat.ensure().await.unwrap();
+        let store = AgentAutomationStore::for_config(&effective).unwrap();
+        let pair = store
+            .issue_pairing(&task, "https://chatgpt.com/c/auto-mode", 0, 1)
+            .unwrap();
+        store
+            .record_pairing_canonical_url(
+                &task,
+                pair.generation,
+                "https://chatgpt.com/c/auto-mode",
+                2,
+            )
+            .unwrap();
+        store
+            .verify_pairing(&task, pair.generation, 0, &pair.reference, 3)
+            .unwrap();
+        store
+            .set_selection(&task, "fixture-model", "high", "catalog", "account", 4)
+            .unwrap();
+        store.set_goal(&task, "Previous work", 5).unwrap();
+        store.run_goal(&task, 1, 6).unwrap();
+        let state_path = store.task_directory(&task).unwrap().join("automation.json");
+        let mut seeded = store.load(&task).unwrap();
+        {
+            let s = &mut seeded;
+            s.action = crate::agent_automation::AutomationActionState {
+                id: Some("accepted-action".into()),
+                kind: Some(crate::agent_automation::AutomationActionKind::OfflineGoal),
+                goal_revision: Some(1),
+                pairing_generation: Some(pair.generation),
+                status: crate::agent_automation::AutomationActionStatus::Generating,
+                send_accepted: Some(true),
+                ..Default::default()
+            };
+            s.agents.delegation_disabled = true;
+        }
+        std::fs::write(&state_path, serde_json::to_vec(&seeded).unwrap()).unwrap();
+        let original_action = store.load(&task).unwrap().action;
+        let supervisor = AgentAutomationSupervisor::new(
+            config.markdown_chat.automation.clone(),
+            Arc::new(OwnerNoopExecutor),
+        );
+        let state = OwnerState {
+            config: Arc::new(config.clone()),
+            chats: chats.clone(),
+            project_bindings: bindings,
+            continuations: Arc::new(
+                ConversationContinuationStore::new(temp.path().join("continuations.json")).unwrap(),
+            ),
+            artifacts: Arc::new(ArtifactEgressStore::new_at(
+                config.artifact_egress.clone(),
+                temp.path().join("artifacts"),
+            )),
+            automation: Some(supervisor),
+            creation_lock: Arc::default(),
+            open_browser: Arc::new(|_| Ok(())),
+            catalog_cache: Arc::default(),
+            global: Arc::default(),
+            token: "auto-test-token".into(),
+        };
+        let id = locate(&state.config, &state.project_bindings)[0].id.clone();
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router(state)).await.unwrap();
+        });
+        let client = reqwest::Client::new();
+        let url = format!("http://{address}/api/chats/{id}/automation/auto-mode");
+        let body = json!({"requestId":"auto-start","expectedRevision":1,"prompt":"Implement and verify the requested feature"});
+        assert_eq!(
+            client.post(&url).json(&body).send().await.unwrap().status(),
+            StatusCode::UNAUTHORIZED
+        );
+        let send = || {
+            client
+                .post(&url)
+                .bearer_auth("auto-test-token")
+                .json(&body)
+                .send()
+        };
+        let response = send().await.unwrap();
+        let status = response.status();
+        let first: Value = response.json().await.unwrap();
+        assert_eq!(status, StatusCode::OK, "{first}");
+        assert_eq!(first["goal"]["revision"], 2);
+        assert_eq!(first["goal"]["status"], "active");
+        assert_eq!(store.load(&task).unwrap().action, original_action);
+        assert!(store.load(&task).unwrap().agents.delegation_enabled());
+        assert!(store.load(&task).unwrap().conversation_recovery.enabled);
+        let repeated: Value = send().await.unwrap().json().await.unwrap();
+        assert_eq!(repeated["replayed"], true);
+        assert_eq!(repeated["goal"]["revision"], 2);
+        store.stop_goal(&task, 2, 10).unwrap();
+        chat.request_agent_stop("owner-stop".into()).await.unwrap();
+        let mut stopped = store.load(&task).unwrap();
+        stopped.agents.delegation_disabled = true;
+        std::fs::write(&state_path, serde_json::to_vec(&stopped).unwrap()).unwrap();
+        let replay: Value = send().await.unwrap().json().await.unwrap();
+        assert_eq!(replay["goal"]["status"], "configured");
+        assert!(chat.agent_stop_requested().await.unwrap());
+        assert!(!store.load(&task).unwrap().agents.delegation_enabled());
+        assert_eq!(store.load(&task).unwrap().action, original_action);
+        server.abort();
+    }
+
     #[test]
     fn public_pairing_prefills_only_the_last_known_conversation_url() {
         let mut pairing = crate::agent_automation::PairingState {
@@ -5361,7 +5469,15 @@ mod tests {
         config.markdown_chat.enabled = true;
         config.markdown_chat.default_message_mode = crate::markdown_chat::MessageMode::Steer;
         config.markdown_chat.automation.enabled = true;
+        config
+            .markdown_chat
+            .automation
+            .retry_timings
+            .infinite_retries = true;
+        config.markdown_chat.automation.recovery_enhancements = true;
         config.markdown_chat.automation.connector_name = "Codexify".into();
+        config.markdown_chat.automation.descriptor_path =
+            root.join("browser/descriptor.json").display().to_string();
         config.memory.dir = Some(root.join("metadata").display().to_string());
         // The worker's pause state must come from this fixture, not the live browser.
         config.markdown_chat.automation.descriptor_path =
@@ -5521,7 +5637,7 @@ mod tests {
                 }
             })
             .await
-            .unwrap();
+            .unwrap_or_else(|error| panic!("Restore timed out: multi={multi}, orphaned={orphaned}, calls={}, saved={:?}: {error}", executor.calls.load(Ordering::SeqCst), store.load(&active)));
             assert_eq!(
                 supervisor.queued_count().await,
                 0,

@@ -109,8 +109,8 @@ pub(super) async fn prepare_chat(
         .automation
         .as_ref()
         .ok_or_else(|| internal_error("Browser automation supervisor is unavailable"))?;
-    let catalog = supervisor
-        .prepare_new_chat(
+    let (catalog, health) = supervisor
+        .prepare_verified_new_chat(
             state
                 .config
                 .markdown_chat
@@ -120,17 +120,6 @@ pub(super) async fn prepare_chat(
         )
         .await
         .map_err(internal_error)?;
-    let health = companion_client(&state)?
-        .health(&CancellationToken::new())
-        .await
-        .map_err(internal_error)?;
-    if !health.authenticated
-        || health.account_fingerprint.as_deref() != Some(catalog.account_fingerprint.as_str())
-    {
-        return Err(internal_error(
-            "ChatGPT account changed while preparing the new chat",
-        ));
-    }
     let entry = OwnerCatalogCache {
         key: catalog_context(&health),
         catalog: catalog.clone(),
@@ -332,12 +321,13 @@ pub(super) async fn create_chat(
         "{:x}",
         Sha256::digest(serde_json::to_vec(&body).map_err(internal_error)?)
     );
-    if let Some(previous_root) = bindings
+    let previous_root = bindings
         .selected_project_root(&state.config, &task)
-        .map_err(internal_error)?
-    {
-        let mut previous_config = state.config.as_ref().clone();
-        previous_config.work_dir = previous_root;
+        .map_err(internal_error)?;
+    if previous_root.is_some() {
+        let previous_config = bindings
+            .effective_config(&state.config, &task)
+            .map_err(internal_error)?;
         AgentAutomationStore::for_config(&previous_config)
             .map_err(internal_error)?
             .record_creation_request(&task, &digest)
@@ -345,7 +335,11 @@ pub(super) async fn create_chat(
     }
     let config = selection_config(&state.config, body.create_worktree);
     crate::project_progress::phase("Preparing workspace");
-    let root = if let Some(worktree) = &body.worktree_path {
+    // The stable request already owns its selected checkout. Selecting it again
+    // with createWorktree can allocate another checkout and duplicate the chat.
+    let _selected_root = if let Some(previous_root) = previous_root {
+        previous_root
+    } else if let Some(worktree) = &body.worktree_path {
         if body.without_project.is_some() || body.resume_path.is_some() {
             return Err(internal_error(
                 "Worktree reuse cannot be combined with another workspace choice",
@@ -399,9 +393,11 @@ pub(super) async fn create_chat(
             }
         }
     };
-    let mut effective = state.config.as_ref().clone();
     crate::project_progress::phase("Creating local chat");
-    effective.work_dir = root.clone();
+    let effective = bindings
+        .effective_config(&state.config, &task)
+        .map_err(internal_error)?;
+    let root = effective.work_dir.clone();
     let chat = state
         .chats
         .chat(
@@ -477,9 +473,8 @@ async fn queue_creation(
         .as_deref()
         .unwrap_or("https://chatgpt.com/new");
     let issue = store
-        .issue_pairing(task, destination, next_owner, now)
+        .issue_creation_pairing(task, destination, next_owner, now)
         .map_err(internal_error)?;
-    store.mark_creating_chat(task).map_err(internal_error)?;
     let supervisor = state
         .automation
         .as_ref()
@@ -529,6 +524,12 @@ pub(super) async fn retry_creation(
             "Creation can only be retried after a confirmed failure before Send",
         ));
     }
+    if !saved.conversation_recovery.previous_urls.is_empty() {
+        // Release the creation lock before entering the shared replacement path.
+        drop(_guard);
+        recovery::queue_replacement(&state, &located, saved.action.id.as_deref(), false).await?;
+        return Ok(Json(json!({"queued":true})));
+    }
     let root = state
         .project_bindings
         .clone()
@@ -557,11 +558,17 @@ mod tests {
     };
     use async_trait::async_trait;
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use tokio::sync::mpsc;
 
     struct CreationExecutor {
         catalog: CapabilityCatalog,
         executions: Mutex<Vec<AutomationExecution>>,
+        preparations: AtomicUsize,
+        block_health: AtomicBool,
+        health_entered: tokio::sync::Notify,
+        health_release: tokio::sync::Notify,
+        health_account: Mutex<String>,
         next_limit: Mutex<Option<bool>>,
         next_failure: Mutex<Option<(&'static str, bool)>>,
         created_url: Mutex<String>,
@@ -588,6 +595,7 @@ mod tests {
             _: Option<&str>,
             _: CancellationToken,
         ) -> Result<CapabilityCatalog, String> {
+            self.preparations.fetch_add(1, Ordering::SeqCst);
             Ok(self.catalog.clone())
         }
         async fn execute(
@@ -717,6 +725,7 @@ mod tests {
         config.markdown_chat.enabled = true;
         config.experimental.agent_tickets = tickets;
         config.markdown_chat.automation.enabled = true;
+        config.markdown_chat.features.conversation_recovery = true;
         config.markdown_chat.automation.connector_name = "Codexify".into();
         config.memory.dir = Some(root.join("metadata").display().to_string());
         config.markdown_chat.automation.descriptor_path =
@@ -742,7 +751,24 @@ mod tests {
         }
         let build = format!("fixture{}", crate::agent_automation::PROTOCOL_BUILD_SUFFIX);
         let catalog:CapabilityCatalog=serde_json::from_value(json!({"protocolVersion":1,"build":build,"accountFingerprint":"creation-account","catalogRevision":"creation-catalog","models":[{"id":"discovered-model","label":"Discovered model","efforts":[{"id":"adaptive-choice","label":"Adaptive choice","available":true,"reason":null}]}]})).unwrap();
-        let health = json!({"protocolVersion":1,"kind":"codexify-browser-companion","build":build,"status":"idle","authenticated":true,"accountFingerprint":"creation-account","activeActionId":null});
+        let tickets = Arc::new(crate::agent_tickets::AgentTicketStore::default());
+        let executor = Arc::new(CreationExecutor {
+            catalog,
+            executions: Mutex::new(Vec::new()),
+            next_limit: Mutex::new(None),
+            next_failure: Mutex::new(None),
+            created_url: Mutex::new("https://chatgpt.com/c/created-chat".into()),
+            reserve_pairing: Default::default(),
+            released_pairings: Default::default(),
+            tickets: tickets.clone(),
+            preparations: AtomicUsize::new(0),
+            block_health: AtomicBool::new(false),
+            health_entered: Default::default(),
+            health_release: Default::default(),
+            health_account: Mutex::new("creation-account".into()),
+        });
+        let health_executor = executor.clone();
+        let health_build = build.clone();
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
             .await
             .unwrap();
@@ -750,8 +776,15 @@ mod tests {
         let app = Router::new().route(
             "/v1/health",
             get(move || {
-                let health = health.clone();
-                async move { Json(health) }
+                let executor = health_executor.clone();
+                let build = health_build.clone();
+                async move {
+                    if executor.block_health.load(Ordering::SeqCst) {
+                        executor.health_entered.notify_one();
+                        executor.health_release.notified().await;
+                    }
+                    Json(json!({"protocolVersion":1,"kind":"codexify-browser-companion","build":build,"status":"idle","authenticated":true,"accountFingerprint":executor.health_account.lock().unwrap().clone(),"activeActionId":null}))
+                }
             }),
         );
         let task = tokio::spawn(async move {
@@ -767,17 +800,6 @@ mod tests {
             )
             .unwrap();
         }
-        let tickets = Arc::new(crate::agent_tickets::AgentTicketStore::default());
-        let executor = Arc::new(CreationExecutor {
-            catalog,
-            executions: Mutex::new(Vec::new()),
-            next_limit: Mutex::new(None),
-            next_failure: Mutex::new(None),
-            created_url: Mutex::new("https://chatgpt.com/c/created-chat".into()),
-            reserve_pairing: Default::default(),
-            released_pairings: Default::default(),
-            tickets: tickets.clone(),
-        });
         let supervisor = AgentAutomationSupervisor::new_with_pairing_wait_timeout(
             config.markdown_chat.automation.clone(),
             executor.clone(),
@@ -1746,6 +1768,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn new_chat_preparation_keeps_its_browser_lease_through_account_validation() {
+        let (_temp, state, executor, server) = fixture().await;
+        executor.block_health.store(true, Ordering::SeqCst);
+        let preparing_state = state.clone();
+        let preparing = tokio::spawn(async move {
+            prepare_chat(State(preparing_state), Json(Default::default())).await
+        });
+        tokio::time::timeout(Duration::from_secs(2), executor.health_entered.notified())
+            .await
+            .unwrap();
+        let supervisor = state.automation.as_ref().unwrap().clone();
+        let mut contender = tokio::spawn(async move { supervisor.prepare_new_chat(None).await });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut contender)
+                .await
+                .is_err(),
+            "another browser action must wait for preparation's health proof"
+        );
+        assert_eq!(executor.preparations.load(Ordering::SeqCst), 1);
+        executor.block_health.store(false, Ordering::SeqCst);
+        executor.health_release.notify_one();
+        let prepared = preparing.await.unwrap().unwrap().0;
+        assert_eq!(prepared["catalogRevision"], "creation-catalog");
+        contender.await.unwrap().unwrap();
+        assert_eq!(executor.preparations.load(Ordering::SeqCst), 2);
+        assert!(state.catalog_cache.lock().await.entry.is_some());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn new_chat_preparation_rejects_a_genuinely_different_account() {
+        let (_temp, state, executor, server) = fixture().await;
+        *executor.health_account.lock().unwrap() = "different-account".into();
+        let error = prepare_chat(State(state.clone()), Json(Default::default()))
+            .await
+            .unwrap_err();
+        assert!(error.1.contains("ChatGPT account changed"));
+        assert!(state.catalog_cache.lock().await.entry.is_none());
+        assert!(executor.executions.lock().unwrap().is_empty());
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn creation_progress_streams_before_completion_and_preserves_the_result() {
         let (advance, wait) = tokio::sync::oneshot::channel::<()>();
         let wait = Arc::new(Mutex::new(Some(wait)));
@@ -2421,6 +2486,238 @@ mod tests {
             assert_eq!(git(&source, &["worktree", "list", "--porcelain"]), before);
             server.abort();
         }
+    }
+
+    #[tokio::test]
+    async fn broken_chat_replacement_keeps_the_task_project_goal_and_journal_and_retires_its_old_owner()
+     {
+        use crate::agent_automation::{AutomationActionKind, AutomationActionStatus};
+        let (_temp, state, executor, server) = fixture().await;
+        let _ = prepare_chat(State(state.clone()), Json(Default::default()))
+            .await
+            .unwrap();
+        let created = create_chat(State(state.clone()), Json(body("recover-existing", false)))
+            .await
+            .unwrap()
+            .0;
+        let located = selected(&state, created["id"].as_str().unwrap()).unwrap();
+        let context = automation_context(&state, &located).await.unwrap();
+        state
+            .automation
+            .as_ref()
+            .unwrap()
+            .run_next(crate::markdown_chat::now_ms())
+            .await
+            .unwrap()
+            .unwrap();
+        let ActionPrompt::CreateChat {
+            continuation_token,
+            reference,
+            ..
+        } = executor.executions.lock().unwrap()[0]
+            .request
+            .prompt
+            .clone()
+        else {
+            panic!("missing creation")
+        };
+        let old = ConversationIdentity::from_openai_session("broken-physical-owner").unwrap();
+        state
+            .continuations
+            .claim(&old, &continuation_token, |_, _| Ok(()))
+            .unwrap();
+        context
+            .store
+            .verify_pairing_reference(&context.task, 1, &reference, crate::markdown_chat::now_ms())
+            .unwrap();
+        let goal = context
+            .store
+            .set_goal(&context.task, "Finish the original work", 10)
+            .unwrap();
+        context
+            .store
+            .run_goal(&context.task, goal.revision, 11)
+            .unwrap();
+        let journal = context
+            .store
+            .task_directory(&context.task)
+            .unwrap()
+            .join("rollout.md");
+        std::fs::write(&journal, "Saved progress and next steps").unwrap();
+        let pairing = context.store.load(&context.task).unwrap().pairing;
+        // Real replacements retain the previous physical owner's turn clock.
+        // It must not revoke the next owner's pending creation on registration.
+        context
+            .store
+            .queue_action(
+                &context.task,
+                "old-goal-turn",
+                AutomationActionKind::OfflineGoal,
+                pairing.generation,
+                Some(goal.revision),
+                12,
+            )
+            .unwrap();
+        context
+            .store
+            .record_turn_send(
+                &context.task,
+                crate::agent_automation::turn_renewal::TurnSend {
+                    action_id: "old-goal-turn".into(),
+                    at_ms: 12,
+                    model: Some("discovered-model".into()),
+                    effort: Some("adaptive-choice".into()),
+                    pairing_generation: pairing.generation,
+                    owner_generation: 1,
+                },
+            )
+            .unwrap();
+        context
+            .store
+            .update_action_status(
+                &context.task,
+                "old-goal-turn",
+                AutomationActionStatus::Idle,
+                None,
+                None,
+                12,
+            )
+            .unwrap();
+        assert!(
+            context
+                .store
+                .load(&context.task)
+                .unwrap()
+                .turn_renewal
+                .send
+                .is_some()
+        );
+        context
+            .store
+            .queue_action(
+                &context.task,
+                "confirmed-load-failure",
+                AutomationActionKind::OfflineGoal,
+                pairing.generation,
+                Some(goal.revision),
+                12,
+            )
+            .unwrap();
+        context.store.update_action_status(&context.task,"confirmed-load-failure",AutomationActionStatus::ConversationUnavailable,Some(crate::agent_automation::conversation_recovery::UNAVAILABLE_CONVERSATION_MESSAGE),None,13).unwrap();
+        let root = state
+            .project_bindings
+            .selected_project_root(&state.config, &context.task)
+            .unwrap();
+        super::super::recovery::queue_replacement(&state, &located, Some("stale-action"), false)
+            .await
+            .unwrap_err();
+        super::super::recovery::queue_replacement(
+            &state,
+            &located,
+            Some("confirmed-load-failure"),
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(state.automation.as_ref().unwrap().queued_count().await, 1);
+        // A status/activity request can carry the previous owner's snapshot
+        // across the creation transaction. It must not cancel the new pairing.
+        state
+            .automation
+            .as_ref()
+            .unwrap()
+            .register_task(AutomationTaskHandle::new(
+                context.task.clone(),
+                context.owner_generation,
+                context.store.clone(),
+                context.chat.clone(),
+            ))
+            .await
+            .unwrap();
+        let observed = automation_context(&state, &located).await.unwrap();
+        assert_eq!(observed.owner_generation, 2);
+        assert_eq!(state.automation.as_ref().unwrap().queued_count().await, 1);
+        // A pre-dispatch crash/older cancellation leaves no browser action to
+        // replay. Recover the reservation without counting another failed chat.
+        state
+            .automation
+            .as_ref()
+            .unwrap()
+            .discard_queued_actions(&context.task)
+            .await;
+        context
+            .store
+            .invalidate_pairing_and_supersede_action(&context.task, crate::markdown_chat::now_ms())
+            .unwrap();
+        assert!(
+            crate::agent_automation::conversation_recovery::interrupted_replacement_creation(
+                &context.store.load(&context.task).unwrap()
+            )
+        );
+        super::super::recovery::queue_replacement(&state, &located, None, false)
+            .await
+            .unwrap();
+        assert_eq!(state.automation.as_ref().unwrap().queued_count().await, 1);
+        assert!(
+            super::super::recovery::queue_replacement(
+                &state,
+                &located,
+                Some("confirmed-load-failure"),
+                false
+            )
+            .await
+            .is_err()
+        );
+        state
+            .automation
+            .as_ref()
+            .unwrap()
+            .run_next(crate::markdown_chat::now_ms())
+            .await
+            .unwrap()
+            .unwrap();
+        let ActionPrompt::CreateChat {
+            continuation_token,
+            reference,
+            ..
+        } = executor.executions.lock().unwrap()[1]
+            .request
+            .prompt
+            .clone()
+        else {
+            panic!("missing replacement")
+        };
+        let replacement =
+            ConversationIdentity::from_openai_session("replacement-physical-owner").unwrap();
+        let claim = state
+            .continuations
+            .claim(&replacement, &continuation_token, |task, path| {
+                assert_eq!(task.stable_key(), context.task.stable_key());
+                assert_eq!(Some(path.to_path_buf()), root);
+                Ok(())
+            })
+            .unwrap();
+        context
+            .store
+            .verify_pairing_reference(&claim.task, 2, &reference, crate::markdown_chat::now_ms())
+            .unwrap();
+        let saved = context.store.load(&context.task).unwrap();
+        assert_eq!(saved.goal.unwrap().markdown, "Finish the original work");
+        assert_eq!(saved.conversation_recovery.failed_chat_count, 1);
+        assert_eq!(saved.selection.model.as_deref(), Some("discovered-model"));
+        assert_eq!(
+            std::fs::read_to_string(journal).unwrap(),
+            "Saved progress and next steps"
+        );
+        assert!(!state.continuations.owner_snapshot(&old).unwrap().active);
+        assert!(
+            state
+                .continuations
+                .owner_snapshot(&replacement)
+                .unwrap()
+                .active
+        );
+        server.abort();
     }
 
     #[tokio::test]

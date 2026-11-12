@@ -58,8 +58,8 @@ fn config_and_path_read_missing_config_without_creating_it() {
     let output = run(&root, &["config", "path"]);
     assert_success(&output);
     assert_eq!(
-        String::from_utf8(output.stdout).unwrap().trim(),
-        config_path(&root).to_string_lossy()
+        PathBuf::from(String::from_utf8(output.stdout).unwrap().trim()),
+        config_path(&root)
     );
     assert!(output.stderr.is_empty());
     assert!(!config_path(&root).exists());

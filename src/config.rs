@@ -187,6 +187,11 @@ pub enum CliCommand {
     },
     /// Print the private, localhost-only owner chat URL for the running service.
     Chat,
+    /// Discover the running agent connection, shared by all AI clients.
+    Agents {
+        #[command(subcommand)]
+        command: AgentsCommand,
+    },
     /// Inspect or edit the selected Codexify JSON configuration.
     Config(ConfigArgs),
     /// Diagnose the local Codexify installation without changing it.
@@ -213,6 +218,14 @@ pub enum CliCommand {
     MigrateLegacyInstall,
 }
 
+#[derive(Subcommand, Debug)]
+pub enum AgentsCommand {
+    /// Print the universal MCP/HTTP/JavaScript connection and private agent token.
+    Connection,
+    /// Print short instructions for any AI agent.
+    Instructions,
+}
+
 #[derive(Args, Debug)]
 pub struct ConfigArgs {
     #[command(subcommand)]
@@ -231,6 +244,8 @@ pub enum ConfigCommand {
     Unset(ConfigUnsetArgs),
     /// Open a validated staging copy in the configured text editor.
     Edit,
+    /// Apply the fast browser, delivery, recovery and agent setup in one save.
+    FastSetup,
     /// Validate the selected configuration using server startup rules.
     #[command(hide = true)]
     Validate,
@@ -421,6 +436,14 @@ pub(crate) fn settings_defaults(
     let notifications: crate::markdown_chat::NotificationsConfig =
         serde_json::from_value(json!({"urls":[]})).expect("notification defaults");
     let mut chat = serde_json::to_value(&defaults.markdown_chat).expect("chat defaults");
+    // A reset of the new level still honors an explicitly saved legacy toggle.
+    chat["automation"]["browserSimplicity"] = json!(
+        if document["agentChat"]["automation"]["minimalUi"] == true {
+            "simplified"
+        } else {
+            "off"
+        }
+    );
     chat["notifications"] = serde_json::to_value(notifications).expect("notification defaults");
     json!({
         "instanceName":null,"workDir":null,"debug":defaults.debug,"uiWidgets":defaults.ui_widgets,
@@ -2616,6 +2639,7 @@ mod tests {
                     "automation",
                     "defaultMessageMode",
                     "enabled",
+                    "features",
                     "maxWaitMs",
                     "offlineTimeoutMinutes",
                     "rolloutReminderInterval",
@@ -2638,12 +2662,16 @@ mod tests {
             &[
                 "autoApproveToolCalls",
                 "automaticRetries",
+                "browserActionLanes",
                 "newConversationOnLoadRateLimit",
                 "retryTimings",
                 "connectorName",
                 "descriptorPath",
                 "enabled",
                 "maxQueuedActions",
+                "minimalUi",
+                "browserSimplicity",
+                "recoveryEnhancements",
                 "requestBlockList",
                 "requestBlockingEnabled",
             ],

@@ -84,7 +84,7 @@ impl Tool for GoalTool {
                 "Resume the exact current paused or blocked standalone agent-chat goal without changing its text, revision, elapsed time, or turn count. An already active goal remains active. A completed goal requires goal_set to create a new revision. Use a fresh requestId for each operation and reuse it only to retry identical arguments."
             }
             Self::Finish => {
-                "NON-TERMINAL TOOL. Mark the exact current goal revision completed or blocked and publish its report inline for the user. For completed, summary MUST describe work performed, results and verification; nextSteps MUST describe suggested follow-up (explicitly say none if none is needed). For blocked, reason MUST explain the concrete blocker and nextSteps MUST explain exactly what input, action or external change will unblock it. Never block merely for a timeout or rejected command. This finishes only the goal, NEVER the assistant turn: no normal ChatGPT final answer. After completed call turn_completed repeatedly to wait for requests; after blocked call chat_await repeatedly for the needed input, then goal_resume only once the blocker is resolved. Follow returned user input first. Do not stop because of elapsed time or an anticipated timeout."
+                "NON-TERMINAL TOOL. Mark the exact current goal revision completed or blocked and publish its report inline for the user. For completed, summary MUST describe work performed, results and verification; nextSteps MUST describe suggested follow-up (explicitly say none if none is needed). For blocked, reason MUST explain the concrete blocker and nextSteps MUST explain exactly what input, action or external change will unblock it. Never block merely for a timeout or rejected command. This finishes only the goal, NEVER the assistant turn: no normal ChatGPT final answer. After completed call turn_completed repeatedly to wait for requests; after blocked call chat_await repeatedly for the needed input, then goal_resume only once the blocker is resolved. Follow returned user input first. Do not stop because of elapsed time or an anticipated timeout. Infinite goals require the identical concrete blocker to persist across three distinct goal turns spanning at least 60 seconds. Check alternatives, continue independent work, and restore progress with rollout_read after context loss."
             }
         }
         .into()
@@ -366,6 +366,16 @@ impl Tool for GoalTool {
                     Ok(summary) => summary.total_tool_calls,
                     Err(error) => return ToolResult::error(error),
                 };
+                if let GoalFinish::Blocked { reason } = &finish
+                    && let Err(error) = store.audit_goal_blocker(
+                        task,
+                        args.expected_revision,
+                        args.reason.as_deref().unwrap_or(reason).trim(),
+                        crate::markdown_chat::now_ms(),
+                    )
+                {
+                    return ToolResult::error(error);
+                }
                 match store.finish_goal_with_tool_count(
                     task,
                     args.expected_revision,
