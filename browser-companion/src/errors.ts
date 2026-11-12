@@ -15,6 +15,8 @@ export type BrowserFailureCode =
   | "cancelled"
   | "failed";
 
+// Native recovery counts distinct confirmed-unsent loads with this diagnosis.
+export const CONVERSATION_UNAVAILABLE_MESSAGE = "ChatGPT conversation temporarily not accessible";
 export const BROWSER_STAGES = ["composer_lookup", "effort_control_lookup", "picker_open", "model_options", "model_identity", "effort_selection", "effort_restore", "capability_discovery"] as const;
 export type BrowserStage = typeof BROWSER_STAGES[number];
 const pickerFailureReasons=new Set([

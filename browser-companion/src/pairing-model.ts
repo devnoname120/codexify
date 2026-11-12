@@ -3,6 +3,7 @@ import { activeComposer } from "./composer";
 import { BrowserCompanionError,browserStage } from "./errors";
 import {browserEffortIdFromLabel } from "./models";
 import {withChatGptModelOptions} from "./model-picker";
+import {observeReadOnly} from "./observation";
 import {
   requireChatGptEffortControl, activateChatGptEffortMenu, discoverChatGptEfforts,
   moveChatGptEffortSlider, readChatGptEffortSnapshot, readCurrentEffortLabel,
@@ -24,6 +25,7 @@ async function selectPairingMediumInner(page: Page, signal: AbortSignal): Promis
   const composer = await browserStage("composer_lookup","ChatGPT did not expose one editable pairing composer",()=>activeComposer(page, 10_000, signal));
   const control = await requireChatGptEffortControl(composer.locator("xpath=ancestor::form[1]"),signal);
   const activate=(operationSignal=signal)=>browserStage("picker_open","ChatGPT did not open its pairing effort picker",()=>activateChatGptEffortMenu(page,control,{signal:operationSignal}));
+  const close=()=>control.press("Escape",{timeout:1_000}).catch(()=>{});
   const checkedFamily = async (menu: Awaited<ReturnType<typeof activateChatGptEffortMenu>>,operationSignal=signal) => {
     const {value:rows}=await withChatGptModelOptions(menu,()=>activate(operationSignal),async(_scope,rows)=>rows,{signal:operationSignal});
     const checked=rows.filter(row=>row.checked&&row.family);
@@ -35,19 +37,19 @@ async function selectPairingMediumInner(page: Page, signal: AbortSignal): Promis
   let family: string;
   let label: string;
   try {
-    original = await readChatGptEffortSnapshot(menu.sliderContainer);
-    family = await checkedFamily(menu);
-    label = await readCurrentEffortLabel(menu);
-  } catch (error) { await page.keyboard.press("Escape").catch(() => {}); throw error; }
+    original = await observeReadOnly(readChatGptEffortSnapshot(menu.sliderContainer),signal);
+    family = await checkedFamily(menu,signal);
+    label = await observeReadOnly(readCurrentEffortLabel(menu),signal);
+  } catch (error) { await close(); throw error; }
   let target: number | undefined;
   let mediumSelected = false;
   const inspect = async (operationSignal=signal) => {
     menu = await activate(operationSignal);
-    const state = await readChatGptEffortSnapshot(menu.sliderContainer);
+    const state = await observeReadOnly(readChatGptEffortSnapshot(menu.sliderContainer),operationSignal);
     if (await checkedFamily(menu,operationSignal) !== family || state.min !== original.min || state.max !== original.max) {
       throw new BrowserCompanionError("ChatGPT changed the model family or effort range during pairing", "external_interference");
     }
-    return {state, label:await readCurrentEffortLabel(menu)};
+    return {state, label:await observeReadOnly(readCurrentEffortLabel(menu),operationSignal)};
   };
   const restore = async (restoreSignal: AbortSignal) => {
     try {
@@ -61,13 +63,23 @@ async function selectPairingMediumInner(page: Page, signal: AbortSignal): Promis
       if (restored.state.value !== original.value || normalize(restored.label) !== normalize(label)) {
         throw new BrowserCompanionError("ChatGPT did not restore the conversation's model and effort after pairing", "model_unavailable");
       }
-    } finally { await page.keyboard.press("Escape").catch(() => {}); }
+    } finally { await close(); }
   };
   try {
     let index = original.labels.findIndex(value => value && browserEffortIdFromLabel(value) === "medium");
+    if(index<0&&browserEffortIdFromLabel(label)==="medium")index=original.value-original.min;
     if (index < 0) {
-      const efforts = await discoverChatGptEfforts(menu);
-      index = efforts.find(effort => effort.id === "medium")?.index ?? -1;
+      // Pairing needs one live Medium tick, not an exhaustive model catalogue.
+      // Probe only unnamed available ticks and stop as soon as Medium is proven.
+      const candidates=original.available.flatMap((available,index)=>available&&!original.labels[index]?[index]:[])
+        .sort((left,right)=>Math.abs(original.min+left-original.value)-Math.abs(original.min+right-original.value));
+      for(const candidate of candidates) {
+        signal.throwIfAborted();
+        if(!original.available[candidate]||original.labels[candidate]||original.min+candidate===original.value)continue;
+        await moveChatGptEffortSlider(menu,original.min+candidate,signal);
+        const current=await inspect(signal);
+        if(browserEffortIdFromLabel(current.label)==="medium"){index=candidate;break;}
+      }
     }
     if (index < 0 || !original.available[index]) {
       throw new BrowserCompanionError("Medium mode is unavailable for pairing; the pairing request was not sent", "model_unavailable");
@@ -81,7 +93,7 @@ async function selectPairingMediumInner(page: Page, signal: AbortSignal): Promis
         if (current.state.value !== target || browserEffortIdFromLabel(current.label) !== "medium") {
           throw new BrowserCompanionError("ChatGPT did not retain Medium mode for the pairing request", "model_unavailable");
         }
-      } finally { await page.keyboard.press("Escape").catch(() => {}); }
+      } finally { await close(); }
     };
     await verify(signal);
     mediumSelected = true;
@@ -90,7 +102,7 @@ async function selectPairingMediumInner(page: Page, signal: AbortSignal): Promis
       restore:restoreSignal=>browserStage("effort_restore","ChatGPT could not restore the original pairing effort",()=>restore(restoreSignal)),
     };
   } catch (error) {
-    await restore(AbortSignal.timeout(10_000));
+    await restore(AbortSignal.timeout(2_000));
     throw error;
   }
 }

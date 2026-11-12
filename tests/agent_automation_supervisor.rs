@@ -27,7 +27,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 const COMPANION_TOKEN: &str = "YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE";
-const COMPANION_BUILD: &str = "supervisor-fake-build+protocol.2f7852fd999d639b18e829bc273b2e38021c40c839ec0feb0ff2c793cfeb9e03";
+const COMPANION_BUILD: &str = "supervisor-fake-build+protocol.36957a042ed31cae11d0401411999119d39c22af98278a46b25c412b0be765c6";
 
 struct FakeExecutor {
     calls: AtomicUsize,

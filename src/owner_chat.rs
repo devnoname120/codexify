@@ -2664,7 +2664,7 @@ mod tests {
     struct OwnerNoopExecutor;
 
     const OWNER_COMPANION_TOKEN: &str = "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc";
-    const OWNER_COMPANION_BUILD: &str = "owner-companion-test-v1+protocol.2f7852fd999d639b18e829bc273b2e38021c40c839ec0feb0ff2c793cfeb9e03";
+    const OWNER_COMPANION_BUILD: &str = "owner-companion-test-v1+protocol.36957a042ed31cae11d0401411999119d39c22af98278a46b25c412b0be765c6";
 
     #[test]
     fn project_groups_resolve_registered_worktrees_without_merging_same_named_projects() {
