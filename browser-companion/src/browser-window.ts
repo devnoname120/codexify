@@ -1,7 +1,9 @@
 import {withConversationCooldownBypass} from "./navigation";
+import {submissionTracingEnabled} from "./submission-network";
 import { createHash } from "node:crypto";
-import { asCompanionError, BrowserCompanionError, ConversationCooldownError } from "./errors";
+import { asCompanionError, BrowserCompanionError, ConversationCooldownError, CONVERSATION_UNAVAILABLE_MESSAGE } from "./errors";
 import { modelSelectionAllowed } from "./model-fallback";
+import { observeReadOnly } from "./observation";
 import {
   COMPANION_KIND,
   MAX_DELTA_BYTES,
@@ -35,10 +37,16 @@ type WithoutEventEnvelope<T> = T extends ActionEvent
 const STOP_PROGRESS_STEPS = ["initial", "retry", "recovery", "confirmation", "complete"] as const;
 export type StopProgressStep = typeof STOP_PROGRESS_STEPS[number];
 export type DriverEvent = WithoutEventEnvelope<ActionEvent> | {type:"connector_omitted"}
+  | {type:"editor_recovery";step:"started"|"document_loaded"|"ready"}
+  | {type:"navigation_progress";step:"document_loaded"|"editor_ready"|"account_verified"}
+  | {type:"connector_progress";step:"query_inserted"|"menu_ready"|"app_selected"}
+  | {type:"submission_progress";step:"send_clicked"}
   | {type:"stop_progress";step:StopProgressStep};
 
 export const MAX_RETAINED_ACTIONS = 8;
 export const BROWSER_OPERATION_TIMEOUT_MS = 30_000;
+export const PASSIVE_HEALTH_BUDGET_MS = 250;
+export const PASSIVE_HEALTH_RESULT_MAX_AGE_MS = 2_000;
 // Refresh confirmation can take 60 seconds after its bounded UI steps. Keep
 // ownership through observation and restoration, below the client's 150s limit.
 const CONNECTOR_REFRESH_TIMEOUT_MS = 120_000;
@@ -57,9 +65,11 @@ export interface DriverExecution {
 export type BrowserStepRunner = <T>(operation:(signal:AbortSignal)=>Promise<T>,signal?:AbortSignal)=>Promise<T>;
 
 export interface BrowserDriver {
-  approvePendingConversation?(request:ConversationApprovalRequest,signal:AbortSignal):Promise<boolean>;
+  presentation?(signal?:AbortSignal,screenshot?:boolean):Promise<unknown>;
+  setPresentationStyle?(css:string,signal?:AbortSignal):Promise<unknown>;
+  approvePendingConversation?(request:ConversationApprovalRequest,signal:AbortSignal,once?:boolean):Promise<boolean>;
   liveness?():Promise<boolean>;
-  health(): Promise<{
+  health(signal?:AbortSignal): Promise<{
     authenticated:boolean;
     accountFingerprint:string | null;
     status:"idle" | "busy" | "authentication_required" | "unavailable";
@@ -95,6 +105,7 @@ interface ActionRecord {
   listeners: Set<(event: ActionEvent) => void>;
   abort: AbortController;
   recoverAuthentication: boolean;
+  verifiedAccountFingerprint: string | null;
   pairingContinuation: boolean;
   terminal: boolean;
   runSettledPromise: Promise<void>;
@@ -225,29 +236,124 @@ export class SingleWindowCoordinator {
   private activeActionId: string | null = null;
   private pendingActionId: string | null = null;
   private windowOperationTail: Promise<void> = Promise.resolve();
+  // Latest time every queued window operation can legitimately finish.
+  private windowOperationTailDeadline = 0;
   private retired = false;
   private driverClosed = false;
   private windowOperationActive = false;
+  private observationCleanupPending = false;
+  private actionCleanupPending = false;
   private connectorRefreshPending = false;
+  private healthFlight?:ReturnType<BrowserDriver["health"]>;
+  private healthFlightGeneration=0;
+  private healthGeneration=0;
+  private healthCompleted?:{pending:ReturnType<BrowserDriver["health"]>;generation:number;observedAt:number;health:Awaited<ReturnType<BrowserDriver["health"]>>};
   private closing = false;
   private pairingWindow: {actionId:string;url:string;generation:number;account:string;connector:string;timer:ReturnType<typeof setTimeout>} | null = null;
 
   constructor(private readonly driver: BrowserDriver, readonly build: string,
-    private readonly timeouts: {operationMs:number;cleanupMs:number;hardStopMs:number;pairingRetentionMs?:number;accountPlanMs?:number} = { operationMs:BROWSER_OPERATION_TIMEOUT_MS, cleanupMs:BROWSER_CLEANUP_GRACE_MS, hardStopMs:BROWSER_HARD_STOP_MS, accountPlanMs:45_000 }) {
+    private readonly timeouts: {operationMs:number;cleanupMs:number;hardStopMs:number;retainedCleanupMs?:number;pairingRetentionMs?:number;accountPlanMs?:number} = { operationMs:BROWSER_OPERATION_TIMEOUT_MS, cleanupMs:BROWSER_CLEANUP_GRACE_MS, hardStopMs:BROWSER_HARD_STOP_MS, accountPlanMs:45_000 }) {
     validateProtocolBuild(build);
     if (Object.values(timeouts).some(value => !Number.isFinite(value) || value <= 0)) throw new Error("Browser operation deadlines must be positive");
   }
 
   async liveness():Promise<{protocolVersion:number;build:string;available:boolean}> {
-    const available=!this.retired&&!this.driverClosed&&(this.activeActionId!==null||this.pendingActionId!==null||this.windowOperationActive||(this.driver.liveness
+    const available=(this.activeActionId!==null&&!this.actionCleanupPending)||this.pendingActionId!==null||(!this.retired&&!this.driverClosed&&((this.windowOperationActive&&!this.observationCleanupPending&&!this.actionCleanupPending)||(this.driver.liveness
       ? await this.driver.liveness()
-      : await this.driver.health().then(health=>health.status!=="unavailable"||health.authenticated).catch(()=>false)));
+      : await this.driver.health().then(health=>health.status!=="unavailable"||health.authenticated).catch(()=>false))));
     return {protocolVersion:PROTOCOL_VERSION,build:this.build,available};
   }
 
+  async presentation(signal?:AbortSignal,screenshot=false):Promise<unknown> {
+    if(this.activeActionId||this.windowOperationActive)throw new BrowserCompanionError("Browser companion is busy; presentation inspection deferred");
+    return this.withWindowOperation(async operationSignal=>{
+      if(this.activeActionId)throw new BrowserCompanionError("Browser companion is busy with an active action");
+      if(!this.driver.presentation)throw new Error("Presentation inspection is unavailable");
+      const inspection=this.driver.presentation(operationSignal,screenshot);
+      // A late read cannot change the browser. Let it settle independently so
+      // a cancelled diagnostic cannot retire the window it was inspecting.
+      return screenshot?inspection:observeReadOnly(inspection,operationSignal,6000);
+    },signal,false,6000,"presentation screenshot");
+  }
+  async setPresentationStyle(css:string,signal?:AbortSignal):Promise<unknown> {
+    if(this.activeActionId||this.windowOperationActive)throw new BrowserCompanionError("Browser companion is busy; fast presentation update deferred");
+    return this.withWindowOperation(async operationSignal=>{
+      if(this.activeActionId||!this.driver.setPresentationStyle)throw new Error("Fast presentation update is unavailable while busy");
+      return this.driver.setPresentationStyle(css,operationSignal);
+    },signal,false,6000,"presentation style update");
+  }
+
   async health(): Promise<CompanionHealth> {
+    return this.inspectCoordinatorHealth(true);
+  }
+
+  get busy():boolean {
+    return this.retired || this.activeActionId !== null || this.pendingActionId !== null || this.windowOperationActive
+      || this.actionCleanupPending || this.observationCleanupPending;
+  }
+
+  // An admitted action owns its page before its asynchronous preflight starts.
+  get ownedActionId():string | null { return this.activeActionId ?? this.pendingActionId; }
+  get retiredWindow():boolean {return this.retired;}
+
+  // Action preflight can await the actual observation instead of treating the
+  // passive reader's short warming response as a failed or delayed action.
+  async readyHealth():Promise<CompanionHealth> {
+    return this.inspectCoordinatorHealth(this.busy);
+  }
+
+  private invalidatePassiveHealth():void {
+    this.healthGeneration++;this.healthCompleted=undefined;
+  }
+
+  private healthInspection(refresh:boolean):ReturnType<BrowserDriver["health"]> {
+    if(!refresh&&this.healthFlight)return this.healthFlight;
+    const previous=this.healthFlight,generation=this.healthGeneration;
+    // Full verification waits for an old passive observation, then starts a
+    // fresh read. Invalidation never starts an overlapping session probe.
+    const pending=previous?previous.catch(()=>{}).then(()=>this.driver.health()):this.driver.health();
+    this.healthFlight=pending;this.healthFlightGeneration=generation;
+    void pending.then(health=>{
+      if(generation===this.healthGeneration&&!this.activeActionId&&!this.windowOperationActive&&!this.retired&&!this.driverClosed)
+        this.healthCompleted={pending,generation,observedAt:Date.now(),health};
+    }).finally(()=>{if(this.healthFlight===pending)this.healthFlight=undefined;}).catch(()=>{});
+    return pending;
+  }
+
+  private async inspectCoordinatorHealth(passive:boolean): Promise<CompanionHealth> {
+    const owner=this.activeActionId ?? this.pendingActionId;
+    const active=owner ? this.actions.get(owner) : undefined;
+    if(active) {
+      // The action owns the tab. Repeated health requests from queued chats
+      // must not compete with navigation/editor work on Chrome's main thread.
+      // This is the last verified identity, not permission for another Send;
+      // the driver still verifies the actual account before submitting.
+      return {protocolVersion:PROTOCOL_VERSION,kind:COMPANION_KIND,build:this.build,status:"busy",
+        authenticated:active.verifiedAccountFingerprint!==null,accountFingerprint:active.verifiedAccountFingerprint,
+        activeActionId:active.request.actionId};
+    }
     if (this.retired) return {protocolVersion:PROTOCOL_VERSION,kind:COMPANION_KIND,build:this.build,status:"unavailable",authenticated:false,accountFingerprint:null,activeActionId:null};
-    const health = await this.driver.health();
+    // Several worker/UI polls can arrive together while no action owns the tab.
+    // A passive HTTP poll must finish before the native manager's short health
+    // deadline, while the one real session inspection continues independently.
+    let health:Awaited<ReturnType<BrowserDriver["health"]>>|undefined;
+    // This is a short-lived observation, not a single-reader ticket. UI and
+    // readiness polls must not steal the only verified result from queued work
+    // and repeatedly force its preflight into a new warming/30-second wait.
+    const completed=this.healthCompleted;
+    if(passive&&completed&&completed.generation===this.healthGeneration&&Date.now()-completed.observedAt<=PASSIVE_HEALTH_RESULT_MAX_AGE_MS)
+      health=completed.health;
+    else {
+      if(!passive)this.invalidatePassiveHealth();
+      const pending=this.healthInspection(!passive);
+      const generation=this.healthFlightGeneration;
+      let timer:ReturnType<typeof setTimeout>|undefined;
+      try {
+        health=passive?await Promise.race([pending,new Promise<undefined>(resolve=>{timer=setTimeout(()=>resolve(undefined),PASSIVE_HEALTH_BUDGET_MS);})]):await pending;
+      } finally {if(timer)clearTimeout(timer);}
+      if(passive&&generation!==this.healthGeneration)health=undefined;
+    }
+    if(!health)return {protocolVersion:PROTOCOL_VERSION,kind:COMPANION_KIND,build:this.build,status:"busy",authenticated:false,accountFingerprint:null,activeActionId:null};
     return {
       protocolVersion:PROTOCOL_VERSION,
       kind:COMPANION_KIND,
@@ -259,56 +365,76 @@ export class SingleWindowCoordinator {
     };
   }
 
-  async approvePendingConversation(raw:ConversationApprovalRequest,signal?:AbortSignal):Promise<{protocolVersion:number;build:string;approved:boolean}> {
+  async approvePendingConversation(raw:ConversationApprovalRequest,signal?:AbortSignal,navigate=false,once=false):Promise<{protocolVersion:number;build:string;approved:boolean}> {
     const request = conversationApprovalRequestSchema.parse(raw);
     const receipt = (approved:boolean) => ({protocolVersion:PROTOCOL_VERSION,build:this.build,approved});
     if (this.activeActionId || this.windowOperationActive || !this.driver.approvePendingConversation) return receipt(false);
-    const bounded = AbortSignal.any([AbortSignal.timeout(5_000),...(signal ? [signal] : [])]);
+    const bounded = AbortSignal.any([AbortSignal.timeout(navigate?30_000:5_000),...(signal ? [signal] : [])]);
     return this.withWindowOperation(async operationSignal => {
       if (this.activeActionId) return receipt(false);
-      return receipt(await this.driver.approvePendingConversation!(request,operationSignal));
-    },bounded);
+      if(navigate){
+        const health=await this.driver.health(operationSignal);
+        if(!health.authenticated||health.accountFingerprint!==request.expectedAccountFingerprint)
+          throw new BrowserCompanionError('ChatGPT account changed before approval recovery','authentication_required');
+        await this.driver.reveal(request.url,operationSignal);
+      }
+      return receipt(await this.driver.approvePendingConversation!(request,operationSignal,once));
+    },bounded,false,this.timeouts.operationMs,"connector approval");
   }
 
   async login(signal?: AbortSignal): Promise<CompanionHealth> {
     await this.withWindowOperation(async operationSignal => {
       if (this.activeActionId) throw new Error(`Browser companion is busy with action ${this.activeActionId}`);
-      const health = await this.driver.health();
+      const health = await this.driver.health(operationSignal);
       if (health.status === "busy") {
         throw new Error(health.detail || "Browser companion window is not idle");
       }
       await this.driver.login(operationSignal);
-    }, signal);
-    return this.health();
+    }, signal,false,this.timeouts.operationMs,"login");
+    return this.inspectCoordinatorHealth(false);
   }
 
   async capabilities(signal?: AbortSignal): Promise<CapabilityCatalog> {
+    if(!this.connectorRefreshPending&&(this.activeActionId||this.windowOperationActive))throw new BrowserCompanionError("Browser companion is busy; catalogue inspection deferred");
     return this.withWindowOperation(async operationSignal => {
       if (this.activeActionId) throw new Error("Browser companion is busy with an active action");
-      const health = await this.driver.health();
+      const health = await this.driver.health(operationSignal);
       if (health.status === "busy") {
         throw new Error(health.detail || "Browser companion window is not idle");
       }
       const catalog = await this.driver.capabilities(operationSignal);
       return { ...catalog, protocolVersion:PROTOCOL_VERSION, build:this.build };
-    }, signal);
+    }, signal,false,this.timeouts.operationMs,"capability inspection");
   }
 
   async newChatCapabilities(projectUrl:string | null, signal?: AbortSignal): Promise<CapabilityCatalog> {
-    return this.withWindowOperation(async operationSignal => {
+    const catalog=await this.withWindowOperation(async operationSignal => {
       if (this.activeActionId) throw new Error("Browser companion is busy with an active action");
       if (!this.driver.prepareNewChat) throw new Error("New chat preparation is unavailable");
       const catalog = await this.driver.prepareNewChat(projectUrl, operationSignal);
       return {...catalog, protocolVersion:PROTOCOL_VERSION, build:this.build};
-    }, signal);
+    // Cold setup includes navigation, editor hydration and a full picker scan.
+    // Each is bounded, but together can exceed an ordinary maintenance read.
+    }, signal,false,this.timeouts.operationMs*3,"new chat preparation");
+    // Older native recovery checks passive health immediately after preparing
+    // a new chat. Finish real verification after the lease invalidates its old
+    // proof, so that check cannot mistake normal warming for lost sign-in.
+    signal?.throwIfAborted();
+    const health=await this.readyHealth();
+    signal?.throwIfAborted();
+    if(!health.authenticated||health.accountFingerprint!==catalog.accountFingerprint
+      ||health.status!=='idle'||health.activeActionId)
+      throw new BrowserCompanionError('ChatGPT account or browser changed while preparing recovery','external_interference');
+    return catalog;
   }
 
   async accountPlan(epoch:string, signal?: AbortSignal) {
+    if(!this.connectorRefreshPending&&(this.activeActionId||this.windowOperationActive))throw new BrowserCompanionError("Browser companion is busy; account plan inspection deferred");
     return this.withWindowOperation(async operationSignal=>{
       if(this.activeActionId)throw new Error("Browser companion is busy with an active action");
       if(!this.driver.accountPlan)throw new Error("Account plan inspection is unavailable");
       return this.driver.accountPlan(epoch, operationSignal);
-    }, signal,false,this.timeouts.accountPlanMs??this.timeouts.operationMs);
+    }, signal,false,this.timeouts.accountPlanMs??this.timeouts.operationMs,"account plan inspection");
   }
 
   async navigationAvailability(url:string) {
@@ -317,10 +443,11 @@ export class SingleWindowCoordinator {
   }
 
   async turnHandoffComplete(url:string,account:string,handoffId:string,signal?:AbortSignal) {
+    if(this.activeActionId||this.windowOperationActive)return {protocolVersion:PROTOCOL_VERSION,build:this.build,complete:false};
     const complete=await this.withWindowOperation(async operationSignal=>{
       if(this.activeActionId || !this.driver.turnHandoffComplete)return false;
       return this.driver.turnHandoffComplete(url,account,handoffId,operationSignal);
-    },signal);
+    },signal,false,this.timeouts.operationMs,"turn handoff inspection");
     return {protocolVersion:PROTOCOL_VERSION,build:this.build,complete};
   }
 
@@ -333,10 +460,10 @@ export class SingleWindowCoordinator {
         if(this.driver.refreshConnectorSteps)return this.driver.refreshConnectorSteps(name,
           // Normal phases inherit operationSignal. Restoration deliberately
           // supplies no parent so it can finish under its own cleanup deadline.
-          (operation,parent)=>this.bounded(operation,parent),operationSignal);
+          (operation,parent)=>this.boundedObservationStep(operation,parent),operationSignal);
         if(!this.driver.refreshConnector)throw new Error("Connector maintenance is unavailable");
         return this.driver.refreshConnector(name,operationSignal);
-      },signal,false,this.driver.refreshConnectorSteps?CONNECTOR_REFRESH_TIMEOUT_MS:this.timeouts.operationMs);
+      },signal,false,this.driver.refreshConnectorSteps?CONNECTOR_REFRESH_TIMEOUT_MS:this.timeouts.operationMs,"connector refresh");
     } finally {
       this.connectorRefreshPending = false;
     }
@@ -346,7 +473,7 @@ export class SingleWindowCoordinator {
     return this.withWindowOperation(async operationSignal => {
       let destination = this.activeActionId ? null : url;
       if (destination) {
-        const health = await this.driver.health();
+        const health = await this.driver.health(operationSignal);
         if (health.status === "busy") destination = null;
       }
       await this.driver.reveal(destination, operationSignal);
@@ -356,7 +483,7 @@ export class SingleWindowCoordinator {
         revealed:true,
         activeActionId:this.activeActionId,
       };
-    }, signal);
+    }, signal,false,this.timeouts.operationMs,"reveal");
   }
 
   async execute(raw: ExecuteActionRequest, signal?: AbortSignal): Promise<ActionSnapshot> {
@@ -406,6 +533,7 @@ export class SingleWindowCoordinator {
       listeners:new Set(),
       abort:new AbortController(),
       recoverAuthentication:false,
+      verifiedAccountFingerprint:null,
       pairingContinuation:Boolean(continuing),
       terminal:false,
       runSettledPromise,
@@ -432,7 +560,9 @@ export class SingleWindowCoordinator {
       await this.withWindowOperation(async operationSignal => {
         this.pendingActionId = null;
         this.activeActionId = request.actionId;
-        let health = await this.driver.health();
+        if(submissionTracingEnabled())console.error(`[submission-step] ${request.actionId} checking preflight health`);
+        let health = await this.driver.health(operationSignal);
+        if(submissionTracingEnabled())console.error(`[submission-step] ${request.actionId} preflight health ${health.status}`);
         if (health.status === "unavailable") throw new BrowserCompanionError(health.detail || "Browser companion Chrome window is unavailable");
         const recoverAuthentication = !health.authenticated && health.status === "authentication_required"
           && request.prompt.kind !== "create_chat";
@@ -444,19 +574,21 @@ export class SingleWindowCoordinator {
         }
         if (health.status === "busy" && request.prompt.kind === "pair_verify"
           && await this.driver.replacePairingDraft?.(request, operationSignal)) {
-          health = await this.driver.health();
+          health = await this.driver.health(operationSignal);
         }
         if (health.status !== "idle" && request.prompt.kind !== "create_chat" && !recoverAuthentication && !record.pairingContinuation) {
           throw new BrowserCompanionError(health.detail || `Browser companion window is not idle (${health.status})`);
         }
         record.recoverAuthentication = recoverAuthentication;
+        record.verifiedAccountFingerprint = health.authenticated ? health.accountFingerprint : null;
       }, record.abort.signal);
       await this.run(record);
     } catch (error) {
       if (!record.terminal) this.emitFailure(record, asCompanionError(error));
     } finally {
       if (this.pendingActionId === request.actionId) this.pendingActionId = null;
-      if (this.activeActionId === request.actionId && this.pairingWindow?.actionId !== request.actionId) this.activeActionId = record.pairingContinuation ? this.pairingWindow?.actionId ?? null : null;
+      // A retained conversation load keeps its lease until its cleanup settles.
+      if (!this.actionCleanupPending && this.activeActionId === request.actionId && this.pairingWindow?.actionId !== request.actionId) this.activeActionId = record.pairingContinuation ? this.pairingWindow?.actionId ?? null : null;
       record.resolveRunSettled();
     }
   }
@@ -569,29 +701,98 @@ export class SingleWindowCoordinator {
     }, undefined, true);
   }
 
-  private async withWindowOperation<T>(operation: (signal:AbortSignal) => Promise<T>, signal?:AbortSignal, closing=false, timeoutMs=this.timeouts.operationMs): Promise<T> {
+  private async withWindowOperation<T>(operation: (signal:AbortSignal) => Promise<T>, signal?:AbortSignal, closing=false, timeoutMs=this.timeouts.operationMs, retainedOperation?:string): Promise<T> {
     let release!: () => void;
     const previous = this.windowOperationTail;
     this.windowOperationTail = new Promise<void>(resolve => { release = resolve; });
-    await previous;
+    // A queued caller may not expire while its predecessors are still within
+    // their own budgets (a connector refresh can legitimately outlast this
+    // caller's timeout). It still expires once they overrun those budgets.
+    const budgetMs=timeoutMs+this.timeouts.cleanupMs+this.timeouts.hardStopMs;
+    const queuedAt=Date.now();
+    const predecessorsDeadline=this.windowOperationTailDeadline;
+    this.windowOperationTailDeadline=Math.max(predecessorsDeadline,queuedAt)+budgetMs;
+    let acquired=false;
+    let unsettled:Promise<unknown>|undefined;
+    let queuedTimer:ReturnType<typeof setTimeout>|undefined;
+    let queuedAbort:(()=>void)|undefined;
     try {
+      // A timed-out observation can retain the UI lease while its late read or
+      // navigation settles. Bound callers waiting behind it without letting an
+      // abandoned queue entry execute later or break ownership ordering.
+      try {
+        await Promise.race([previous,new Promise<never>((_resolve,reject)=>{
+          queuedAbort=()=>reject(new BrowserCompanionError('Browser action was cancelled','cancelled'));
+          if(signal?.aborted){queuedAbort();return;}
+          signal?.addEventListener('abort',queuedAbort,{once:true});
+          queuedTimer=setTimeout(()=>reject(new BrowserCompanionError('Browser companion is busy; a previous operation still owns the shared window')),
+            Math.max(budgetMs,predecessorsDeadline-queuedAt));
+        })]);
+      } finally {
+        if(queuedTimer)clearTimeout(queuedTimer);
+        if(queuedAbort)signal?.removeEventListener('abort',queuedAbort);
+      }
+      acquired=true;
       if (this.retired && !closing) throw new BrowserCompanionError("Browser operation recovery is required; restart the browser companion", "failed");
+      if (this.actionCleanupPending && !closing) throw new BrowserCompanionError("Browser companion is busy; a cancelled conversation load still owns the shared window");
+      this.invalidatePassiveHealth();
       this.windowOperationActive=true;
-      return await this.bounded(operation, signal,()=>false,timeoutMs);
+      return await this.bounded(operation, signal,()=>false,timeoutMs,
+        retainedOperation?pending=>{unsettled=pending;this.observationCleanupPending=true;}:undefined);
     } finally {
-      this.windowOperationActive=false;
-      release();
+      if(!acquired){void previous.then(release);}
+      else if(unsettled){
+        this.releaseRetainedCleanup(unsettled,()=>{
+          this.invalidatePassiveHealth();this.observationCleanupPending=false;this.windowOperationActive=false;release();
+        },retainedOperation ?? 'maintenance');
+      }else{this.invalidatePassiveHealth();this.windowOperationActive=false;release();}
+    }
+  }
+
+  private releaseRetainedCleanup(pending:Promise<unknown>,release:()=>void,label:string):void {
+    let finished=false,retiring=false;
+    const finish=()=>{if(finished)return;finished=true;clearTimeout(timer);release();};
+    // Allow slow restoration to finish, but a responsive renderer is not proof
+    // that a cancelled operation will ever settle. Never retain its lease forever.
+    const timer=setTimeout(()=>{
+      retiring=true;this.retired=true;
+      console.error(`[browser-lease] at=${new Date().toISOString()} retired ${label} after cancelled cleanup did not settle`);
+      void (async()=>{
+        try {
+          if(!this.driverClosed){
+            this.driverClosed=true;
+            let stopTimer:ReturnType<typeof setTimeout>|undefined;
+            try {await Promise.race([
+              Promise.resolve().then(()=>this.driver.close?.()).catch(()=>{}),
+              new Promise<void>(resolve=>{stopTimer=setTimeout(resolve,this.timeouts.hardStopMs);}),
+            ]);} finally {if(stopTimer)clearTimeout(stopTimer);}
+          }
+        } finally {finish();}
+      })();
+    },this.timeouts.retainedCleanupMs??30_000);
+    void pending.then(()=>{if(!retiring)finish();},()=>{if(!retiring)finish();});
+  }
+
+  private async boundedObservationStep<T>(operation:(signal:AbortSignal)=>Promise<T>,signal?:AbortSignal):Promise<T> {
+    let unsettled:Promise<unknown>|undefined;
+    try {return await this.bounded(operation,signal,()=>false,this.timeouts.operationMs,pending=>{unsettled=pending;});}
+    catch(error){
+      // A connector phase must settle before its finally block can restore the
+      // page. The outer observation deadline bounds the HTTP caller while
+      // retaining ownership over this delayed phase and its restoration.
+      if(unsettled)await unsettled;
+      throw error;
     }
   }
 
   private async bounded<T>(operation:(signal:AbortSignal,progress:()=>void)=>Promise<T>, parent?:AbortSignal,
-    mayHaveSent:()=>boolean=()=>false,timeoutMs=this.timeouts.operationMs):Promise<T> {
+    mayHaveSent:()=>boolean=()=>false,timeoutMs=this.timeouts.operationMs,retainObservation?:(pending:Promise<unknown>)=>void|boolean):Promise<T> {
     const abort = new AbortController();
     const cancel = () => abort.abort(new BrowserCompanionError("Browser action was cancelled", "cancelled"));
     if (parent?.aborted) cancel(); else parent?.addEventListener("abort",cancel,{once:true});
     const timer = setTimeout(() => abort.abort(new BrowserCompanionError(
       `Browser operation timed out after ${timeoutMs / 1000} seconds without progress`, "failed")), timeoutMs);
-    timer.unref?.();
+    // Retain the timer while an action owns browser cleanup, even without live handles.
     let onAbort!:()=>void;
     const interrupted = new Promise<{interrupted:true}>(resolve => {
       onAbort=()=>resolve({interrupted:true});
@@ -610,11 +811,13 @@ export class SingleWindowCoordinator {
       if (!("interrupted" in result)) { if (result.ok) return result.value; throw result.error; }
       const submitted = mayHaveSent();
       const cleanup = await wait(pending,this.timeouts.cleanupMs);
-      if (!cleanup) {
+      const retained=!cleanup&&retainObservation&&retainObservation(pending)!==false;
+      if (!cleanup&&!retained) {
         // Never release this tab to a new operation while an old driver can still
         // mutate it. Retire and close an uncooperative driver; the next request
         // recovers through the existing browser-companion restart path.
         this.retired=true;
+        console.error(`[browser-deadline] at=${new Date().toISOString()} retired action=${this.activeActionId??"preflight-or-maintenance"} sendMayHaveBeenAccepted=${submitted||mayHaveSent()} after an operation ignored cancellation`);
         if (!this.driverClosed) { this.driverClosed=true; await wait(Promise.resolve().then(()=>this.driver.close?.()).catch(()=>{}),this.timeouts.hardStopMs); }
       }
       const reason = asCompanionError(abort.signal.reason);
@@ -657,6 +860,11 @@ export class SingleWindowCoordinator {
 
   private async runWithNavigationPolicy(record: ActionRecord): Promise<void> {
     const completedSteps = new Set<string>();
+    let unsettled:Promise<unknown>|undefined;
+    const loadingOnly=()=>record.request.prompt.kind!=="create_chat"
+      && completedSteps.has("navigating") && !completedSteps.has("composer_ready")
+      && !completedSteps.has("navigation:editor_ready") && !completedSteps.has("model_verified")
+      && !completedSteps.has("connector_verified") && ![...completedSteps].some(key=>key.startsWith("stop:"));
     try {
       await this.bounded(async(signal,progress)=>{
         if(record.recoverAuthentication){
@@ -665,10 +873,11 @@ export class SingleWindowCoordinator {
           this.emit(record,{type:"navigating"});progress();
           if(!this.driver.recoverAuthentication)throw new BrowserCompanionError("Browser companion requires ChatGPT authentication","authentication_required");
           await this.driver.recoverAuthentication(record.request,signal);
-          const health=await this.driver.health();
+          const health=await this.driver.health(signal);
           if(!health.authenticated||health.status==="authentication_required")throw new BrowserCompanionError("Browser companion requires ChatGPT authentication","authentication_required");
           if(health.accountFingerprint!==record.request.expectedAccountFingerprint)throw new BrowserCompanionError("Browser companion account changed before the action could start","authentication_required");
           if(health.status!=="idle")throw new BrowserCompanionError(health.detail||"Browser companion window is not idle","external_interference");
+          record.verifiedAccountFingerprint=health.accountFingerprint;
         }
         await this.driver.execute({
           request:record.request,
@@ -678,15 +887,22 @@ export class SingleWindowCoordinator {
             this.emit(record,event);
             // Only a newly verified stage renews the stall deadline. Repeated
             // events and response output cannot keep browser ownership alive.
-            const progressKey=event.type==='stop_progress'?`stop:${event.step}`:event.type;
+            const progressKey=event.type==='stop_progress'?`stop:${event.step}`:event.type==='editor_recovery'?`editor:${event.step}`:event.type==='navigation_progress'?`navigation:${event.step}`:event.type==='connector_progress'?`connector:${event.step}`:event.type;
             if (!record.terminal && !completedSteps.has(progressKey)
-              && ["navigating","composer_ready","model_verified","connector_verified","connector_omitted","stop_progress","send_accepted","conversation_created"].includes(event.type)) {
+              && ["navigating","composer_ready","model_verified","connector_verified","connector_omitted","stop_progress","editor_recovery","navigation_progress","connector_progress","submission_progress","send_accepted","conversation_created"].includes(event.type)) {
               completedSteps.add(progressKey);
               progress();
             }
           },
         });
-      },record.abort.signal,()=>this.driver.submissionMayHaveBeenAccepted?.(record.request.actionId)??false);
+      },record.abort.signal,()=>this.driver.submissionMayHaveBeenAccepted?.(record.request.actionId)??false,this.timeouts.operationMs,pending=>{
+        if(!loadingOnly()||record.snapshot.sendAccepted||this.driver.submissionMayHaveBeenAccepted?.(record.request.actionId))return false;
+        // A late navigation/renderer read has not touched the composer or Send.
+        // Keep its action lease until it settles rather than closing a live
+        // browser. New mutations are refused, and liveness uses real probes.
+        unsettled=pending;this.actionCleanupPending=true;
+        console.error(`[browser-deadline] at=${new Date().toISOString()} retained action=${record.request.actionId} stage=conversation_load until cancelled work settles`);
+      });
       if (!record.terminal) {
         this.emit(record, {
           type:"failed",
@@ -700,19 +916,34 @@ export class SingleWindowCoordinator {
       if (error.code!=="conversation_limit"&&(record.snapshot.sendAccepted || error.sendAccepted)) {
         this.emit(record, { type:"ambiguous_send", message:boundedEventMessage(error.message) });
       } else {
-        this.emitFailure(record, error);
+        const stalledConversationLoad=loadingOnly()
+          && error.code==="failed" && error.message.startsWith("Browser operation timed out");
+        this.emitFailure(record,stalledConversationLoad
+          ? new BrowserCompanionError(CONVERSATION_UNAVAILABLE_MESSAGE,"conversation_unavailable",{cause:error})
+          : error);
       }
     } finally {
-      if (!this.closing && record.request.retainPairingWindow && record.request.prompt.kind === "create_chat"
-        && record.snapshot.state === "idle" && record.snapshot.sendAccepted && !record.snapshot.attention
-        && record.snapshot.canonicalUrl && this.activeActionId === record.request.actionId) {
-        const timer = setTimeout(()=>this.releasePairingWindow(record.request.actionId),this.timeouts.pairingRetentionMs ?? 180_000);
-        timer.unref?.();
-        this.pairingWindow = {actionId:record.request.actionId,url:record.snapshot.canonicalUrl,
-          generation:record.request.pairingGeneration,account:record.request.expectedAccountFingerprint,
-          connector:record.request.connectorName,timer};
-      } else if (this.activeActionId === record.request.actionId) this.activeActionId = record.pairingContinuation ? this.pairingWindow?.actionId ?? null : null;
       record.resolveRunSettled();
+      // Keep the native watchdog from replacing the process during browser
+      // cleanup or before its terminal event has reached the event stream.
+      // The retired driver still rejects every new window operation.
+      if(this.retired)await new Promise(resolve=>setTimeout(resolve,250));
+      const release=()=>{
+        if (!this.closing && !unsettled && record.request.retainPairingWindow && record.request.prompt.kind === "create_chat"
+          && record.snapshot.state === "idle" && record.snapshot.sendAccepted && !record.snapshot.attention
+          && record.snapshot.canonicalUrl && this.activeActionId === record.request.actionId) {
+          const timer = setTimeout(()=>this.releasePairingWindow(record.request.actionId),this.timeouts.pairingRetentionMs ?? 180_000);
+          timer.unref?.();
+          this.pairingWindow = {actionId:record.request.actionId,url:record.snapshot.canonicalUrl,
+            generation:record.request.pairingGeneration,account:record.request.expectedAccountFingerprint,
+            connector:record.request.connectorName,timer};
+        } else if (this.activeActionId === record.request.actionId) {
+          this.invalidatePassiveHealth();
+          this.activeActionId = record.pairingContinuation ? this.pairingWindow?.actionId ?? null : null;
+        }
+      };
+      if(unsettled)this.releaseRetainedCleanup(unsettled,()=>{this.actionCleanupPending=false;release();},'conversation load');
+      else release();
     }
   }
 
@@ -754,6 +985,7 @@ export class SingleWindowCoordinator {
       return;
     }
     if (raw.type === "connector_omitted") return;
+    if (raw.type === "editor_recovery"||raw.type === "navigation_progress"||raw.type === "connector_progress"||raw.type==="submission_progress") return;
     if (raw.type === "model_verified"
       && !modelSelectionAllowed(record.request.model,record.request.effort,raw)) {
       throw new BrowserCompanionError(
@@ -842,6 +1074,10 @@ export class SingleWindowCoordinator {
     record.eventBytes += lineBytes;
     record.snapshot.lastEventSequence = event.sequence;
     record.snapshot.state = stateForEvent(event.type, record.snapshot.state);
+    // An approval discovered while opening an existing turn is a failed
+    // preparation of THIS Send. Keep the approval event/attention for the
+    // native supervisor, whose post-Send snapshot state requires acceptance.
+    if(event.type==='approval_required'&&!record.snapshot.sendAccepted)record.snapshot.state='failed';
     record.snapshot.attention = attentionFor(event);
     if(event.type === "waiting")record.snapshot.cooldownUntilMs=event.availableAtMs;
     if (event.type === "model_verified") record.snapshot.selected = { model:event.model, effort:event.effort };

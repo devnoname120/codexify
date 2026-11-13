@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 import type { Frame, Page } from "patchright";
 import { BrowserCompanionError } from "./errors";
+import {observeReadOnly} from "./observation";
 
 const sessionProjectionSchema = z.strictObject({
   userId:z.string().min(1).max(256),
@@ -29,7 +30,7 @@ export function fingerprintAccountIdentity(userId: string, accountId: string): s
     .digest("hex");
 }
 
-export async function readChatGptAccount(page: Page): Promise<{
+export async function readChatGptAccount(page: Page, signal?:AbortSignal): Promise<{
   fingerprint:string;
   planType:string;
   personal:boolean;
@@ -38,7 +39,7 @@ export async function readChatGptAccount(page: Page): Promise<{
   if (new URL(page.url()).origin !== "https://chatgpt.com") {
     throw new Error("Open ChatGPT and sign in before inspecting account capabilities");
   }
-  const projection = validateAccountSessionProjection(await page.evaluate(async () => {
+  const projection = validateAccountSessionProjection(await observeReadOnly(page.evaluate(async () => {
     const response = await fetch("/api/auth/session", {
       credentials:"same-origin",
       cache:"no-store",
@@ -65,7 +66,7 @@ export async function readChatGptAccount(page: Page): Promise<{
       structure:session?.account?.structure,
       needsAttention:session?.account?.isDelinquent === true,
     };
-  }));
+  }),signal));
   return {
     fingerprint:fingerprintAccountIdentity(projection.userId, projection.accountId),
     planType:projection.planType,

@@ -22,10 +22,12 @@ test("composer and effort selectors exclude unrelated editors and menus", () => 
   <form data-chatgpt-composer>
     <div contenteditable="true" data-composer-markdown role="textbox" id="power-editor"></div>
     <button data-codex-intelligence-trigger="true" data-composer-navigation-target="reasoning" aria-haspopup="menu" id="power-effort"></button>
+    <button data-composer-navigation-target="reasoning" aria-haspopup="menu" id="current-effort"></button>
+    <button data-composer-navigation-target="add-context" aria-haspopup="menu" id="current-apps"></button>
   </form></body>`);
   const matches = (selector: string) => Array.from(document.querySelectorAll(selector)).map(element => element.id);
   expect(matches(CHATGPT_COMPOSER_SELECTOR)).toEqual(["composer-testid", "prompt-textarea", "composer-lexical", "power-editor"]);
-  expect(matches(CHATGPT_EFFORT_CONTROL_SELECTOR)).toEqual(["effort", "model", "power-effort"]);
+  expect(matches(CHATGPT_EFFORT_CONTROL_SELECTOR)).toEqual(["effort", "model", "power-effort", "current-effort"]);
 });
 
 test("model announcements tolerate localized punctuation without weakening identity", () => {
@@ -54,6 +56,7 @@ test("effort activation retries a ghost click with primary pointerdown", async (
     filter() { return this; }, last() { return this; }, locator() { return this; }, isVisible: async () => false,
   };
   const control = {
+    evaluate:async () => undefined,
     getAttribute: async (name: string) => {
       if (name === "aria-controls") return pointerOpened ? "radix-effort-menu" : null;
       if (name === "aria-expanded") return ghostOpen ? "true" : "false";
@@ -61,6 +64,7 @@ test("effort activation retries a ghost click with primary pointerdown", async (
       return null;
     },
     click: async (options: unknown) => { events.push(["click", options]); ghostOpen = true; },
+    press: async (key:string) => {events.push(["keyboard",key]);ghostOpen=false;},
     dispatchEvent: async (name: string, detail: unknown) => {
       events.push([name, detail]); ghostOpen = true; pointerOpened = true;
     },
@@ -84,8 +88,10 @@ test("an outgoing global slider cannot stand in for the control's new menu", asy
   const slider = { filter() { return this; }, locator() { return this; }, isVisible:async () => true };
   const menu = { isVisible:async () => currentMenuVisible, locator:() => slider };
   const control = {
+    evaluate:async () => undefined,
     getAttribute:async (name: string) => name === "aria-controls" ? "current-menu" : "true",
     click:async () => { clicks += 1; currentMenuVisible = true; },
+    press:async () => {},
   };
   const page = {
     locator:(selector: string) => selector === '[id="current-menu"]' ? menu : slider,

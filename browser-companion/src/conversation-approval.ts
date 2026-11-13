@@ -21,12 +21,14 @@ export async function throwIfConversationApproval(page:Page):Promise<void> {
 }
 
 /** Only the connector card in the verified conversation may grant conversation scope. */
-export async function approveConversationCard(page:Page, request:ConversationApprovalRequest, expectedAppId:string|undefined, signal:AbortSignal):Promise<boolean> {
+export async function approveConversationCard(page:Page, request:ConversationApprovalRequest, expectedAppId:string|undefined, signal:AbortSignal,mode:'conversation'|'once'='conversation'):Promise<boolean> {
   const sameConversation = () => {
     try { return canonicalChatGptConversationUrl(page.url()) === canonicalChatGptConversationUrl(request.url); }
     catch { return false; }
   };
   if (!sameConversation()) return false;
+  if(mode==='once'&&!expectedAppId)return false;
+  if(!await page.locator(APPROVAL_SELECTOR).filter({visible:true}).count())return false;
   const cards = (await latestConversationApprovalCards(page)).and(page.locator('[data-codex-approval-surface="true"]'));
   if (await cards.count() !== 1) return false;
   const card = cards.first();
@@ -50,7 +52,15 @@ export async function approveConversationCard(page:Page, request:ConversationApp
     const mentions = [...(turn?.querySelectorAll('[data-user-message-bubble] [data-prompt-link-href^="app://"]') ?? [])]
       .filter(mention => mention.textContent?.trim() === name)
       .map(mention => mention.getAttribute('data-prompt-link-href')!.slice(6));
-    return mentions.length === 1 && /^asdk_app_[A-Za-z0-9_]+$/.test(mentions[0]!) && (!appId || mentions[0] === appId);
+    if(mentions.length)return mentions.length === 1 && /^asdk_app_[A-Za-z0-9_]+$/.test(mentions[0]!) && (!appId || mentions[0] === appId);
+    // A later user turn can inherit a connector selected earlier in this same
+    // conversation. A platform-owned card for the configured, account-bound
+    // connector can omit its chip. Any explicit conflicting user identity fails.
+    if(!appId||!turn)return false;
+    const inherited=new Set([...document.querySelectorAll('[data-user-message-bubble] [data-prompt-link-href^="app://"]')]
+      .filter(mention=>mention.textContent?.trim()===name)
+      .map(mention=>mention.getAttribute('data-prompt-link-href')!.slice(6)));
+    return inherited.size===0||inherited.size===1&&inherited.has(appId);
   }, {name:request.connectorName,appId:expectedAppId});
   if (!await trusted()) return false;
   const trigger = card.locator('form button[type="button"][aria-haspopup="menu"]');
@@ -73,6 +83,12 @@ export async function approveConversationCard(page:Page, request:ConversationApp
     }
   };
   await verify();
+  if(mode==='once'){
+    const once=card.locator('form button[type="button"].bg-primary-solid:not([aria-haspopup])');
+    if(await once.count()!==1||!await once.isEnabled())return false;
+    await verify();await once.click({timeout:750,signal});
+    await card.waitFor({state:'hidden',timeout:1_500,signal});return true;
+  }
   let opened = false;
   try {
     if (!existingMenus) await trigger.click({timeout:750,signal});
