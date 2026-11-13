@@ -12,7 +12,9 @@ if(-not $owner.ExecutablePath -or -not $owner.ExecutablePath.StartsWith($runtime
 $started=([DateTimeOffset]$owner.CreationDate.ToUniversalTime()).ToUnixTimeMilliseconds()
 $mutex=[Threading.Mutex]::new($false,('Local\CodexifyRendererPriority-'+$browserId+'-'+$started))
 if(-not $mutex.WaitOne(0)){@{state='already_running';browserPid=$browserId}|ConvertTo-Json;exit 0}
-$statusPath=Join-Path (Split-Path -Parent $PSScriptRoot) 'browser-companion/artifacts/ready-20261030/renderer-priority-maintenance.json'
+$statusDirectory=Join-Path $env:USERPROFILE '.codexify/logs'
+$null=New-Item -ItemType Directory -Path $statusDirectory -Force
+$statusPath=Join-Path $statusDirectory 'renderer-priority-maintenance.json'
 $deadline=[DateTime]::UtcNow.AddSeconds($DurationSeconds)
 $changed=0;$lastChanges=@();$lastSave=[datetime]::MinValue;$reason='deadline'
 try {

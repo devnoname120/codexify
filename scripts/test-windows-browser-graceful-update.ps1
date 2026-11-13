@@ -2,7 +2,7 @@ param([string]$HelperPath)
 $ErrorActionPreference='Stop'
 if(-not $HelperPath){$HelperPath=Join-Path $PSScriptRoot 'windows-browser-graceful-update.ps1'}
 . $HelperPath
-$script:fixtureRoot=Join-Path 'D:/CodexifyBuild' ('graceful-lock-test-'+[guid]::NewGuid().ToString('N'))
+$script:fixtureRoot=Join-Path ([IO.Path]::GetTempPath()) ('graceful-lock-test-'+[guid]::NewGuid().ToString('N'))
 $script:fixtureBackup=Join-Path $script:fixtureRoot 'backup'
 $script:fixtureNative=Join-Path $script:fixtureRoot 'native.exe'
 $script:fixtureChrome=Join-Path $script:fixtureRoot 'runtime/chrome.exe'
@@ -59,7 +59,7 @@ function Start-Process {
     return $p
   }
   if($ArgumentList[1] -ne 'stop'){throw 'Unexpected lifecycle command'}
-  $script:fixtureStop=Microsoft.PowerShell.Management\Start-Process -FilePath (Join-Path $PSHOME 'pwsh.exe') -ArgumentList @('-NoProfile','-File',('"'+$stopScript+'"'),('-Root "'+$script:fixtureRoot+'"')) -WindowStyle Hidden -PassThru -RedirectStandardOutput $RedirectStandardOutput -RedirectStandardError $RedirectStandardError
+  $script:fixtureStop=Microsoft.PowerShell.Management\Start-Process -FilePath ([Diagnostics.Process]::GetCurrentProcess().MainModule.FileName) -ArgumentList @('-NoProfile','-File',('"'+$stopScript+'"'),('-Root "'+$script:fixtureRoot+'"')) -WindowStyle Hidden -PassThru -RedirectStandardOutput $RedirectStandardOutput -RedirectStandardError $RedirectStandardError
   return $script:fixtureStop
 }
 try {

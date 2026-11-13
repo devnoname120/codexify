@@ -1,6 +1,6 @@
 $ErrorActionPreference='Stop'
 . (Join-Path $PSScriptRoot 'windows-browser-only-native-backup.ps1')
-$fixture=Join-Path 'D:/CodexifyBuild' ('browser-only-native-test-'+[Guid]::NewGuid().ToString('N'))
+$fixture=Join-Path ([IO.Path]::GetTempPath()) ('browser-only-native-test-'+[Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $fixture | Out-Null
 $exe=Join-Path $fixture 'installed.exe'
 $candidate=Join-Path $fixture 'candidate.exe'

@@ -1,6 +1,6 @@
 $ErrorActionPreference='Stop'
 . (Join-Path $PSScriptRoot 'windows-browser-graceful-update.ps1')
-$fixture=Join-Path 'D:/CodexifyBuild' ('clean-stop-race-test-'+[Guid]::NewGuid().ToString('N'))
+$fixture=Join-Path ([IO.Path]::GetTempPath()) ('clean-stop-race-test-'+[Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $fixture | Out-Null
 $descriptor=Join-Path $fixture 'descriptor.json';$errorFile=Join-Path $fixture 'stderr.txt'
 @{pid=42000}|ConvertTo-Json|Set-Content -LiteralPath $descriptor
