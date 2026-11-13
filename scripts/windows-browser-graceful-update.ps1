@@ -1,4 +1,5 @@
 # Dot-sourced by the coordinated updater. Never terminate a live Chrome profile.
+. (Join-Path $PSScriptRoot 'windows-agent-update-guards.ps1')
 function Test-CleanBrowserStopExitRace([string]$BrowserRoot,[string]$DescriptorPath,[int]$OriginalLauncherPid,[string]$StopErrorPath) {
   # Native Stop can receive a health reply just before the gracefully closing
   # launcher exits, then fail its PID/path lookup. Accept only that exact error
@@ -26,10 +27,10 @@ function Stop-ManagedBrowserGracefully([string]$BrowserRoot,[string]$NativeExe,[
   $until=[DateTime]::UtcNow.AddSeconds(30)
   do {
     $health=Invoke-RestMethod ($descriptor.endpoint.TrimEnd('/')+'/v1/health') -Headers $headers -TimeoutSec 15
-    if($health.authenticated -and $health.status -eq 'idle' -and -not $health.activeActionId){break}
+    if($health.authenticated -and $health.status -eq 'idle' -and (Test-BrowserPoolUnowned $health)){break}
     Start-Sleep -Milliseconds 250
   }while([DateTime]::UtcNow -lt $until)
-  if(-not $health.authenticated -or $health.status -ne 'idle' -or $health.activeActionId){throw 'Browser must be authenticated and idle before clean shutdown'}
+  if(-not $health.authenticated -or $health.status -ne 'idle' -or -not (Test-BrowserPoolUnowned $health)){throw 'Browser must be authenticated and idle before clean shutdown'}
   if($ExpectedAccountFingerprint -and $health.accountFingerprint -ne $ExpectedAccountFingerprint){throw 'Browser account changed before the update'}
   $account=$health.accountFingerprint
   $chrome=@(Get-CimInstance Win32_Process -Filter "Name='chrome.exe'" | Where-Object {
@@ -64,10 +65,10 @@ function Stop-ManagedBrowserGracefully([string]$BrowserRoot,[string]$NativeExe,[
     $until=[DateTime]::UtcNow.AddSeconds(15)
     do {
       $fresh=Invoke-RestMethod ($descriptor.endpoint.TrimEnd('/')+'/v1/health') -Headers $headers -TimeoutSec 15
-      if($fresh.authenticated -and $fresh.accountFingerprint -eq $account -and $fresh.status -eq 'idle' -and -not $fresh.activeActionId){break}
+      if($fresh.authenticated -and $fresh.accountFingerprint -eq $account -and $fresh.status -eq 'idle' -and (Test-BrowserPoolUnowned $fresh)){break}
       Start-Sleep -Milliseconds 250
     }while([DateTime]::UtcNow -lt $until)
-    if(-not $fresh.authenticated -or $fresh.accountFingerprint -ne $account -or $fresh.status -ne 'idle' -or $fresh.activeActionId){throw 'Browser activity or account changed before clean shutdown; browser preserved'}
+    if(-not $fresh.authenticated -or $fresh.accountFingerprint -ne $account -or $fresh.status -ne 'idle' -or -not (Test-BrowserPoolUnowned $fresh)){throw 'Browser activity or account changed before clean shutdown; browser preserved'}
     $current=Get-CimInstance Win32_Process -Filter "ProcessId=$chromeId"
     if($current.ExecutablePath -ine $chrome[0].ExecutablePath -or $current.ParentProcessId -ne $descriptor.pid){throw 'Managed Chrome identity changed'}
     $owner.Refresh()

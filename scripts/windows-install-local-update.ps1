@@ -69,7 +69,7 @@ function Browser-Idle {
     if($endpoint.Scheme -ne 'http' -or $endpoint.Host -ne '127.0.0.1'){return $false}
     $health=Invoke-RestMethod -Uri ($descriptor.endpoint.TrimEnd('/')+'/v1/health') -TimeoutSec 10 `
       -Headers @{Authorization=('Bearer '+$descriptor.token)}
-    return $health.status -eq 'idle' -and $health.authenticated -and -not $health.activeActionId
+    return $health.status -eq 'idle' -and $health.authenticated -and (Test-BrowserPoolUnowned $health)
   } catch { return $false }
 }
 function Active-Commands([int]$ServerId) {

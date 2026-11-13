@@ -5,6 +5,7 @@ param(
   [switch]$Deploy
 )
 $ErrorActionPreference='Stop'
+. (Join-Path $PSScriptRoot 'windows-agent-update-guards.ps1')
 $ProgressPreference='SilentlyContinue'
 $root=Join-Path $env:USERPROFILE '.codexify'
 $exe=Join-Path $root 'bin\codexify.exe'
@@ -29,6 +30,8 @@ function Invoke-Cli([string[]]$Arguments) {
   $out=Join-Path $Backup "cli-$counter.stdout"
   $err=Join-Path $Backup "cli-$counter.stderr"
   $process=Start-Process -FilePath $exe -ArgumentList $Arguments -WindowStyle Hidden -PassThru -RedirectStandardOutput $out -RedirectStandardError $err
+  # Windows PowerShell 5.1 reports a null ExitCode unless the handle is opened early.
+  $null=$process.Handle
   if(-not $process.WaitForExit(180000)){throw "CLI timed out: $($Arguments -join ' ')"}
   $process.Refresh()
   if($process.ExitCode -ne 0){throw "CLI failed: $($Arguments -join ' '); see $err"}
@@ -55,13 +58,14 @@ function Browser-Idle {
     $endpoint=[uri]$descriptor.endpoint
     if($endpoint.Scheme -ne 'http' -or $endpoint.Host -ne '127.0.0.1'){return $false}
     $health=Invoke-RestMethod ($descriptor.endpoint.TrimEnd('/')+'/v1/health') -TimeoutSec 10 -Headers @{Authorization=('Bearer '+$descriptor.token)}
-    if(-not $health.activeActionId -and $health.authenticated -and $health.status -eq 'unavailable'){
+    if(-not (Test-BrowserPoolUnowned $health)){return $false}
+    if($health.authenticated -and $health.status -eq 'unavailable'){
       # An idle signed-in page can be unusable during hydration/rate limits.
       # Verify the control surface is live before replacing that broken runtime.
       $liveness=Invoke-RestMethod ($descriptor.endpoint.TrimEnd('/')+'/v1/liveness') -TimeoutSec 5 -Headers @{Authorization=('Bearer '+$descriptor.token)}
       return [bool]$liveness.available
     }
-    return $health.status -in @('idle','authentication_required') -and -not $health.activeActionId
+    return $health.status -in @('idle','authentication_required')
   } catch {return $false}
 }
 function Wait-BrowserReady([string]$Version) {

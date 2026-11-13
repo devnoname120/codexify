@@ -114,6 +114,17 @@ try {
   catch {$authRejected=$_.Exception.Message -notmatch 'codexify_[A-Za-z0-9_-]+'}
   Assert-StartLocal $authRejected 'An incorrect bearer was accepted or exposed in an error.'
   $checks.Add('real proxy-free owner HTTP verification and rejected incorrect bearer; browser not opened')
+  $portConfig=Join-Path $fixture 'port.config.json'
+  Set-Content -LiteralPath $portConfig -Value '{"port":4123}'
+  Assert-StartLocal ((Get-StartLocalServerPort $portConfig) -eq 4123) 'Console startup must poll the saved port'
+  Set-Content -LiteralPath $portConfig -Value '{"agentChat":{}}'
+  Assert-StartLocal ((Get-StartLocalServerPort $portConfig) -eq 3000) 'Console startup must default to port 3000'
+  Set-Content -LiteralPath $portConfig -Value '{"port":70000}'
+  $rejected=$false;try{$null=Get-StartLocalServerPort $portConfig}catch{$rejected=$true}
+  Assert-StartLocal $rejected 'An invalid saved port must be rejected'
+  $startScript=Get-Content -LiteralPath (Join-Path $PSScriptRoot 'windows-start-local.ps1') -Raw
+  Assert-StartLocal ($startScript -notmatch '127\.0\.0\.1:3000') 'Console startup must not hard-code port 3000'
+  $checks.Add('console startup reads the saved server port')
   [pscustomobject]@{ok=$true;shellVersion=$PSVersionTable.PSVersion.ToString();checks=$checks.ToArray()} | ConvertTo-Json -Depth 3
 } finally {
   $resolvedFixture=[IO.Path]::GetFullPath($fixture)

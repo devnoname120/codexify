@@ -1,18 +1,26 @@
 # Pure process classification for the guarded updater. A yielded exec call can
 # leave a real build running even when HTTP activeRequests is zero.
-function Test-AgentUpdateBrowserIdle {
+function Test-BrowserPoolUnowned {
   param([object]$Health)
-  if (-not $Health -or $Health.kind -ne 'codexify-browser-companion' -or
-      $Health.status -ne 'idle' -or $Health.authenticated -ne $true -or
-      -not $Health.accountFingerprint -or $Health.activeActionId) { return $false }
   # A pool can expose a free slot while another page owns a Send. Its singular
   # activeActionId is then null, so the complete ownership list is required.
-  if ($Health.PSObject.Properties['activeActionIds'] -and @($Health.activeActionIds).Count) { return $false }
+  # Every updater checks this before any browser shutdown, and again before it.
+  if (-not $Health -or $Health.activeActionId) { return $false }
+  if ($Health.PSObject.Properties['activeActionIds'] -and
+      @($Health.activeActionIds | Where-Object { $_ }).Count) { return $false }
   if ($Health.PSObject.Properties['actionCapacity'] -and
       ($Health.actionCapacity -lt 1 -or
        -not $Health.PSObject.Properties['availableActionSlots'] -or
        $Health.availableActionSlots -ne $Health.actionCapacity)) { return $false }
   return $true
+}
+
+function Test-AgentUpdateBrowserIdle {
+  param([object]$Health)
+  if (-not $Health -or $Health.kind -ne 'codexify-browser-companion' -or
+      $Health.status -ne 'idle' -or $Health.authenticated -ne $true -or
+      -not $Health.accountFingerprint) { return $false }
+  return Test-BrowserPoolUnowned $Health
 }
 
 function Test-AgentUpdateBrowserStopped {

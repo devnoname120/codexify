@@ -6,6 +6,7 @@ $applicationRoot=Join-Path $env:USERPROFILE '.codexify'
 $nativeExe=Join-Path $applicationRoot 'bin\codexify.exe'
 $configPath=Join-Path $applicationRoot 'codexify.config.json'
 if(-not(Test-Path -LiteralPath $nativeExe -PathType Leaf) -or -not(Test-Path -LiteralPath $configPath -PathType Leaf)){throw 'Codexify installation/configuration was not found'}
+$serverPort=Get-StartLocalServerPort $configPath
 $logDirectory=Join-Path $applicationRoot 'logs'
 $null=New-Item -ItemType Directory -Path $logDirectory -Force
 $launchId=[DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss')+'-'+[Guid]::NewGuid().ToString('N').Substring(0,6)
@@ -14,7 +15,7 @@ $handler.UseProxy=$false
 $client=[Net.Http.HttpClient]::new($handler)
 $client.Timeout=[TimeSpan]::FromSeconds(2)
 function Read-LocalHealth {
-  try {return ($client.GetStringAsync('http://127.0.0.1:3000/health').GetAwaiter().GetResult() | ConvertFrom-Json)}catch{return $null}
+  try {return ($client.GetStringAsync("http://127.0.0.1:$serverPort/health").GetAwaiter().GetResult() | ConvertFrom-Json)}catch{return $null}
 }
 try {
   $health=Read-LocalHealth

@@ -48,6 +48,15 @@ function Invoke-StartLocalCli(
     return [pscustomobject]@{ExitCode=[int]$exitCode;Output=$output;ErrorOutput=$errorOutput}
   } finally {$process.Dispose()}
 }
+function Get-StartLocalServerPort([string]$ConfigPath) {
+  # Same rule as the WPF launcher: the saved top-level port, 3000 when absent.
+  $config=Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json
+  $port=3000
+  if($config.PSObject.Properties['port'] -and $null -ne $config.port){$port=$config.port}
+  $value=0
+  if(-not [int]::TryParse([string]$port,[ref]$value) -or $value -lt 1 -or $value -gt 65535){throw 'The saved Codexify port is not valid'}
+  return $value
+}
 function Get-StartLocalDashboardUri([string]$Output) {
   $value=$Output.Trim()
   $uri=$null
