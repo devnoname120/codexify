@@ -97,7 +97,11 @@ async function visibleStopDialogs(page:Page):Promise<Locator[]> {
   for(const frame of page.frames()) {
     try {
       if(await visibleChatGptFrame(frame)) {
-        dialogs.push(...await frame.locator('[role="dialog"], [role="alertdialog"]').filter({visible:true}).all());
+        // ChatGPT exposes non-modal suggestion menus and tool popovers with
+        // role=dialog even after the prior response has finished. They are
+        // not Stop confirmations. Only a genuinely modal dialog may block
+        // Stop recovery; all real Stop/approval confirmations remain guarded.
+        dialogs.push(...await frame.locator('[role="dialog"][aria-modal="true"], [role="alertdialog"][aria-modal="true"]').filter({visible:true}).all());
       }
     } catch(error) {
       if(!frame.isDetached())throw error;
