@@ -208,9 +208,11 @@ Both preserve model/apps menus, Stop, Copy and tool approvals. **Off** restores
 the full interface. Existing simplification settings remain compatible; restart
 Codexify to apply a level.
 
-**Fast setup** in Settings → General or Browser applies the complete recommended
-configuration in one save: Bones, Steer delivery, stalled-browser recovery,
-automatic retries and turn renewal, progress tracking and agent controls. It also
+**Fast setup** in Settings → General or Browser applies the recommended
+configuration in one save: Steer delivery, stalled-browser recovery, automatic
+retries, progress tracking and agent controls. Browser simplification
+(Simplified/Bones), infinite retries and turn renewal are not part of it; enable
+each separately if you want it. It also
 reduces animations, sounds and recap interruptions. Restart once using the
 existing button; tool refresh is queued automatically when needed. Model/effort
 choices, renewal limits and explicit per-chat stops remain yours. New quickstart

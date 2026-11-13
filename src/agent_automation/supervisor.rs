@@ -734,6 +734,7 @@ pub struct AgentAutomationSupervisor {
     approval_next_scan_ms: AtomicU64,
     approval_scan_cursor: AtomicU64,
     next_retry_scan_ms: AtomicU64,
+    activity: super::activity_guard::ActivityGuard,
     rollover: OnceLock<ConversationRolloverContext>,
     pairing_wait_timeout: Duration,
 }
@@ -886,6 +887,7 @@ impl AgentAutomationSupervisor {
             approval_next_scan_ms: AtomicU64::new(0),
             approval_scan_cursor: AtomicU64::new(0),
             next_retry_scan_ms: AtomicU64::new(0),
+            activity: Default::default(),
             rollover: OnceLock::new(),
             pairing_wait_timeout: Duration::from_secs(90),
             action_timeouts: ActionTimeouts {
@@ -1509,6 +1511,12 @@ impl AgentAutomationSupervisor {
 
     pub async fn queued_count(&self) -> usize {
         self.queue.lock().await.len()
+    }
+
+    /// Counters for loads, sends, recoveries, renewals and worker turns, plus
+    /// the automatic-activity circuit breaker state.
+    pub fn activity_snapshot(&self, now_ms: u64) -> super::ActivitySnapshot {
+        self.activity.snapshot(now_ms)
     }
 
     pub async fn queue_position(&self, task: &ConversationIdentity) -> Option<(usize, usize)> {
@@ -3210,7 +3218,7 @@ impl AgentAutomationSupervisor {
     ) -> Result<Option<CompanionActionSnapshot>, String> {
         let maximum_candidates = self.queue.lock().await.len();
         let mut considered = 0;
-        let (mut execution, task, _task_guards) = loop {
+        let (mut execution, task, _task_guards, activity_class) = loop {
             if considered >= maximum_candidates {
                 return Ok(None);
             }
@@ -3284,8 +3292,11 @@ impl AgentAutomationSupervisor {
                     }
                 }
             }
-            let cooldown = match task.store.load(&task.task) {
-                Ok(state) => state.browser_cooldown_until_ms(),
+            let (cooldown, worker) = match task.store.load(&task.task) {
+                Ok(state) => (
+                    state.browser_cooldown_until_ms(),
+                    state.agents.parent_task_key.is_some(),
+                ),
                 Err(error) => {
                     // A transient unreadable state must not silently drop a
                     // queued user message. Keep its original action identity
@@ -3297,6 +3308,14 @@ impl AgentAutomationSupervisor {
                 }
             };
             if let Some(until) = cooldown.filter(|until| now_ms < *until) {
+                self.next_retry_scan_ms.fetch_min(until, Ordering::Relaxed);
+                self.queue.lock().await.push_back(execution);
+                continue;
+            }
+            // Automatic work waits while the circuit breaker is open; owner
+            // messages and setup are never held.
+            let activity_class = activity_class(&execution, worker);
+            if let Some(until) = self.activity.hold_until(activity_class, now_ms) {
                 self.next_retry_scan_ms.fetch_min(until, Ordering::Relaxed);
                 self.queue.lock().await.push_back(execution);
                 continue;
@@ -3394,7 +3413,7 @@ impl AgentAutomationSupervisor {
                     now_ms,
                 )?;
             }
-            break (execution, task, task_guards);
+            break (execution, task, task_guards, activity_class);
         };
 
         if let Some(context) = self.rollover.get()
@@ -3469,6 +3488,7 @@ impl AgentAutomationSupervisor {
         );
         let (events_tx, mut events_rx) = mpsc::unbounded_channel();
         let cancellation = CancellationToken::new();
+        self.activity.record_dispatch(activity_class, now_ms);
         let execute = self
             .executor
             .execute(execution.clone(), events_tx, cancellation.clone());
@@ -3595,6 +3615,9 @@ impl AgentAutomationSupervisor {
                     }
                     self.clear_live_if_action(&execution).await;
                     return Ok(Some(snapshot));
+                }
+                if snapshot.send_accepted {
+                    self.activity.record_send(now_ms);
                 }
                 if snapshot.send_accepted
                     && matches!(execution.request.prompt, ActionPrompt::CreateChat { .. })
@@ -4910,6 +4933,22 @@ fn execution_kind(execution: &AutomationExecution) -> AutomationActionKind {
         ActionPrompt::OfflineChat { .. } => AutomationActionKind::OfflineChat,
         ActionPrompt::OfflineGoal { .. } => AutomationActionKind::OfflineGoal,
         ActionPrompt::OfflineCombined { .. } => AutomationActionKind::OfflineCombined,
+    }
+}
+
+fn activity_class(
+    execution: &AutomationExecution,
+    worker: bool,
+) -> super::activity_guard::ActivityClass {
+    use super::activity_guard::ActivityClass;
+    if execution.activity_epoch == "conversation-rollover" {
+        return ActivityClass::Recovery;
+    }
+    match execution_kind(execution) {
+        AutomationActionKind::TurnRenewal => ActivityClass::Renewal,
+        AutomationActionKind::OfflineGoal => ActivityClass::Recovery,
+        _ if worker => ActivityClass::WorkerTurn,
+        _ => ActivityClass::Owner,
     }
 }
 

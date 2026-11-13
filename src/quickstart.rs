@@ -1285,13 +1285,19 @@ mod tests {
         let config: Value =
             serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
         assert_eq!(config["schemaVersion"], json!(1));
+        // Browser simplification, infinite retries and turn renewal are
+        // separate opt-ins that quickstart leaves at their off defaults.
         assert_eq!(
             config["agentChat"]["automation"]["browserSimplicity"],
-            "bones"
+            Value::Null
         );
+        assert_eq!(
+            config["agentChat"]["automation"]["retryTimings"]["infiniteRetries"],
+            Value::Null
+        );
+        assert_eq!(config["agentChat"]["turnRenewal"]["enabled"], Value::Null);
         assert_eq!(config["agentChat"]["defaultMessageMode"], "steer");
         assert_eq!(config["agentChat"]["features"]["agentTeams"], true);
-        assert_eq!(config["agentChat"]["turnRenewal"]["enabled"], true);
         assert_eq!(
             config["agentChat"]["automation"]["connectorName"],
             "Codexify"

@@ -1,5 +1,20 @@
 //! Shared fast-setup policy for the wizard and the owner settings UI.
+//!
+//! The preset stays conservative: browser simplification (Simplified/Bones),
+//! infinite retries, turn renewal and the conversation-load interval are
+//! separate explicit opt-ins and keep their defaults here.
 use serde_json::{Map, Value, json};
+
+/// Settings that fast setup and quickstart must never choose for the user.
+#[cfg(test)]
+const SEPARATE_OPT_INS: [&str; 6] = [
+    "agentChat.automation.browserSimplicity",
+    "agentChat.automation.minimalUi",
+    "agentChat.automation.retryTimings.infiniteRetries",
+    "agentChat.automation.retryTimings.conversationLoadIntervalSeconds",
+    "agentChat.automation.browserActionLanes",
+    "agentChat.turnRenewal.enabled",
+];
 
 pub(crate) fn changes() -> Map<String, Value> {
     serde_json::from_value(json!({
@@ -10,15 +25,11 @@ pub(crate) fn changes() -> Map<String, Value> {
         "agentChat.extras.sounds": false,
         "agentChat.extras.weeklyRecap": false,
         "agentChat.automation.enabled": true,
-        "agentChat.automation.browserSimplicity": "bones",
         "agentChat.automation.recoveryEnhancements": true,
         "agentChat.automation.automaticRetries": true,
-        "agentChat.automation.retryTimings.infiniteRetries": true,
-        "agentChat.automation.retryTimings.conversationLoadIntervalSeconds": 1,
         "agentChat.features.agentTeams": true,
         "agentChat.features.autoMode": true,
-        "agentChat.features.conversationRecovery": true,
-        "agentChat.turnRenewal.enabled": true
+        "agentChat.features.conversationRecovery": true
     }))
     .expect("fast setup fields")
 }
@@ -39,15 +50,7 @@ pub(crate) fn snapshot(document: &Value, defaults: &Value) -> Value {
 /// Quickstart supplies good initial choices, without rewriting existing ones.
 /// The button in Settings is an explicit opt-in and applies the whole preset.
 pub(crate) fn apply_missing(document: &mut Map<String, Value>) -> Result<(), String> {
-    let preserve_legacy_presentation = document
-        .get("agentChat")
-        .and_then(|chat| chat.get("automation"))
-        .and_then(|automation| automation.get("minimalUi"))
-        .is_some();
     for (path, value) in changes() {
-        if path == "agentChat.automation.browserSimplicity" && preserve_legacy_presentation {
-            continue;
-        }
         let parts = path.split('.').collect::<Vec<_>>();
         insert_missing(document, &parts, value)?;
     }
@@ -79,12 +82,12 @@ mod tests {
         let mut document = Map::new();
         apply_missing(&mut document).unwrap();
         let document = Value::Object(document);
-        assert_eq!(
-            document["agentChat"]["automation"]["browserSimplicity"],
-            "bones"
-        );
         assert_eq!(document["agentChat"]["defaultMessageMode"], "steer");
-        assert_eq!(document["agentChat"]["turnRenewal"]["enabled"], true);
+        for path in SEPARATE_OPT_INS {
+            assert!(!changes().contains_key(path), "{path}");
+            let pointer = format!("/{}", path.replace('.', "/"));
+            assert!(document.pointer(&pointer).is_none(), "{path}");
+        }
         assert!(
             snapshot(&document, &json!({}))["applied"]
                 .as_bool()
@@ -139,7 +142,7 @@ mod tests {
     }
 
     #[test]
-    fn preset_uses_effective_values_and_only_enables_turn_renewal_leaf() {
+    fn preset_uses_effective_values_and_leaves_turn_renewal_untouched() {
         let defaults = Value::Object({
             let mut document = Map::new();
             apply_missing(&mut document).unwrap();
@@ -160,6 +163,11 @@ mod tests {
         assert_eq!(
             document["agentChat"]["turnRenewal"]["limits"][0]["enabled"],
             false
+        );
+        assert!(
+            document["agentChat"]["turnRenewal"]
+                .get("enabled")
+                .is_none()
         );
         assert!(!changes().contains_key("agentChat.turnRenewal.limits"));
     }

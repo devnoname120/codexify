@@ -516,7 +516,7 @@ mod tests {
         let document = Value::Object(read_document(&path).unwrap());
         assert_eq!(
             document["agentChat"]["automation"]["browserSimplicity"],
-            "bones"
+            Value::Null
         );
         assert_eq!(document["agentChat"]["defaultMessageMode"], "steer");
         assert_eq!(document["agentChat"]["turnRenewal"]["limits"], limits);

@@ -131,7 +131,7 @@
         "^https?://(www\\.)?chatgpt\\.com/backend-api/.*/sidebar"
       ],
       "maxQueuedActions": 64,
-      "browserActionLanes": 2,
+      "browserActionLanes": 1,
       "autoApproveToolCalls": true,
       "newConversationOnLoadRateLimit": false,
       "automaticRetries": true,
@@ -141,7 +141,7 @@
         "goalRecoveryDelaysSeconds": [60, 120, 240],
         "jitterPercent": 10,
         "approvalResumeGraceSeconds": 180,
-        "conversationLoadIntervalSeconds": 1,
+        "conversationLoadIntervalSeconds": 180,
         "conversationUnavailableCooldownSeconds": 300,
         "rateLimitCooldownSeconds": 180,
         "infiniteRetries": false
@@ -272,7 +272,8 @@
     },
     "features": {
       "agentTeams": false,
-      "defaultDelegation": true,
+      "defaultDelegation": false,
+      "maxActiveWorkers": 4,
       "externalAgentControl": false,
       "autoMode": false,
       "agentFolders": false,

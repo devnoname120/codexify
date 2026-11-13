@@ -68,7 +68,7 @@ impl Default for RetryTimings {
             goal_recovery_delays_seconds: vec![60, 120, 240],
             jitter_percent: 10,
             approval_resume_grace_seconds: 180,
-            conversation_load_interval_seconds: 1,
+            conversation_load_interval_seconds: 180,
             conversation_unavailable_cooldown_seconds: 300,
             rate_limit_cooldown_seconds: 180,
         }
@@ -187,7 +187,7 @@ impl Default for AgentAutomationConfig {
             descriptor_path: DEFAULT_AUTOMATION_DESCRIPTOR_PATH.into(),
             connector_name: DEFAULT_AUTOMATION_CONNECTOR_NAME.into(),
             max_queued_actions: DEFAULT_AUTOMATION_MAX_QUEUED_ACTIONS,
-            browser_action_lanes: 2,
+            browser_action_lanes: 1,
             auto_approve_tool_calls: true,
             automatic_retries: true,
             new_conversation_on_load_rate_limit: false,
@@ -369,12 +369,17 @@ impl Default for MarkdownChatConfig {
     }
 }
 
-/// Feature gates stay opt-in; enabled agent teams may delegate by default.
+pub const DEFAULT_MAX_ACTIVE_WORKERS: usize = 4;
+pub const MAX_ACTIVE_WORKERS_LIMIT: usize = 32;
+
+/// Feature gates stay opt-in. Delegation needs either this global switch or a
+/// per-team grant, and active workers are capped per project.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields, rename_all = "camelCase")]
 pub struct ChatFeatures {
     pub agent_teams: bool,
     pub default_delegation: bool,
+    pub max_active_workers: usize,
     pub external_agent_control: bool,
     pub auto_mode: bool,
     pub agent_folders: bool,
@@ -384,7 +389,8 @@ impl Default for ChatFeatures {
     fn default() -> Self {
         Self {
             agent_teams: false,
-            default_delegation: true,
+            default_delegation: false,
+            max_active_workers: DEFAULT_MAX_ACTIVE_WORKERS,
             external_agent_control: false,
             auto_mode: false,
             agent_folders: false,
@@ -522,6 +528,11 @@ impl MarkdownChatConfig {
             notifications.validate()?;
         }
         self.automation.validate()?;
+        if !(1..=MAX_ACTIVE_WORKERS_LIMIT).contains(&self.features.max_active_workers) {
+            return Err(format!(
+                "agentChat.features.maxActiveWorkers must be between 1 and {MAX_ACTIVE_WORKERS_LIMIT}"
+            ));
+        }
         Ok(())
     }
 }
@@ -816,15 +827,28 @@ mod tests {
         ] {
             let config: MarkdownChatConfig = serde_json::from_value(value).unwrap();
             assert_eq!(config.features, ChatFeatures::default());
-            assert!(config.features.default_delegation);
+            assert!(!config.features.default_delegation);
+            assert_eq!(config.features.max_active_workers, 4);
             assert!(
                 serde_json::to_value(&config.features)
                     .unwrap()
                     .as_object()
                     .unwrap()
                     .iter()
-                    .filter(|(key, _)| key.as_str() != "defaultDelegation")
+                    .filter(|(key, _)| key.as_str() != "maxActiveWorkers")
                     .all(|(_, value)| value == false)
+            );
+            assert_eq!(config.automation.browser_action_lanes, 1);
+            assert_eq!(
+                config
+                    .automation
+                    .retry_timings
+                    .conversation_load_interval_seconds,
+                180
+            );
+            assert_eq!(
+                config.automation.effective_browser_simplicity(),
+                BrowserSimplicity::Off
             );
             assert!(!config.automation.minimal_ui);
             assert!(!config.automation.recovery_enhancements);
@@ -844,19 +868,26 @@ mod tests {
                 .features
                 .agent_teams
         );
-        let disabled: MarkdownChatConfig = serde_json::from_value(
-            serde_json::json!({"features":{"agentTeams":true,"defaultDelegation":false}}),
+        let enabled: MarkdownChatConfig = serde_json::from_value(
+            serde_json::json!({"features":{"agentTeams":true,"defaultDelegation":true}}),
         )
         .unwrap();
-        assert!(!disabled.features.default_delegation);
-        let saved = serde_json::to_value(disabled).unwrap();
-        assert_eq!(saved["features"]["defaultDelegation"], false);
+        assert!(enabled.features.default_delegation);
+        let saved = serde_json::to_value(enabled).unwrap();
+        assert_eq!(saved["features"]["defaultDelegation"], true);
         assert!(
-            !serde_json::from_value::<MarkdownChatConfig>(saved)
+            serde_json::from_value::<MarkdownChatConfig>(saved)
                 .unwrap()
                 .features
                 .default_delegation
         );
+        for (workers, valid) in [(0, false), (1, true), (4, true), (32, true), (33, false)] {
+            let config: MarkdownChatConfig = serde_json::from_value(
+                serde_json::json!({"features":{"maxActiveWorkers":workers}}),
+            )
+            .unwrap();
+            assert_eq!(config.validate().is_ok(), valid, "{workers} workers");
+        }
     }
     #[test]
     fn retry_timings_default_and_partial_configuration() {
@@ -874,7 +905,7 @@ mod tests {
             custom.retry_timings.action_delays_seconds,
             defaults.retry_timings.action_delays_seconds
         );
-        assert_eq!(custom.retry_timings.conversation_load_interval_seconds, 1);
+        assert_eq!(custom.retry_timings.conversation_load_interval_seconds, 180);
     }
 
     #[test]
@@ -1011,8 +1042,8 @@ mod tests {
     }
 
     #[test]
-    fn browser_action_lanes_default_to_two_and_are_bounded() {
-        assert_eq!(AgentAutomationConfig::default().browser_action_lanes, 2);
+    fn browser_action_lanes_default_to_one_and_are_bounded() {
+        assert_eq!(AgentAutomationConfig::default().browser_action_lanes, 1);
         for lanes in [0, 1, 2, 4, 5] {
             let config: AgentAutomationConfig =
                 serde_json::from_value(serde_json::json!({"browserActionLanes":lanes})).unwrap();

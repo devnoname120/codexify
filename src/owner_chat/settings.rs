@@ -203,6 +203,10 @@ pub(super) async fn health(State(state): State<OwnerState>) -> ApiResult {
     let schema = crate::global_settings::read_schema_intent(&state.config);
     let (mut body, readiness) = super::readiness::snapshot(&state, schema.as_ref()).await;
     body["readiness"] = readiness;
+    if let Some(automation) = &state.automation {
+        body["automationActivity"] =
+            json!(automation.activity_snapshot(crate::markdown_chat::now_ms()));
+    }
     Ok(Json(body))
 }
 

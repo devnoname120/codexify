@@ -40,9 +40,12 @@ parent and worker chats, including after continuation.
    Use `agent_control` action `set_goal` with the current `expectedRevision`, then
    confirm an active new goal revision. Mentioning a revision in a message does
    not change the saved goal.
-9. Enabled agent teams delegate by default without opening the Agents tab.
-   `agentChat.features.defaultDelegation: false` opts out globally, and an
-   explicit per-team disable always wins. New descendants inherit permission and
+9. Delegation is opt-in: grant it per team with the Agents button, or set
+   `agentChat.features.defaultDelegation: true` to let every enabled team
+   delegate. An explicit per-team disable always wins. At most
+   `agentChat.features.maxActiveWorkers` (default 4, up to 32) workers may be
+   active per project; further spawn requests are refused until a worker
+   completes or is retired. New descendants inherit permission and
    read-only limits. Requests queue while the browser is busy; a queue receipt
    proves reservation, and fresh task calls prove that useful work has started.
 

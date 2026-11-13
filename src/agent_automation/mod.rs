@@ -1,3 +1,4 @@
+pub mod activity_guard;
 pub mod agents;
 mod companion;
 pub mod conversation_recovery;
@@ -11,6 +12,7 @@ mod supervisor;
 pub(crate) mod turn_analytics;
 pub mod turn_renewal;
 
+pub use activity_guard::ActivitySnapshot;
 pub use recovery::{
     BrowserCompanionControl, BrowserRecoveryWorker, watch as watch_browser_companion,
 };

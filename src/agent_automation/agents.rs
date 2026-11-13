@@ -19,7 +19,7 @@ const MAX_DELEGATION_DEPTH: usize = 2;
 static SPAWN_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 static CONTROL_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-pub const FULL_DEVELOPMENT_BRIEF: &str = "The owner authorizes full development access for this team, including existing and future workers. This supersedes older audit-only/read-only worker instructions. Each worker is an independent implementing agent: investigate, edit, build, test, debug and use the available development tools to achieve its goal. Follow the coordinator's priorities and coordinate file/build ownership with peers; ask the coordinator to resolve overlaps rather than waiting for the user. Scope describes responsibility, not a blanket ban on development tools. Completed assignments remain completed until reassigned with agent_control set_goal and a fresh expectedRevision; stops and pauses remain in effect. Read chat_read now for owner messages and agent_status for current assignments, then continue active assigned work. A completed worker waits for reassignment or retirement; full access does not reopen its finished goal. After reviewing a completed assignment, the coordinator must reuse that worker for a useful concrete follow-up or call agent_control retire with its fresh completed revision to archive it automatically. Preserve reports and history; never retire active work or outstanding dependencies. Create as many useful workers as the project needs; there is no fixed active-worker limit. Use at most two worker levels and batches of up to eight workers per spawn request. Create lead workers for independent responsibilities; leads may delegate with distinct ownership. Pace creation to actual browser and machine throughput. The coordinator must read incoming messages before each work batch, after every command wait and before waiting or handoff; review worker evidence, reassign useful workers and implement work itself.";
+pub const FULL_DEVELOPMENT_BRIEF: &str = "The owner authorizes full development access for this team, including existing and future workers. This supersedes older audit-only/read-only worker instructions. Each worker is an independent implementing agent: investigate, edit, build, test, debug and use the available development tools to achieve its goal. Follow the coordinator's priorities and coordinate file/build ownership with peers; ask the coordinator to resolve overlaps rather than waiting for the user. Scope describes responsibility, not a blanket ban on development tools. Completed assignments remain completed until reassigned with agent_control set_goal and a fresh expectedRevision; stops and pauses remain in effect. Read chat_read now for owner messages and agent_status for current assignments, then continue active assigned work. A completed worker waits for reassignment or retirement; full access does not reopen its finished goal. After reviewing a completed assignment, the coordinator must reuse that worker for a useful concrete follow-up or call agent_control retire with its fresh completed revision to archive it automatically. Preserve reports and history; never retire active work or outstanding dependencies. Create useful workers within the project's active-worker limit (agent_status capacity.limit); retire or reuse completed workers to make room. Use at most two worker levels and batches of up to eight workers per spawn request. Create lead workers for independent responsibilities; leads may delegate with distinct ownership. Pace creation to actual browser and machine throughput. The coordinator must read incoming messages before each work batch, after every command wait and before waiting or handoff; review worker evidence, reassign useful workers and implement work itself.";
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields, rename_all = "camelCase")]
@@ -581,12 +581,12 @@ impl AgentRuntime {
         if parent_chat.agent_stop_requested().await? {
             return Err("Resume the coordinating chat before creating more workers".into());
         }
-        if !saved
+        let replay = saved
             .agents
             .children
             .iter()
-            .any(|child| child.request_id == request.request_id)
-        {
+            .any(|child| child.request_id == request.request_id);
+        if !replay {
             let mut ancestor = saved.agents.parent_task_key.clone();
             let mut depth = 0;
             while let Some(key) = ancestor {
@@ -633,6 +633,18 @@ impl AgentRuntime {
             .bindings
             .selected_project_root(&self.config, parent)?
             .ok_or("Select a project before creating agents")?;
+        if !replay {
+            // Hard cap across every team in the project. Replays of an already
+            // accepted request stay idempotent and are never refused here.
+            let limit = self.config.markdown_chat.features.max_active_workers;
+            let active =
+                self.active_project_workers(parent, &mut AgentRequestSnapshot::new(self))?;
+            if active + request.workers.len() > limit {
+                return Err(format!(
+                    "This project has {active} active workers and the active-worker limit is {limit}. Reuse or retire a completed worker before creating more."
+                ));
+            }
+        }
         let digest = format!(
             "{:x}",
             Sha256::digest(serde_json::to_vec(&request).map_err(|e| e.to_string())?)
@@ -1020,7 +1032,7 @@ impl AgentRuntime {
             .map(|worker| worker.ok_or_else(|| "Worker status row was not initialized".to_string()))
             .collect::<Result<Vec<_>, _>>()?;
         Ok(
-            json!({"capacity":{"active":self.active_project_workers(task,snapshot)?,"limit":null,"maxWorkersPerRequest":MAX_WORKERS_PER_REQUEST,"maxWorkerDepth":MAX_DELEGATION_DEPTH},"allowDelegation":self.config.markdown_chat.features.agent_teams && (own.agents.delegation_enabled_with_default(self.config.markdown_chat.features.default_delegation) || !own.agents.delegation_disabled && full_development_access),"fullDevelopmentAccess":full_development_access,"developmentInstructions":if full_development_access {Some(FULL_DEVELOPMENT_BRIEF)}else{None},"parentTaskKey":own.agents.parent_task_key,"communication":{"messageTool":"agent_message","reportTool":"agent_report","statusTool":"agent_status"},"workers":workers}),
+            json!({"capacity":{"active":self.active_project_workers(task,snapshot)?,"limit":self.config.markdown_chat.features.max_active_workers,"automaticWorkHeldUntilMs":self.supervisor.activity_snapshot(crate::markdown_chat::now_ms()).breaker_open_until_ms,"maxWorkersPerRequest":MAX_WORKERS_PER_REQUEST,"maxWorkerDepth":MAX_DELEGATION_DEPTH},"allowDelegation":self.config.markdown_chat.features.agent_teams && (own.agents.delegation_enabled_with_default(self.config.markdown_chat.features.default_delegation) || !own.agents.delegation_disabled && full_development_access),"fullDevelopmentAccess":full_development_access,"developmentInstructions":if full_development_access {Some(FULL_DEVELOPMENT_BRIEF)}else{None},"parentTaskKey":own.agents.parent_task_key,"communication":{"messageTool":"agent_message","reportTool":"agent_report","statusTool":"agent_status"},"workers":workers}),
         )
     }
 
@@ -1797,7 +1809,12 @@ mod tests {
         let project = root.path().join("project");
         std::fs::create_dir_all(&project).unwrap();
         let mut config = crate::config::default_config(root.path().to_owned());
+        assert!(
+            !config.markdown_chat.features.default_delegation,
+            "delegation is opt-in"
+        );
         config.markdown_chat.features.agent_teams = true;
+        config.markdown_chat.features.default_delegation = true;
         config.markdown_chat.automation.connector_name = "Codexify".into();
         config.memory.dir = Some(root.path().join("metadata").display().to_string());
         let config = Arc::new(config);
@@ -1957,6 +1974,7 @@ mod tests {
         let mut config = crate::config::default_config(access);
         config.markdown_chat.enabled = true;
         config.markdown_chat.features.agent_teams = true;
+        config.markdown_chat.features.default_delegation = true;
         config.memory.dir = Some(root.path().join("metadata").display().to_string());
         let config = Arc::new(config);
         let bindings = Arc::new(ProjectBindingStore::new(root.path().join("bindings")));
@@ -2040,7 +2058,7 @@ mod tests {
             .unwrap();
         assert_eq!(granted["fullDevelopmentAccess"], true);
         assert_eq!(granted["capacity"]["active"], 12);
-        assert!(granted["capacity"]["limit"].is_null());
+        assert_eq!(granted["capacity"]["limit"], 4);
         assert!(
             granted["workers"]
                 .as_array()
@@ -2204,6 +2222,8 @@ mod tests {
         config.markdown_chat.enabled = true;
         config.markdown_chat.automation.enabled = true;
         config.markdown_chat.features.agent_teams = true;
+        config.markdown_chat.features.max_active_workers =
+            crate::markdown_chat::MAX_ACTIVE_WORKERS_LIMIT;
         config.markdown_chat.features.conversation_recovery = true;
         config.markdown_chat.automation.connector_name = "Codexify".into();
         config.memory.dir = Some(root.path().join("metadata").display().to_string());
@@ -2999,8 +3019,11 @@ mod tests {
                 .is_err()
         );
         let child_count = store.load(&parent).unwrap().agents.children.len();
-        // Multiple full batches exceed both the former six-project and
-        // 32-direct-worker caps, without replaying reservations or setup sends.
+        // Full batches are accepted up to the configured active-worker limit,
+        // replays never queue another setup, and the batch that would exceed
+        // the limit is refused without recording any worker.
+        let limit = config.markdown_chat.features.max_active_workers;
+        let mut refused = false;
         for batch in 0..5 {
             let request = SpawnWorkersRequest {
                 request_id: format!("expanded-team-{batch}"),
@@ -3013,6 +3036,19 @@ mod tests {
                     })
                     .collect(),
             };
+            let active = runtime.status(&parent).await.unwrap()["capacity"]["active"]
+                .as_u64()
+                .unwrap() as usize;
+            if active + 8 > limit {
+                let error = runtime.spawn(&parent, request, true).await.unwrap_err();
+                assert!(error.contains("active-worker limit"), "{error}");
+                assert_eq!(
+                    store.load(&parent).unwrap().agents.children.len(),
+                    child_count + batch * 8
+                );
+                refused = true;
+                break;
+            }
             runtime.spawn(&parent, request.clone(), true).await.unwrap();
             let queued = supervisor.queued_count().await;
             runtime.spawn(&parent, request, true).await.unwrap();
@@ -3026,9 +3062,10 @@ mod tests {
                 child_count + (batch + 1) * 8
             );
         }
+        assert!(refused, "the fixture must reach the active-worker limit");
         let expanded = runtime.status(&parent).await.unwrap();
-        assert!(expanded["capacity"]["active"].as_u64().unwrap() > 32);
-        assert!(expanded["capacity"]["limit"].is_null());
+        assert!(expanded["capacity"]["active"].as_u64().unwrap() as usize <= limit);
+        assert_eq!(expanded["capacity"]["limit"], limit);
         assert_eq!(expanded["capacity"]["maxWorkersPerRequest"], 8);
         let paused_revision = child_store.load(&identity).unwrap().goal.unwrap().revision;
         runtime

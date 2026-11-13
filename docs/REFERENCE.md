@@ -1928,7 +1928,7 @@ runtime:
       "descriptorPath": "~/.codexify/browser/descriptor.json",
       "connectorName": "Codexify",
       "maxQueuedActions": 64,
-      "browserActionLanes": 2,
+      "browserActionLanes": 1,
       "autoApproveToolCalls": false
     }
   }
@@ -1966,7 +1966,7 @@ is disabled. The descriptor path
 must be absolute or start with `~/`; the connector name is bounded visible text;
 `maxQueuedActions` accepts 1–1024; and `autoApproveToolCalls` defaults to `true`.
 
-`browserActionLanes` defaults to `2` and accepts `1`–`4`. Independent chats use
+`browserActionLanes` defaults to `1` and accepts `1`–`4`. Independent chats use
 separate pages in the same private browser context. Each chat retains its own
 ordered action lease; setup and recovery wait for all active pages before taking
 exclusive browser access. Actual Sends remain spaced by at least one second,
@@ -3687,9 +3687,23 @@ shared browser. Infinite retries are disabled by default:
 | `goalRecoveryDelaysSeconds` | `[60, 120, 240]` | Recover an active goal after a continuation; each effective wait is at least `offlineTimeoutMinutes`. |
 | `jitterPercent` | `10` | Add a stable random wait between 0 and this percentage of each retry delay or approval resume wait. Set to `0` for no jitter. |
 | `approvalResumeGraceSeconds` | `180` | Wait for agent activity after accepting an approval before considering another continuation. |
-| `conversationLoadIntervalSeconds` | `1` | Minimum interval between healthy conversation document loads or reloads across all chats. Actual HTTP 429 backoffs still apply. |
+| `conversationLoadIntervalSeconds` | `180` | Minimum interval between healthy conversation document loads or reloads across all chats. Same-page reuse needs no load. Actual HTTP 429 backoffs still apply. |
 | `conversationUnavailableCooldownSeconds` | `300` | Shared conversation loading cooldown while a conversation is inaccessible. |
 | `rateLimitCooldownSeconds` | `180` | Shared fallback cooldown after HTTP 429 when no valid `Retry-After` is supplied. |
+
+### Automatic activity circuit breaker
+
+Codexify counts every dispatched browser action (each opens or reuses its
+conversation), accepted Sends, recoveries (goal recovery and replacement
+conversations), turn renewals and worker turns. `GET /api/health` on the owner
+UI reports them as `automationActivity`: lifetime `totals`, counts in the last
+10 minutes (`window`), the `limits`, and the breaker state.
+
+When automatic work reaches a limit within 10 minutes (180 dispatches, 12
+recoveries, 12 renewals or 60 worker turns), the breaker opens for 15 minutes.
+While it is open, recoveries, renewals and worker turns stay queued and resume
+afterwards; owner messages, pairing and new-chat setup are never held. Agent
+status reports the resume time as `capacity.automaticWorkHeldUntilMs`.
 
 In the GUI, enter retry schedules as comma-separated durations, for example
 `30s, 1m, 2m`. Bare numbers mean seconds. The JSON configuration always stores
