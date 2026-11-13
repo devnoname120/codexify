@@ -540,6 +540,7 @@ impl ExecSessionState {
         self.sessions.lock().unwrap().remove(&id)
     }
 
+    #[cfg(test)]
     fn len(&self) -> usize {
         self.sessions.lock().unwrap().len()
     }
@@ -558,6 +559,36 @@ impl ExecSessionState {
 
     fn reap(&self, idle_timeout: Duration) -> Vec<Arc<ExecSession>> {
         reap_sessions(&mut self.sessions.lock().unwrap(), idle_timeout)
+    }
+
+    /// Makes room for one more session. Only running processes count against
+    /// `max`; when the map is full of finished-but-unread results, the oldest
+    /// of those (by last client activity) are dropped to admit the new command.
+    fn admit(&self, max: usize) -> bool {
+        let mut sessions = self.sessions.lock().unwrap();
+        if sessions.len() < max {
+            return true;
+        }
+        let mut finished = sessions
+            .values()
+            .filter(|session| session.exit_code().is_some())
+            .map(|session| (*session.last_activity.lock().unwrap(), session.id))
+            .collect::<Vec<_>>();
+        finished.sort_unstable();
+        let excess = sessions.len() + 1 - max;
+        if finished.len() < excess {
+            return false;
+        }
+        for (_, id) in finished.into_iter().take(excess) {
+            if let Some(evicted) = sessions.remove(&id) {
+                tracing::info!(
+                    exec_session_id = evicted.id,
+                    exit_code = ?evicted.exit_code(),
+                    "unread finished exec session evicted to admit a new command"
+                );
+            }
+        }
+        true
     }
 
     /// Starts a transport-owned reaper. It holds only a weak reference, so it
@@ -1108,6 +1139,7 @@ impl SessionState {
         self.exec.remove(id)
     }
 
+    #[cfg(test)]
     fn exec_session_count(&self) -> usize {
         self.exec.len()
     }
@@ -1505,14 +1537,13 @@ pub fn start_exec_session(
     cwd: &std::path::Path,
     shell: Option<&str>,
 ) -> Result<Arc<ExecSession>, String> {
-    {
-        let live = state.exec_session_count();
-        if live >= config.exec.max_sessions {
-            return Err(format!(
-                "Too many live exec sessions ({}). Finish or terminate an existing session before starting another.",
-                config.exec.max_sessions
-            ));
-        }
+    // Finished sessions keep their final output for the client, but they must
+    // not hold admission slots that only running processes need.
+    if !state.exec.admit(config.exec.max_sessions) {
+        return Err(format!(
+            "Too many live exec sessions ({}). Finish or terminate an existing session before starting another.",
+            config.exec.max_sessions
+        ));
     }
 
     let parts = match shell.filter(|value| !value.is_empty()) {
@@ -2247,6 +2278,46 @@ exit $exit
             kill_exec_session(session);
         }
         assert_eq!(state.exec_session_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn unread_finished_sessions_do_not_block_admission_but_running_ones_do() {
+        let dir = std::env::temp_dir();
+        let mut config = crate::config::default_config(dir.clone());
+        config.exec.max_sessions = 2;
+        let state = SessionState::new();
+        let finished_first = start_exec_session(&state, &config, "exit 3", &dir, None).unwrap();
+        let finished_second = start_exec_session(&state, &config, "exit 4", &dir, None).unwrap();
+        for session in [&finished_first, &finished_second] {
+            for _ in 0..400 {
+                if session.exit_code().is_some() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            assert!(session.exit_code().is_some(), "fixture must finish");
+        }
+        finished_second.touch();
+        assert_eq!(state.exec_session_count(), 2);
+
+        // The map is full of unread results: the least recently used one gives
+        // way and the other stays readable.
+        let running =
+            start_exec_session(&state, &config, &resident_sleep_command(), &dir, None).unwrap();
+        assert!(state.exec_session(finished_first.id).is_none());
+        assert!(state.exec_session(finished_second.id).is_some());
+        let second_running =
+            start_exec_session(&state, &config, &resident_sleep_command(), &dir, None).unwrap();
+        assert!(state.exec_session(finished_second.id).is_none());
+
+        // Every slot now holds a live process, so admission is refused.
+        let refused = start_exec_session(&state, &config, &resident_sleep_command(), &dir, None);
+        let Err(error) = refused else {
+            panic!("a third running command must be refused")
+        };
+        assert!(error.contains("Too many live exec sessions"));
+        kill_exec_session(&running);
+        kill_exec_session(&second_running);
     }
 
     #[tokio::test]
