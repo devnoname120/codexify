@@ -186,11 +186,12 @@ impl Tool for GoalTool {
                         "writeOnly": true
                     }
                 },
+                // Avoid status-dependent anyOf on this tool's wire schema.
+                // Some MCP adapters normalize its conditional branches into
+                // an untyped map and silently drop the summary/reason fields,
+                // leaving an otherwise valid goal_finish call impossible.
+                // finish_report checks the status-specific requirement below.
                 "required": ["expectedRevision", "status", "nextSteps"],
-                "anyOf": [
-                    {"properties": {"status": {"const": "completed"}}, "required": ["summary"]},
-                    {"properties": {"status": {"const": "blocked"}}, "required": ["reason"]}
-                ],
                 "additionalProperties": false
             }),
         }
@@ -604,6 +605,27 @@ mod tests {
             GoalTool::Set.input_schema()["properties"]["markdown"]["writeOnly"],
             true
         );
+        assert!(schema.get("anyOf").is_none());
+        assert_eq!(schema["properties"]["summary"]["type"], "string");
+        assert_eq!(schema["properties"]["reason"]["type"], "string");
+        let valid: FinishArgs = serde_json::from_value(json!({
+            "expectedRevision":1,
+            "status":"completed",
+            "summary":"Completed the independent read-only audit with evidence",
+            "nextSteps":"None"
+        }))
+        .expect("flat finish schema should preserve the summary");
+        assert!(matches!(
+            finish_report(&valid),
+            Ok(GoalFinish::Completed { .. })
+        ));
+        let missing: FinishArgs = serde_json::from_value(json!({
+            "expectedRevision":1,
+            "status":"completed",
+            "nextSteps":"None"
+        }))
+        .expect("summary remains optional on the wire but required by runtime validation");
+        assert!(finish_report(&missing).is_err());
 
         let goal = GoalRecord {
             revision: 1,
