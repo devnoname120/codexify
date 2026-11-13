@@ -160,6 +160,15 @@ body.system-progress-visible{height:100dvh;display:flex;flex-direction:column}bo
     'audit.enabled':['Record bounded, redacted tool activity in a private local audit log.','advanced','Audit logging'],
     'audit.logFile':['Optional JSONL destination. Leave blank to use the per-project default shown in the field. Ignored when Audit logging is off.','advanced','Log file'],
     'agentChat.automation.requestBlockingEnabled':['Block matching requests before they leave the browser. Off by default. Use Restart Codexify to apply.','browser','Block matching requests'],
+    'agentChat.automation.browserSimplicity':['Simplified reduces decoration and defers offscreen history. Bones also compacts navigation and removes decorative message chrome, keeping messages, composer, model/apps controls, Stop, and approvals. Off keeps the full ChatGPT interface. Restart Codexify to apply. Your previous simplification choice is retained.','browser','Browser simplicity'],
+    'agentChat.automation.recoveryEnhancements':['Recover verified unsent drafts, stuck editors, lingering responses, and incomplete goal handoffs automatically. Off by default. Restart Codexify to apply.','browser','Stalled browser recovery'],
+    'agentChat.features.agentTeams':['Enable agent tools and worker chats. New workers can implement, build, test, and debug by default. Agent teams are off by default. Restart Codexify and refresh the connector to apply.','chats','Agent teams'],
+    'agentChat.features.defaultDelegation':['Let enabled agent teams delegate without another setup click. Off by default; teams can still be granted delegation from the Agents button. Explicit team disables, audit assignments, stops, project boundaries, and approval settings still apply. Restart Codexify to apply.','chats','Delegate by default'],
+    'agentChat.features.maxActiveWorkers':['Most worker chats that may be active at once in one project, across all teams. Further spawn requests are refused until a worker completes or is retired. 4 by default, 1 to 32.','chats','Active worker limit'],
+    'agentChat.features.externalAgentControl':['Expose one shared agent connection over MCP, HTTP and JavaScript for any AI. Starts with the Codexify service and tunnel. Discover it with codexify agents connection. Requires Agent teams and browser automation. Off by default; restart to apply.','chats','AI agent control'],
+    'agentChat.features.autoMode':['Show Auto mode for delegated development goals. Requires Agent teams and automatic retries. Off by default. Restart Codexify to apply.','chats','Auto mode'],
+    'agentChat.features.agentFolders':['Group worker chats under their coordinator in the sidebar. Off by default. Restart Codexify to apply.','chats','Agent folders'],
+    'agentChat.features.conversationRecovery':['Allow guarded replacement of repeatedly inaccessible conversations. Each chat also has its own recovery switch. Off by default. Restart Codexify to apply.','chats','Conversation recovery'],
     'agentChat.extras.achievements':['Celebrate newly earned badges. Your badge collection stays in Statistics. Applies immediately.','extras','Achievement celebrations'],
     'agentChat.extras.animations':['Colorful bursts and motion, lasting a few seconds. Respects reduced motion. Applies immediately.','extras','Animations'],
     'agentChat.extras.sounds':['Brief fireworks and a musical flourish for celebrations. Applies immediately.','extras','Celebration sounds'],
@@ -175,9 +184,10 @@ body.system-progress-visible{height:100dvh;display:flex;flex-direction:column}bo
     'agentChat.rolloutEnabled':['Keep chronological per-chat progress reports and checkpoint reminders. Independent of turn renewal. Applies immediately.','chats','Progress journal'],
     'agentChat.automation.automaticRetries':['Retry failed browser actions automatically. Turn off to keep manual Retry available without scheduling retries. Applies immediately.','chats','Automatic retries'],
     'agentChat.automation.newConversationOnLoadRateLimit':['Create and auto-pair a replacement when ChatGPT rate-limits loading an existing conversation. Preserve the task and stay on the replacement through pairing and the first work message. Restart to apply.','chats','New conversation when loading is rate-limited'],
-    'agentChat.automation.retryTimings.actionDelaysSeconds':['Delays between retries when a browser action failed before sending. One delay per retry, in order; stop after the last entry. Use s, m, or h, for example 30s, 1m, 2m. Restart to apply.','chats','Failed send retry delays'],
-    'agentChat.automation.retryTimings.chatgptAccessDelaysSeconds':['Retry delays for sign-in, inaccessible conversations, rate limits, and shared loading cooldowns. One delay per retry, then stop. Use s, m, or h. Restart to apply.','chats','ChatGPT access retry delays'],
-    'agentChat.automation.retryTimings.goalRecoveryDelaysSeconds':['Delays before trying to recover a goal when the agent stays offline after a continuation. One delay per retry, then stop. Use s, m, or h. Restart to apply.','chats','Goal recovery retry delays'],
+    'agentChat.automation.retryTimings.infiniteRetries':['Keep retrying until the work resumes, finishes, or is paused. Reuse the final retry delay after the schedule ends. Off by default. Restart to apply.','chats','Retry without a limit'],
+    'agentChat.automation.retryTimings.actionDelaysSeconds':['Delays between retries when a browser action failed before sending. Unlimited retries reuse the final delay. Use s, m, or h, for example 30s, 1m, 2m. Restart to apply.','chats','Failed send retry delays'],
+    'agentChat.automation.retryTimings.chatgptAccessDelaysSeconds':['Retry delays for sign-in, inaccessible conversations, rate limits, and shared loading cooldowns. Unlimited retries reuse the final delay. Use s, m, or h. Restart to apply.','chats','ChatGPT access retry delays'],
+    'agentChat.automation.retryTimings.goalRecoveryDelaysSeconds':['Delays before recovering a goal whose agent stays offline after a continuation. Unlimited retries reuse the final delay. Use s, m, or h. Restart to apply.','chats','Goal recovery retry delays'],
     'agentChat.automation.retryTimings.jitterPercent':['Add a random extra wait from 0 to this percentage of each retry delay and approval resume wait. Stable for each attempt; 0 disables jitter. Restart to apply.','chats','Retry jitter (%)'],
     'agentChat.automation.retryTimings.approvalResumeGraceSeconds':['Wait for agent activity after accepting a tool or file approval before considering another continuation. Seconds, plus retry jitter. Restart to apply.','chats','Wait after accepting approval (seconds)'],
     'agentChat.automation.retryTimings.conversationLoadIntervalSeconds':['Minimum time between conversation loads or reloads across the shared browser. Reusing the open conversation needs no load. Seconds. Restart to apply.','chats','Conversation loading interval (seconds)'],
@@ -187,17 +197,19 @@ body.system-progress-visible{height:100dvh;display:flex;flex-direction:column}bo
     'agentChat.turnRenewal.enabled':['Ask for a final handoff at the model limit, then continue automatically after the report finishes. Applies immediately.','chats','Turn renewal'],
     'agentChat.turnRenewal.limits':['Renew only checked model and effort pairs, measured from the last accepted ChatGPT send using the actual model. Unchecked and unlisted selections are left alone. Limits stay editable while off. Applies immediately.','chats','Turn limits by model'],
     'agentChat.enabled':['Enable conversations and agent messaging.','chats'], 'agentChat.rolloutReminderInterval':['Agent work tool calls between progress checkpoint reminders. UI polling and idle wait loops do not count. Applies immediately.','chats','Progress report interval'], 'agentChat.defaultMessageMode':['Default composer action. Cmd+Enter on Mac or Ctrl+Enter on Windows/Linux uses the other mode for one message.','chats','Default message mode'], 'agentChat.port':['Port for the owner chat interface.','chats'], 'agentChat.maxWaitMs':['Maximum duration of a chat_await or turn_completed call, in milliseconds.','chats'],
-    'agentChat.automation.enabled':['Use the browser companion to send messages and continue goals.','browser'], 'agentChat.automation.connectorName':['The connector to mention when sending messages in ChatGPT.','browser'], 'agentChat.automation.chatgptProjectUrl':['ChatGPT project used for new conversations.','browser'], 'agentChat.automation.descriptorPath':['Location of the browser companion connection descriptor.','browser'], 'agentChat.automation.requestBlockList':['One case-sensitive Chrome regex per line. Matching requests never reach the server. Use Restart Codexify to apply browser policy changes.','browser','Blocked requests'], 'agentChat.automation.maxQueuedActions':['Maximum number of actions waiting to be sent.','chats'], 'agentChat.automation.autoApproveToolCalls':['Automatically approve tool calls in ChatGPT.','browser'],
+    'agentChat.automation.enabled':['Use the browser companion to send messages and continue goals.','browser'], 'agentChat.automation.connectorName':['The connector to mention when sending messages in ChatGPT.','browser'], 'agentChat.automation.chatgptProjectUrl':['ChatGPT project used for new conversations.','browser'], 'agentChat.automation.descriptorPath':['Location of the browser companion connection descriptor.','browser'], 'agentChat.automation.requestBlockList':['One case-sensitive Chrome regex per line. Matching requests never reach the server. Use Restart Codexify to apply browser policy changes.','browser','Blocked requests'], 'agentChat.automation.maxQueuedActions':['Maximum number of actions waiting to be sent.','chats'], 'agentChat.automation.browserActionLanes':['Browser pages that may act on different chats at once, 1 to 4. 1 by default; more lanes mean more concurrent ChatGPT traffic. Restart Codexify to apply.','browser','Browser action lanes'], 'agentChat.automation.autoApproveToolCalls':['Automatically approve tool calls in ChatGPT.','browser'],
     'agentChat.notifications.events.completed':['A chat or goal finishes.','notifications','Completion'], 'agentChat.notifications.events.inputRequired':['A chat needs your reply. Repeated alerts are deduplicated.','notifications','Input required'], 'agentChat.notifications.events.goalBlocked':['A goal becomes blocked.','notifications','Goal blocked'], 'agentChat.notifications.events.errors':['An error prevents a chat from continuing.','notifications','Chat errors'], 'agentChat.notifications.events.messages':['Notify for new agent messages.','notifications','New messages'], 'agentChat.notifications.events.offline':['Notify when an agent goes offline.','notifications','Agent offline'], 'agentChat.notifications.urls':['Apprise destination URLs, one per line.','notifications','Delivery destinations'], 'agentChat.notifications.pythonPath':['Python executable used to deliver notifications.','notifications','Python executable'], 'agentChat.notifications.timeoutMs':['Notification delivery timeout, in milliseconds.','notifications','Delivery timeout'],
     'worktrees.mode':['Automatically create worktrees, always require them, or disable them.','workspaces','Creation mode'], 'worktrees.root':['Directory containing managed worktrees.','workspaces','Worktree directory'], 'worktrees.autoCleanupEnabled':['Remove old worktrees automatically.','workspaces','Automatic cleanup'], 'worktrees.keepCount':['Number of worktrees to keep during automatic cleanup.','workspaces','Worktrees to keep'], 'worktrees.allowSetupScript':['Run configured setup scripts when creating a worktree.','workspaces','Run setup scripts'], 'worktrees.upstreamRefreshMode':['Choose whether to refresh upstream references.','workspaces','Upstream refresh'],
     apiKey:['Optional API authentication key.','connections'],conversationAuthToken:['Reference used when setting up conversations.','connections'],mcpServers:['Configure server commands, connections, and tool policies.','connections'],openaiTunnels:['Configure additional outbound tunnel connections.','connections'],openaiTunnel:['Configure the primary outbound tunnel connection.','connections'],allowedHosts:['HTTP Host names accepted by the server, one per line.','connections'],
   };
   const enums={
+    'agentChat.automation.browserSimplicity':[['off','Off'],['simplified','Simplified'],['bones','Bones — maximum simplicity']],
     'agentChat.defaultMessageMode':[['steer','Steer'],['queue','Queue']],'worktrees.mode':[['auto','Automatic'],['always','Always'],['never','Never']],'worktrees.upstreamRefreshMode':[['never','Never'],['best-effort','Best effort']],'toolLogging.mode':[['off','Off'],['requests','Requests'],['responses','Responses'],['all','All']],'toolLogging.level':[['trace','Trace'],['debug','Debug'],['info','Info'],['warn','Warning'],['error','Error']]};
   const label=key=>names[key]||key.replace(/([a-z])([A-Z])/g,'$1 $2').replace(/Ms$/,' (ms)').replace(/^./,letter=>letter.toUpperCase());
   const RESET=Symbol('default'),invalidFields=new Map(),invalidText=new Map();
   let snapshot=null,global=null,dirty={},saving=false,savePromise=null,saveTimer,maintenance=false,statusTimer,previousInstance=null,rawEdited=false,shownRefreshState=null,category='general',rawMode=false,fields=[],saveError=null,inFlightChanges={},refreshSubmitting=false,refreshTimer=null,refreshEpoch=0;
   let notice=null,noticeTimer=null,maintenanceKind=null,statusReading=false,lastStatusAt=0,connectionLost=false,dismissedUpdate=null;
+  let fastSetupApplying=false,fastSetupRetry=false;
   const updatePending=value=>['preparing','scheduled','installing','validating','restarting'].includes(value?.state);
   const updateFailure=value=>['failed','rolled_back'].includes(value?.state);
   const updateMessage=value=>({
@@ -233,6 +245,7 @@ body.system-progress-visible{height:100dvh;display:flex;flex-direction:column}bo
     const button=byId('global-update');button.hidden=!global?.latest?.updateAvailable&&!updating&&!updateFailure(update);button.disabled=maintenance||updatePending(update);button.setAttribute('aria-busy',String(updating));button.textContent=updating?'Updating…':updateFailure(update)?'Retry update':'Update';button.title=view&&updating?`${view.title} ${view.detail||''}`:'Update Codexify';
     byId('settings-update').disabled=button.disabled;byId('global-footer').dataset.maintenance=String(busy);
     document.documentElement.style.setProperty('--system-progress-height',`${progress.hidden?0:progress.getBoundingClientRect().height}px`);
+    renderFastSetup();
   }
   function runtimeNotice(title,detail='',error=false) {
     clearTimeout(noticeTimer);notice={title,detail,error,loading:maintenance,dismiss:!maintenance};renderRuntime();
@@ -285,9 +298,40 @@ body.system-progress-visible{height:100dvh;display:flex;flex-direction:column}bo
   }
   for(const [key,operation]of [['start','start'],['stop','stop'],['login','login'],['models','capabilities']])browserNodes[key].addEventListener('click',()=>void controlBrowser(operation));
   const browserTimer=setInterval(()=>{if(dialog.open&&!rawMode&&browserCard.isConnected&&!document.hidden)void refreshBrowser();},1500);
-  const message=(text,error=false)=>{byId('settings-save-state').textContent=text;byId('settings-save-state').dataset.error=String(error);byId('settings-reload').hidden=!error;};
+  const message=(text,error=false)=>{byId('settings-save-state').textContent=text;byId('settings-save-state').dataset.error=String(error);byId('settings-reload').hidden=!error;renderFastSetup();};
   const storedAt=(object,path)=>path.split('.').reduce((value,key)=>value&&Object.hasOwn(value,key)?value[key]:undefined,object);
   const draftAt=path=>{const pending=Object.hasOwn(dirty,path)?dirty:inFlightChanges;return Object.hasOwn(pending,path)?pending[path]===RESET?undefined:pending[path]:storedAt(snapshot.document,path);};
+  const fastSetupCard=document.createElement('section');fastSetupCard.id='settings-fast-setup';fastSetupCard.className='settings-card';fastSetupCard.setAttribute('aria-labelledby','settings-fast-setup-heading');
+  fastSetupCard.innerHTML='<h4 class="settings-card-heading" id="settings-fast-setup-heading">Fast setup</h4><div class="setting-row"><p class="setting-help" id="settings-fast-setup-description">Steer delivery, stalled-browser recovery, automatic retries, progress and agent controls. Fewer decorations and sounds. Browser simplification, infinite retries and turn renewal stay separate opt-ins.</p><div class="setting-control"><button type="button" class="settings-primary" id="settings-fast-setup-apply" aria-describedby="settings-fast-setup-description">Apply fast setup</button></div></div>';
+  const fastSetupButton=fastSetupCard.querySelector('button');
+  function fastSetupBlocked() {
+    const setup=snapshot?.fastSetup;
+    if(!setup?.changes||typeof setup.changes!=='object'||Array.isArray(setup.changes)||!Object.keys(setup.changes).length)return 'Fast setup is unavailable.';
+    if(fastSetupApplying||saving)return 'Saving settings…';
+    if(maintenance||updatePending(global?.update)||connectionLost)return 'Wait for Codexify to finish starting or updating.';
+    if(rawEdited||rawMode)return 'Save raw configuration changes before applying fast setup.';
+    if(invalidFields.size)return 'Fix the highlighted settings first.';
+    if(Object.keys(dirty).length&&!(fastSetupRetry&&JSON.stringify(dirty)===JSON.stringify(setup.changes)))return 'Save current settings before applying fast setup.';
+    return '';
+  }
+  function renderFastSetup() {
+    const blocked=fastSetupBlocked(),applied=snapshot?.fastSetup?.applied===true;
+    fastSetupButton.disabled=Boolean(blocked)||applied;
+    fastSetupButton.textContent=fastSetupApplying?'Applying…':applied?'Fast setup saved':fastSetupRetry?'Retry fast setup':'Apply fast setup';
+    fastSetupButton.title=blocked||'';fastSetupButton.setAttribute('aria-busy',String(fastSetupApplying));
+  }
+  fastSetupButton.addEventListener('click',async()=>{
+    if(fastSetupBlocked()||snapshot?.fastSetup?.applied===true)return;
+    fastSetupApplying=true;fastSetupRetry=false;
+    dirty=structuredClone(snapshot.fastSetup.changes);renderFastSetup();
+    try {
+      const saved=await saveChanges();
+      fastSetupRetry=!saved&&snapshot?.fastSetup?.applied!==true;
+      // New input can arrive while the request is in flight. Never replace an
+      // invalid field or unsaved raw draft just to refresh the preset card.
+      if(saved&&!invalidFields.size&&!rawEdited&&!Object.keys(dirty).length)renderEditor();
+    }finally{fastSetupApplying=false;renderFastSetup();}
+  });
   function describe(path,sample) {
     const root=path.split('.')[0],meta=metadata[path],key=path.split('.').at(-1);
     let section=groups[root]||'Other settings',group=meta?.[1];
@@ -304,7 +348,7 @@ body.system-progress-visible{height:100dvh;display:flex;flex-direction:column}bo
   }
   function collect(schema,stored,prefix='',defaults=snapshot.defaults) {
     for(const key of new Set([...Object.keys(schema||{}),...Object.keys(defaults||{}),...Object.keys(stored||{})])) {
-      if(key==='schemaVersion'||key==='multiProject'&&!prefix||prefix==='agentChat'&&key==='analyticsEnabled')continue;
+      if(key==='schemaVersion'||key==='multiProject'&&!prefix||prefix==='agentChat'&&key==='analyticsEnabled'||prefix==='agentChat.automation'&&key==='minimalUi')continue;
       const path=prefix?`${prefix}.${key}`:key,fallback=schema?.[key]??defaults?.[key],value=stored?.[key],sample=value??fallback??(annotationHintOverrides.has(path)?false:undefined);
       const atomic=['mcpServers','openaiTunnel','env','httpHeaders','envHttpHeaders'].includes(key);
       if(sample&&typeof sample==='object'&&!Array.isArray(sample)&&!atomic)collect(fallback||{},value||{},path,defaults?.[key]);
@@ -320,6 +364,7 @@ body.system-progress-visible{height:100dvh;display:flex;flex-direction:column}bo
     return label==='Required'?label:`${text} (default)`;
   }
   function queue(path,value,control) {
+    fastSetupRetry=false;
     control?.setAttribute('data-default',String(value===RESET));
     if(control?.tagName!=='SELECT'&&control?.matches('input,textarea'))control.placeholder=value===RESET?defaultText(path):'';
     const previous=draftAt(path),wasInvalid=invalidFields.has(path);
@@ -399,7 +444,7 @@ body.system-progress-visible{height:100dvh;display:flex;flex-direction:column}bo
         const tools=document.createElement('div');tools.className='setting-editor-tools';tools.hidden=true;const format=document.createElement('button');format.type='button';format.textContent='Format JSON';format.addEventListener('click',()=>{try{control.value=JSON.stringify(JSON.parse(control.value),null,2);control.dispatchEvent(new Event('input'));}catch{control.dispatchEvent(new Event('input'));}});tools.append(format,document.createTextNode('JSON · validated before saving'));controls.append(control,tools);
       }else{control=document.createElement('input');control.type=typeof sample==='number'||path.endsWith('port')?'number':field.secret?'password':'text';control.value=value??'';control.placeholder=value==null?defaultText(path):'';if(path.startsWith('agentChat.automation.retryTimings.')){control.min=path.endsWith('jitterPercent')?'0':'1';control.max=path.endsWith('jitterPercent')?'100':'86400';control.step='1';}if(control.type==='password')control.autocomplete='new-password';read=()=>control.value.trim()===''?RESET:control.type==='number'?Number(control.value):control.value;}
       if(path==='agentChat.offlineTimeoutMinutes'){control.min='1';control.max='1440';control.step='1';}
-      if(path==='agentChat.offlineTimeoutMinutes'||path.startsWith('agentChat.automation.retryTimings.'))read=()=>{if(!control.value.trim())return RESET;const number=Number(control.value);if(!Number.isInteger(number)||number<Number(control.min)||number>Number(control.max))throw new Error(`${name} must be a whole number between ${control.min} and ${control.max}.`);return number;};
+      if(path==='agentChat.offlineTimeoutMinutes'||(path.startsWith('agentChat.automation.retryTimings.')&&!path.endsWith('.infiniteRetries')))read=()=>{if(!control.value.trim())return RESET;const number=Number(control.value);if(!Number.isInteger(number)||number<Number(control.min)||number>Number(control.max))throw new Error(`${name} must be a whole number between ${control.min} and ${control.max}.`);return number;};
       if(invalidText.has(path))control.value=invalidText.get(path);
       control.dataset.default=String(value==null);control.className='setting-input';control.id=`setting-${path.replaceAll('.','-')}`;control.setAttribute('aria-label',path);caption.htmlFor=control.id;
       control.addEventListener(control.tagName==='SELECT'?'change':'input',()=>{try{queue(path,read(),control);}catch(error){delete dirty[path];invalidText.set(path,control.value);invalidFields.set(path,(path==='agentChat.offlineTimeoutMinutes'||path.startsWith('agentChat.automation.retryTimings.'))?error.message:`${name} must be valid JSON.`);control.setAttribute('aria-invalid','true');message(invalidFields.get(path),true);}});
@@ -452,6 +497,8 @@ body.system-progress-visible{height:100dvh;display:flex;flex-direction:column}bo
     if(rawMode)return;
     const form=byId('settings-form');form.replaceChildren();
     if(category==='analytics'&&!query){usageDashboard.mount(form);void extras.refresh();return;}
+    const fastSetupVisible=Boolean(snapshot?.fastSetup)&&(!query&&['general','browser'].includes(category)||query&&fastSetupCard.textContent.toLowerCase().includes(query));
+    if(fastSetupVisible){form.append(fastSetupCard);renderFastSetup();}
     const browserVisible=!query&&category==='browser'||query&&'browser session start browser stop browser sign in refresh models'.includes(query);
     if(browserVisible){form.append(browserCard);renderBrowser();void refreshBrowser();}
     const eventOrder=['completed','inputRequired','goalBlocked','errors','messages','offline'];
@@ -459,7 +506,7 @@ body.system-progress-visible{height:100dvh;display:flex;flex-direction:column}bo
     const sections=new Map();for(const field of matching){const title=query?`${categories.find(item=>item.id===field.category).name} · ${field.section}`:field.section;if(!sections.has(title))sections.set(title,[]);sections.get(title).push(field);}
     for(const [title,items] of sections){const card=document.createElement('section');card.className='settings-card';const heading=document.createElement('h4');heading.className='settings-card-heading';heading.textContent=title;card.append(heading,...items.map(drawField));form.append(card);}
     if(category==='chats'&&!query)form.append(cutoffCard());
-    if(!matching.length&&!browserVisible){const empty=document.createElement('div');empty.className='settings-empty';empty.innerHTML='<strong>No settings found</strong><p>Try another search or choose a category.</p>';form.append(empty);}
+    if(!matching.length&&!browserVisible&&!fastSetupVisible){const empty=document.createElement('div');empty.className='settings-empty';empty.innerHTML='<strong>No settings found</strong><p>Try another search or choose a category.</p>';form.append(empty);}
   }
   for(const item of categories){const button=document.createElement('button');button.type='button';button.dataset.category=item.id;button.innerHTML=`${icon(item.id)}<span>${item.name}</span>`;button.addEventListener('click',()=>{category=item.id;byId('settings-search').value='';renderForm();byId('settings-main').scrollTop=0;});byId('settings-nav').append(button);}
   byId('settings-analytics-back').addEventListener('click',()=>{category='general';byId('settings-search').value='';renderForm();byId('settings-main').scrollTop=0;});
@@ -470,7 +517,7 @@ body.system-progress-visible{height:100dvh;display:flex;flex-direction:column}bo
     message(snapshot.restartRequired?'Saved. Restart Codexify to apply changes.':'All changes saved.');
     if(global?.connectorRefresh?.source==='manual'||['queued','running'].includes(global?.connectorRefresh?.phase)){shownRefreshState=null;renderRefresh(global.connectorRefresh);}
   }
-  async function load(){snapshot=await(await api('/api/settings')).json();extras.preferences({...snapshot.defaults?.agentChat?.extras,...snapshot.document?.agentChat?.extras});dirty={};saveError=null;renderEditor();void loadCutoffEstimates();}
+  async function load(){snapshot=await(await api('/api/settings')).json();extras.preferences({...snapshot.defaults?.agentChat?.extras,...snapshot.document?.agentChat?.extras});dirty={};saveError=null;fastSetupRetry=false;renderEditor();void loadCutoffEstimates();}
   function changeDocument(changes) {
     const document=JSON.parse(JSON.stringify(snapshot.document));
     for(const [path,value] of Object.entries(changes)){const parts=path.split('.');let target=document;for(const part of parts.slice(0,-1)){if(!target[part]||typeof target[part]!=='object')target[part]={};target=target[part];}if(value===RESET)delete target[parts.at(-1)];else target[parts.at(-1)]=value;}
@@ -485,7 +532,7 @@ body.system-progress-visible{height:100dvh;display:flex;flex-direction:column}bo
     savePromise=(async()=>{
       try{snapshot=await(await api('/api/settings',{method:'POST',body:JSON.stringify(body)})).json();saveError=null;extras.preferences({...snapshot.defaults?.agentChat?.extras,...snapshot.document?.agentChat?.extras});if(!rawEdited)byId('settings-raw').value=snapshot.raw;window.dispatchEvent(new CustomEvent('codexify-message-mode-change',{detail:snapshot.document?.agentChat?.defaultMessageMode??snapshot.defaults?.agentChat?.defaultMessageMode??'queue'}));if(invalidFields.size)message(invalidFields.values().next().value,true);else if(snapshot.schemaRefreshError)message('Settings saved. Automatic tool refresh could not be queued. Use Refresh connector.',true);else message(snapshot.restartRequired?'Saved. Restart Codexify to apply changes.':'All changes saved.');return true;}
       catch(error){dirty={...changes,...dirty};saveError=error.message||'Settings were not saved.';message(saveError,true);return false;}
-      finally{saving=false;inFlightChanges={};}
+      finally{saving=false;inFlightChanges={};renderFastSetup();}
     })();
     const success=await savePromise;if(!success)return false;return Object.keys(dirty).length?saveChanges():!invalidFields.size;
   }

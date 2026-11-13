@@ -66,7 +66,7 @@ beforeAll(async()=>{
     }else await route.fulfill({contentType:"text/html",body:'<!doctype html><meta charset="utf-8">'+body});
   });
 },30_000);
-afterAll(async()=>{await context?.close();if(profile)await rm(profile,{recursive:true,force:true});});
+afterAll(async()=>{if(context){await Promise.all(context.pages().map(page=>page.close()));await context.close();}if(profile)await rm(profile,{recursive:true,force:true,maxRetries:10,retryDelay:100});});
 
 test.skipIf(!native)("English, Greek and Italian approval menus grant conversation scope without once, deny, Send or navigation",async()=>{
   for(const [once,conversation] of [["Allow once",`Allow ${name} for this conversation`],["Να επιτρέπεται μία φορά",`Να επιτρέπεται το ${name} για αυτήν τη συνομιλία`],["Consenti una volta",`Consenti ${name} per questa conversazione`]]){
@@ -140,7 +140,7 @@ test.skipIf(!native)("an approval blocking a newly opened target stops ordinary 
   const coordinator=new SingleWindowCoordinator(new ChatGptBrowserDriver(surface,build),build);
   const action={actionId:"blocked-before-send",idempotencyKey:"blocked-before-send",url,expectedUrl:url,pairingGeneration:1,connectorName:name,expectedAccountFingerprint:request.expectedAccountFingerprint,model:"gpt-6-sol",effort:"high",prompt:{kind:"offline_goal" as const,goalRevision:1},autoApproveToolCalls:true};
   await coordinator.execute(action);for await(const _event of coordinator.events(action.actionId,0)){}
-  expect(await coordinator.action(action.actionId)).toMatchObject({state:"approval_required",sendAccepted:false});
+  expect(await coordinator.action(action.actionId)).toMatchObject({state:'failed',sendAccepted:false,attention:{code:'approval_required'}});
   expect(await page.locator('#prompt-textarea').textContent()).toBe("");
   expect(await page.evaluate(()=> JSON.parse(document.body.dataset.clicks!).send)).toBe(0);
 });
@@ -151,7 +151,7 @@ test.skipIf(!native)("retry preserves a current approval without reloading, then
   const coordinator=new SingleWindowCoordinator(new ChatGptBrowserDriver(guardedSurface,build),build);
   const action={actionId:'retry-with-approval',idempotencyKey:'retry-with-approval',url,expectedUrl:url,pairingGeneration:1,connectorName:name,expectedAccountFingerprint:request.expectedAccountFingerprint,model:'gpt-6-sol',effort:'high',prompt:{kind:'offline_goal' as const,goalRevision:1},autoApproveToolCalls:true};
   await coordinator.execute(action);for await(const _event of coordinator.events(action.actionId,0)){}
-  expect(await coordinator.action(action.actionId)).toMatchObject({state:'approval_required',sendAccepted:false});
+  expect(await coordinator.action(action.actionId)).toMatchObject({state:'failed',sendAccepted:false,attention:{code:'approval_required'}});
   expect(navigations).toBe(0);expect(await page.locator('[data-codex-approval-surface]').isVisible()).toBeTrue();
   expect(await coordinator.approvePendingConversation(request)).toMatchObject({approved:true});
   expect(await page.evaluate(()=>JSON.parse(document.body.dataset.clicks!))).toEqual({arrow:1,once:0,conversation:1,deny:0,send:0});
@@ -185,11 +185,39 @@ test.skipIf(!native)("a materialization card arriving after prompt insertion pre
   const coordinator=new SingleWindowCoordinator(new ChatGptBrowserDriver(surface,build),build);
   const action={actionId:'late-materialization',idempotencyKey:'late-materialization',url,expectedUrl:url,pairingGeneration:1,connectorName:name,expectedAccountFingerprint:request.expectedAccountFingerprint,model:null,effort:null,prompt:{kind:'offline_goal' as const,goalRevision:1},autoApproveToolCalls:true};
   await coordinator.execute(action);for await(const _event of coordinator.events(action.actionId,0)){}
-  expect(await coordinator.action(action.actionId)).toMatchObject({state:'approval_required',sendAccepted:false});
+  expect(await coordinator.action(action.actionId)).toMatchObject({state:'failed',sendAccepted:false,attention:{code:'approval_required'}});
   expect(await page.evaluate(()=>JSON.parse(document.body.dataset.clicks!).send)).toBe(0);
   expect(await coordinator.approvePendingConversation(request)).toMatchObject({approved:true});
   expect(await page.evaluate(()=>JSON.parse(document.body.dataset.clicks!))).toMatchObject({arrow:1,conversation:1,once:0,deny:0,send:0});
 },30_000);
+
+test.skipIf(!native)('an inherited connector approval requires the cached app and unambiguous prior user mentions',async()=>{
+  for(const variant of ['verified','uncached','conflicting'] as const){
+    fixture();await surface.navigate(url);
+    await page.evaluate(({appId,name,conflict})=>{
+      const current=document.querySelector('[data-turn-key]')!,mention=current.querySelector('[data-user-message-bubble]')!;
+      const previous=document.createElement('section');previous.setAttribute('data-turn-key','previous');previous.append(mention);current.before(previous);
+      if(conflict){const bubble=document.createElement('div');bubble.setAttribute('data-user-message-bubble','');
+        const other=document.createElement('span');other.setAttribute('data-prompt-link-href','app://'+appId+'_other');other.textContent=name;bubble.append(other);previous.append(bubble);}
+    },{appId,name,conflict:variant==='conflicting'});
+    expect(await approveConversationCard(page,request,variant==='uncached'?undefined:appId,new AbortController().signal)).toBe(variant==='verified');
+  }
+},30_000);
+
+test.skipIf(!native)('automatic once approval handles a configured connector without a new mention',async()=>{
+  fixture();await surface.navigate(url);
+  await page.evaluate(()=>{
+    document.querySelector('[data-user-message-bubble]')!.textContent='Continue the existing work';
+    document.querySelector<HTMLButtonElement>('#once')!.onclick=event=>{
+      event.stopImmediatePropagation();
+      const clicks=JSON.parse(document.body.dataset.clicks!);clicks.once++;document.body.dataset.clicks=JSON.stringify(clicks);
+      document.querySelector('[data-codex-approval-surface]')!.remove();
+    };
+  });
+  expect(await approveConversationCard(page,request,undefined,new AbortController().signal,'once')).toBe(false);
+  expect(await approveConversationCard(page,request,appId,new AbortController().signal,'once')).toBe(true);
+  expect(await page.evaluate(()=>JSON.parse(document.body.dataset.clicks!))).toMatchObject({arrow:0,once:1,conversation:0,deny:0,send:0});
+});
 
 for(const capture of ['materialization-approval','materialization-approval-neutral']) {
 test.skipIf(!native)(`the captured ${capture} card and portalled Radix menu select conversation scope exactly once`,async()=>{

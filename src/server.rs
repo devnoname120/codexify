@@ -73,6 +73,39 @@ const HTTP_SERVER_STOP_TIMEOUT: Duration = Duration::from_secs(10);
 const DEFAULT_CACHE_TTL_MS: u64 = 0;
 const WORKSPACE_CHANGE_FIELD: &str = "workspace_changed";
 const WORKSPACE_CHANGE_DESCRIPTION: &str = "User-selected workspace transition. Stop using old paths and call get_agent_brief before further project work. Omitted when no transition is pending.";
+const PENDING_CHAT_READ_REQUIRED: &str = "New owner or team messages are waiting or could not be verified. Required next tool: chat_read. Read and acknowledge them, adjust the current plan, then retry this operation only if still appropriate. This operation has not run. Resident command polling and cancellation remain available.";
+const INLINE_CHAT_WRITE_REQUIRED: &str = "New owner or team messages have been read in full and are included in new_chat_message_from_user. Required next tool: chat_write to answer or acknowledge them, then adjust the current plan. This operation has not run; retry it only if still appropriate. Resident command polling and cancellation remain available.";
+
+async fn read_pending_chat_inline(
+    config: &AppConfig,
+    session: &SessionState,
+    context: &ToolRequestContext,
+) -> Option<ToolResult> {
+    // Use the exact explicit chat_read implementation: its atomic bounded read,
+    // cursor checks and cancellation handling must stay the single authority.
+    let mut receipt = crate::tools::markdown_chat::ChatTool::Read
+        .call_with_context(json!({}), config, session, context)
+        .await;
+    if receipt.is_error
+        || receipt.audit.truncated == Some(true)
+        || receipt.chat_delivery_end.is_none()
+        || receipt
+            .new_chat_message_from_user
+            .as_ref()
+            .is_none_or(|text| text.is_empty())
+    {
+        return None;
+    }
+    // The original work tool did not run. Keep the chat receipt outside its
+    // ordinary output budget and do not claim its output schema or success.
+    receipt.is_error = true;
+    receipt.content = vec![ToolContent::Text(INLINE_CHAT_WRITE_REQUIRED.into())];
+    receipt.structured_content = None;
+    receipt.new_chat_message_from_user = receipt
+        .new_chat_message_from_user
+        .map(|text| format!("{INLINE_CHAT_WRITE_REQUIRED}\n\n{text}"));
+    Some(receipt)
+}
 
 fn should_emit_ordinary_tool_completion(
     tool_log_call: Option<&crate::tool_logging::ToolLogCall>,
@@ -976,6 +1009,15 @@ impl ServerHandler for CodexHandler {
             diff_checkpoints: self.diff_checkpoints.clone(),
             artifact_egress: self.artifact_egress.clone(),
             agent_automation: None,
+            agent_runtime: self.agent_automation.as_ref().map(|supervisor| {
+                Arc::new(crate::agent_automation::agents::AgentRuntime::new(
+                    self.config.clone(),
+                    self.markdown_chat.clone(),
+                    self.project_bindings.clone(),
+                    self.continuations.clone(),
+                    supervisor.clone(),
+                ))
+            }),
             cancellation: context.ct.clone(),
         };
 
@@ -1112,6 +1154,56 @@ impl ServerHandler for CodexHandler {
         }
 
         let started = Instant::now();
+        // New work must not run past an unread owner/team instruction. Polling
+        // or interrupting a resident command remains available through write_stdin.
+        let work_preflight = if agent_call
+            && authorized_before
+            && let Some(root) = self.selected_project_root(task_conversation.as_ref())
+            && let Ok(config) = self.effective_task_config(task_conversation.as_ref(), root)
+            && let Ok(chat) =
+                self.markdown_chat
+                    .chat(&config, task_conversation.as_ref(), &self.session)
+        {
+            if chat.agent_stop_requested().await.unwrap_or(true)
+                && tool.is_some_and(|tool| !tool.behavior().read_only)
+                && !matches!(
+                    name.as_str(),
+                    "chat_write"
+                        | "chat_read"
+                        | "chat_await"
+                        | "turn_completed"
+                        | "write_stdin"
+                        | "rollout_update"
+                        | "agent_report"
+                )
+            {
+                Some((crate::markdown_chat::AGENT_STOP_MESSAGE, None))
+            } else if matches!(
+                name.as_str(),
+                "exec_command"
+                    | "apply_patch"
+                    | "write_file"
+                    | "edit_file"
+                    | "agent_spawn"
+                    | "agent_control"
+                    | "agent_message"
+                    | "goal_finish"
+            ) {
+                match chat.read_cancellable(false, context.ct.clone()).await {
+                    Ok(snapshot) if !snapshot.text.is_empty() => {
+                        Some((PENDING_CHAT_READ_REQUIRED, Some(config)))
+                    }
+                    // An unavailable or over-limit inbox must not permit work.
+                    Err(_) => Some((PENDING_CHAT_READ_REQUIRED, None)),
+                    Ok(_) => None,
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let mut inline_chat_read = false;
         let mut pairing_continuation = false;
         let execution = async {
             if let Some(error) = self.conversation_auth_error(&name, conversation.as_ref()) {
@@ -1122,6 +1214,21 @@ impl ServerHandler for CodexHandler {
                 ToolResult::error(format!("Invalid arguments for `{name}`: {error}"))
             } else if let Some(error) = tool.and_then(|tool| tool.validate_arguments(&args).err()) {
                 ToolResult::error(format!("Invalid arguments for `{name}`: {error}"))
+            } else if let Some((message, inline_config)) = work_preflight {
+                if let Some(config) = inline_config
+                    && matches!(&workspace_at_start, Ok((Some(root), None)) if root == &config.work_dir)
+                    && !context.ct.is_cancelled()
+                    && self
+                        .conversation_auth_error("chat_read", conversation.as_ref())
+                        .is_none()
+                    && let Some(receipt) =
+                        read_pending_chat_inline(&config, &self.session, &tool_context).await
+                {
+                    inline_chat_read = true;
+                    receipt
+                } else {
+                    ToolResult::error(message)
+                }
             } else {
                 // A ChatGPT conversation gets its own exec-session view (#12); generic MCP
                 // clients fall back to the transport-owned session.
@@ -1643,11 +1750,12 @@ impl ServerHandler for CodexHandler {
         }
 
         let mut delivery = None;
-        let chat_delivery_root = if !result.is_error
-            && matches!(
-                name.as_str(),
-                "chat_read" | "chat_write" | "chat_await" | "turn_completed"
-            ) {
+        let chat_delivery_root = if inline_chat_read
+            || (!result.is_error
+                && matches!(
+                    name.as_str(),
+                    "chat_read" | "chat_write" | "chat_await" | "turn_completed"
+                )) {
             workspace_at_start
                 .as_ref()
                 .ok()
@@ -1680,6 +1788,9 @@ impl ServerHandler for CodexHandler {
                 Ok(String::new())
             } else {
                 match &chat {
+                    // Preserve the complete consumed receipt. A later append
+                    // stays unread for chat_write; never replace this input.
+                    Ok(_) if inline_chat_read => Ok(String::new()),
                     Ok(chat)
                         if result.is_error
                             || !matches!(
@@ -1708,8 +1819,15 @@ impl ServerHandler for CodexHandler {
                 ))),
             }
             if stop_requested {
-                result.new_chat_message_from_user =
-                    Some(crate::markdown_chat::AGENT_STOP_MESSAGE.into());
+                result.new_chat_message_from_user = Some(if inline_chat_read {
+                    format!(
+                        "{}\n\n{}",
+                        crate::markdown_chat::AGENT_STOP_MESSAGE,
+                        result.new_chat_message_from_user.take().unwrap_or_default()
+                    )
+                } else {
+                    crate::markdown_chat::AGENT_STOP_MESSAGE.into()
+                });
             }
             if let Ok(chat) = chat
                 && let Some(end) = result.chat_delivery_end
@@ -1785,6 +1903,9 @@ impl ServerHandler for CodexHandler {
                     self.markdown_chat
                         .chat(&config, task_conversation.as_ref(), &self.session)
             {
+                // Deliver the deadline notice alongside pending messages. A busy
+                // inbox must not keep an expired turn alive; messages remain
+                // unacknowledged for the next turn and explicit stops still win.
                 let renewal = if !chat.agent_stop_requested().await.unwrap_or(true)
                     && let Some(task) = task_conversation.as_ref()
                 {
@@ -3107,6 +3228,7 @@ mod tests {
     include!("server_starvation_tests.rs");
     include!("server_agent_ticket_tests.rs");
     include!("server_agent_automation_tests.rs");
+    include!("server_agent_client_tests.rs");
     include!("server_turn_renewal_tests.rs");
     include!("server_continuation_tests.rs");
 
@@ -3682,6 +3804,7 @@ mod tests {
                 std::fs::write(project.join("tracked.txt"), "original\n").unwrap();
                 for args in [
                     vec!["init", "--quiet"],
+                    vec!["config", "core.autocrlf", "false"],
                     vec!["add", "tracked.txt"],
                     vec![
                         "-c",

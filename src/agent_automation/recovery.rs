@@ -23,7 +23,35 @@ const STOPPED: &str = "Browser companion was stopped by you. Use Start browser t
 struct Runtime {
     lock: Mutex<()>,
     phase: AtomicU8,
+    failures: StdMutex<RecoveryProbeGate>,
 }
+#[derive(Debug, Default)]
+struct RecoveryProbeGate {
+    pid: u32,
+    first: Option<Instant>,
+    last: Option<Instant>,
+    count: u32,
+}
+impl RecoveryProbeGate {
+    fn confirmed(&mut self, pid: u32, now: Instant) -> bool {
+        if self.pid != pid {
+            *self = Self {
+                pid,
+                ..Self::default()
+            };
+        }
+        let first = *self.first.get_or_insert(now);
+        if self
+            .last
+            .is_none_or(|last| now.saturating_duration_since(last) >= Duration::from_secs(5))
+        {
+            self.count = self.count.saturating_add(1);
+            self.last = Some(now);
+        }
+        self.count >= 3 && now.saturating_duration_since(first) >= Duration::from_secs(60)
+    }
+}
+
 static RUNTIMES: OnceLock<StdMutex<HashMap<PathBuf, Weak<Runtime>>>> = OnceLock::new();
 
 #[derive(Serialize, Deserialize)]
@@ -191,8 +219,55 @@ impl BrowserCompanionControl {
         if healthy_client(&self.config, cancellation).await?.is_some() {
             return Ok(());
         }
+        // Descriptor validation includes the live PID. A failed HTTP observation
+        // is never permission to terminate that process or an uncertain Send.
+        if let Ok(client) = BrowserCompanionClient::from_config(&self.config) {
+            let unavailable =
+                match tokio::time::timeout(HEALTH_TIMEOUT, client.liveness(cancellation)).await {
+                    Ok(Ok(Some(false))) => true,
+                    Ok(Ok(Some(true))) => false,
+                    Ok(Ok(None)) => match tokio::time::timeout(
+                        HEALTH_TIMEOUT,
+                        client.health(cancellation),
+                    )
+                    .await
+                    {
+                        Ok(Ok(health)) => {
+                            health.status == CompanionSessionStatus::Unavailable
+                                && health.active_action_id.is_none()
+                        }
+                        _ => return Err(
+                            "Browser observation did not complete; the live browser was preserved"
+                                .into(),
+                        ),
+                    },
+                    _ => {
+                        return Err(
+                            "Browser observation did not complete; the live browser was preserved"
+                                .into(),
+                        );
+                    }
+                };
+            if !unavailable {
+                return Ok(());
+            }
+            let confirmed = self
+                .runtime
+                .failures
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .confirmed(client.pid(), Instant::now());
+            if !confirmed {
+                return Err("Browser reported unavailable; retaining its live process while repeated probes settle".into());
+            }
+        }
+        *self
+            .runtime
+            .failures
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = RecoveryProbeGate::default();
         let _phase = Phase::new(&self.runtime, 1);
-        // Stop also verifies executable identity when HTTP health is frozen.
+        // Stop also verifies executable identity after confirmed recovery evidence.
         self.manager.stop().await?;
         self.allowed()?;
         if cancellation.is_cancelled() {
@@ -218,6 +293,11 @@ impl BrowserCompanionControl {
             })
             .await?;
         self.allowed()?;
+        *self
+            .runtime
+            .failures
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = RecoveryProbeGate::default();
         Ok(result)
     }
     pub async fn start(
@@ -412,5 +492,28 @@ pub fn watch(config: &AgentAutomationConfig) -> Option<BrowserRecoveryWorker> {
             tracing::warn!(%error,"browser recovery unavailable");
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod observation_tests {
+    use super::*;
+    #[test]
+    fn slow_or_single_probes_do_not_restart_a_live_browser() {
+        let start = Instant::now();
+        let mut gate = RecoveryProbeGate::default();
+        assert!(!gate.confirmed(10, start));
+        for _ in 0..100 {
+            assert!(!gate.confirmed(10, start + Duration::from_secs(1)));
+        }
+        assert!(!gate.confirmed(10, start + Duration::from_secs(30)));
+        assert!(!gate.confirmed(10, start + Duration::from_secs(59)));
+        assert!(gate.confirmed(10, start + Duration::from_secs(61)));
+        assert!(
+            !gate.confirmed(11, start + Duration::from_secs(62)),
+            "A replacement process needs its own fresh probes"
+        );
+        gate = RecoveryProbeGate::default();
+        assert!(!gate.confirmed(10, start + Duration::from_secs(120)));
     }
 }

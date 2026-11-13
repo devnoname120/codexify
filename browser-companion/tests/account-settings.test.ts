@@ -36,19 +36,18 @@ async function expectFailure(promise:Promise<unknown>,message:string):Promise<vo
  expect(failure).toBeInstanceOf(Error);expect((failure as Error).message).toContain(message);
 }
 
-test.skipIf(process.env.CODEXIFY_TEST_BROWSER_COMPANION_CHROME!=="1")("plan checks and localized connector refresh reuse one tab, restore it, and defer while busy",async()=>{
+test.skipIf(process.env.CODEXIFY_TEST_BROWSER_COMPANION_CHROME!=="1")("passive plan checks preserve the shared tab while localized connector maintenance restores it and defers while busy",async()=>{
  const executablePath=await privateChromeExecutable(join(import.meta.dirname,'../.browsers',`${process.platform}-${process.arch}`));
  const browser=await chromium.launch({executablePath,headless:true});
  try {
   const context=await browser.newContext();const page=await context.newPage();let permission='read_only',refreshes=0,deletes=0,billingReads=0,failConnector=false,fastRefresh=false,replaceRefresh=false,refreshDelay=300,permissionVisits=0;const visits:string[]=[];
-  let releaseBilling:(()=>void)|undefined,billingEntered:(()=>void)|undefined,holdBilling:Promise<void>|undefined;
   let planAccount='fixture-account',permissionLabel='Permiso',allowLabel='Permitir todo',originalHtml='<form><div id="prompt-textarea" contenteditable="true"></div></form>',sessionAvailable=true;
   const witness:{summary?:string;remember:(summary:string)=>void}={remember:summary=>witness.summary=summary};
   await page.context().route('https://chatgpt.com/**',async route=>{
    const path=new URL(route.request().url()).pathname;
    if(route.request().isNavigationRequest())visits.push(path);
    if(path==='/api/auth/session')return route.fulfill({json:sessionAvailable?{user:{id:'fixture-user'},account:{id:new URL(route.request().frame().page().url()).pathname==='/settings/billing'?planAccount:'fixture-account',planType:'pro',structure:'personal'}}:{}});
-   if(path==='/settings/billing'){billingReads++;billingEntered?.();if(holdBilling)await holdBilling;return route.fulfill({contentType:'text/html; charset=utf-8',body:'<h2>ChatGPT Pro 200</h2>'});}
+   if(path==='/settings/billing'){billingReads++;return route.fulfill({contentType:'text/html; charset=utf-8',body:'<h2>ChatGPT Pro 200</h2>'});}
    if(path==='/c/original')return route.fulfill({contentType:'text/html; charset=utf-8',body:originalHtml});
    if(path==='/set-permission'){permission='allow_all';return route.fulfill({json:{ok:true}});}
    if(path==='/refresh'){refreshes++;return route.fulfill({json:{ok:true}});}
@@ -73,9 +72,9 @@ test.skipIf(process.env.CODEXIFY_TEST_BROWSER_COMPANION_CHROME!=="1")("plan chec
   let addedPages=0;context.on('page',()=>addedPages++);
   try {
     const before=billingReads;
-    await driver.accountPlan('startup-one');expect(page.url()).toBe(original);
-    await driver.accountPlan('startup-one');expect(billingReads-before).toBe(1);
-    await driver.accountPlan('startup-two');expect(billingReads-before).toBe(2);expect(page.url()).toBe(original);
+    expect((await driver.accountPlan('startup-one')).label).toBe('Pro');expect(page.url()).toBe(original);
+    await driver.accountPlan('startup-one');expect(billingReads-before).toBe(0);
+    await driver.accountPlan('startup-two');expect(billingReads-before).toBe(0);expect(page.url()).toBe(original);
     await driver.refreshConnector('Fixture connector');expect(page.url()).toBe(original);expect(refreshes).toBe(4);
     const permissionBeforeCached=permissionVisits;visits.length=0;
     await driver.refreshConnector('Fixture connector');expect(visits).toEqual(['/settings/plugins-settings/plugin_asdk_app_fixture','/c/original']);
@@ -97,8 +96,8 @@ test.skipIf(process.env.CODEXIFY_TEST_BROWSER_COMPANION_CHROME!=="1")("plan chec
     expect(planSettled).toBeFalse();expect(revealSettled).toBeFalse();expect(billingReads).toBe(readsBeforeRefresh);
     expect(page.url()).toContain('/settings/plugins-settings/');
     await pendingRefresh;expect(page.url()).toBe(original);
-    expect((await queuedPlan).label).toBe('Pro 20x');await queuedReveal;
-    expect(billingReads).toBe(readsBeforeRefresh+1);expect(page.url()).toBe(original);
+    expect((await queuedPlan).label).toBe('Pro');await queuedReveal;
+    expect(billingReads).toBe(readsBeforeRefresh);expect(page.url()).toBe(original);
     const interrupted=coordinator.refreshConnector('Fixture connector');
     const failure=expectFailure(interrupted,'another browser action');
     await waitStarted();
@@ -118,13 +117,12 @@ test.skipIf(process.env.CODEXIFY_TEST_BROWSER_COMPANION_CHROME!=="1")("plan chec
     await driver.refreshConnector('Fixture connector');expect(permissionVisits).toBe(beforeItalian+1);
     await driver.refreshConnector('Fixture connector');expect(permissionVisits).toBe(beforeItalian+1);
     expect(newPage).not.toHaveBeenCalled();expect(addedPages).toBe(0);expect(context.pages()).toEqual(initialPages);expect(page.isClosed()).toBeFalse();
-    // Maintenance owns the same tab until the previous URL has been restored.
-    holdBilling=new Promise(resolve=>{releaseBilling=resolve;});
-    const entered=new Promise<void>(resolve=>{billingEntered=resolve;});
-    const pending=driver.accountPlan('startup-three');await entered;
-    const health=await driver.health();expect(health.authenticated).toBeTrue();expect(health.status).toBe('busy');
-    releaseBilling!();await pending;holdBilling=undefined;billingEntered=undefined;expect(page.url()).toBe(original);
-    // Drafts are cleared before maintenance; response/approval UI does not own the browser queue.
+    // Passive account reads neither acquire a maintenance lease nor navigate.
+    const beforePassive={beginCalls,endCalls,billingReads};visits.length=0;
+    await driver.accountPlan('startup-three');expect(page.url()).toBe(original);
+    expect(await driver.health()).toMatchObject({authenticated:true,status:'idle'});
+    expect({beginCalls,endCalls,billingReads}).toEqual(beforePassive);expect(visits).toEqual([]);
+    // Passive plans preserve drafts; explicit connector maintenance clears them.
     const composer=page.locator('#prompt-textarea');await composer.fill('User draft');const readsBeforeDraft=billingReads;
     {
       const beforeNavigation:string[]=[],originalGoto=page.goto.bind(page),goto=spyOn(page,'goto');
@@ -134,9 +132,9 @@ test.skipIf(process.env.CODEXIFY_TEST_BROWSER_COMPANION_CHROME!=="1")("plan chec
       });
       try {
         expect((await driver.health()).status).toBe('idle');expect(await composer.innerText()).toBe('User draft');
-        await driver.accountPlan('draft');expect(billingReads).toBe(readsBeforeDraft+1);
+        await driver.accountPlan('draft');expect(billingReads).toBe(readsBeforeDraft);expect(await composer.innerText()).toBe('User draft');
         await composer.fill('Another draft');await driver.refreshConnector('Fixture connector');
-        expect(beforeNavigation.length).toBeGreaterThanOrEqual(2);expect(beforeNavigation.every(text=>text==='')).toBeTrue();
+        expect(beforeNavigation.length).toBeGreaterThanOrEqual(1);expect(beforeNavigation.every(text=>text==='')).toBeTrue();
       }finally{goto.mockRestore();}
     }
     expect(await composer.innerText()).toBe('');expect(page.url()).toBe(original);
@@ -147,8 +145,8 @@ test.skipIf(process.env.CODEXIFY_TEST_BROWSER_COMPANION_CHROME!=="1")("plan chec
     await page.evaluate(()=>{const approval=document.createElement('div');approval.setAttribute('role','dialog');approval.textContent='Allow ChatGPT to use Fixture connector?';document.body.append(approval);});
     await driver.accountPlan('approval');await driver.refreshConnector('Fixture connector');
     expect(page.url()).toBe(original);
-    // Failures and account changes also restore the original tab and release it.
-    planAccount='other-account';await expectFailure(driver.accountPlan('changed-account'),'account changed');expect(page.url()).toBe(original);planAccount='fixture-account';
+    // Passive plans ignore stale billing pages and billing-navigation failures.
+    planAccount='other-account';expect((await driver.accountPlan('changed-billing-account')).label).toBe('Pro');expect(page.url()).toBe(original);planAccount='fixture-account';
     const originalGoto=page.goto.bind(page),goto=spyOn(page,'goto');
     goto.mockImplementation(async(url,options)=>{const result=await originalGoto(url,options);if(url.endsWith('/settings/billing'))throw Error('Billing navigation failed');return result;});
     try {expect((await driver.accountPlan('failed-billing')).label).toBe('Pro');}finally{goto.mockRestore();}
@@ -182,7 +180,7 @@ test.skipIf(process.env.CODEXIFY_TEST_BROWSER_COMPANION_CHROME!=="1")("plan chec
 },30000);
 
 
-test.skipIf(process.env.CODEXIFY_TEST_BROWSER_COMPANION_CHROME!=="1")("billing resolves nested plan text and a missing label within the browser action deadline",async()=>{
+test.skipIf(process.env.CODEXIFY_TEST_BROWSER_COMPANION_CHROME!=="1")("explicit billing inspection resolves nested plan text and a missing label within its observation budget",async()=>{
  const executablePath=await privateChromeExecutable(join(import.meta.dirname,'../.browsers',`${process.platform}-${process.arch}`));
  const browser=await chromium.launch({executablePath,headless:true});
  try {
@@ -194,77 +192,17 @@ test.skipIf(process.env.CODEXIFY_TEST_BROWSER_COMPANION_CHROME!=="1")("billing r
    return route.fulfill({contentType:'text/html; charset=utf-8',body:'<form><div id="prompt-textarea" contenteditable="true"></div></form>'});
   });
   await page.goto('https://chatgpt.com/c/original');
-  const driver=new ChatGptBrowserDriver({page:async()=>page,navigate:async url=>{await page.goto(url);return page;},reveal:async()=>{},beginAction:async()=>{},endAction:async()=>{},close:async()=>{}},protocolBuild('plan-deadline-test'));
-  const coordinator=new SingleWindowCoordinator(driver,protocolBuild('plan-deadline-test'));
-  expect((await coordinator.accountPlan('nested')).label).toBe('Pro 20x');
-  billing='<h2>Billing</h2><script>setTimeout(()=>{const label=document.createElement("h2");label.textContent="ChatGPT Pro 200";document.body.append(label);},3200)</script>';
-  expect((await coordinator.accountPlan('hydrated')).label).toBe('Pro 20x');
+  expect((await readBillingPlan(page)).label).toBe('Pro 20x');
+  await page.goto('https://chatgpt.com/c/original');
   billing='<h2>Billing</h2><p>Subscription details are loading.</p>';
-  const beforeMissing=visits;
-  const started=Date.now();expect((await coordinator.accountPlan('missing')).label).toBe('Pro');
-  expect(Date.now()-started).toBeLessThan(12_000);
-  expect(page.url()).toBe('https://chatgpt.com/c/original');expect(context.pages()).toEqual([page]);
-  await coordinator.accountPlan('missing');expect(visits).toBe(beforeMissing+1);
-  billing='<h2>ChatGPT Pro 200</h2>';
-  const clock=spyOn(Date,'now').mockReturnValue(Date.now()+60_001);
-  try {expect((await coordinator.accountPlan('missing')).label).toBe('Pro 20x');expect(visits).toBe(beforeMissing+2);}
-  finally {clock.mockRestore();}
-  expect((await coordinator.health()).authenticated).toBeTrue();
+  const started=Date.now();expect((await readBillingPlan(page)).label).toBe('');
+  expect(Date.now()-started).toBeLessThan(8_000);
+  expect(page.url()).toBe('https://chatgpt.com/settings/billing');expect(context.pages()).toEqual([page]);
+  await readBillingPlan(page);expect(visits).toBe(2);
  }finally{await browser.close();}
 },20_000);
 
-test.skipIf(process.env.CODEXIFY_TEST_BROWSER_COMPANION_CHROME!=="1")("verified plans survive restore cooldowns without bypassing navigation or caching empty results",async()=>{
- const executablePath=await privateChromeExecutable(join(import.meta.dirname,'../.browsers',`${process.platform}-${process.arch}`));
- const browser=await chromium.launch({executablePath,headless:true});
- try {
-  const context=await browser.newContext(),page=await context.newPage();let visits=0,planType='pro';
-  await context.route('https://chatgpt.com/**',route=>{
-   const path=new URL(route.request().url()).pathname;
-   if(path==='/api/auth/session')return route.fulfill({json:{user:{id:'fixture-user'},account:{id:'fixture-account',planType,structure:'personal'}}});
-   if(path==='/settings/billing'){visits++;return route.fulfill({contentType:'text/html',body:'<h2>ChatGPT Pro 200</h2>'});}
-   return route.fulfill({contentType:'text/html',body:'<form><div id="prompt-textarea" contenteditable="true"></div></form>'});
-  });
-  const original='https://chatgpt.com/c/recently-loaded';
-  await navigatePage(page,original);
-  const driver=new ChatGptBrowserDriver({page:async()=>page,navigate:async(url,signal)=>{await navigatePage(page,url,{signal});return page;},reveal:async()=>{},beginAction:async()=>{},endAction:async()=>{},close:async()=>{}},protocolBuild('plan-cooldown-test'));
-  const coordinator=new SingleWindowCoordinator(driver,protocolBuild('plan-cooldown-test'));
-  expect((await coordinator.accountPlan('verified')).label).toBe('Pro 20x');
-  expect(page.url()).toBe('https://chatgpt.com/settings/billing');
-  expect((await coordinator.accountPlan('verified')).label).toBe('Pro 20x');
-  expect(visits).toBe(1);
-  await expect(navigatePage(page,original)).rejects.toBeInstanceOf(ConversationCooldownError);
-  expect(context.pages()).toEqual([page]);
-  planType='unknown-plan';await page.locator('h2').evaluate(node=>{node.textContent='Billing';});
-  await expect(coordinator.accountPlan('missing')).rejects.toThrow('subscription plan');
-  await page.locator('h2').evaluate(node=>{node.textContent='ChatGPT Pro 200';});
-  expect((await coordinator.accountPlan('missing')).label).toBe('Pro 20x');
-  expect(visits).toBe(1);
- }finally{await browser.close();}
-},60_000);
-
-test.skipIf(process.env.CODEXIFY_TEST_BROWSER_COMPANION_CHROME!=="1")("billing navigation failures return the verified base tier and restore the shared tab only once",async()=>{
- const executablePath=await privateChromeExecutable(join(import.meta.dirname,'../.browsers',`${process.platform}-${process.arch}`));
- const browser=await chromium.launch({executablePath,headless:true});let restoreGoto=()=>{};
- try {
-  const context=await browser.newContext(),page=await context.newPage();let visits=0,restores=0;
-  await context.route('https://chatgpt.com/**',route=>{
-   const path=new URL(route.request().url()).pathname;
-   if(path==='/api/auth/session')return route.fulfill({json:{user:{id:'fixture-user'},account:{id:'fixture-account',planType:'pro',structure:'personal'}}});
-   if(path==='/settings/billing'){visits++;return route.fulfill({contentType:'text/html',body:'<h2>ChatGPT Pro 200</h2>'});}
-   return route.fulfill({contentType:'text/html',body:'<form><div id="prompt-textarea" contenteditable="true"></div></form>'});
-  });
-  const original='https://chatgpt.com/c/recently-loaded';await navigatePage(page,original);
-  const originalGoto=page.goto.bind(page),goto=spyOn(page,'goto');restoreGoto=()=>goto.mockRestore();
-  goto.mockImplementation(async(url,options)=>{const result=await originalGoto(url,options);if(url.endsWith('/settings/billing'))throw new Error('Billing navigation timed out');return result;});
-  const driver=new ChatGptBrowserDriver({page:async()=>page,navigate:async(url,signal)=>{restores++;await navigatePage(page,url,{signal});return page;},reveal:async()=>{},beginAction:async()=>{},endAction:async()=>{},close:async()=>{}},protocolBuild('plan-navigation-test'));
-  const coordinator=new SingleWindowCoordinator(driver,protocolBuild('plan-navigation-test'));
-  expect((await coordinator.accountPlan('startup')).label).toBe('Pro');
-  expect((await coordinator.accountPlan('startup')).label).toBe('Pro');
-  expect(restores).toBe(1);expect(visits).toBe(1);expect(context.pages()).toEqual([page]);
- }finally{restoreGoto();await browser.close();}
-},30_000);
-
-test.skipIf(process.env.CODEXIFY_TEST_BROWSER_COMPANION_CHROME!=="1")("account-menu fallback ignores names and language, preserves unknown labels, and caches missing plans",async()=>{
+test.skipIf(process.env.CODEXIFY_TEST_BROWSER_COMPANION_CHROME!=="1")("explicit billing account-menu fallback ignores names and language and preserves unknown labels",async()=>{
  const executablePath=await privateChromeExecutable(join(import.meta.dirname,'../.browsers',`${process.platform}-${process.arch}`));
  const browser=await chromium.launch({executablePath,headless:true});
  try {
@@ -281,29 +219,28 @@ test.skipIf(process.env.CODEXIFY_TEST_BROWSER_COMPANION_CHROME!=="1")("account-m
   await page.goto('https://chatgpt.com/c/original');
   const newPage=spyOn(context,'newPage');
   try {
-   const driver=new ChatGptBrowserDriver({page:async()=>page,navigate:async url=>{await page.goto(url);return page;},reveal:async()=>{},beginAction:async()=>{},endAction:async()=>{},close:async()=>{}},protocolBuild('menu-plan-test'));
-   const coordinator=new SingleWindowCoordinator(driver,protocolBuild('menu-plan-test'));
-   const check=async(epoch:string,expected:string,kind:string)=>{
+   const check=async(expected:string,kind:string)=>{
     await page.evaluate(({name,label})=>{const column=document.querySelector('#account-row > div:last-child');if(column){column.replaceChildren();for(const text of [name,...(label?[label]:[])]){const span=document.createElement('span');span.textContent=text;column.append(span);}}},{name,label});
-    const started=Date.now(),plan=await coordinator.accountPlan(epoch);
+    const started=Date.now(),plan=await readBillingPlan(page);
     expect(plan.label).toBe(expected);expect(plan.kind).toBe(kind as any);
-    expect(Date.now()-started).toBeLessThan(12_000);
+    expect(Date.now()-started).toBeLessThan(8_000);
+    if(page.url()!=='https://chatgpt.com/c/original')await page.goto('https://chatgpt.com/c/original');
     expect(page.url()).toBe('https://chatgpt.com/c/original');
     expect(await page.locator('[role="menu"]').isVisible()).toBeFalse();expect(context.pages()).toEqual([page]);
    };
-   await check('pro','Pro','pro');
-   const reads={billingReads,menuReads};await check('pro','Pro','pro');expect({billingReads,menuReads}).toEqual(reads);
-   label='Pro 200';await page.locator('#prompt-textarea').fill('Keep my draft');const beforeMenuPlan=billingReads;await check('menu-tier','Pro 20x','pro');expect(billingReads).toBe(beforeMenuPlan);expect(await page.locator('#prompt-textarea').innerText()).toBe('Keep my draft');await page.locator('#prompt-textarea').fill('');
-   name='Pro';label='Go';testId=false;await check('go','Go','go');
-   name='Another person';label='Research membership';await check('unknown','Research membership','unknown');
-   label='';await check('missing','Pro','pro');
-   const missingReads={billingReads,menuReads};await check('missing','Pro','pro');expect({billingReads,menuReads}).toEqual(missingReads);
-   billing='<h2>ChatGPT Pro 200</h2>';label='Research membership';await check('unknown-menu-billing','Pro 20x','pro');
+   await check('Pro','pro');
+   const reads={billingReads,menuReads};await check('Pro','pro');expect(billingReads).toBeGreaterThan(reads.billingReads);expect(menuReads).toBeGreaterThan(reads.menuReads);
+   label='Pro 200';await page.locator('#prompt-textarea').fill('Keep my draft');const beforeMenuPlan=billingReads;await check('Pro 20x','pro');expect(billingReads).toBe(beforeMenuPlan);expect(await page.locator('#prompt-textarea').innerText()).toBe('Keep my draft');await page.locator('#prompt-textarea').fill('');
+   name='Pro';label='Go';testId=false;await check('Go','go');
+   name='Another person';label='Research membership';await check('Research membership','unknown');
+   label='';await check('','unknown');
+   const missingReads={billingReads,menuReads};await check('','unknown');expect(billingReads).toBeGreaterThan(missingReads.billingReads);expect(menuReads).toBeGreaterThan(missingReads.menuReads);
+   billing='<h2>ChatGPT Pro 200</h2>';label='Research membership';await check('Pro 20x','pro');
    billing='<h2>ChatGPT Pro 200</h2>';label='Pro';const before=menuReads;
-   await check('billing','Pro 20x','pro');expect(menuReads).toBe(before+1);
+   await check('Pro 20x','pro');expect(menuReads).toBe(before+1);
    const originalGoto=page.goto.bind(page),goto=spyOn(page,'goto');
    goto.mockImplementation(async(url,options)=>{if(url.endsWith('/settings/billing'))throw Error('Billing navigation failed');return originalGoto(url,options);});
-   try {await check('navigation-failed','Pro','pro');}finally{goto.mockRestore();}
+   try {await check('Pro','pro');}finally{goto.mockRestore();}
    expect(newPage).not.toHaveBeenCalled();
   }finally{newPage.mockRestore();}
  }finally{await browser.close();}

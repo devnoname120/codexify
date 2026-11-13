@@ -15,5 +15,8 @@ export async function backgroundChromeArgs(profilePath: string): Promise<string[
   if (!args.includes(`--user-data-dir=${profilePath}`) || !args.includes("--remote-debugging-pipe") || !args.includes("about:blank")) {
     throw new Error("Patchright's persistent Chrome launch arguments changed");
   }
-  return [...args.filter(arg => arg !== "about:blank"), "--no-startup-window"];
+  // Agent switches navigate directly to their bound URL. Keeping whole old
+  // documents for Back/Forward only retains extra chat heaps between workers.
+  return [...args.filter(arg => arg !== "about:blank" && arg !== "--disable-back-forward-cache"),
+    "--disable-back-forward-cache", "--no-startup-window"];
 }

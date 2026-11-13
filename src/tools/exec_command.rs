@@ -1,15 +1,17 @@
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 
 use crate::exec_sessions::{
     DEFAULT_MAX_OUTPUT_TOKENS, EXEC_DEFAULT_YIELD_MS, EXEC_MAX_YIELD_MS, EXEC_MIN_YIELD_MS,
-    SessionState, ShellType, UnifiedExecOutput, clamp, generate_chunk_id, resolve_shell,
-    shell_type_of, start_exec_session, truncate_output,
+    ExecSession, SessionState, ShellType, UnifiedExecOutput, clamp, generate_chunk_id,
+    resolve_shell, shell_type_of, start_exec_session, truncate_output,
 };
 use crate::output_budget::resolve_requested_output_tokens;
 use crate::safe_path::resolve_safe_path;
-use crate::tool::{Tool, ToolBehavior, parse_tool_args};
+use crate::tool::{Tool, ToolBehavior, ToolRequestContext, parse_tool_args};
 use crate::types::{AppConfig, ToolAuditMetadata, ToolResult};
 
 /// The output schema shared by `exec_command` and `write_stdin`.
@@ -84,6 +86,58 @@ pub fn describe_exec_command(config: &AppConfig) -> String {
 
 pub struct ExecCommand;
 
+pub(super) fn command_chat(
+    config: &AppConfig,
+    session: &SessionState,
+    context: Option<&ToolRequestContext>,
+) -> Option<Arc<crate::markdown_chat::ChatFile>> {
+    if !config.markdown_chat.enabled {
+        return None;
+    }
+    let context = context?;
+    match context
+        .markdown_chat
+        .chat(config, context.task_conversation.as_ref(), session)
+    {
+        Ok(chat) => Some(chat),
+        Err(error) => {
+            tracing::debug!(%error, "owner message observation unavailable during command output wait");
+            None
+        }
+    }
+}
+
+pub(super) async fn wait_for_command_output(
+    exec_session: &ExecSession,
+    yield_ms: u64,
+    chat: Option<&Arc<crate::markdown_chat::ChatFile>>,
+    cancellation: &CancellationToken,
+) -> Result<(String, bool, bool), String> {
+    let output = crate::audit::stage(
+        "command_output_wait",
+        exec_session.yield_output_with_metadata(yield_ms),
+    );
+    tokio::pin!(output);
+    if let Some(chat) = chat {
+        tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => return Err("Output wait cancelled; the command session remains available.".into()),
+            message = chat.wait_for_unread(cancellation.clone()) => match message {
+                // End only the output wait. Draining does not signal the child,
+                // resend stdin, consume owner text, or change the session ID.
+                Ok(()) => return Ok(exec_session.yield_output_with_metadata(0).await),
+                Err(error) => tracing::debug!(%error, "owner message observation failed; retaining command output wait"),
+            },
+            result = &mut output => return Ok(result),
+        }
+    }
+    tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => Err("Output wait cancelled; the command session remains available.".into()),
+        result = &mut output => Ok(result),
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ExecCommandArgs {
@@ -156,6 +210,31 @@ impl Tool for ExecCommand {
     }
 
     async fn call(&self, args: Value, config: &AppConfig, session: &SessionState) -> ToolResult {
+        self.run(args, config, session, None).await
+    }
+
+    async fn call_with_context(
+        &self,
+        args: Value,
+        config: &AppConfig,
+        session: &SessionState,
+        context: &ToolRequestContext,
+    ) -> ToolResult {
+        self.run(args, config, session, Some(context)).await
+    }
+}
+
+impl ExecCommand {
+    async fn run(
+        &self,
+        args: Value,
+        config: &AppConfig,
+        session: &SessionState,
+        context: Option<&ToolRequestContext>,
+    ) -> ToolResult {
+        if context.is_some_and(|context| context.cancellation.is_cancelled()) {
+            return ToolResult::error("Call cancelled before the command was started.");
+        }
         let ExecCommandArgs {
             cmd,
             workdir,
@@ -204,8 +283,19 @@ impl Tool for ExecCommand {
             Err(e) => return ToolResult::error(e),
         };
 
+        let chat = command_chat(config, session, context);
+        let cancellation = context
+            .map(|context| context.cancellation.clone())
+            .unwrap_or_default();
         let (output, exited, buffer_truncated) =
-            exec_session.yield_output_with_metadata(yield_ms).await;
+            match wait_for_command_output(&exec_session, yield_ms, chat.as_ref(), &cancellation)
+                .await
+            {
+                Ok(output) => output,
+                Err(error) => {
+                    return ToolResult::error(format!("{error} Session id: {}", exec_session.id));
+                }
+            };
         let (text, original_token_count, truncated) = truncate_output(&output, max_output_tokens);
 
         let mut result = UnifiedExecOutput {
@@ -253,7 +343,366 @@ mod tests {
     use super::*;
     use crate::config::default_config;
     use crate::output_budget::approx_token_count;
+    use crate::tools::write_stdin::WriteStdin;
     use serde_json::json;
+    use std::time::Duration;
+
+    struct OwnerWakeFixture {
+        root: tempfile::TempDir,
+        config: AppConfig,
+        session: Arc<SessionState>,
+        context: ToolRequestContext,
+        chat: Arc<crate::markdown_chat::ChatFile>,
+    }
+
+    async fn owner_wake_fixture() -> OwnerWakeFixture {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = default_config(root.path().canonicalize().unwrap());
+        config.memory.dir = Some(root.path().join("metadata").display().to_string());
+        config.markdown_chat.enabled = true;
+        config.exec.default_shell = Some(if cfg!(windows) { "powershell" } else { "sh" }.into());
+        let identity = crate::project_bindings::ConversationIdentity::from_openai_session(
+            "command-owner-wake",
+        );
+        let context = ToolRequestContext {
+            conversation: identity.clone(),
+            task_conversation: identity,
+            task_owner_generation: Some(0),
+            conversation_retired: false,
+            connector_schema_version: None,
+            conversation_schema_version: None,
+            conversation_authorizations: Arc::new(
+                crate::conversation_auth::ConversationAuthorizationStore::new(),
+            ),
+            project_bindings: Arc::new(crate::project_bindings::ProjectBindingStore::new(
+                root.path().join("bindings"),
+            )),
+            diff_checkpoints: Arc::new(crate::diff::DiffCheckpointManager::new()),
+            artifact_egress: Arc::new(crate::artifact_egress::ArtifactEgressStore::new_at(
+                config.artifact_egress.clone(),
+                root.path().join("artifacts"),
+            )),
+            markdown_chat: Arc::default(),
+            agent_automation: None,
+            agent_runtime: None,
+            cancellation: CancellationToken::new(),
+        };
+        let session = Arc::new(SessionState::new());
+        let chat = context
+            .markdown_chat
+            .chat(&config, context.task_conversation.as_ref(), &session)
+            .unwrap();
+        chat.ensure().await.unwrap();
+        OwnerWakeFixture {
+            root,
+            config,
+            session,
+            context,
+            chat,
+        }
+    }
+
+    fn finish_on_input_command() -> &'static str {
+        if cfg!(windows) {
+            "$line=[Console]::ReadLine(); [Console]::WriteLine('finished:'+ $line)"
+        } else {
+            "IFS= read -r line; printf 'finished:%s\\n' \"$line\""
+        }
+    }
+
+    async fn wait_for_test_file(path: &std::path::Path) {
+        tokio::time::timeout(Duration::from_secs(8), async {
+            while !path.is_file() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    fn spawn_poll(
+        fixture: &OwnerWakeFixture,
+        id: u64,
+        chars: &str,
+    ) -> tokio::task::JoinHandle<ToolResult> {
+        let config = fixture.config.clone();
+        let session = fixture.session.clone();
+        let context = fixture.context.clone();
+        let chars = chars.to_string();
+        tokio::spawn(async move {
+            WriteStdin
+                .call_with_context(
+                    json!({"session_id":id,"chars":chars,"yield_time_ms":300_000}),
+                    &config,
+                    &session,
+                    &context,
+                )
+                .await
+        })
+    }
+
+    #[tokio::test]
+    async fn owner_message_wake_long_poll_preserves_process_cursor_and_task_isolation() {
+        let fixture = owner_wake_fixture().await;
+        fixture
+            .chat
+            .append_user("already-read".into(), "Old acknowledged input".into())
+            .await
+            .unwrap();
+        fixture.chat.read(true).await.unwrap();
+        let before = fixture.chat.unread_snapshot().await.unwrap();
+        let exec = start_exec_session(
+            &fixture.session,
+            &fixture.config,
+            finish_on_input_command(),
+            fixture.root.path(),
+            None,
+        )
+        .unwrap();
+        let mut polling = spawn_poll(&fixture, exec.id, "");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut polling)
+                .await
+                .is_err(),
+            "already-read text must not end the wait"
+        );
+        let other = crate::project_bindings::ConversationIdentity::from_openai_session(
+            "unrelated-command-owner",
+        )
+        .unwrap();
+        let other_chat = fixture
+            .context
+            .markdown_chat
+            .chat(&fixture.config, Some(&other), &fixture.session)
+            .unwrap();
+        other_chat
+            .append_user("other-owner".into(), "Do not wake a different task".into())
+            .await
+            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(150), &mut polling)
+                .await
+                .is_err(),
+            "another task's message must not wake this command"
+        );
+        fixture
+            .chat
+            .append_user("new-owner".into(), "Read this instruction now".into())
+            .await
+            .unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(4), polling)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!result.is_error, "{}", result.joined_text());
+        assert_eq!(
+            result.structured_content.as_ref().unwrap()["session_id"],
+            exec.id
+        );
+        assert!(exec.exit_code().is_none());
+        assert!(fixture.session.exec_session(exec.id).is_some());
+        let pending = fixture.chat.unread_snapshot().await.unwrap();
+        assert_eq!(pending.read_through, before.read_through);
+        assert_eq!(pending.messages.len(), 1);
+        assert_eq!(
+            other_chat.unread_snapshot().await.unwrap().messages.len(),
+            1
+        );
+        fixture.chat.read(true).await.unwrap();
+        let finished = WriteStdin
+            .call_with_context(
+                json!({"session_id":exec.id,"chars":"finish\n","yield_time_ms":1500}),
+                &fixture.config,
+                &fixture.session,
+                &fixture.context,
+            )
+            .await;
+        assert_eq!(
+            finished.structured_content.as_ref().unwrap()["exit_code"],
+            0
+        );
+        assert!(finished.joined_text().contains("finished:finish"));
+    }
+
+    #[tokio::test]
+    async fn owner_message_wake_after_stdin_never_resends_input_or_loses_late_output() {
+        let fixture = owner_wake_fixture().await;
+        let command = if cfg!(windows) {
+            "$first=[Console]::ReadLine(); [IO.File]::AppendAllText('stdin-events.txt',$first+\"`n\"); [Console]::WriteLine('first:'+ $first); $second=[Console]::ReadLine(); [IO.File]::AppendAllText('stdin-events.txt',$second+\"`n\"); [Console]::WriteLine('second:'+ $second)"
+        } else {
+            "IFS= read -r first; printf '%s\\n' \"$first\" >> stdin-events.txt; printf 'first:%s\\n' \"$first\"; IFS= read -r second; printf '%s\\n' \"$second\" >> stdin-events.txt; printf 'second:%s\\n' \"$second\""
+        };
+        let exec = start_exec_session(
+            &fixture.session,
+            &fixture.config,
+            command,
+            fixture.root.path(),
+            None,
+        )
+        .unwrap();
+        let input = spawn_poll(&fixture, exec.id, "only-once\n");
+        let events = fixture.root.path().join("stdin-events.txt");
+        wait_for_test_file(&events).await;
+        fixture
+            .chat
+            .append_user(
+                "stdin-owner".into(),
+                "New work while input waits for output".into(),
+            )
+            .await
+            .unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(4), input)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!result.is_error, "{}", result.joined_text());
+        assert_eq!(
+            result.structured_content.as_ref().unwrap()["session_id"],
+            exec.id
+        );
+        assert_eq!(
+            std::fs::read_to_string(&events)
+                .unwrap()
+                .lines()
+                .collect::<Vec<_>>(),
+            ["only-once"]
+        );
+        assert!(exec.exit_code().is_none());
+        fixture.chat.read(true).await.unwrap();
+        let finished = WriteStdin
+            .call_with_context(
+                json!({"session_id":exec.id,"chars":"finish\n","yield_time_ms":1500}),
+                &fixture.config,
+                &fixture.session,
+                &fixture.context,
+            )
+            .await;
+        assert_eq!(
+            finished.structured_content.as_ref().unwrap()["exit_code"],
+            0
+        );
+        assert!(finished.joined_text().contains("second:finish"));
+        let combined = format!("{}{}", result.joined_text(), finished.joined_text());
+        assert_eq!(
+            combined.matches("first:only-once").count(),
+            1,
+            "early and late output must be delivered exactly once"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&events)
+                .unwrap()
+                .lines()
+                .collect::<Vec<_>>(),
+            ["only-once", "finish"]
+        );
+    }
+
+    #[tokio::test]
+    async fn owner_message_wake_initial_exec_returns_its_registered_session() {
+        let fixture = owner_wake_fixture().await;
+        let config = fixture.config.clone();
+        let session = fixture.session.clone();
+        let context = fixture.context.clone();
+        let running = tokio::spawn(async move {
+            ExecCommand
+                .call_with_context(
+                    json!({"cmd":finish_on_input_command(),"yield_time_ms":30_000}),
+                    &config,
+                    &session,
+                    &context,
+                )
+                .await
+        });
+        let id = tokio::time::timeout(Duration::from_secs(8), async {
+            loop {
+                if let Some(id) = fixture.session.exec_session_ids().first() {
+                    break *id;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        fixture
+            .chat
+            .append_user(
+                "initial-owner".into(),
+                "Handle this before waiting further".into(),
+            )
+            .await
+            .unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(4), running)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!result.is_error, "{}", result.joined_text());
+        assert_eq!(
+            result.structured_content.as_ref().unwrap()["session_id"],
+            id
+        );
+        assert!(
+            fixture
+                .session
+                .exec_session(id)
+                .unwrap()
+                .exit_code()
+                .is_none()
+        );
+        assert_eq!(
+            fixture.chat.unread_snapshot().await.unwrap().messages.len(),
+            1
+        );
+        fixture.chat.read(true).await.unwrap();
+        let finished = WriteStdin
+            .call_with_context(
+                json!({"session_id":id,"chars":"finish\n","yield_time_ms":5000}),
+                &fixture.config,
+                &fixture.session,
+                &fixture.context,
+            )
+            .await;
+        assert_eq!(
+            finished.structured_content.as_ref().unwrap()["exit_code"],
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn owner_message_wake_real_cancellation_keeps_session_and_buffer() {
+        let fixture = owner_wake_fixture().await;
+        let command = if cfg!(windows) {
+            "[Console]::WriteLine('buffered-before-cancel'); [IO.File]::WriteAllText('cancellation-ready','ready'); $line=[Console]::ReadLine(); [Console]::WriteLine('after-cancel')"
+        } else {
+            "printf 'buffered-before-cancel\\n'; printf ready > cancellation-ready; IFS= read -r line; printf 'after-cancel\\n'"
+        };
+        let exec = start_exec_session(
+            &fixture.session,
+            &fixture.config,
+            command,
+            fixture.root.path(),
+            None,
+        )
+        .unwrap();
+        wait_for_test_file(&fixture.root.path().join("cancellation-ready")).await;
+        let polling = spawn_poll(&fixture, exec.id, "");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        fixture.context.cancellation.cancel();
+        let result = tokio::time::timeout(Duration::from_secs(2), polling)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(result.is_error);
+        assert!(result.joined_text().contains("Output wait cancelled"));
+        assert!(exec.exit_code().is_none());
+        assert!(fixture.session.exec_session(exec.id).is_some());
+        let (buffer, exited, _) = exec.yield_output_with_metadata(0).await;
+        assert!(!exited);
+        assert!(buffer.contains("buffered-before-cancel"));
+        exec.write_stdin("finish\n").await.unwrap();
+        let (late, exited, _) = exec.yield_output_with_metadata(1500).await;
+        assert!(exited);
+        assert!(late.contains("after-cancel"));
+    }
 
     fn large_output_command() -> &'static str {
         if cfg!(windows) {

@@ -365,6 +365,12 @@ for(const [name,engine]of [['Chromium',chromium],['WebKit',webkit]])test(`${name
   await error.getByText(/Automatic retries paused/).waitFor();
   await host.locator('#automation-dismiss-inline').click();await error.waitFor({state:'hidden'});
   await page.reload();host=page.locator('#chat-host');await host.locator('#goal-text').getByText(goal.markdown).waitFor();
+  for(const width of [390,320]){
+   await page.setViewportSize({width,height:844});
+   assert(await host.locator('#goal-text').isVisible(),'retry dismissal preserves a visible goal on narrow screens');
+   const text=await host.locator('#goal-text').boundingBox();assert(text.width>=30,'goal metrics leave room for the goal text');
+   const metrics=await host.locator('#goal-metrics').boundingBox();assert(metrics.y>=text.y+text.height,'mobile metrics wrap beneath the goal');
+  }
   await page.clock.fastForward(2000);assert.equal(await host.locator('#automation-error').isVisible(),false);
   assert.equal(goal.status,'active');assert.equal(action.sendAccepted,false);assert.equal(operations.length,2);assert.deepEqual(errors,[]);
  }finally{await browser.close();}

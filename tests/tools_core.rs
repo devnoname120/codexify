@@ -512,6 +512,7 @@ async fn clock_sleep_ends_early_when_the_mcp_request_is_cancelled() {
             dir.path().join("artifact-state"),
         )),
         agent_automation: None,
+        agent_runtime: None,
         cancellation: cancellation.clone(),
     };
 

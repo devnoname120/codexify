@@ -16,7 +16,13 @@ impl Tool for MarkdownPassthroughFixture {
         "Test-only upstream result passthrough".into()
     }
     fn behavior(&self) -> crate::tool::ToolBehavior {
-        crate::tool::ToolBehavior::new(true, false, true, false, "Test-only passthrough")
+        crate::tool::ToolBehavior::new(
+            self.name != "exec_command",
+            false,
+            true,
+            false,
+            "Test-only passthrough",
+        )
     }
     fn input_schema(&self) -> Value {
         crate::tool::empty_object_schema()
@@ -358,4 +364,485 @@ async fn markdown_chat_never_initializes_or_exposes_a_channel_before_setup() {
     }
     client.cancel().await.unwrap();
     task.await.unwrap();
+}
+
+fn pending_chat_context(
+    handler: &CodexHandler,
+    identity: &ConversationIdentity,
+    cancellation: CancellationToken,
+) -> ToolRequestContext {
+    ToolRequestContext {
+        conversation: Some(identity.clone()),
+        task_conversation: Some(identity.clone()),
+        task_owner_generation: Some(0),
+        conversation_retired: false,
+        connector_schema_version: None,
+        conversation_schema_version: None,
+        markdown_chat: handler.markdown_chat.clone(),
+        conversation_authorizations: handler.conversation_authorizations.clone(),
+        project_bindings: handler.project_bindings.clone(),
+        diff_checkpoints: handler.diff_checkpoints.clone(),
+        artifact_egress: handler.artifact_egress.clone(),
+        agent_automation: None,
+        agent_runtime: None,
+        cancellation,
+    }
+}
+
+#[tokio::test]
+async fn inline_pending_chat_read_delivers_complete_input_then_acknowledges_once_and_keeps_late_input()
+ {
+    let root = tempfile::tempdir().unwrap();
+    let tools: Vec<Box<dyn Tool>> = vec![
+        Box::new(MarkdownPassthroughFixture {
+            name: "exec_command",
+            schema: Some(crate::tool::text_output_schema()),
+            data: None,
+        }),
+        Box::new(crate::tools::markdown_chat::ChatTool::Read),
+        Box::new(crate::tools::markdown_chat::ChatTool::Write),
+    ];
+    let mut handler = handler_with_tools(root.path(), tools, crate::types::ToolLogLevel::Info);
+    let mut config = handler.config.as_ref().clone();
+    config.markdown_chat.enabled = true;
+    config.output.max_tool_output_tokens = Some(128);
+    handler.config = Arc::new(config.clone());
+    let identity = ConversationIdentity::from_openai_session("inline-inbox").unwrap();
+    bind_fixture_workspace(&handler, Some(&identity)).await;
+    let other_identity = ConversationIdentity::from_openai_session("other-inline-inbox").unwrap();
+    bind_fixture_workspace(&handler, Some(&other_identity)).await;
+    let chat = handler
+        .markdown_chat
+        .chat(&config, Some(&identity), &handler.session)
+        .unwrap();
+    let message = format!(
+        "{}END_OF_COMPLETE_INPUT",
+        "Owner instruction\n".repeat(20_000)
+    );
+    chat.append_user("inline-owner".into(), message.clone())
+        .await
+        .unwrap();
+    let expected_input = chat.read(false).await.unwrap().text;
+    let (server_transport, client_transport) = tokio::io::duplex(64 * 1024);
+    let server = tokio::spawn(async move {
+        handler
+            .serve(server_transport)
+            .await
+            .unwrap()
+            .waiting()
+            .await
+            .unwrap()
+    });
+    let client = ().serve(client_transport).await.unwrap();
+    let request = |name: &str, args: Value| {
+        let mut request = CallToolRequestParams::new(name.to_owned());
+        request.arguments = args.as_object().cloned();
+        request.meta =
+            Some(serde_json::from_value(json!({"openai/session":"inline-inbox"})).unwrap());
+        request
+    };
+    let invalid = client
+        .call_tool(request("exec_command", json!({"unexpected":true})))
+        .await
+        .unwrap();
+    assert_eq!(invalid.is_error, Some(true));
+    assert!(
+        !chat
+            .user_messages_read(&["inline-owner".into()])
+            .await
+            .unwrap(),
+        "argument rejection never consumes input"
+    );
+    let mut other_request = request("exec_command", json!({}));
+    other_request.meta =
+        Some(serde_json::from_value(json!({"openai/session":"other-inline-inbox"})).unwrap());
+    let other_result = client.call_tool(other_request).await.unwrap();
+    assert_ne!(other_result.is_error, Some(true));
+    assert!(
+        other_result
+            .structured_content
+            .as_ref()
+            .is_none_or(|value| value
+                .get(crate::markdown_chat::USER_MESSAGE_FIELD)
+                .is_none())
+    );
+    assert!(
+        !chat
+            .user_messages_read(&["inline-owner".into()])
+            .await
+            .unwrap(),
+        "another conversation cannot receive or consume this inbox"
+    );
+    let blocked = client
+        .call_tool(request("exec_command", json!({})))
+        .await
+        .unwrap();
+    assert_eq!(blocked.is_error, Some(true));
+    assert!(
+        !blocked
+            .content
+            .iter()
+            .any(|block| matches!(block, ContentBlock::Image(_))),
+        "the requested operation never dispatched"
+    );
+    assert!(
+        blocked.content[0]
+            .as_text()
+            .unwrap()
+            .text
+            .contains("Required next tool: chat_write")
+    );
+    let field =
+        &blocked.structured_content.as_ref().unwrap()[crate::markdown_chat::USER_MESSAGE_FIELD];
+    assert!(
+        field
+            .as_str()
+            .unwrap()
+            .contains("Required next tool: chat_write"),
+        "the next action stays beside the unbudgeted complete input"
+    );
+    assert!(
+        field.as_str().unwrap().ends_with(&expected_input),
+        "complete input bypasses the ordinary 128-token work-result budget"
+    );
+    assert!(
+        blocked
+            .content
+            .iter()
+            .any(|block| block
+                .as_text()
+                .is_some_and(
+                    |text| serde_json::from_str::<Value>(&text.text).ok().is_some_and(
+                        |value| value[crate::markdown_chat::USER_MESSAGE_FIELD] == *field
+                    )
+                )),
+        "text-only hosts receive the exact same receipt"
+    );
+    assert!(
+        chat.user_messages_read(&["inline-owner".into()])
+            .await
+            .unwrap(),
+        "same read cursor semantics as explicit chat_read"
+    );
+    assert!(
+        !std::fs::read_to_string(chat.path())
+            .unwrap()
+            .contains("codexify-agent-message:v1:start"),
+        "inline reading never appends an acknowledgment or claims the direction handled"
+    );
+    let acknowledgment = client
+        .call_tool(request(
+            "chat_write",
+            json!({"message":"Acknowledged; applying the changed plan."}),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(acknowledgment.is_error, Some(true));
+    assert!(
+        acknowledgment
+            .structured_content
+            .as_ref()
+            .unwrap()
+            .get(crate::markdown_chat::USER_MESSAGE_FIELD)
+            .is_none(),
+        "one acknowledgment does not echo already-read input and demand another"
+    );
+    let worked = client
+        .call_tool(request("exec_command", json!({})))
+        .await
+        .unwrap();
+    assert_ne!(worked.is_error, Some(true));
+    assert!(matches!(&worked.content[0], ContentBlock::Image(_)));
+
+    chat.append_user("second-owner".into(), "Second direction".into())
+        .await
+        .unwrap();
+    let blocked = client
+        .call_tool(request("exec_command", json!({})))
+        .await
+        .unwrap();
+    assert_eq!(blocked.is_error, Some(true));
+    assert!(
+        !blocked
+            .content
+            .iter()
+            .any(|block| matches!(block, ContentBlock::Image(_)))
+    );
+    chat.append_user(
+        "late-owner".into(),
+        "Late direction after inline receipt".into(),
+    )
+    .await
+    .unwrap();
+    let acknowledgment = client
+        .call_tool(request(
+            "chat_write",
+            json!({"message":"Acknowledged the second direction."}),
+        ))
+        .await
+        .unwrap();
+    let late = acknowledgment.structured_content.as_ref().unwrap()
+        [crate::markdown_chat::USER_MESSAGE_FIELD]
+        .as_str()
+        .unwrap();
+    assert!(late.contains("Late direction after inline receipt"));
+    assert!(!late.contains("Second direction"));
+    assert_eq!(
+        acknowledgment.structured_content.as_ref().unwrap()["required_next_action"],
+        "chat_write"
+    );
+    assert!(
+        chat.user_messages_read(&["late-owner".into()])
+            .await
+            .unwrap()
+    );
+    chat.request_agent_stop("explicit-stop".into())
+        .await
+        .unwrap();
+    let stopped = client
+        .call_tool(request("exec_command", json!({})))
+        .await
+        .unwrap();
+    assert_eq!(stopped.is_error, Some(true));
+    assert!(
+        !stopped
+            .content
+            .iter()
+            .any(|block| matches!(block, ContentBlock::Image(_)))
+    );
+    client.cancel().await.unwrap();
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn inline_pending_chat_read_oversize_inbox_stays_unread_and_requires_explicit_read() {
+    use std::io::Write;
+    let root = tempfile::tempdir().unwrap();
+    let mut handler = handler_with_tools(
+        root.path(),
+        vec![Box::new(MarkdownPassthroughFixture {
+            name: "exec_command",
+            schema: Some(crate::tool::text_output_schema()),
+            data: None,
+        })],
+        crate::types::ToolLogLevel::Info,
+    );
+    let mut config = handler.config.as_ref().clone();
+    config.markdown_chat.enabled = true;
+    handler.config = Arc::new(config.clone());
+    let identity = ConversationIdentity::from_openai_session("oversize-inbox").unwrap();
+    bind_fixture_workspace(&handler, Some(&identity)).await;
+    let chat = handler
+        .markdown_chat
+        .chat(&config, Some(&identity), &handler.session)
+        .unwrap();
+    chat.ensure().await.unwrap();
+    let before: Value =
+        serde_json::from_slice(&std::fs::read(chat.path().with_file_name("cursor.json")).unwrap())
+            .unwrap();
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(chat.path())
+        .unwrap()
+        .write_all(&vec![b'x'; crate::markdown_chat::MAX_UNREAD_BYTES + 1])
+        .unwrap();
+    let (server_transport, client_transport) = tokio::io::duplex(64 * 1024);
+    let server = tokio::spawn(async move {
+        handler
+            .serve(server_transport)
+            .await
+            .unwrap()
+            .waiting()
+            .await
+            .unwrap()
+    });
+    let client = ().serve(client_transport).await.unwrap();
+    let mut request = CallToolRequestParams::new("exec_command");
+    request.meta =
+        Some(serde_json::from_value(json!({"openai/session":"oversize-inbox"})).unwrap());
+    let blocked = client.call_tool(request).await.unwrap();
+    assert_eq!(blocked.is_error, Some(true));
+    assert!(
+        !blocked
+            .content
+            .iter()
+            .any(|block| matches!(block, ContentBlock::Image(_)))
+    );
+    assert!(
+        blocked.content[0]
+            .as_text()
+            .unwrap()
+            .text
+            .contains("Required next tool: chat_read")
+    );
+    assert!(blocked.structured_content.as_ref().is_none_or(|value| {
+        value
+            .get(crate::markdown_chat::USER_MESSAGE_FIELD)
+            .is_none()
+    }));
+    let after: Value =
+        serde_json::from_slice(&std::fs::read(chat.path().with_file_name("cursor.json")).unwrap())
+            .unwrap();
+    assert_eq!(after["offset"], before["offset"]);
+    assert_eq!(after["deliveredThrough"], before["deliveredThrough"]);
+    assert!(chat.read(false).await.err().unwrap().contains("16 MiB"));
+    client.cancel().await.unwrap();
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn inline_pending_chat_read_cancelled_and_empty_receipts_do_not_claim_delivery() {
+    let root = tempfile::tempdir().unwrap();
+    let mut handler = handler_with_tools(root.path(), vec![], crate::types::ToolLogLevel::Info);
+    let mut config = handler.config.as_ref().clone();
+    config.markdown_chat.enabled = true;
+    handler.config = Arc::new(config.clone());
+    let identity = ConversationIdentity::from_openai_session("cancel-inline-inbox").unwrap();
+    bind_fixture_workspace(&handler, Some(&identity)).await;
+    let chat = handler
+        .markdown_chat
+        .chat(&config, Some(&identity), &handler.session)
+        .unwrap();
+    chat.append_user(
+        "cancelled-owner".into(),
+        "Do not consume a cancelled read".into(),
+    )
+    .await
+    .unwrap();
+    let cancellation = CancellationToken::new();
+    cancellation.cancel();
+    let context = pending_chat_context(&handler, &identity, cancellation);
+    assert!(
+        read_pending_chat_inline(&config, &handler.session, &context)
+            .await
+            .is_none()
+    );
+    assert!(
+        !chat
+            .user_messages_read(&["cancelled-owner".into()])
+            .await
+            .unwrap()
+    );
+    let context = pending_chat_context(&handler, &identity, CancellationToken::new());
+    let receipt = read_pending_chat_inline(&config, &handler.session, &context)
+        .await
+        .unwrap();
+    assert!(
+        receipt.is_error,
+        "this is a rejected work operation, never work success"
+    );
+    assert!(
+        receipt
+            .new_chat_message_from_user
+            .unwrap()
+            .contains("Do not consume a cancelled read")
+    );
+    assert!(
+        chat.user_messages_read(&["cancelled-owner".into()])
+            .await
+            .unwrap()
+    );
+    assert!(
+        read_pending_chat_inline(&config, &handler.session, &context)
+            .await
+            .is_none(),
+        "empty/racing reads retain the caller's explicit-read fallback"
+    );
+}
+
+#[tokio::test]
+async fn inline_pending_chat_read_keeps_ticket_rejection_and_successor_handoff_guards() {
+    let root = tempfile::tempdir().unwrap();
+    let calls = Arc::new(AtomicU64::new(0));
+    let tools: Vec<Box<dyn Tool>> = vec![
+        Box::new(TicketProbe {
+            name: "exec_command",
+            calls: calls.clone(),
+            private: false,
+        }),
+        Box::new(crate::tools::markdown_chat::ChatTool::Write),
+    ];
+    let mut handler = handler_with_tools(root.path(), tools, crate::types::ToolLogLevel::Info);
+    let mut config = handler.config.as_ref().clone();
+    config.markdown_chat.enabled = true;
+    config.experimental.agent_tickets = true;
+    handler.config = Arc::new(config.clone());
+    bind_fixture_workspace(&handler, None).await;
+    let chat = handler
+        .markdown_chat
+        .chat(&config, None, &handler.session)
+        .unwrap();
+    let (server_transport, client_transport) = tokio::io::duplex(64 * 1024);
+    let server = tokio::spawn(async move {
+        handler
+            .serve(server_transport)
+            .await
+            .unwrap()
+            .waiting()
+            .await
+            .unwrap()
+    });
+    let client = ().serve(client_transport).await.unwrap();
+    let first = client
+        .call_tool(ticket_request("exec_command", None, json!({})))
+        .await
+        .unwrap();
+    let ticket = next_ticket(&first);
+    chat.append_user(
+        "ticketed-owner".into(),
+        "Only the winning ticket may read this direction".into(),
+    )
+    .await
+    .unwrap();
+    let rejected = client
+        .call_tool(ticket_request("exec_command", None, json!({})))
+        .await
+        .unwrap();
+    assert_ticket_rejected(&rejected);
+    assert!(
+        !serde_json::to_string(&rejected)
+            .unwrap()
+            .contains("Only the winning ticket")
+    );
+    assert!(
+        !chat
+            .user_messages_read(&["ticketed-owner".into()])
+            .await
+            .unwrap()
+    );
+    let blocked = client
+        .call_tool(ticket_request("exec_command", Some(&ticket), json!({})))
+        .await
+        .unwrap();
+    assert_eq!(blocked.is_error, Some(true));
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "the winning work operation is blocked, never replayed"
+    );
+    assert!(
+        chat.user_messages_read(&["ticketed-owner".into()])
+            .await
+            .unwrap()
+    );
+    let next = next_ticket(&blocked);
+    assert_ne!(next, ticket);
+    let acknowledgment = client
+        .call_tool(ticket_request(
+            "chat_write",
+            Some(&next),
+            json!({"message":"Acknowledged the direction."}),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(acknowledgment.is_error, Some(true));
+    let next = next_ticket(&acknowledgment);
+    let worked = client
+        .call_tool(ticket_request("exec_command", Some(&next), json!({})))
+        .await
+        .unwrap();
+    assert_ne!(worked.is_error, Some(true));
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    client.cancel().await.unwrap();
+    server.await.unwrap();
 }

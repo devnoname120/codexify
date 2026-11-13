@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
@@ -386,6 +386,7 @@ impl PendingBuffer {
         }
     }
 
+    #[cfg(test)]
     fn is_empty(&self) -> bool {
         self.head.is_empty() && self.tail.is_empty() && self.omitted == 0
     }
@@ -488,7 +489,8 @@ impl ExecSession {
             tokio::time::sleep(remaining.min(Duration::from_millis(25))).await;
         }
 
-        if self.exit_code().is_some() {
+        let exited = self.exit_code().is_some();
+        if exited {
             // Let the readers finish so the final bytes are not lost to the race
             // between process exit and stream EOF.
             let _ =
@@ -496,7 +498,9 @@ impl ExecSession {
         }
 
         let output = self.take_pending();
-        (output.text, self.exit_code().is_some(), output.truncated)
+        // If the child exits after the snapshot, keep its session addressable
+        // for the next poll's final drain instead of discarding late stdout.
+        (output.text, exited, output.truncated)
     }
 }
 
@@ -536,6 +540,7 @@ impl ExecSessionState {
         self.sessions.lock().unwrap().remove(&id)
     }
 
+    #[cfg(test)]
     fn len(&self) -> usize {
         self.sessions.lock().unwrap().len()
     }
@@ -554,6 +559,36 @@ impl ExecSessionState {
 
     fn reap(&self, idle_timeout: Duration) -> Vec<Arc<ExecSession>> {
         reap_sessions(&mut self.sessions.lock().unwrap(), idle_timeout)
+    }
+
+    /// Makes room for one more session. Only running processes count against
+    /// `max`; when the map is full of finished-but-unread results, the oldest
+    /// of those (by last client activity) are dropped to admit the new command.
+    fn admit(&self, max: usize) -> bool {
+        let mut sessions = self.sessions.lock().unwrap();
+        if sessions.len() < max {
+            return true;
+        }
+        let mut finished = sessions
+            .values()
+            .filter(|session| session.exit_code().is_some())
+            .map(|session| (*session.last_activity.lock().unwrap(), session.id))
+            .collect::<Vec<_>>();
+        finished.sort_unstable();
+        let excess = sessions.len() + 1 - max;
+        if finished.len() < excess {
+            return false;
+        }
+        for (_, id) in finished.into_iter().take(excess) {
+            if let Some(evicted) = sessions.remove(&id) {
+                tracing::info!(
+                    exec_session_id = evicted.id,
+                    exit_code = ?evicted.exit_code(),
+                    "unread finished exec session evicted to admit a new command"
+                );
+            }
+        }
+        true
     }
 
     /// Starts a transport-owned reaper. It holds only a weak reference, so it
@@ -593,6 +628,33 @@ impl Drop for ExecSessionState {
 }
 
 type ConversationExecStates = HashMap<ConversationIdentity, Arc<ExecSessionState>>;
+static CONVERSATION_EXEC_ACTIVITY: OnceLock<
+    StdMutex<HashMap<String, Vec<Weak<ExecSessionState>>>>,
+> = OnceLock::new();
+
+pub(crate) fn conversation_has_running_commands(identity: &ConversationIdentity) -> bool {
+    let Some(registry) = CONVERSATION_EXEC_ACTIVITY.get() else {
+        return false;
+    };
+    let Ok(registry) = registry.try_lock() else {
+        return true;
+    };
+    let states = registry
+        .get(identity.stable_key())
+        .cloned()
+        .unwrap_or_default();
+    drop(registry);
+    states
+        .into_iter()
+        .filter_map(|state| state.upgrade())
+        .any(|state| {
+            state.sessions.try_lock().map_or(true, |sessions| {
+                sessions
+                    .values()
+                    .any(|command| command.exit_code().is_none())
+            })
+        })
+}
 
 /// Server-process ownership for ChatGPT resident commands. ChatGPT can replace
 /// its MCP transport between adjacent tool calls while retaining the same
@@ -622,6 +684,22 @@ impl ConversationExecSessionStore {
             .entry(identity.clone())
             .or_insert_with(|| Arc::new(ExecSessionState::new()))
             .clone();
+        if let Ok(mut registry) = CONVERSATION_EXEC_ACTIVITY
+            .get_or_init(Default::default)
+            .lock()
+        {
+            if registry.len() > 4096 {
+                registry.retain(|_, states| states.iter().any(|state| state.strong_count() > 0));
+            }
+            let states = registry
+                .entry(identity.stable_key().to_owned())
+                .or_default();
+            states.retain(|state| state.strong_count() > 0);
+            let weak = Arc::downgrade(&exec);
+            if !states.iter().any(|state| state.ptr_eq(&weak)) {
+                states.push(weak);
+            }
+        }
         transport_session.with_exec_state(exec)
     }
 
@@ -1104,10 +1182,12 @@ impl SessionState {
         self.exec.remove(id)
     }
 
+    #[cfg(test)]
     fn exec_session_count(&self) -> usize {
         self.exec.len()
     }
 
+    #[cfg(test)]
     fn reap_exec_sessions(&self, idle_timeout: Duration) -> Vec<Arc<ExecSession>> {
         self.exec.reap(idle_timeout)
     }
@@ -1457,21 +1537,26 @@ impl SessionState {
     }
 }
 
-/// Removes finished-and-empty sessions and, when `idle_timeout` is non-zero,
-/// removes every session idle beyond it. Running idle sessions are returned so
-/// the caller can kill them without holding the map lock; completed sessions
-/// whose final output was never polled are simply expired.
+/// Expires sessions only after their configured non-zero idle timeout.
+/// A quiet exit still has an unread exit status. The tools remove a session
+/// after returning that final result; an empty output buffer is not an ack.
+/// Running expired sessions are returned for termination outside the map lock.
 fn reap_sessions(
     map: &mut HashMap<u64, Arc<ExecSession>>,
     idle_timeout: Duration,
 ) -> Vec<Arc<ExecSession>> {
     let mut killed = Vec::new();
     map.retain(|_, s| {
-        if s.exit_code().is_some() && s.pending.lock().unwrap().is_empty() {
-            return false;
-        }
         if !idle_timeout.is_zero() && s.idle_for() >= idle_timeout {
-            if s.exit_code().is_none() {
+            let exit_code = s.exit_code();
+            tracing::info!(
+                exec_session_id = s.id,
+                process_id = ?s.pid,
+                exit_code = ?exit_code,
+                idle_timeout_ms = idle_timeout.as_millis() as u64,
+                "exec session expired by configured idle timeout"
+            );
+            if exit_code.is_none() {
                 killed.push(s.clone());
             }
             return false;
@@ -1481,12 +1566,10 @@ fn reap_sessions(
     killed
 }
 
-/// Removes sessions whose process already exited and left nothing buffered.
-/// Idle enforcement is the background reaper's job (see `spawn_idle_reaper`),
-/// so this opportunistic pass never kills a running session.
-pub fn reap_finished_sessions(state: &SessionState) {
-    let _ = state.reap_exec_sessions(Duration::ZERO);
-}
+/// Compatibility entry point; final results are now retained until polled.
+/// Configured idle expiry is enforced by the background reaper.
+#[deprecated(note = "Poll final results; configured idle cleanup runs in the background")]
+pub fn reap_finished_sessions(_state: &SessionState) {}
 
 /// Spawns `cmd` through a shell and registers it as a resident session. The
 /// caller is responsible for having validated `cmd` against policy first.
@@ -1497,15 +1580,13 @@ pub fn start_exec_session(
     cwd: &std::path::Path,
     shell: Option<&str>,
 ) -> Result<Arc<ExecSession>, String> {
-    reap_finished_sessions(state);
-    {
-        let live = state.exec_session_count();
-        if live >= config.exec.max_sessions {
-            return Err(format!(
-                "Too many live exec sessions ({}). Finish or terminate an existing session before starting another.",
-                config.exec.max_sessions
-            ));
-        }
+    // Finished sessions keep their final output for the client, but they must
+    // not hold admission slots that only running processes need.
+    if !state.exec.admit(config.exec.max_sessions) {
+        return Err(format!(
+            "Too many live exec sessions ({}). Finish or terminate an existing session before starting another.",
+            config.exec.max_sessions
+        ));
     }
 
     let parts = match shell.filter(|value| !value.is_empty()) {
@@ -1678,6 +1759,38 @@ mod tests {
     use crate::tools::exec_command::ExecCommand;
     use crate::tools::write_stdin::WriteStdin;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn owner_message_wake_zero_wait_completed_snapshot_keeps_final_drain() {
+        let pending = Arc::new(StdMutex::new(PendingBuffer::new()));
+        let drain_done = Arc::new(Notify::new());
+        let session = ExecSession {
+            id: 1,
+            command: "final-drain-fixture".into(),
+            pid: None,
+            started_at: Instant::now(),
+            stdin: TokioMutex::new(None),
+            pending: pending.clone(),
+            exit_code: Arc::new(StdMutex::new(Some(0))),
+            drain_done: drain_done.clone(),
+            last_activity: StdMutex::new(Instant::now()),
+        };
+        // Spawn is not polled until yield_output reaches its await, so the
+        // final reader completes after the zero-wait snapshot begins.
+        let reader = tokio::spawn(async move {
+            pending
+                .lock()
+                .unwrap()
+                .push_str("final output after process exit");
+            drain_done.notify_waiters();
+        });
+        let (output, exited, truncated) = session.yield_output_with_metadata(0).await;
+        reader.await.unwrap();
+        assert!(exited);
+        assert!(!truncated);
+        assert_eq!(output, "final output after process exit");
+        assert!(session.take_pending().text.is_empty());
+    }
 
     #[test]
     fn classifies_shells() {
@@ -2095,6 +2208,69 @@ exit $exit
         kill_exec_session(&resident);
     }
 
+    #[tokio::test]
+    async fn quiet_exit_status_survives_cleanup_reconnect_and_another_command() {
+        for expected_code in [0, 23] {
+            let root = tempfile::tempdir().unwrap();
+            let config = crate::config::default_config(root.path().to_owned());
+            let store = ConversationExecSessionStore::new();
+            let identity = ConversationIdentity::from_openai_session(&format!(
+                "quiet-exit-receipt-{expected_code}"
+            ))
+            .unwrap();
+            let first_transport = SessionState::new();
+            let first_call = store.session_for(&identity, &first_transport);
+            #[cfg(windows)]
+            let (shell, command) = (
+                "powershell",
+                format!(
+                    "while (-not (Test-Path -LiteralPath 'release')) {{ Start-Sleep -Milliseconds 10 }}; exit {expected_code}"
+                ),
+            );
+            #[cfg(not(windows))]
+            let (shell, command) = (
+                "sh",
+                format!("while [ ! -f release ]; do sleep 0.01; done; exit {expected_code}"),
+            );
+            let resident =
+                start_exec_session(&first_call, &config, &command, root.path(), Some(shell))
+                    .unwrap();
+            let (output, exited, _) = resident.yield_output_with_metadata(0).await;
+            assert!(output.is_empty());
+            assert!(!exited, "fixture must first return a resident session");
+            drop(first_call);
+            drop(first_transport);
+
+            std::fs::write(root.path().join("release"), b"").unwrap();
+            for _ in 0..500 {
+                if resident.exit_code().is_some() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            assert_eq!(resident.exit_code(), Some(expected_code));
+            assert!(resident.pending.lock().unwrap().is_empty());
+            // Simulate both background cleanup and a fresh transport while the
+            // caller has yet to receive even this silent process's exit code.
+            assert!(reap_conversation_states(&store.states, Duration::from_secs(3600)).is_empty());
+            let next_transport = SessionState::new();
+            let next_call = store.session_for(&identity, &next_transport);
+            let other = ExecCommand
+                .call(json!({"cmd":"exit 0", "shell":shell}), &config, &next_call)
+                .await;
+            assert!(!other.is_error, "{}", other.joined_text());
+            let final_result = WriteStdin
+                .call(json!({"session_id":resident.id}), &config, &next_call)
+                .await;
+            assert_eq!(final_result.is_error, expected_code != 0);
+            let result = final_result.structured_content.unwrap();
+            assert_eq!(result["exit_code"], expected_code);
+            assert!(result.get("session_id").is_none());
+            assert_eq!(result["output"], "");
+            assert!(next_call.exec_session(resident.id).is_none());
+        }
+    }
+
     #[test]
     fn conversation_exec_states_are_isolated_and_empty_states_are_reclaimed() {
         let store = ConversationExecSessionStore::new();
@@ -2145,6 +2321,46 @@ exit $exit
             kill_exec_session(session);
         }
         assert_eq!(state.exec_session_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn unread_finished_sessions_do_not_block_admission_but_running_ones_do() {
+        let dir = std::env::temp_dir();
+        let mut config = crate::config::default_config(dir.clone());
+        config.exec.max_sessions = 2;
+        let state = SessionState::new();
+        let finished_first = start_exec_session(&state, &config, "exit 3", &dir, None).unwrap();
+        let finished_second = start_exec_session(&state, &config, "exit 4", &dir, None).unwrap();
+        for session in [&finished_first, &finished_second] {
+            for _ in 0..400 {
+                if session.exit_code().is_some() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            assert!(session.exit_code().is_some(), "fixture must finish");
+        }
+        finished_second.touch();
+        assert_eq!(state.exec_session_count(), 2);
+
+        // The map is full of unread results: the least recently used one gives
+        // way and the other stays readable.
+        let running =
+            start_exec_session(&state, &config, &resident_sleep_command(), &dir, None).unwrap();
+        assert!(state.exec_session(finished_first.id).is_none());
+        assert!(state.exec_session(finished_second.id).is_some());
+        let second_running =
+            start_exec_session(&state, &config, &resident_sleep_command(), &dir, None).unwrap();
+        assert!(state.exec_session(finished_second.id).is_none());
+
+        // Every slot now holds a live process, so admission is refused.
+        let refused = start_exec_session(&state, &config, &resident_sleep_command(), &dir, None);
+        let Err(error) = refused else {
+            panic!("a third running command must be refused")
+        };
+        assert!(error.contains("Too many live exec sessions"));
+        kill_exec_session(&running);
+        kill_exec_session(&second_running);
     }
 
     #[tokio::test]

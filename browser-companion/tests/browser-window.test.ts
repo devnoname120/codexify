@@ -9,6 +9,8 @@ import {
 } from "../src/protocol";
 import {
   BROWSER_OPERATION_TIMEOUT_MS,
+  PASSIVE_HEALTH_BUDGET_MS,
+  PASSIVE_HEALTH_RESULT_MAX_AGE_MS,
   MAX_RETAINED_ACTIONS,
   SingleWindowCoordinator,
   type BrowserDriver,
@@ -20,6 +22,12 @@ import {navigatePage} from "../src/navigation";
 import type {BrowserContext,Page} from "patchright";
 
 const TEST_BUILD = protocolBuild("test-build");
+
+function expireCompletedHealth(coordinator:SingleWindowCoordinator):void {
+  const completed=(coordinator as any).healthCompleted;
+  expect(completed).toBeDefined();
+  completed.observedAt=Date.now()-PASSIVE_HEALTH_RESULT_MAX_AGE_MS-1;
+}
 
 const request = (id: string): ExecuteActionRequest => ({
   actionId:id,
@@ -738,6 +746,38 @@ test("omitting an unavailable connector renews the next submission phase without
   await coordinator.close();
 });
 
+test("maintenance queued behind a valid longer connector refresh waits for it instead of expiring",async()=>{
+  // The queued caller's own budget is 220 ms; the refresh legitimately needs 600 ms.
+  class SlowRefreshDriver extends DeferredDriver {
+    async refreshConnectorSteps(_name:string,_run:unknown,signal?:AbortSignal){
+      await Bun.sleep(600);signal?.throwIfAborted();
+      return {appId:"app",refreshObserved:true,permissionChanged:false,schemaVerified:false as const};
+    }
+  }
+  const driver=new SlowRefreshDriver();
+  const coordinator=new SingleWindowCoordinator(driver,TEST_BUILD,{operationMs:150,cleanupMs:40,hardStopMs:30});
+  const refresh=coordinator.refreshConnector("Fixture connector");
+  await Bun.sleep(20);
+  const queued=coordinator.login();
+  await expect(refresh).resolves.toMatchObject({refreshObserved:true});
+  await expect(queued).resolves.toBeDefined();
+  expect(driver.loginCalls).toBe(1);
+  await coordinator.close();
+});
+
+test("maintenance queued behind an overrunning predecessor still expires",async()=>{
+  class StuckDriver extends DeferredDriver {
+    override async login(){await Bun.sleep(5_000);return this.health();}
+  }
+  const coordinator=new SingleWindowCoordinator(new StuckDriver(),TEST_BUILD,{operationMs:100,cleanupMs:30,hardStopMs:20});
+  const first=coordinator.login().catch(error=>error);
+  await Bun.sleep(10);
+  const started=Date.now();
+  await expect(coordinator.login()).rejects.toThrow("still owns the shared window");
+  expect(Date.now()-started).toBeLessThan(1_500);
+  await first;
+});
+
 test("ordinary sends still require model verification before connector verification",async()=>{
   class UnverifiedDriver extends DeferredDriver {
     override async execute(execution:DriverExecution):Promise<void>{execution.emit({type:"connector_verified"});execution.emit({type:"send_accepted"});}
@@ -777,6 +817,38 @@ test("passive approval checks yield to active sends and never start another acti
 });
 
 const shortBudget = {operationMs:45,cleanupMs:40,hardStopMs:30};
+
+test('background checks defer immediately instead of queuing behind an owned UI operation',async()=>{
+ let release!:()=>void;let entered=false;
+ class OwnedDriver extends DeferredDriver {override async reveal(){entered=true;await new Promise<void>(resolve=>{release=resolve;});}}
+ const driver=new OwnedDriver(),coordinator=new SingleWindowCoordinator(driver,TEST_BUILD,shortBudget);
+ const owner=coordinator.reveal(null);while(!entered)await Bun.sleep(1);
+ const checks=Promise.allSettled([coordinator.capabilities(),coordinator.accountPlan('epoch'),coordinator.turnHandoffComplete('https://chatgpt.com/c/owned','account-1','renew-'+('a'.repeat(64)))]);
+ const immediate=await Promise.race([checks.then(()=>true),Bun.sleep(10).then(()=>false)]);
+ release();await owner;await checks;
+ expect(immediate).toBeTrue();expect(driver.capabilityCalls).toBe(0);
+ await coordinator.close();
+});
+
+test.each(['approval','login','reveal'] as const)('a delayed %s operation preserves the browser and its late UI lease',async kind=>{
+ let release!:()=>void;let entered=false,closed=0;
+ class SlowApprovalDriver extends DeferredDriver {
+  async approvePendingConversation(){entered=true;await new Promise<void>(resolve=>{release=resolve;});return true;}
+  override async login(){entered=true;await new Promise<void>(resolve=>{release=resolve;});return this.health();}
+  override async reveal(){entered=true;await new Promise<void>(resolve=>{release=resolve;});}
+  async close(){closed++;}
+ }
+ const driver=new SlowApprovalDriver(),coordinator=new SingleWindowCoordinator(driver,TEST_BUILD,shortBudget);
+ const signal=AbortSignal.timeout(10);
+ const pending=kind==='approval'?coordinator.approvePendingConversation({url:'https://chatgpt.com/c/approval',expectedAccountFingerprint:'account-1',connectorName:'Codexify'},signal)
+  :kind==='login'?coordinator.login(signal):coordinator.reveal(null,signal);
+ await expect(pending).rejects.toThrow();
+ expect(entered).toBeTrue();expect(closed).toBe(0);
+ expect((await coordinator.health()).status).toBe('busy');
+ release();await Bun.sleep(10);
+ expect((await coordinator.health()).status).toBe('idle');
+ await coordinator.close();expect(closed).toBe(1);
+});
 
 test('slow navigation, connector selection and Send acceptance get the 30-second budget',async()=>{
  // Scale the production budget and browser delays together to exercise a
@@ -925,17 +997,128 @@ test('maintenance deadlines abort their work and release the window operation qu
  await coordinator.close();
 });
 
-test('a driver that ignores cancellation is retired before its tab can be reused',async()=>{
- const driver=new DeferredDriver();let closed=0;
- (driver as BrowserDriver).refreshConnector=async()=>new Promise(()=>{});
+test('only confirmed-unsent conversation load deadlines become replaceable load failures',async()=>{
+ for(const stage of ['loading','editor-ready','model-ready','attempted','new-chat'] as const){
+  const driver=new DeferredDriver();
+  (driver as BrowserDriver).submissionMayHaveBeenAccepted=()=>stage==='attempted';
+  driver.execute=async execution=>{
+   execution.emit({type:'navigating'});
+   if(stage==='editor-ready')execution.emit({type:'navigation_progress',step:'editor_ready'});
+   if(stage==='model-ready')execution.emit({type:'model_verified',model:'gpt-6-sol',effort:'high'});
+   await new Promise<void>((_resolve,reject)=>execution.signal.addEventListener('abort',()=>reject(execution.signal.reason),{once:true}));
+  };
+  const coordinator=new SingleWindowCoordinator(driver,TEST_BUILD,shortBudget);
+  const input=request(`load-deadline-${stage}`);
+  if(stage==='new-chat')Object.assign(input,{url:'https://chatgpt.com/new',expectedUrl:'https://chatgpt.com/new',prompt:{kind:'create_chat',reference:'A'.repeat(43),continuationToken:Buffer.alloc(32,2).toString('base64url'),setupReference:null}});
+  await coordinator.execute(input);const events=await collect(coordinator,input.actionId),last=events.at(-1) as any;
+  expect(last.type).toBe(stage==='attempted'?'ambiguous_send':'failed');
+  if(stage!=='attempted')expect(last.code).toBe(stage==='loading'?'conversation_unavailable':'failed');
+  if(stage==='loading')expect(last.message).toBe('ChatGPT conversation temporarily not accessible');
+  await coordinator.close();
+ }
+});
+
+test.each(['deadline','cancel'] as const)('an unsettled unsent conversation load preserves the browser on %s',async mode=>{
+ const driver=new DeferredDriver();let closed=0,probes=0,rendererAlive=true,release!:()=>void,attempts=0;
+ const gate=new Promise<void>(resolve=>{release=resolve;});
+ driver.execute=async execution=>{
+  attempts++;execution.emit({type:'navigating'});
+  if(attempts===1)await gate;
+  execution.signal.throwIfAborted();
+  execution.emit({type:'model_verified',model:execution.request.model!,effort:execution.request.effort!});
+  execution.emit({type:'connector_verified'});
+  execution.emit({type:'send_accepted'});
+  execution.emit({type:'submission_complete',canonicalUrl:execution.request.expectedUrl});
+ };
+ (driver as BrowserDriver).liveness=async()=>{probes++;return rendererAlive;};
+ (driver as BrowserDriver).close=async()=>{closed++;};
+ const coordinator=new SingleWindowCoordinator(driver,TEST_BUILD,{operationMs:35,cleanupMs:10,hardStopMs:20});
+ const input=request(`retained-load-${mode}`);await coordinator.execute(input);
+ // Admission is acknowledged before preflight; cancel once the load has begun.
+ while(attempts===0)await Bun.sleep(1);
+ if(mode==='cancel')await coordinator.cancel({idempotencyKey:`cancel-${mode}`,actionId:input.actionId});
+ const events=await collect(coordinator,input.actionId),last=events.at(-1) as any;
+ expect(last.type).toBe('failed');expect(last.code).toBe(mode==='deadline'?'conversation_unavailable':'cancelled');
+ expect(events.some(event=>event.type==='send_accepted')).toBeFalse();expect(closed).toBe(0);
+ expect((await coordinator.health()).activeActionId).toBe(input.actionId);
+ expect((await coordinator.liveness()).available).toBeTrue();expect(probes).toBe(1);
+ rendererAlive=false;expect((await coordinator.liveness()).available).toBeFalse();expect(probes).toBe(2);
+ rendererAlive=true;
+ await expect(coordinator.execute(request('blocked-late-load'))).rejects.toThrow('busy');
+ await expect(coordinator.reveal('https://chatgpt.com/c/other')).rejects.toThrow('still owns');
+ expect(attempts).toBe(1);
+ release();await Bun.sleep(10);
+ expect((await coordinator.health()).activeActionId).toBeNull();expect(closed).toBe(0);
+ expect((await coordinator.action(input.actionId))?.sendAccepted).toBeFalse();
+ await coordinator.execute(request('after-late-load'));await collect(coordinator,'after-late-load');expect(attempts).toBe(2);
+ await coordinator.close();expect(closed).toBe(1);
+});
+
+test('retiring an unresponsive mutating action keeps it visible until the terminal event drains',async()=>{
+ const driver=new DeferredDriver();let closeStarted!:()=>void,releaseClose!:()=>void;
+ const closing=new Promise<void>(resolve=>{closeStarted=resolve;});
+ const gate=new Promise<void>(resolve=>{releaseClose=resolve;});
+ driver.execute=async execution=>{execution.emit({type:'navigating'});execution.emit({type:'composer_ready'});await new Promise(()=>{});};
+ (driver as BrowserDriver).close=async()=>{closeStarted();await gate;};
+ const coordinator=new SingleWindowCoordinator(driver,TEST_BUILD,{operationMs:30,cleanupMs:10,hardStopMs:500});
+ const input=request('retiring-load');
+ await coordinator.execute(input);
+ const events=collect(coordinator,input.actionId);
+ await closing;
+ try {
+  expect((await coordinator.health()).activeActionId).toBe(input.actionId);
+  expect((await coordinator.health()).status).toBe('busy');
+  expect((await coordinator.liveness()).available).toBeTrue();
+ } finally {releaseClose();}
+ const last=(await events).at(-1) as any;
+ expect(last.type).toBe('failed');
+ expect(last.code).toBe('failed');
+ expect((await coordinator.health()).activeActionId).toBe(input.actionId);
+ await coordinator.close();
+});
+
+test('an uncooperative maintenance observation preserves the browser and its UI lease',async()=>{
+ const driver=new DeferredDriver();let closed=0,probes=0,release!:()=>void;
+ const gate=new Promise<void>(resolve=>{release=resolve;});
+ (driver as BrowserDriver).refreshConnector=async()=>{await gate;return {appId:'fixture',refreshObserved:true,permissionChanged:false,schemaVerified:false};};
+ (driver as BrowserDriver).liveness=async()=>{probes++;return true;};
  (driver as BrowserDriver).close=async()=>{closed++;};
  const coordinator=new SingleWindowCoordinator(driver,TEST_BUILD,shortBudget);
- await expect(coordinator.refreshConnector('Fixture connector')).rejects.toThrow('timed out');
- expect(closed).toBe(1);
- expect((await coordinator.health()).status).toBe('unavailable');
- await expect(coordinator.capabilities()).rejects.toThrow('recovery is required');
- expect(driver.capabilityCalls).toBe(0);
+ try {
+  await expect(coordinator.refreshConnector('Fixture connector')).rejects.toThrow('timed out');
+  expect(closed).toBe(0);
+  expect((await coordinator.health()).status).toBe('busy');
+  expect((await coordinator.liveness()).available).toBeTrue();
+  expect(probes).toBe(1);
+  await expect(coordinator.capabilities()).rejects.toThrow('busy');
+  expect(driver.capabilityCalls).toBe(0);
+ } finally {release();}
+ await Bun.sleep(5);
+ expect((await coordinator.capabilities()).accountFingerprint).toBe('account-1');
  await coordinator.close();expect(closed).toBe(1);
+});
+
+test('cancelled connector phases retain ownership until the late phase settles before restoration',async()=>{
+ const driver=new DeferredDriver();let closed=0,restored=0,entered!:()=>void,release!:()=>void;
+ const started=new Promise<void>(resolve=>{entered=resolve;}),gate=new Promise<void>(resolve=>{release=resolve;});
+ (driver as BrowserDriver).close=async()=>{closed++;};
+ (driver as BrowserDriver).refreshConnectorSteps=async(_name,run,signal)=>{
+  try {await run(async()=>{entered();await gate;},signal);} finally {restored++;}
+  return {appId:'fixture',refreshObserved:true,permissionChanged:false,schemaVerified:false};
+ };
+ const coordinator=new SingleWindowCoordinator(driver,TEST_BUILD,shortBudget),abort=new AbortController();
+ const pending=coordinator.refreshConnector('Fixture connector',abort.signal);
+ await started;abort.abort();
+ try {
+  await expect(pending).rejects.toThrow('cancelled');
+  expect(closed).toBe(0);expect(restored).toBe(0);
+  expect((await coordinator.health()).status).toBe('busy');
+  await expect(coordinator.capabilities()).rejects.toThrow('busy');
+  expect(driver.capabilityCalls).toBe(0);
+ } finally {release();}
+ await Bun.sleep(5);
+ expect(restored).toBe(1);expect(closed).toBe(0);
+ expect((await coordinator.capabilities()).accountFingerprint).toBe('account-1');
 });
 
 test('a stalled admitted preflight records a definite unsent failure and retires its driver',async()=>{
@@ -1022,6 +1205,236 @@ test('cancelled refresh restores its page before queued account work can run',as
  expect(order).toEqual([]);expect((await coordinator.health()).status).toBe('busy');
  restored();await rejected;await plan;expect(order).toEqual(['restored','plan']);await coordinator.close();
 },2000);
+
+test("queued health polling leaves the active Chrome tab alone and rechecks identity after release",async()=>{
+  const driver=new SlowHealthDriver(),coordinator=new SingleWindowCoordinator(driver,TEST_BUILD);
+  await coordinator.execute(request("health-owner"));
+  // Admission precedes preflight; wait until the action owns the tab.
+  while(!driver.releases.has("health-owner"))await Bun.sleep(1);
+  const calls=driver.healthCalls;
+  driver.authenticated=false;
+  const polls=await Promise.all(Array.from({length:100},()=>coordinator.health()));
+  expect(driver.healthCalls).toBe(calls);
+  expect(polls.every(health=>health.status==="busy"&&health.activeActionId==="health-owner"&&health.accountFingerprint==="account-1")).toBe(true);
+  driver.releases.get("health-owner")?.();
+  for await(const _event of coordinator.events("health-owner",0)){}
+  await Bun.sleep(0);
+  expect((await coordinator.health()).authenticated).toBe(false);
+  expect(driver.healthCalls).toBe(calls+1);
+  await coordinator.close();
+});
+
+test("document and editor readiness renew deadlines without changing the wire protocol",async()=>{
+  const driver=new DeferredDriver();let closed=0;
+  (driver as BrowserDriver).close=async()=>{closed++;};
+  driver.execute=async execution=>{
+    execution.emit({type:"navigating"});
+    for(const step of ["document_loaded","editor_ready","account_verified"] as const){await Bun.sleep(60);execution.emit({type:"navigation_progress",step});}
+    throw new BrowserCompanionError("Expected readiness boundary","model_unavailable");
+  };
+  const coordinator=new SingleWindowCoordinator(driver,TEST_BUILD,{operationMs:100,cleanupMs:20,hardStopMs:20});
+  await coordinator.execute(request("hydration-progress"));
+  const events=await collect(coordinator,"hydration-progress");
+  expect(events.at(-1)?.type).toBe("failed");
+  expect((events.at(-1) as any).code).toBe("model_unavailable");
+  expect(events.some(event=>(event as any).type==="navigation_progress")).toBe(false);
+  expect(closed).toBe(0);await coordinator.close();
+});
+
+test("parallel idle health polls share brief real proof and an expired poll is fresh",async()=>{
+  const driver=new DeferredDriver();let calls=0,authenticated=true;
+  const original=driver.health.bind(driver);
+  driver.health=async()=>{calls++;await Bun.sleep(5);return {...await original(),authenticated,accountFingerprint:authenticated?"account-1":null};};
+  const coordinator=new SingleWindowCoordinator(driver,TEST_BUILD);
+  const polls=await Promise.all(Array.from({length:100},()=>coordinator.health()));
+  expect(calls).toBe(1);expect(polls.every(health=>health.authenticated)).toBe(true);
+  authenticated=false;expect((await coordinator.health()).authenticated).toBe(true);expect(calls).toBe(1);
+  expireCompletedHealth(coordinator);
+  expect((await coordinator.health()).authenticated).toBe(false);expect(calls).toBe(2);
+  await coordinator.close();
+});
+
+test("slow passive health polls return warming busy promptly and retain one real probe",async()=>{
+  const driver=new DeferredDriver(),original=driver.health.bind(driver);
+  let release!:()=>void,calls=0;const gate=new Promise<void>(resolve=>{release=resolve;});
+  driver.health=async()=>{calls++;if(calls===1)await gate;return original();};
+  const coordinator=new SingleWindowCoordinator(driver,TEST_BUILD),started=performance.now();
+  const warming=await Promise.all(Array.from({length:100},()=>coordinator.health()));
+  expect(performance.now()-started).toBeLessThan(1_000);expect(calls).toBe(1);
+  for(const health of warming)expect(health).toMatchObject({status:"busy",authenticated:false,accountFingerprint:null,activeActionId:null});
+  expect((await coordinator.health()).status).toBe("busy");expect(calls).toBe(1);
+  release();await Bun.sleep(0);
+  expect(await coordinator.health()).toMatchObject({status:"idle",authenticated:true,accountFingerprint:"account-1"});expect(calls).toBe(1);
+  const readers=await Promise.all(Array.from({length:100},()=>coordinator.health()));
+  expect(readers.every(health=>health.authenticated&&health.accountFingerprint==="account-1")).toBe(true);expect(calls).toBe(1);
+  expireCompletedHealth(coordinator);
+  expect((await coordinator.health()).authenticated).toBe(true);expect(calls).toBe(2);
+  await coordinator.close();
+});
+
+test("passive health warming preserves eventual explicit sign-out and real failures",async()=>{
+  const driver=new DeferredDriver(),original=driver.health.bind(driver);let calls=0;
+  let reject!:(error:Error)=>void;const pending=new Promise<never>((_,no)=>{reject=no;});
+  driver.health=async()=>{calls++;if(calls===1)return pending;return original();};
+  const coordinator=new SingleWindowCoordinator(driver,TEST_BUILD);
+  expect((await coordinator.health()).status).toBe("busy");expect(calls).toBe(1);
+  reject(new Error("Session transport failed"));await Bun.sleep(0);
+  driver.authenticated=false;driver.status="authentication_required";
+  expect(await coordinator.health()).toMatchObject({status:"authentication_required",authenticated:false,accountFingerprint:null});
+  driver.health=async()=>{throw Error("Real inspection failure");};
+  expireCompletedHealth(coordinator);
+  await expect(coordinator.health()).rejects.toThrow("Real inspection failure");
+  await coordinator.close();
+});
+
+for(const operation of ["login","capabilities","execute"] as const)test(`${operation} preflight waits for real health beyond the passive poll budget`,async()=>{
+  const driver=new DeferredDriver(),original=driver.health.bind(driver);let release!:()=>void;
+  const gate=new Promise<void>(resolve=>{release=resolve;});driver.health=async()=>{await gate;return original();};
+  const coordinator=new SingleWindowCoordinator(driver,TEST_BUILD);
+  const pending=operation==="login"?coordinator.login():operation==="capabilities"?coordinator.capabilities():coordinator.execute(request("full-health"));
+  let settled=false;void pending.finally(()=>{settled=true;});
+  await Bun.sleep(PASSIVE_HEALTH_BUDGET_MS+25);
+  // Execute acknowledges admission immediately; its preflight still waits.
+  expect(settled).toBe(operation==="execute");expect(driver.loginCalls).toBe(0);expect(driver.capabilityCalls).toBe(0);expect(driver.runs).toEqual([]);
+  release();const result=await pending;
+  if(operation==="login")expect(result).toMatchObject({status:"idle",authenticated:true,accountFingerprint:"account-1"});
+  if(operation==="execute"){while(!driver.releases.has("full-health"))await Bun.sleep(1);driver.releases.get("full-health")?.();}
+  await coordinator.close();
+});
+
+test("login's final health response also waits for the complete identity observation",async()=>{
+  const driver=new DeferredDriver(),original=driver.health.bind(driver);let reads=0,release!:()=>void;
+  const gate=new Promise<void>(resolve=>{release=resolve;});
+  driver.health=async()=>{if(++reads>1)await gate;return original();};
+  driver.login=async()=>{driver.loginCalls++;return original();};
+  const coordinator=new SingleWindowCoordinator(driver,TEST_BUILD);let settled=false;
+  const pending=coordinator.login();void pending.finally(()=>{settled=true;});
+  await Bun.sleep(PASSIVE_HEALTH_BUDGET_MS+25);expect(driver.loginCalls).toBe(1);expect(settled).toBe(false);
+  release();expect(await pending).toMatchObject({status:"idle",authenticated:true,accountFingerprint:"account-1"});
+  await coordinator.close();
+});
+
+test("steady slow passive probes share completed real proof until its original expiration",async()=>{
+  const driver=new DeferredDriver(),original=driver.health.bind(driver);let calls=0;
+  driver.health=async()=>{calls++;await Bun.sleep(PASSIVE_HEALTH_BUDGET_MS+40);return original();};
+  const coordinator=new SingleWindowCoordinator(driver,TEST_BUILD);
+  expect((await coordinator.health()).status).toBe("busy");await Bun.sleep(80);
+  expect(await coordinator.health()).toMatchObject({status:"idle",authenticated:true,accountFingerprint:"account-1"});expect(calls).toBe(1);
+  expect((await coordinator.health()).status).toBe("idle");expect(calls).toBe(1);
+  expireCompletedHealth(coordinator);
+  expect((await coordinator.health()).status).toBe("busy");expect(calls).toBe(2);
+  await Bun.sleep(80);expect((await coordinator.health()).authenticated).toBe(true);expect(calls).toBe(2);
+  await coordinator.close();
+});
+
+test("passive health readers cannot steal fresh proof from a queued action preflight",async()=>{
+  const driver=new DeferredDriver(),original=driver.health.bind(driver);
+  let calls=0;const releases:Array<()=>void>=[];
+  driver.health=async()=>{calls++;await new Promise<void>(resolve=>releases.push(resolve));return original();};
+  const coordinator=new SingleWindowCoordinator(driver,TEST_BUILD);
+  try {
+    for(let attempt=0;attempt<3;attempt++) {
+      expect((await coordinator.health()).status).toBe("busy");
+      expect(calls).toBe(attempt+1);
+      releases.shift()!();await Bun.sleep(0);
+      // The UI/readiness reader arrives first. The native queue must be able
+      // to use this same complete <=2s observation rather than wait 30s again.
+      expect(await coordinator.health()).toMatchObject({status:"idle",authenticated:true,accountFingerprint:"account-1"});
+      expect(await coordinator.health()).toMatchObject({status:"idle",authenticated:true,accountFingerprint:"account-1"});
+      expect(calls).toBe(attempt+1);
+      expireCompletedHealth(coordinator);
+    }
+  } finally {for(const release of releases)release();await coordinator.close();}
+});
+
+test('new-chat preparation leaves fresh verified health for legacy recovery clients',async()=>{
+  class PreparationDriver extends DeferredDriver {
+    reads=0;
+    async prepareNewChat(){return this.capabilities();}
+    override async health(){this.reads++;await Bun.sleep(PASSIVE_HEALTH_BUDGET_MS+40);return super.health();}
+  }
+  const driver=new PreparationDriver(),coordinator=new SingleWindowCoordinator(driver,TEST_BUILD);
+  try {
+    expect((await coordinator.newChatCapabilities(null)).accountFingerprint).toBe('account-1');
+    expect(await coordinator.health()).toMatchObject({status:'idle',authenticated:true,accountFingerprint:'account-1'});
+    expect(await coordinator.health()).toMatchObject({status:'idle',authenticated:true,accountFingerprint:'account-1'});
+    expect(driver.reads).toBe(1);expect(driver.runs).toEqual([]);
+  }finally{await coordinator.close();}
+});
+
+test('new-chat preparation rejects a changed account before publishing its catalogue',async()=>{
+  class ChangedPreparationDriver extends DeferredDriver {
+    async prepareNewChat(){return this.capabilities();}
+    override async health(){return {...await super.health(),accountFingerprint:'changed-account'};}
+  }
+  const coordinator=new SingleWindowCoordinator(new ChangedPreparationDriver(),TEST_BUILD);
+  try {await expect(coordinator.newChatCapabilities(null)).rejects.toThrow('account or browser changed');}
+  finally{await coordinator.close();}
+});
+
+test("a shared passive identity never authorizes an action after the real account changes",async()=>{
+  const driver=new DeferredDriver();let calls=0,account="account-1";
+  driver.health=async()=>{calls++;return {authenticated:true,accountFingerprint:account,status:"idle",detail:null};};
+  const coordinator=new SingleWindowCoordinator(driver,TEST_BUILD);
+  expect(await coordinator.health()).toMatchObject({authenticated:true,accountFingerprint:"account-1"});
+  account="changed-account";
+  expect(await coordinator.health()).toMatchObject({authenticated:true,accountFingerprint:"account-1"});expect(calls).toBe(1);
+  await coordinator.execute(request("fresh-account-required"));
+  const events=await collect(coordinator,"fresh-account-required");
+  expect(events.at(-1)).toMatchObject({type:"failed",message:expect.stringContaining("account changed")});
+  expect(driver.runs).toEqual([]);expect(calls).toBe(2);
+  expect(await coordinator.health()).toMatchObject({authenticated:true,accountFingerprint:"changed-account"});expect(calls).toBe(3);
+  await coordinator.close();
+});
+
+test("completed passive observations expire and are never reused after a window/account mutation",async()=>{
+  const driver=new DeferredDriver(),original=driver.health.bind(driver);let calls=0;
+  driver.health=async()=>{calls++;if(calls<=2)await Bun.sleep(PASSIVE_HEALTH_BUDGET_MS+20);return original();};
+  const coordinator=new SingleWindowCoordinator(driver,TEST_BUILD);
+  expect((await coordinator.health()).status).toBe("busy");await Bun.sleep(50);
+  const completed=(coordinator as any).healthCompleted;expect(completed).toBeDefined();completed.observedAt=Date.now()-PASSIVE_HEALTH_RESULT_MAX_AGE_MS-1;
+  expect((await coordinator.health()).status).toBe("busy");expect(calls).toBe(2);await Bun.sleep(50);
+  driver.reveal=async()=>{driver.authenticated=false;driver.status="authentication_required";};
+  await coordinator.reveal(null);
+  expect(await coordinator.health()).toMatchObject({status:"authentication_required",authenticated:false,accountFingerprint:null});expect(calls).toBe(3);
+  await coordinator.close();
+});
+
+test("invalidation retains an unsettled flight and discards its old account result",async()=>{
+  const driver=new DeferredDriver(),original=driver.health.bind(driver);let release!:()=>void,calls=0,active=0,maxActive=0;
+  const gate=new Promise<void>(resolve=>{release=resolve;});
+  driver.health=async()=>{calls++;active++;maxActive=Math.max(maxActive,active);const result=await original();if(calls===1)await gate;active--;return result;};
+  const coordinator=new SingleWindowCoordinator(driver,TEST_BUILD);
+  expect((await coordinator.health()).status).toBe("busy");
+  driver.reveal=async()=>{driver.authenticated=false;driver.status="authentication_required";};await coordinator.reveal(null);
+  const waiting=coordinator.health();expect(calls).toBe(1);release();
+  expect(await waiting).toMatchObject({status:"busy",authenticated:false,accountFingerprint:null});expect(maxActive).toBe(1);
+  expect(await coordinator.health()).toMatchObject({status:"authentication_required",authenticated:false,accountFingerprint:null});expect(calls).toBe(2);
+  await coordinator.close();
+});
+
+test("login ignores a completed passive result and verifies the changed account freshly",async()=>{
+  const driver=new DeferredDriver();let calls=0,account="old-account";
+  driver.health=async()=>{calls++;const result={authenticated:true,accountFingerprint:account,status:"idle" as const,detail:null};if(calls===1)await Bun.sleep(PASSIVE_HEALTH_BUDGET_MS+20);return result;};
+  driver.login=async()=>{driver.loginCalls++;account="new-account";return {authenticated:true,accountFingerprint:account,status:"idle",detail:null};};
+  const coordinator=new SingleWindowCoordinator(driver,TEST_BUILD);
+  expect((await coordinator.health()).status).toBe("busy");await Bun.sleep(50);
+  expect(await coordinator.login()).toMatchObject({authenticated:true,accountFingerprint:"new-account"});expect(calls).toBe(3);
+  await coordinator.close();
+});
+
+test("login final verification waits out an old passive flight then reads the new account",async()=>{
+  const driver=new DeferredDriver();let calls=0,account="old-account",release!:()=>void;
+  const gate=new Promise<void>(resolve=>{release=resolve;});
+  driver.health=async()=>{calls++;const result={authenticated:true,accountFingerprint:account,status:"idle" as const,detail:null};if(calls===1)await gate;return result;};
+  driver.login=async()=>{account="new-account";return {authenticated:true,accountFingerprint:account,status:"idle",detail:null};};
+  const coordinator=new SingleWindowCoordinator(driver,TEST_BUILD);
+  expect((await coordinator.health()).status).toBe("busy");
+  let settled=false;const pending=coordinator.login();void pending.finally(()=>{settled=true;});
+  await Bun.sleep(20);expect(settled).toBe(false);expect(calls).toBe(2);
+  release();expect(await pending).toMatchObject({authenticated:true,accountFingerprint:"new-account"});expect(calls).toBe(3);
+  await coordinator.close();
+});
 
 test("liveness checks browser responsiveness without inspecting account sessions", async () => {
   class LivenessDriver extends DeferredDriver {
