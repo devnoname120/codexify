@@ -4207,30 +4207,8 @@ fn persist_private_record(path: &Path, record: &impl Serialize) -> Result<(), St
         .write_all(&bytes)
         .and_then(|_| temporary.as_file().sync_all())
         .map_err(|error| format!("Could not write agent automation state: {error}"))?;
-    #[cfg(windows)]
-    let mut retry_delay_ms = 10;
-    loop {
-        match temporary.persist(path) {
-            Ok(_) => break,
-            Err(error) => {
-                // Short-lived Windows readers and virus scanners can deny
-                // replacement even while we own the task's writer lock. Keep
-                // the complete temporary record and retry the atomic publish.
-                #[cfg(windows)]
-                if matches!(error.error.raw_os_error(), Some(5 | 32 | 33)) && retry_delay_ms <= 320
-                {
-                    temporary = error.file;
-                    std::thread::sleep(std::time::Duration::from_millis(retry_delay_ms));
-                    retry_delay_ms *= 2;
-                    continue;
-                }
-                return Err(format!(
-                    "Could not publish agent automation state: {}",
-                    error.error
-                ));
-            }
-        }
-    }
+    crate::persist::persist_replacing(temporary, path)
+        .map_err(|error| format!("Could not publish agent automation state: {}", error.error))?;
     set_private_file_permissions(path, "agent automation state")?;
     #[cfg(unix)]
     if let Ok(directory) = File::open(parent) {

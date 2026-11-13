@@ -43,6 +43,7 @@ pub mod memory;
 pub mod openai_tunnel;
 pub mod output_budget;
 pub mod owner_chat;
+pub(crate) mod persist;
 pub mod process_env;
 pub mod project_bindings;
 pub mod project_catalog;

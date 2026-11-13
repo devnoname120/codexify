@@ -98,6 +98,16 @@ fn identity(team_id: &str) -> Result<ConversationIdentity, String> {
         .ok_or_else(|| "Invalid coding-app team identity".into())
 }
 
+/// Resolves a workspace to the spelling the project binding uses. A missing
+/// path keeps its saved spelling so the comparison still fails closed.
+fn canonical_workspace(path: &std::path::Path) -> std::path::PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn same_workspace(left: &std::path::Path, right: &std::path::Path) -> bool {
+    canonical_workspace(left) == canonical_workspace(right)
+}
+
 impl AgentRuntime {
     fn require_client_control(&self) -> Result<(), String> {
         self.require_enabled()?;
@@ -178,7 +188,7 @@ impl AgentRuntime {
             .bindings
             .selected_project_root(&self.config, &task)?
             .ok_or("Coding-app team workspace is missing; retry setup")?;
-        if root != std::path::Path::new(&record.project_path) {
+        if !same_workspace(&root, std::path::Path::new(&record.project_path)) {
             return Err("Team workspace changed; do not control it through an old teamId".into());
         }
         let saved = self.store(&task)?.1.load(&task)?;
@@ -392,7 +402,12 @@ impl AgentRuntime {
                         crate::markdown_chat::now_ms(),
                     )?;
                     self.set_delegation(&task, true).await?;
-                    record.project_path = selection.project_root.display().to_string();
+                    // Save the binding's canonical spelling. A new managed worktree
+                    // is returned as a plain drive path on Windows, while the
+                    // binding reloads it as an extended-length (\?\) path.
+                    record.project_path = canonical_workspace(&selection.project_root)
+                        .display()
+                        .to_string();
                     record.initialized = true;
                     self.save_client_team(&record, false)?;
                 }
@@ -464,6 +479,22 @@ impl AgentRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn workspace_comparison_accepts_both_spellings_of_a_managed_worktree() {
+        let directory = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        // Setup receives the worktree as a plain drive path; the binding reloads
+        // it through canonicalize, which is extended-length on Windows.
+        let bound = std::fs::canonicalize(directory.path()).unwrap();
+        let created = crate::worktrees::strip_verbatim_prefix(bound.clone());
+        assert!(same_workspace(&bound, &created));
+        assert!(same_workspace(&bound, &canonical_workspace(&created)));
+        assert_eq!(canonical_workspace(&created), bound);
+        assert!(!same_workspace(&bound, other.path()));
+        let missing = directory.path().join("removed");
+        assert!(!same_workspace(&bound, &missing));
+    }
     use crate::agent_automation::{
         AgentAutomationSupervisor, AutomationActionState, AutomationExecution,
         AutomationExecutionError, AutomationExecutor, CompanionActionSnapshot, CompanionEvent,

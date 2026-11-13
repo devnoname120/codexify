@@ -578,8 +578,22 @@ mod tests {
         )
         .unwrap();
         config.memory.dir = Some(root.path().join("metadata").display().to_string());
-        config.markdown_chat.automation.descriptor_path =
-            root.path().join("descriptor.json").display().to_string();
+        // The real companion client requires a private descriptor directory.
+        let descriptor_directory = root.path().join("browser");
+        std::fs::create_dir(&descriptor_directory).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                &descriptor_directory,
+                std::fs::Permissions::from_mode(0o700),
+            )
+            .unwrap();
+        }
+        config.markdown_chat.automation.descriptor_path = descriptor_directory
+            .join("descriptor.json")
+            .display()
+            .to_string();
         let build = format!(
             "recovery-test{}",
             crate::agent_automation::PROTOCOL_BUILD_SUFFIX

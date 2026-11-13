@@ -650,7 +650,9 @@ for(const [name,engine]of [['Chromium',chromium],['WebKit',webkit]])test(`${name
   await page.goto('http://127.0.0.1:43278/#test-token');await page.getByRole('button',{name:'Codexify settings',exact:true}).click();
   const dialog=page.getByRole('dialog',{name:'Codexify settings'});await dialog.getByRole('button',{name:'Chats & goals',exact:true}).click();
   const field=key=>dialog.getByLabel(`agentChat.automation.retryTimings.${key}`,{exact:true});
-  assert.equal(await dialog.locator('[data-setting^="agentChat.automation.retryTimings."]').count(),8);
+  // Eight timing editors plus the infinite-retries switch.
+  assert.equal(await dialog.locator('[data-setting^="agentChat.automation.retryTimings."]').count(),9);
+  assert.equal(await dialog.locator('[data-setting="agentChat.automation.retryTimings.infiniteRetries"]').count(),1);
   assert.equal(await field('chatgptAccessDelaysSeconds').getAttribute('placeholder'),'3m, 5m, 10m, 20m, 30m, 1h (default)');
   assert.equal(await field('chatgptAccessDelaysSeconds').inputValue(),'');assert.deepEqual(writes,[]);
   await field('actionDelaysSeconds').fill('10s, 2m');

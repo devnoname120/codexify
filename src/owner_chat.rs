@@ -456,29 +456,10 @@ fn load_or_create_runtime(path: &FilePath, port: u16) -> anyhow::Result<RuntimeI
     };
     if info.port != port {
         info.port = port;
-        let mut temporary = prepare_runtime(parent, &info)?;
-        #[cfg(windows)]
-        let mut retry_delay_ms = 10;
-        loop {
-            match temporary.persist(path) {
-                Ok(_) => break,
-                Err(error) => {
-                    // Concurrent startup readers can briefly deny replacement
-                    // on Windows. Retry the complete atomic record, retaining
-                    // the credential already adopted above.
-                    #[cfg(windows)]
-                    if matches!(error.error.raw_os_error(), Some(5 | 32 | 33))
-                        && retry_delay_ms <= 320
-                    {
-                        temporary = error.file;
-                        std::thread::sleep(std::time::Duration::from_millis(retry_delay_ms));
-                        retry_delay_ms *= 2;
-                        continue;
-                    }
-                    return Err(error.into());
-                }
-            }
-        }
+        // Concurrent startup readers can briefly deny replacement on Windows;
+        // the helper retries the complete atomic record, retaining the
+        // credential already adopted above.
+        crate::persist::persist_replacing(prepare_runtime(parent, &info)?, path)?;
     }
     Ok(info)
 }
@@ -3218,14 +3199,18 @@ mod tests {
             "role":"Material auditor","scope":"Read-only renderer","goal":"Audit material parity",
             "readOnly":true,"createdAtMs":1
         }])).unwrap();
-        std::fs::write(
-            team_store
-                .task_directory(&identity)
-                .unwrap()
-                .join("automation.json"),
-            serde_json::to_vec(&team_state).unwrap(),
-        )
-        .unwrap();
+        let team_record = team_store
+            .task_directory(&identity)
+            .unwrap()
+            .join("automation.json");
+        std::fs::write(&team_record, serde_json::to_vec(&team_state).unwrap()).unwrap();
+        // The store reads only private records; on Unix a plain write is 0644,
+        // which would hide the team from the listing.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&team_record, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
         let artifacts = Arc::new(ArtifactEgressStore::new_at(
             config.artifact_egress.clone(),
             temp.path().join("artifacts"),
