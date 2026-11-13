@@ -236,6 +236,8 @@ export class SingleWindowCoordinator {
   private activeActionId: string | null = null;
   private pendingActionId: string | null = null;
   private windowOperationTail: Promise<void> = Promise.resolve();
+  // Latest time every queued window operation can legitimately finish.
+  private windowOperationTailDeadline = 0;
   private retired = false;
   private driverClosed = false;
   private windowOperationActive = false;
@@ -703,6 +705,13 @@ export class SingleWindowCoordinator {
     let release!: () => void;
     const previous = this.windowOperationTail;
     this.windowOperationTail = new Promise<void>(resolve => { release = resolve; });
+    // A queued caller may not expire while its predecessors are still within
+    // their own budgets (a connector refresh can legitimately outlast this
+    // caller's timeout). It still expires once they overrun those budgets.
+    const budgetMs=timeoutMs+this.timeouts.cleanupMs+this.timeouts.hardStopMs;
+    const queuedAt=Date.now();
+    const predecessorsDeadline=this.windowOperationTailDeadline;
+    this.windowOperationTailDeadline=Math.max(predecessorsDeadline,queuedAt)+budgetMs;
     let acquired=false;
     let unsettled:Promise<unknown>|undefined;
     let queuedTimer:ReturnType<typeof setTimeout>|undefined;
@@ -717,7 +726,7 @@ export class SingleWindowCoordinator {
           if(signal?.aborted){queuedAbort();return;}
           signal?.addEventListener('abort',queuedAbort,{once:true});
           queuedTimer=setTimeout(()=>reject(new BrowserCompanionError('Browser companion is busy; a previous operation still owns the shared window')),
-            timeoutMs+this.timeouts.cleanupMs+this.timeouts.hardStopMs);
+            Math.max(budgetMs,predecessorsDeadline-queuedAt));
         })]);
       } finally {
         if(queuedTimer)clearTimeout(queuedTimer);

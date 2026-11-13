@@ -8,12 +8,17 @@ function stageWindowsApplication(scratch, unpacked, appRoot) {
   const root = fs.realpathSync(scratch);
   const source = fs.realpathSync(unpacked);
   const target = path.resolve(appRoot);
-  const within = candidate => {
-    const relative = path.relative(root, candidate);
+  const inside = (base, candidate) => {
+    const relative = path.relative(base, candidate);
     return relative.length > 0 && relative !== ".."
       && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
   };
-  if (!within(source) || !within(target)
+  const within = candidate => inside(root, candidate);
+  // The not-yet-created target can only be named lexically. Accept either
+  // spelling of the scratch root (macOS /var is a link to /private/var); the
+  // real parent chain is verified below before anything is created or moved.
+  const targetNamed = within(target) || inside(path.resolve(scratch), target);
+  if (!within(source) || !targetNamed
     || fs.lstatSync(unpacked).isSymbolicLink() || !fs.statSync(source).isDirectory()
     || fs.lstatSync(target,{throwIfNoEntry:false})) throw new Error("Unsafe Windows package staging paths");
   let ancestor = path.dirname(target);

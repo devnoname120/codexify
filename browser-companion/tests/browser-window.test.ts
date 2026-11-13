@@ -746,6 +746,38 @@ test("omitting an unavailable connector renews the next submission phase without
   await coordinator.close();
 });
 
+test("maintenance queued behind a valid longer connector refresh waits for it instead of expiring",async()=>{
+  // The queued caller's own budget is 220 ms; the refresh legitimately needs 600 ms.
+  class SlowRefreshDriver extends DeferredDriver {
+    async refreshConnectorSteps(_name:string,_run:unknown,signal?:AbortSignal){
+      await Bun.sleep(600);signal?.throwIfAborted();
+      return {appId:"app",refreshObserved:true,permissionChanged:false,schemaVerified:false as const};
+    }
+  }
+  const driver=new SlowRefreshDriver();
+  const coordinator=new SingleWindowCoordinator(driver,TEST_BUILD,{operationMs:150,cleanupMs:40,hardStopMs:30});
+  const refresh=coordinator.refreshConnector("Fixture connector");
+  await Bun.sleep(20);
+  const queued=coordinator.login();
+  await expect(refresh).resolves.toMatchObject({refreshObserved:true});
+  await expect(queued).resolves.toBeDefined();
+  expect(driver.loginCalls).toBe(1);
+  await coordinator.close();
+});
+
+test("maintenance queued behind an overrunning predecessor still expires",async()=>{
+  class StuckDriver extends DeferredDriver {
+    override async login(){await Bun.sleep(5_000);return this.health();}
+  }
+  const coordinator=new SingleWindowCoordinator(new StuckDriver(),TEST_BUILD,{operationMs:100,cleanupMs:30,hardStopMs:20});
+  const first=coordinator.login().catch(error=>error);
+  await Bun.sleep(10);
+  const started=Date.now();
+  await expect(coordinator.login()).rejects.toThrow("still owns the shared window");
+  expect(Date.now()-started).toBeLessThan(1_500);
+  await first;
+});
+
 test("ordinary sends still require model verification before connector verification",async()=>{
   class UnverifiedDriver extends DeferredDriver {
     override async execute(execution:DriverExecution):Promise<void>{execution.emit({type:"connector_verified"});execution.emit({type:"send_accepted"});}

@@ -47,3 +47,14 @@ test("staging cannot follow a linked application or create directories through a
     expect(existsSync(source)).toBe(true);
   } finally {rmSync(parent,{recursive:true,force:true});}
 });
+
+test("staging accepts a scratch directory named through a linked parent, like macOS /var",()=>{
+  const parent=mkdtempSync(join(tmpdir(),"codexify-package-stage-")),real=join(parent,"private"),alias=join(parent,"var");
+  try {
+    mkdirSync(join(real,"builder"),{recursive:true});
+    writeFileSync(join(real,"builder","companion.exe"),"fixture executable");
+    symlinkSync(real,alias,process.platform==="win32"?"junction":"dir");
+    stageWindowsApplication(alias,join(alias,"builder"),join(alias,"package","app"));
+    expect(readFileSync(join(real,"package","app","companion.exe"),"utf8")).toBe("fixture executable");
+  } finally {rmSync(parent,{recursive:true,force:true});}
+});

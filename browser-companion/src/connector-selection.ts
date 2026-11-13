@@ -167,6 +167,20 @@ export async function selectConnector(
     if ((await composerText(selected)).trim()) {
       throw new BrowserCompanionError("ChatGPT connector selection left an unexpected draft", "external_interference");
     }
+    // A pointer click leaves the editor's collapsed selection where the typed
+    // query was. Prompt insertion keeps a collapsed in-editor caret, so place
+    // it after the retained chip; otherwise the prompt lands before the chip.
+    await selected.evaluate((element:HTMLElement) => {
+      element.focus();
+      const owner = element.ownerDocument;
+      const selection = owner.defaultView?.getSelection?.() ?? owner.getSelection?.();
+      if (!selection || typeof owner.createRange !== "function") return;
+      const range = owner.createRange();
+      range.selectNodeContents(element);
+      range.collapse(false);
+      selection.removeAllRanges();
+      selection.addRange(range);
+    });
     mark("app_selected");
     return { composer:selected, identity };
   } catch (error) {
