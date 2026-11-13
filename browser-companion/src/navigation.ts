@@ -14,9 +14,7 @@ export function withConversationCooldownBypass<T>(allowed:boolean, operation:()=
 
 // One budget for the shared browser, including returns from account settings.
 const defaultTimings = {
-  // Healthy agents share this tab. Local spacing must not impose the server's
-  // rate-limit backoff on every successful switch between their conversations.
-  conversationLoadIntervalSeconds:1,
+  conversationLoadIntervalSeconds:180,
   conversationUnavailableCooldownSeconds:300,
   rateLimitCooldownSeconds:180,
 };

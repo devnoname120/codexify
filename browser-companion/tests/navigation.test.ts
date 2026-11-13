@@ -1,4 +1,4 @@
-import {afterEach,expect,setSystemTime,test} from "bun:test";
+import {afterEach,beforeEach,expect,setSystemTime,test} from "bun:test";
 import type {BrowserContext,Page} from "patchright";
 import {mkdtempSync,unlinkSync,rmdirSync} from "node:fs";
 import {tmpdir} from "node:os";
@@ -18,6 +18,9 @@ class NavigationPage {
   reload=()=>this.goto(this.current);
   asPage=()=>this as unknown as Page;
 }
+// These cases exercise lane spacing with a deployment configured for one-second
+// loads. The unconfigured default stays at three minutes (covered below).
+beforeEach(()=>{configureNavigationTimings('{"conversationLoadIntervalSeconds":1}');});
 afterEach(()=>{setSystemTime();configureNavigationTimings();configureNavigationPersistence();});
 
 test("an unsettled document load cannot hold another chat's navigation slot",async()=>{
@@ -180,7 +183,8 @@ test("same-page reuse makes no request; explicit recovery reloads once",async()=
   await navigatePage(page.asPage(),page.current,{reload:true});expect(page.loads).toEqual([page.current]);
 });
 
-test("healthy chats share a one-second limit and same-page reuse does not consume a slot",async()=>{
+test("healthy chats share a configured one-second limit and same-page reuse does not consume a slot",async()=>{
+  setSystemTime(Date.now()); // frozen clock: deadlines are exact, not load-dependent
   const page=new NavigationPage();
   await navigatePage(page.asPage(),'https://chatgpt.com/c/first');
   const loadedAt=Date.now();
@@ -241,6 +245,7 @@ test("Retry-After HTTP dates are honored and unrelated browser profiles are inde
 });
 
 test("an unavailable chat keeps its five-minute backoff without delaying a different chat",async()=>{
+  setSystemTime(Date.now()); // frozen clock: deadlines are exact, not load-dependent
   const first=new NavigationPage(),second=new NavigationPage(first.owner);
   const failedAt=Date.now();
   first.current='https://chatgpt.com/c/failed';recordConversationUnavailable(first.asPage());
@@ -344,4 +349,16 @@ test("deferral carries the latest applicable absolute deadline without consuming
   setSystemTime(now+600_000);
   await navigatePage(page.asPage(),'https://chatgpt.com/c/second');
   expect(page.loads).toHaveLength(2);
+});
+
+test("without configuration conversation loads keep the conservative three-minute spacing",async()=>{
+  setSystemTime(Date.now()); // frozen clock: deadlines are exact, not load-dependent
+  configureNavigationTimings();
+  const page=new NavigationPage();
+  await navigatePage(page.asPage(),'https://chatgpt.com/c/first');
+  const loadedAt=Date.now();
+  setSystemTime(loadedAt+179_999);
+  await expect(navigatePage(page.asPage(),'https://chatgpt.com/c/second')).rejects.toMatchObject({code:'conversation_cooldown'});
+  setSystemTime(loadedAt+180_000);
+  await navigatePage(page.asPage(),'https://chatgpt.com/c/second');expect(page.loads).toHaveLength(2);
 });

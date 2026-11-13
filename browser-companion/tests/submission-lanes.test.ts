@@ -1,4 +1,4 @@
-import {afterEach,expect,setSystemTime,test} from "bun:test";
+import {afterEach,beforeEach,expect,setSystemTime,test} from "bun:test";
 import type {BrowserContext,Page} from "patchright";
 import {acquireSubmissionSlot,configureNavigationPersistence,configureNavigationTimings,navigatePage,observeConversationRateLimits} from "../src/navigation";
 
@@ -16,6 +16,9 @@ class PageStub {
   rateLimitSubmission(){this.callbacks.get("response")?.({status:()=>429,url:()=>"https://chatgpt.com/backend-api/conversation",
     request:()=>({method:()=>"POST"}),headerValue:async()=>"120"});}
 }
+// These cases exercise lane spacing with a deployment configured for one-second
+// loads. The unconfigured default stays at three minutes (covered below).
+beforeEach(()=>{configureNavigationTimings('{"conversationLoadIntervalSeconds":1}');});
 afterEach(()=>{setSystemTime();configureNavigationTimings();configureNavigationPersistence();});
 
 test("a stalled document does not retain another page's navigation reservation",async()=>{
