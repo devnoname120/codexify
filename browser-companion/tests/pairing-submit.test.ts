@@ -1532,7 +1532,7 @@ for(const creating of [false,true])test.skipIf(!native)(`Japanese lazy picker ${
   const coordinator=new SingleWindowCoordinator(driver,build);
   await executeCoordinatorFixture(coordinator,submitted);const events=[];
   for await(const event of coordinator.events(submitted.actionId,0))events.push(event);
-  expect(events.at(-1)?.type).toBe('submission_complete');
+  expect(events.at(-1)).toMatchObject({type:'submission_complete'});
   expect(events.filter(event=>event.type==='send_accepted')).toHaveLength(1);
   expect(await page.evaluate(()=>[document.body.dataset.sends,document.body.dataset.sentFamily,document.body.dataset.sentEffort,document.body.dataset.family,document.body.dataset.effort])).toEqual(['1','6','中','6','高']);
   await coordinator.close();
