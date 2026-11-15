@@ -107,5 +107,16 @@ try {
   if (fs.existsSync(descriptor)) throw new Error("Package smoke unexpectedly started the companion control server");
   process.stdout.write(`PACKAGED_BROWSER_COMPANION_SMOKE_OK ${process.platform}/${process.arch}\n`);
 } finally {
-  fs.rmSync(scratch, { recursive:true, force:true });
+  const target=path.resolve(scratch),temporaryRoot=path.resolve(os.tmpdir())+path.sep;
+  if(!target.startsWith(temporaryRoot)||!path.basename(target).startsWith("codexify-browser-smoke-"))
+    throw new Error("Refusing to remove a package smoke path outside its temporary directory");
+  // Electron helpers and Windows scanning can release extracted DLLs after
+  // the parent exits. Let that bounded shutdown finish before removing them.
+  try {fs.rmSync(target, { recursive:true, force:true, maxRetries:12, retryDelay:250 });}
+  catch(error) {
+    if(process.platform!=="win32" || !["EPERM","EBUSY","ENOTEMPTY"].includes(error.code))throw error;
+    // Validation already finished. Retain locked test output for later cleanup;
+    // never turn a late helper/antivirus file lease into a false package failure.
+    console.warn(`Package smoke temporary files retained until Windows releases them: ${target}`);
+  }
 }

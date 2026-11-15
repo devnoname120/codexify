@@ -17,9 +17,9 @@ use crate::markdown_chat::AgentAutomationConfig;
 pub const PROTOCOL_VERSION: u32 = 1;
 pub const COMPANION_KIND: &str = "codexify-browser-companion";
 pub const PROTOCOL_SCHEMA_HASH: &str =
-    "b8fe6b01a8bcfc067c29a28dd5620fa83ecad0f486f159d4c82413c2a59b8930";
+    "caed87c2a59aa10d656554f5b1e8e74a640e57c3bb5fa9315b6050f279212d92";
 pub const PROTOCOL_BUILD_SUFFIX: &str =
-    "+protocol.b8fe6b01a8bcfc067c29a28dd5620fa83ecad0f486f159d4c82413c2a59b8930";
+    "+protocol.caed87c2a59aa10d656554f5b1e8e74a640e57c3bb5fa9315b6050f279212d92";
 
 const MAX_DESCRIPTOR_BYTES: u64 = 8192;
 const MAX_JSON_BYTES: usize = 1024 * 1024;
@@ -84,6 +84,12 @@ pub struct CompanionHealth {
     pub authenticated: bool,
     pub account_fingerprint: Option<String>,
     pub active_action_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action_capacity: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub available_action_slots: Option<usize>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub active_action_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -465,6 +471,24 @@ impl BrowserCompanionClient {
             .request_json(
                 Method::GET,
                 "/v1/health",
+                Option::<&Value>::None,
+                cancellation,
+            )
+            .await?;
+        self.validate_health(&health)?;
+        Ok(health)
+    }
+
+    /// Action preflight waits for a free page's fresh account observation. UI
+    /// health remains passive and may report warming without proving sign-out.
+    pub async fn ready_health(
+        &self,
+        cancellation: &CancellationToken,
+    ) -> Result<CompanionHealth, String> {
+        let health: CompanionHealth = self
+            .request_json(
+                Method::GET,
+                "/v1/health?ready=1",
                 Option::<&Value>::None,
                 cancellation,
             )
@@ -985,7 +1009,7 @@ impl BrowserCompanionClient {
         }
     }
 
-    async fn action_optional(
+    pub(crate) async fn action_optional(
         &self,
         action_id: &str,
         cancellation: &CancellationToken,
@@ -1021,6 +1045,32 @@ impl BrowserCompanionClient {
         }
         if let Some(action_id) = &health.active_action_id {
             validate_opaque(action_id, "browser action ID")?;
+        }
+        let capacity = health.action_capacity.unwrap_or(1);
+        if !(1..=4).contains(&capacity)
+            || health
+                .available_action_slots
+                .is_some_and(|slots| slots > capacity)
+            || health.active_action_ids.len() > capacity
+        {
+            return Err("Browser companion action capacity is invalid".into());
+        }
+        let mut unique = std::collections::HashSet::new();
+        for action_id in &health.active_action_ids {
+            validate_opaque(action_id, "browser action ID")?;
+            if !unique.insert(action_id) {
+                return Err("Browser companion repeats an active action ID".into());
+            }
+        }
+        if let Some(action_id) = &health.active_action_id {
+            unique.insert(action_id);
+        }
+        if unique.len() > capacity
+            || health
+                .available_action_slots
+                .is_some_and(|slots| unique.len() + slots > capacity)
+        {
+            return Err("Browser companion action capacity is inconsistent".into());
         }
         Ok(())
     }
@@ -1447,15 +1497,21 @@ fn process_is_alive(pid: u32) -> bool {
 
 #[cfg(windows)]
 fn process_is_alive(pid: u32) -> bool {
-    use windows_sys::Win32::Foundation::CloseHandle;
-    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    use windows_sys::Win32::Foundation::{CloseHandle, WAIT_TIMEOUT};
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
+    };
 
-    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
     if handle.is_null() {
         return false;
     }
+    // OpenProcess can succeed for an exited process while another owner holds
+    // its process object. A live process is unsignalled; a terminated process
+    // is signalled even when its exit code happens to be STILL_ACTIVE (259).
+    let running = unsafe { WaitForSingleObject(handle, 0) } == WAIT_TIMEOUT;
     unsafe { CloseHandle(handle) };
-    true
+    running
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -1987,6 +2043,56 @@ fn status_error(status: StatusCode) -> String {
 
 fn cancelled_error() -> String {
     "Browser companion request was cancelled".into()
+}
+
+#[cfg(all(test, windows))]
+mod process_liveness_tests {
+    use super::process_is_alive;
+    use std::os::windows::io::{FromRawHandle, OwnedHandle};
+    use std::os::windows::process::CommandExt;
+    use std::process::{Command, Stdio};
+    use windows_sys::Win32::System::Threading::{
+        CREATE_NO_WINDOW, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    #[test]
+    fn current_process_is_alive() {
+        assert!(process_is_alive(std::process::id()));
+        assert!(!process_is_alive(0));
+    }
+
+    #[test]
+    fn an_exited_process_with_a_retained_handle_is_not_alive() {
+        for exit_code in [0, 259] {
+            let mut child = Command::new("cmd.exe")
+                .args(["/D", "/C", &format!("exit {exit_code}")])
+                .creation_flags(CREATE_NO_WINDOW)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap();
+            let pid = child.id();
+            let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+            assert!(
+                !handle.is_null(),
+                "retain the disposable child's process object"
+            );
+            let _retained = unsafe { OwnedHandle::from_raw_handle(handle) };
+            assert_eq!(child.wait().unwrap().code(), Some(exit_code));
+            // Reproduce the old successful-OpenProcess condition explicitly.
+            let exited_handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+            assert!(
+                !exited_handle.is_null(),
+                "the exited process object must still be openable"
+            );
+            let _exited = unsafe { OwnedHandle::from_raw_handle(exited_handle) };
+            assert!(
+                !process_is_alive(pid),
+                "exit code {exit_code} is not a running process"
+            );
+        }
+    }
 }
 
 #[cfg(test)]

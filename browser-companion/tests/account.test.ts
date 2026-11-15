@@ -75,3 +75,13 @@ test("explicit action account reads remain fresh while the passive cache is popu
   for(let i=0;i<3;i++)expect((await readChatGptAccount(page.asPage())).fingerprint).not.toBe(before.fingerprint);
   expect(page.requests).toBe(4);cache.dispose();
 });
+
+test("confirmed missing sessions retain authentication-required errors through the health cache",async()=>{
+  const page=new AccountPage(),cache=new HealthAccountCache();
+  page.evaluate=async()=>{page.requests++;return null as unknown as typeof page.result;};
+  await expect(readChatGptAccount(page.asPage())).rejects.toMatchObject({code:'authentication_required'});
+  await expect(cache.read(page.asPage())).rejects.toMatchObject({code:'authentication_required'});
+  await expect(cache.read(page.asPage())).rejects.toMatchObject({code:'authentication_required'});
+  expect(page.requests).toBe(2);
+  cache.dispose();
+});

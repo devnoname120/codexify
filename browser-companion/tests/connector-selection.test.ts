@@ -34,7 +34,7 @@ test("connector selection searches for the configured name and verifies its exac
     pill.textContent = name;
     const names = ["Codexify", name];
     const queries: string[] = [];
-    let highlighted: string | undefined;
+    const pressed:string[]=[];
     const visibleNames = () => names.filter(candidate => candidate.toLowerCase()
       .includes((editor.textContent ?? "").slice(1).toLowerCase()));
     const selected = {
@@ -52,16 +52,12 @@ test("connector selection searches for the configured name and verifies its exac
         return selected;
       },
       focus: async () => {},
-      fill: async (value: string) => { editor.textContent = value; },
-      pressSequentially: async (value: string) => { queries.push(value); editor.textContent = value; },
+      fill: async (value: string) => { if(value.startsWith('@'))queries.push(value); editor.textContent = value; },
+      pressSequentially: async () => { throw new Error("App search must use a single input event"); },
       press: async (key: string) => {
+        pressed.push(key);
         if (key === "Backspace") editor.textContent = "";
-        if (key === "ArrowDown") highlighted = visibleNames()[0];
-        if (key === "Enter") {
-          expect(highlighted).toBe(name);
-          editor.textContent = "";
-          editor.appendChild(pill);
-        }
+        if (key === "Enter") throw new Error("Selecting an app must not press Enter in the composer");
       },
     };
     const rows = {
@@ -73,7 +69,7 @@ test("connector selection searches for the configured name and verifies its exac
             if (!visibleNames().includes(target)) throw new Error("The mention search excludes the configured connector");
           },
           count: async () => visibleNames().filter(candidate => candidate === target).length,
-          getAttribute: async () => highlighted === target ? "true" : null,
+          click:async()=>{expect(target).toBe(name);editor.textContent="";editor.appendChild(pill);},
         };
       },
       count: async () => visibleNames().length,
@@ -86,6 +82,7 @@ test("connector selection searches for the configured name and verifies its exac
     };
     expect(await selectConnector(page as never, name)).toEqual({composer:composer as never,identity:"plugin:test-connector"});
     expect(queries).toEqual([`@${name}`]);
+    expect(pressed).not.toContain("Enter");
     expect(editor.querySelector('[data-keyword]')?.getAttribute("data-keyword")).toBe(name);
   }
 });

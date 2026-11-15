@@ -5,6 +5,7 @@ import {join} from "node:path";
 import {chromium,type BrowserContext,type Page} from "patchright";
 import {privateChromeExecutable} from "../src/chrome-executable";
 import {deliveryTimeoutText,previousResponseDeliveryTimedOut,throwIfSessionAttention} from "../src/browser-session";
+import {uiLabels} from "../src/ui-localization";
 
 const localizedTimeouts=[
   "Cas za dostavo sporocila se je iztekel. Poskusite znova.", // ASCII is not the real locale; must not match
@@ -78,6 +79,18 @@ test.skipIf(!native)("unrelated terminal failure remains a blocker",async()=>{
   expect(await previousResponseDeliveryTimedOut(page)).toBe(false);
   await expect(throwIfSessionAttention(page)).rejects.toMatchObject({code:"failed"});
 },60_000);
+
+test.skipIf(!native)("bounded session alerts retain authentication, rate-limit and subscription failures",async()=>{
+  for(const [role,message,code] of [
+    ['alert',uiLabels('expiredTitle')[0]!,'authentication_required'],
+    ['dialog',`${uiLabels('rateTitle')[0]} ${uiLabels('rateBody')[0]}`,'rate_limited'],
+    ['alert',uiLabels('subscriptionFailure')[0]!.replace(/\{[A-Za-z_]+\}/g,'fixture'),'failed'],
+  ] as const){
+    await page.setContent(`<main><form><div id="prompt-textarea" contenteditable="true"></div></form><div id="notice" role="${role}"></div></main>`);
+    await page.locator('#notice').evaluate((node,message)=>{node.textContent=message;},message);
+    await expect(throwIfSessionAttention(page)).rejects.toMatchObject({code});
+  }
+},30_000);
 
 const timeoutCard=`<div role="alert">${localizedTimeouts[2]}<button data-testid="regenerate-thread-error-button">Retry old response</button></div>`;
 const terminalCard='<div role="alert">Something went wrong. See help.openai.com.<button data-testid="regenerate-thread-error-button">Retry current response</button></div>';

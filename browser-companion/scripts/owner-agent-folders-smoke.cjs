@@ -1,0 +1,104 @@
+// Isolated owner-UI fixture. Native access is GET-only; mutations fail closed.
+const fs=require('node:fs'),path=require('node:path'),os=require('node:os'),assert=require('node:assert/strict');
+const {chromium}=require('patchright');
+const repo=path.resolve(__dirname,'../..'),read=file=>fs.readFileSync(path.join(repo,'src',file),'utf8');
+const section=(source,start,end)=>source.split(start)[1].split(end)[0];
+(async()=>{
+ const root=path.join(os.homedir(),'.codexify'),auth=JSON.parse(fs.readFileSync(path.join(root,'owner-chat.json'),'utf8'));
+ const base='http://127.0.0.1:'+auth.port,real='901363c803db5b95fc3d60af3327e560de6ebc3e284c1997daacf8e124742136';
+ const get=async suffix=>{const response=await fetch(base+suffix,{headers:{Authorization:'Bearer '+auth.token}});assert(response.ok);return response.json();};
+ const widget=await get('/api/chats/'+real),automation=await get('/api/chats/'+real+'/automation');
+ automation.features={agentTeams:true,autoMode:true,agentFolders:true,conversationRecovery:true};
+ let component=read('markdown_chat_ui.html').replace('/* CODEXIFY_MARKDOWN_LIBRARY */',read('vendor/markdown-it.min.js')).replace('/* CODEXIFY_MARKDOWN_RENDERER */',read('markdown_chat_render.js')).replace('/* CODEXIFY_ATTACHMENT_COMPOSER */',read('chat_attachments_ui.js'));
+ let style=section(component,'<style>','</style>').replaceAll(':root:not([data-theme="light"])',':host(:not([data-theme="light"]))').replaceAll(':root[data-theme="dark"]',':host([data-theme="dark"])').replaceAll(':root',':host').replace('body {',':host { display:block;');
+ style+='\n#chat{max-width:none;height:100%;border:0;border-radius:0;display:flex;flex-direction:column}#panel{display:flex;flex:1;min-height:0;flex-direction:column}#panel[hidden]{display:none}#messages{flex:1;max-height:none;min-height:0}';
+ let html=read('owner_chat.html').replace('<!-- CHAT_TEMPLATE -->','<template id="chat-template"><style>'+style+'</style>'+section(component,'<body>','<script>')+'</template>').replace('/* CHAT_SCRIPT */',section(component,'<script>','</script>'));
+ for(const [marker,file] of [['GLOBAL_SETTINGS_SCRIPT','global_settings_ui.js'],['OWNER_PWA_SCRIPT','owner_pwa_ui.js'],['USAGE_ANALYTICS_SCRIPT','analytics_ui.js'],['STATISTICS_EXTRAS_SCRIPT','statistics_extras_ui.js']])html=html.replace('/* '+marker+' */',read(file));
+ const id=letter=>letter.repeat(64),now=Date.now();
+ const common={customTitle:null,pinnedAtMs:null,archivedAtMs:null,ownerReadThrough:0,workspace:'New Vegas Vita',projectId:'project-vita',projectPath:'C:/projects/newvegas-vita',projectGroup:{name:'New Vegas Vita',path:'C:/projects/newvegas-vita'},isScratch:false,lastEntryEnd:100,lastIncomingEntryEnd:100,lastEntryAtMs:now,lastAgentCallAtMs:now,goalStatus:'active',goal:null,automationError:null,automationRetrying:false,totalToolCalls:10};
+ const members=[{taskKey:id('b'),role:'Material parity',scope:'Renderer materials'},{taskKey:id('c'),role:'World gameplay',scope:'Player and collision'},{taskKey:id('d'),role:'Build verification',scope:'Package evidence'},{taskKey:id('9'),role:'Reserved auditor',scope:'Pending setup'}];
+ const parent={...common,id:id('a'),title:'New Vegas coordinator',agentTeam:{taskKey:id('a'),parentTaskKey:null,children:members.filter(member=>member.taskKey!==id('d'))}};
+ const workers=members.slice(0,3).map((member,index)=>({...common,id:member.taskKey,title:'Worker '+(index+1),agentTeam:{...member,parentTaskKey:id('a'),children:[],actionStatus:index===1?'queued':'idle',creating:index===1}}));
+ workers[2].automationError='Temporary setup observation failure';workers[2].automationRetrying=true;
+ const foreign={...common,id:id('f'),title:'Another project',projectId:'other',projectPath:'C:/projects/other',workspace:'Other project',agentTeam:{taskKey:id('f'),parentTaskKey:id('a'),role:'Unrelated worker',children:[]}};
+ let chats=[parent,...workers,foreign],mutations=0,featureMode=false,fixtureAccess=false,retired=false,mockStops=0;const errors=[];
+ const browserRoot=path.resolve(__dirname,'../.browsers',process.platform+'-'+process.arch),metadata=JSON.parse(fs.readFileSync(path.join(browserRoot,'chrome-executable.json'),'utf8'));
+ const browser=await chromium.launch({executablePath:path.resolve(browserRoot,metadata.executable),headless:true});
+ try {
+  const context=await browser.newContext({viewport:{width:1280,height:900}}),page=await context.newPage();page.on('pageerror',error=>errors.push(error.message));
+  await context.route(base+'/**',async route=>{
+   const request=route.request(),url=new URL(request.url()),p=url.pathname;
+   if(featureMode&&request.method()==='POST'&&p.endsWith('/automation/agents/settings')){const body=request.postDataJSON();assert.equal(body.fullDevelopmentAccess,true);assert(body.requestId);fixtureAccess=true;return route.fulfill({json:{fullDevelopmentAccess:true}});}
+   if(featureMode&&request.method()==='POST'&&p.endsWith('/automation/agents/control')){const body=request.postDataJSON();assert.equal(body.action,'retire');assert.equal(body.expectedRevision,7);retired=true;return route.fulfill({json:{applied:true}});}
+   if(featureMode&&request.method()==='POST'&&p.endsWith('/automation/agents/stop-all')){assert(request.postDataJSON().requestId);mockStops++;return route.fulfill({json:{stopped:true,stoppedChats:4}});}
+   if(request.method()==='POST'&&p.endsWith('/read'))return route.fulfill({json:{}});
+   if(request.method()!=='GET'){mutations++;return route.fulfill({status:403,body:'Fixture mutation rejected'});}
+   if(p==='/preview')return route.fulfill({contentType:'text/html',body:html});
+   if(p==='/api/chats')return route.fulfill({json:{chats,matchedChatIds:url.searchParams.has('q')?[]:null,automationEnabled:true,serverTimeMs:Date.now()}});
+   if(/^\/api\/chats\/[a-f0-9]{64}\/automation$/.test(p))return route.fulfill({json:automation});
+   if(/^\/api\/chats\/[a-f0-9]{64}$/.test(p))return route.fulfill({json:widget});
+   if(p.endsWith('/automation/agents'))return route.fulfill({json:{allowDelegation:true,parentTaskKey:null,fullDevelopmentAccess:fixtureAccess,capacity:{active:0,limit:6,maxWorkerDepth:2},workers:featureMode?[{taskKey:id('b'),role:'Completed implementer',scope:'Verified module',readOnly:false,retired,canControl:true,goal:{status:'completed',revision:7},goalText:'Implement module',report:'Implemented and verified. No remaining dependencies.',toolCallCount:12}]:[]}});
+   const response=await fetch(base+p+url.search,{headers:{Authorization:'Bearer '+auth.token}});
+   return route.fulfill({status:response.status,contentType:response.headers.get('content-type')||'application/json',body:await response.text()});
+  });
+  await page.goto(base+'/preview?chat='+id('a')+'#fixture-token');
+  const folder=page.locator('.agent-chat-group[data-parent-chat-id="'+id('a')+'"]'),toggle=folder.locator('.agent-group-toggle').first();
+  await toggle.waitFor();assert.equal(await toggle.getAttribute('aria-expanded'),'true');
+  assert.equal(await folder.locator('.agent-worker-row').count(),3);assert.equal(await folder.locator('.agent-pending-row').count(),1);
+  assert.equal(await folder.locator('[data-chat-id="'+id('f')+'"]').count(),0);
+  await folder.getByText('Queued for setup',{exact:false}).waitFor();
+  await toggle.click();assert.equal(await toggle.getAttribute('aria-expanded'),'false');
+  await toggle.focus();await page.waitForTimeout(5500);assert.equal(await toggle.getAttribute('aria-expanded'),'false');
+  assert.equal(await toggle.evaluate(node=>node===document.activeElement),true);
+  await toggle.click();await folder.locator('[data-chat-id="'+id('b')+'"] .conversation').click();
+  await page.getByRole('button',{name:'Parent: New Vegas coordinator',exact:true}).click();
+  assert(new URL(page.url()).searchParams.get('chat')===id('a'));
+  const search=page.getByRole('searchbox',{name:'Search chats'});await search.fill('World gameplay');
+  await page.locator('#conversations .agent-chat-group [data-chat-id="'+id('c')+'"]').waitFor();
+  await search.fill('');await toggle.waitFor();
+  chats=chats.map(chat=>chat.id===id('b')?{...chat,pinnedAtMs:Date.now()}:chat);
+  await page.waitForTimeout(5500);assert.equal(await page.locator('[data-chat-id="'+id('b')+'"]').count(),1);
+  assert.equal(await folder.locator('[data-chat-id="'+id('b')+'"]').count(),1);assert.equal(await page.locator('#conversations > [data-chat-id="'+id('b')+'"]').count(),0);
+  chats=chats.map(chat=>chat.id===id('b')?{...chat,pinnedAtMs:null}:chat);
+  chats=chats.map(chat=>chat.id===id('a')?{...chat,archivedAtMs:Date.now()}:chat);
+  await page.waitForTimeout(5500);
+  assert.equal(await folder.locator('[data-chat-id="'+id('b')+'"]').count(),1,'active workers retain an archived parent as folder context');
+  assert.equal(await page.locator('#conversations > [data-chat-id="'+id('b')+'"]').count(),0);
+  chats=chats.map(chat=>chat.id===id('a')?{...chat,archivedAtMs:null}:chat);
+  chats=chats.map(chat=>chat.id===id('c')?{...chat,archivedAtMs:Date.now()}:chat);
+  chats.push({...common,id:id('e'),title:'Lead child',agentTeam:{taskKey:id('e'),parentTaskKey:id('c'),role:'Nested implementation',scope:'Independent leaf',children:[]}});
+  await page.waitForTimeout(5500);
+  assert.equal(await folder.locator('.agent-chat-group[data-parent-chat-id="'+id('c')+'"] [data-chat-id="'+id('e')+'"]').count(),1,'active descendants keep their archived lead folder');
+  chats=chats.filter(chat=>chat.id!==id('e')).map(chat=>chat.id===id('c')?{...chat,archivedAtMs:null}:chat);
+  const out='D:/CodexifyBuild/smartness-setup-20261025';fs.mkdirSync(out,{recursive:true});
+  await page.waitForTimeout(5500);await page.screenshot({path:out+'/agent-folders-desktop.png'});
+  await page.emulateMedia({colorScheme:'dark'});await page.screenshot({path:out+'/agent-folders-dark.png'});
+  await page.setViewportSize({width:390,height:850});await page.goto(base+'/preview#fixture-token');
+  await toggle.waitFor();await page.screenshot({path:out+'/agent-folders-mobile.png'});
+  assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
+  await page.goto(base+'/preview?chat='+id('a')+'#fixture-token');
+  await page.locator('#automation-agents').click();
+  await page.getByText('Renderer: implemented shader contract',{exact:false}).waitFor();
+  assert.equal(await page.locator('[data-worker="readOnly"]').isChecked(),false);
+  await page.screenshot({path:out+'/agent-tools-mobile.png'});
+  featureMode=true;
+  await page.setViewportSize({width:1280,height:900});
+  await page.locator('#automation-agents').click();
+  await page.locator('.agent-card h4').filter({hasText:'Completed implementer'}).waitFor();
+  await page.locator('#agents-development-access').check();
+  await page.waitForFunction(()=>true);await page.waitForTimeout(300);
+  assert(fixtureAccess);assert.equal(await page.locator('[data-worker="readOnly"]').isVisible(),false);
+  await page.getByText('Coordinate worker',{exact:true}).click();
+  await page.getByRole('button',{name:/^Archive worker/}).click();
+  await page.getByText('No active workers. Retired workers are preserved in the archive.',{exact:true}).waitFor();assert(retired);
+  await page.locator('#agents-editor-close').click();
+  await page.getByRole('button',{name:'Stop all agents',exact:true}).click();
+  await page.waitForTimeout(300);assert.equal(mockStops,1);
+  await page.screenshot({path:out+'/team-controls-desktop.png'});
+  await page.setViewportSize({width:390,height:850});
+  assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
+  await page.screenshot({path:out+'/team-controls-mobile.png'});
+  assert.equal(mutations,0);assert.deepEqual(errors,[]);
+  console.log('AGENT_FOLDERS_SMOKE_OK: nesting, reserved slots, parent navigation, role search, pinned workers, poll persistence, focus, light/dark/mobile, tool-based reports, explicit development access; no native mutations');
+ } finally {await browser.close();}
+})().catch(error=>{console.error(error);process.exitCode=1;});

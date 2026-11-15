@@ -1,24 +1,25 @@
 // Adapted from miuuyy/codex-chatgpt-web
 // src/adapters/chatgpt-web/browser-worker.ts at f9ad4ae83a579287105ad822dd0c3e0029b04ef6.
 import type { Locator, Page } from "patchright";
-import { BrowserCompanionError } from "./errors";
+import { BrowserCompanionError, CONVERSATION_UNAVAILABLE_MESSAGE } from "./errors";
 import {uiLabelPattern,uiTemplatePattern} from "./ui-localization";
-import {recordConversationUnavailable,conversationLoadWasRateLimited} from "./navigation";
+import {recordConversationUnavailable,throwIfConversationRateLimited,conversationLoadWasRateLimited} from "./navigation";
+import {composerText,isAutomationGoalDraft} from "./composer";
+import {CHATGPT_COMPOSER_SELECTOR} from "./session";
+import {observeReadOnly} from "./observation";
 
-const rateLimitDialog = (page: Page): Locator => page.locator('[role="dialog"]')
-  .filter({ hasText:uiLabelPattern("rateTitle",false) })
-  .filter({ hasText:uiLabelPattern("rateBody",false) })
-  .last();
-
-const expiredSessionAlert = (page: Page): Locator => page
-  .locator('[role="alert"], [role="dialog"]')
-  .filter({ hasText:uiLabelPattern("expiredTitle",false) })
-  .last();
-
-const subscriptionFailureAlert = (page: Page): Locator => page
-  .locator('[role="alert"]')
-  .filter({ hasText:uiTemplatePattern("subscriptionFailure") })
-  .last();
+async function sessionAttention(page:Page) {
+  // Evaluate the locale patterns in one read. Serializing them into chained
+  // text selectors can exceed the observer deadline before the alert is read.
+  return page.locator('[role="alert"], [role="dialog"]').filter({visible:true}).evaluateAll((nodes,patterns)=>{
+    const match=(node:Element,source:string)=>new RegExp(source,'iu').test(node.textContent??'');
+    if(nodes.some(node=>match(node,patterns.expired)))return 'authentication_required' as const;
+    if(nodes.some(node=>node.getAttribute('role')==='dialog'&&match(node,patterns.rateTitle)&&match(node,patterns.rateBody)))return 'rate_limited' as const;
+    if(nodes.some(node=>node.getAttribute('role')==='alert'&&match(node,patterns.subscription)))return 'failed' as const;
+    return undefined;
+  },{expired:uiLabelPattern('expiredTitle',false).source,rateTitle:uiLabelPattern('rateTitle',false).source,
+    rateBody:uiLabelPattern('rateBody',false).source,subscription:uiTemplatePattern('subscriptionFailure').source});
+}
 
 // Error semantics and the support destination are stable across UI languages.
 // Scope the fallback to alerts/error surfaces so ordinary answer links do not match.
@@ -73,7 +74,7 @@ export async function previousResponseDeliveryTimedOut(page:Page):Promise<boolea
 export async function conversationUnavailableVisible(page: Page): Promise<boolean> {
   const url = new URL(page.url());
   if (url.origin !== "https://chatgpt.com" || !/^\/(?:g\/[^/]+\/)?c\/[^/]+\/?$/.test(url.pathname)) return false;
-  return page.evaluate(() => {
+  const unavailable = await page.evaluate(() => {
     const visible = (element: Element): boolean => {
       if (!element.getClientRects().length || element.closest('[hidden], [inert], [aria-hidden="true"]')) return false;
       for (let node: Element | null = element; node; node = node.parentElement) {
@@ -83,6 +84,26 @@ export async function conversationUnavailableVisible(page: Page): Promise<boolea
       return true;
     };
     const conversationContent = 'form, [role="textbox"], textarea, [contenteditable="true"], article, [data-turn-key], [data-turn-id], [data-message-author-role]';
+    // A full conversation can retain its transcript and editor. Recognize the
+    // app's terminal banner, not a quoted sentence in an answer or user message.
+    const protectedContent='pre,code,blockquote,.markdown,[data-user-message-bubble],[data-message-author-role="user"],[data-conversation-role="user"]';
+    const approvals='[role="dialog"],[role="alertdialog"],[data-testid="tool-approval-card"],[data-codex-approval-surface="true"]';
+    if(![...document.querySelectorAll(approvals)].some(visible)) {
+      const maximum=/You['’]ve reached the maximum length for this conversation, but you can keep talking by starting a new chat\./i;
+      const red=(color:string)=>{const parts=color.match(/[\d.]+/g)?.map(Number);return !!parts&&parts[0]!>=parts[1]!+40&&parts[0]!>=parts[2]!+40;};
+      for(const button of document.querySelectorAll('button,[role="button"],a[href]')) {
+        if(button.closest(protectedContent)||!/^start new chat$/i.test((button.textContent??'').replace(/\s+/g,' ').trim())||!visible(button))continue;
+        for(let panel=button.parentElement,depth=0;panel&&depth<5;panel=panel.parentElement,depth++) {
+          if(panel.closest(protectedContent))break;
+          const text=(panel.textContent??'').replace(/\s+/g,' ').trim();
+          if(text.length>600)break;
+          if(!maximum.test(text)||!visible(panel))continue;
+          const style=getComputedStyle(panel);
+          if(panel.matches('[role="alert"],[data-error-code]')
+            ||parseFloat(style.borderTopWidth)>0&&red(style.borderTopColor))return 'limit';
+        }
+      }
+    }
     // The inline load failure replaces the transcript, with one message and
     // one retry button. Match its app-owned structure, never translated text.
     for (const target of document.querySelectorAll('[data-chatgpt-conversation-selection-target][data-thread-find-target="conversation"]')) {
@@ -96,7 +117,7 @@ export async function conversationUnavailableVisible(page: Page): Promise<boolea
       const button = panel.firstElementChild;
       if (panel.matches('.rounded-xl.border.border-default.p-4.text-sm.text-default')
         && panel.children.length === 1 && button?.matches('button[type="button"]') && visible(button)
-        && [...panel.childNodes].some(node => node.nodeType === Node.TEXT_NODE && !!node.textContent?.trim())) return true;
+        && [...panel.childNodes].some(node => node.nodeType === Node.TEXT_NODE && !!node.textContent?.trim())) return 'unavailable';
     }
     // The original full-page layout also has no composer or conversation turns.
     const main = document.querySelector('[data-app-shell-focus-area="main"]');
@@ -112,8 +133,18 @@ export async function conversationUnavailableVisible(page: Page): Promise<boolea
         && !!heading?.textContent?.trim() && visible(heading)
         && buttons.length === 1 && buttons[0]!.matches('button[type="button"]') && visible(buttons[0]!)
         && !panel.querySelector('a, input, select, [role="button"]');
-    });
+    }) ? 'unavailable' : false;
   });
+  if(unavailable==='limit') {
+    const composers=page.locator(CHATGPT_COMPOSER_SELECTOR).filter({visible:true});
+    const count=await composers.count();
+    if(count>1)return false;
+    if(count===1) {
+      const draft=await composerText(composers.first());
+      if(draft&&!isAutomationGoalDraft(draft))return false;
+    }
+  }
+  return Boolean(unavailable);
 }
 
 export async function toolApprovalVisible(page: Page): Promise<boolean> {
@@ -140,24 +171,32 @@ export async function throwIfConversationLimit(page:Page):Promise<void> {
   if(await conversationLimitVisible(page))throw new BrowserCompanionError("ChatGPT conversation reached its length limit. Continuing in a new conversation.","conversation_limit");
 }
 
-export async function throwIfSessionAttention(page: Page): Promise<void> {
-  if (await expiredSessionAlert(page).isVisible().catch(() => false)) {
+export async function throwIfSessionAttention(page: Page,signal?:AbortSignal): Promise<void> {
+  const read=<T>(operation:()=>Promise<T>):Promise<T>=>{
+    signal?.throwIfAborted();return observeReadOnly(operation(),signal);
+  };
+  throwIfConversationRateLimited(page);
+  const attention=await read(()=>sessionAttention(page));
+  if (attention==='authentication_required') {
     throw new BrowserCompanionError("The ChatGPT session has expired. Sign in again in the browser companion.", "authentication_required");
   }
-  if (await rateLimitDialog(page).isVisible().catch(() => false)) {
+  if (attention==='rate_limited') {
     throw new BrowserCompanionError("ChatGPT rate limit: too many requests. Retry only after the account cooldown clears.", "rate_limited");
   }
-  if (await subscriptionFailureAlert(page).isVisible().catch(() => false)) {
+  if (attention==='failed') {
     throw new BrowserCompanionError("ChatGPT could not load the current subscription.", "failed");
   }
   await throwIfConversationLimit(page);
-  if (await conversationUnavailableVisible(page)) {
+  if (await read(()=>conversationUnavailableVisible(page))) {
+    signal?.throwIfAborted();
     recordConversationUnavailable(page);
+    // A rate-limited transcript load gets native replacement recovery.
     if(conversationLoadWasRateLimited(page))throw new BrowserCompanionError("ChatGPT conversation loading is temporarily rate limited; wait before retrying","conversation_load_rate_limited");
-    throw new BrowserCompanionError("ChatGPT conversation temporarily not accessible", "conversation_unavailable");
+    throwIfConversationRateLimited(page,true);
+    throw new BrowserCompanionError(CONVERSATION_UNAVAILABLE_MESSAGE, "conversation_unavailable");
   }
   const failures=page.getByTestId("regenerate-thread-error-button").filter({visible:true}).or(terminalErrorAlert(page));
-  if ((await responseDeliveryTimeoutMatches(page,failures)).some(timeout=>!timeout)) {
+  if ((await read(()=>responseDeliveryTimeoutMatches(page,failures))).some(timeout=>!timeout)) {
     throw new BrowserCompanionError("ChatGPT displayed a terminal response error.", "failed");
   }
 }

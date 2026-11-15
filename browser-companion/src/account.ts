@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 import type { Frame, Page } from "patchright";
 import { BrowserCompanionError } from "./errors";
+import {observeReadOnly} from "./observation";
 
 const sessionProjectionSchema = z.strictObject({
   userId:z.string().min(1).max(256),
@@ -29,7 +30,7 @@ export function fingerprintAccountIdentity(userId: string, accountId: string): s
     .digest("hex");
 }
 
-export async function readChatGptAccount(page: Page): Promise<{
+export async function readChatGptAccount(page: Page, signal?:AbortSignal): Promise<{
   fingerprint:string;
   planType:string;
   personal:boolean;
@@ -38,7 +39,7 @@ export async function readChatGptAccount(page: Page): Promise<{
   if (new URL(page.url()).origin !== "https://chatgpt.com") {
     throw new Error("Open ChatGPT and sign in before inspecting account capabilities");
   }
-  const projection = validateAccountSessionProjection(await page.evaluate(async () => {
+  const observed = await observeReadOnly(page.evaluate(async () => {
     const response = await fetch("/api/auth/session", {
       credentials:"same-origin",
       cache:"no-store",
@@ -50,13 +51,17 @@ export async function readChatGptAccount(page: Page): Promise<{
       throw new Error("ChatGPT account session could not be verified");
     }
     const session = await response.json();
+    // The session endpoint explicitly returns null or an empty object after
+    // sign-out. A failed fetch or malformed identity is still unverified.
+    if (session === null || (typeof session === "object" && !Array.isArray(session)
+      && Object.keys(session).length === 0)) return null;
     if ((session?.error != null && session.error !== "")
       || (session?.expires != null && (
         typeof session.expires !== "string"
         || !Number.isFinite(Date.parse(session.expires))
         || Date.parse(session.expires) <= Date.now()
       ))) {
-      throw new Error("ChatGPT session is expired");
+      return null;
     }
     return {
       userId:session?.user?.id,
@@ -65,7 +70,11 @@ export async function readChatGptAccount(page: Page): Promise<{
       structure:session?.account?.structure,
       needsAttention:session?.account?.isDelinquent === true,
     };
-  }));
+  }),signal);
+  if (observed === null) {
+    throw new BrowserCompanionError("The ChatGPT session has expired. Sign in again in the browser companion.", "authentication_required");
+  }
+  const projection = validateAccountSessionProjection(observed);
   return {
     fingerprint:fingerprintAccountIdentity(projection.userId, projection.accountId),
     planType:projection.planType,

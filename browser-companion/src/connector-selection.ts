@@ -4,9 +4,14 @@ import type { Locator, Page } from "patchright";
 import { activeComposer, composerText } from "./composer";
 import { BrowserCompanionError } from "./errors";
 
-const CONNECTOR_ACTION_TIMEOUT_MS = 10_000;
-const CONNECTOR_MENU_TIMEOUT_MS = 7_500;
-const MAX_CONNECTOR_TRIGGER_ATTEMPTS = 3;
+const CONNECTOR_ACTION_TIMEOUT_MS = 5_000;
+// Leave the query intact while the app menu loads. Clearing/retyping every few
+// seconds restarts React's search and can keep a slow menu from ever appearing.
+// The caller can refresh the empty editor once and retry the stable query.
+const CONNECTOR_MENU_TIMEOUT_MS = 8_000;
+const MAX_CONNECTOR_TRIGGER_ATTEMPTS = 1;
+const CONNECTOR_COMPOSER_TIMEOUT_MS = 3_000;
+export type ConnectorProgress = "query_inserted" | "menu_ready" | "app_selected";
 export const SELECTED_CONNECTOR_SELECTOR = '[data-id^="plugin:"][data-keyword], [app-mention-path^="app://"][contenteditable="false"]';
 
 export interface SelectedConnector {
@@ -67,13 +72,13 @@ export function normalizeConnectorRowTitles(texts: readonly string[]): string[] 
 
 export async function clearComposerState(page: Page, connectorName: string, signal?: AbortSignal): Promise<void> {
   await page.keyboard.press("Escape").catch(() => {});
-  const composer = await activeComposer(page, 30_000, signal);
+  const composer = await activeComposer(page, CONNECTOR_COMPOSER_TIMEOUT_MS, signal);
   await composer.focus({ timeout:CONNECTOR_ACTION_TIMEOUT_MS, signal });
   await composer.press(process.platform === "darwin" ? "Meta+A" : "Control+A", { timeout:CONNECTOR_ACTION_TIMEOUT_MS, signal });
   await composer.press("Backspace", { timeout:CONNECTOR_ACTION_TIMEOUT_MS, signal });
   const deadline = Date.now() + 5_000;
   while (Date.now() < deadline) {
-    const settled = await activeComposer(page, 5_000, signal);
+    const settled = await activeComposer(page, CONNECTOR_COMPOSER_TIMEOUT_MS, signal);
     const text = await composerText(settled);
     const selected = await settled.locator(SELECTED_CONNECTOR_SELECTOR).filter({ visible:true }).count() > 0;
     if (!text.trim() && !selected) return;
@@ -94,16 +99,26 @@ export async function selectConnector(
   page: Page,
   connectorName: string,
   signal?: AbortSignal,
+  progress?: (stage:ConnectorProgress) => void,
 ): Promise<SelectedConnector> {
-  let composer = await activeComposer(page, 30_000, signal);
+  let stage = "finding editor";
+  const mark = (value:ConnectorProgress) => {stage=value;progress?.(value);};
+  const readyComposer = async () => {
+    try { return await activeComposer(page, CONNECTOR_COMPOSER_TIMEOUT_MS, signal); }
+    catch(error) {
+      if(signal?.aborted)throw error;
+      throw new ConnectorMenuUnavailableError(`ChatGPT's connector editor was unavailable at ${stage}`,error);
+    }
+  };
+  let composer = await readyComposer();
   if (await connectorIsSelected(composer, connectorName)) {
     if (!(await composerText(composer)).trim()) return { composer, identity:await selectedConnectorIdentity(composer) };
     await clearComposerState(page, connectorName, signal);
-    composer = await activeComposer(page, 30_000, signal);
+    composer = await readyComposer();
   }
   if ((await composerText(composer)).trim()) {
     await clearComposerState(page, connectorName, signal);
-    composer = await activeComposer(page, 30_000, signal);
+    composer = await readyComposer();
   }
   const rows = page.locator('.__menu-item[tabindex="0"], [data-mention-list-scroll-area] button[data-list-navigation-item="true"]');
   const exactRow = rows.filter({ has:page.getByText(connectorName, { exact:true }) });
@@ -111,16 +126,15 @@ export async function selectConnector(
   try {
     while (attempts < MAX_CONNECTOR_TRIGGER_ATTEMPTS) {
       attempts += 1;
-      composer = await activeComposer(page, 30_000, signal);
-      await composer.fill("", { timeout:CONNECTOR_ACTION_TIMEOUT_MS, signal });
-      await composer.focus({ timeout:CONNECTOR_ACTION_TIMEOUT_MS, signal });
-      await composer.pressSequentially(`@${connectorName}`, {
-        delay:25,
-        timeout:CONNECTOR_ACTION_TIMEOUT_MS,
-        signal,
-      });
+      composer = await readyComposer();
+      stage="inserting app query";
+      // One input event avoids rerendering a long conversation for every
+      // character. ProseMirror's mention search consumes the resulting input.
+      await composer.fill(`@${connectorName}`, { timeout:CONNECTOR_ACTION_TIMEOUT_MS, signal });
+      mark("query_inserted");
       try {
         await exactRow.waitFor({ state:"visible", timeout:CONNECTOR_MENU_TIMEOUT_MS, signal });
+        mark("menu_ready");
         break;
       } catch (error) {
         if (signal?.aborted) throw error;
@@ -139,21 +153,10 @@ export async function selectConnector(
     if (await exactRow.count() !== 1) {
       throw new BrowserCompanionError(`ChatGPT did not expose one exact ${JSON.stringify(connectorName)} connector row`, "connector_unavailable");
     }
-    const highlighted = async () => (
-      await exactRow.getAttribute("data-highlighted") !== null
-      || await exactRow.getAttribute("aria-current") === "true"
-    );
-    if (!await highlighted()) {
-      const count = await rows.filter({ visible:true }).count();
-      for (let index = 0; index < count && !await highlighted(); index += 1) {
-        await composer.press("ArrowDown", { timeout:CONNECTOR_ACTION_TIMEOUT_MS, signal });
-      }
-    }
-    if (!await highlighted()) {
-      throw new BrowserCompanionError(`ChatGPT connector menu could not highlight ${JSON.stringify(connectorName)}`, "connector_unavailable");
-    }
-    await composer.press("Enter", { timeout:CONNECTOR_ACTION_TIMEOUT_MS, signal });
-    const selected = await activeComposer(page, 30_000, signal);
+    // Click the verified app row directly. Enter in the composer can submit the
+    // mention as a message if React closes/rebuilds the menu between checks.
+    await exactRow.click({ timeout:CONNECTOR_ACTION_TIMEOUT_MS, signal });
+    const selected = await readyComposer();
     // The exact menu row proves the configured display name. The selected chip can
     // expose an internal slug instead, so bind its actual app identity for Send.
     await selected.locator(SELECTED_CONNECTOR_SELECTOR).filter({ visible:true }).waitFor({ state:"visible", timeout:CONNECTOR_ACTION_TIMEOUT_MS, signal });
@@ -164,13 +167,30 @@ export async function selectConnector(
     if ((await composerText(selected)).trim()) {
       throw new BrowserCompanionError("ChatGPT connector selection left an unexpected draft", "external_interference");
     }
+    // A pointer click leaves the editor's collapsed selection where the typed
+    // query was. Prompt insertion keeps a collapsed in-editor caret, so place
+    // it after the retained chip; otherwise the prompt lands before the chip.
+    await selected.evaluate((element:HTMLElement) => {
+      element.focus();
+      const owner = element.ownerDocument;
+      const selection = owner.defaultView?.getSelection?.() ?? owner.getSelection?.();
+      if (!selection || typeof owner.createRange !== "function") return;
+      const range = owner.createRange();
+      range.selectNodeContents(element);
+      range.collapse(false);
+      selection.removeAllRanges();
+      selection.addRange(range);
+    });
+    mark("app_selected");
     return { composer:selected, identity };
   } catch (error) {
+    if(signal?.aborted)throw error;
     try {
       await clearComposerState(page, connectorName, signal);
     } catch (cleanupError) {
       throw new AggregateError([error, cleanupError], "ChatGPT connector selection failed and its draft could not be cleared");
     }
+    if(error instanceof Error&&error.name==="TimeoutError")throw new ConnectorMenuUnavailableError(`ChatGPT did not finish selecting the requested connector at ${stage}`,error);
     throw error;
   }
 }

@@ -11,7 +11,7 @@ test("connector identities persist across restarts and stay bound to account and
     const restarted=new ConnectorAppCache(path);
     expect(restarted.get(account,"My connector")).toBe("asdk_app_fixture");
     expect(restarted.get("b".repeat(64),"My connector")).toBeUndefined();expect(restarted.get(account,"Other")).toBeUndefined();
-    expect(lstatSync(path).mode&0o777).toBe(0o600);
+    if(process.platform!=="win32")expect(lstatSync(path).mode&0o777).toBe(0o600);
     cache.rememberAllowAllSummary(account,"My connector","Permiso Permitir todo");
     expect(new ConnectorAppCache(path).getAllowAllSummary(account,"My connector")).toBe("Permiso Permitir todo");
     expect(cache.getAllowAllSummary("b".repeat(64),"My connector")).toBeUndefined();
@@ -19,7 +19,7 @@ test("connector identities persist across restarts and stay bound to account and
     writeFileSync(path,"invalid JSON");expect(new ConnectorAppCache(path).get(account,"My connector")).toBeUndefined();
   }finally{rmSync(root,{recursive:true,force:true});}
 });
-test("connector cache never follows or replaces a symlink",()=>{
+test.skipIf(process.platform==="win32")("connector cache never follows or replaces a symlink",()=>{
   const root=mkdtempSync(join(tmpdir(),"connector-cache-")),target=join(root,"target"),path=join(root,"apps.json");
   try {
     writeFileSync(target,"keep");symlinkSync(target,path);

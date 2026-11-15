@@ -6,7 +6,9 @@ import { join } from "node:path";
 import { chromium, type BrowserContext, type Page } from "patchright";
 import { fingerprintAccountIdentity } from "../src/account";
 import { SingleWindowCoordinator, type DriverExecution } from "../src/browser-window";
-import { ChatGptBrowserDriver, type SingleBrowserSurface } from "../src/chatgpt-driver";
+import { ChatGptBrowserDriver, stopLingeringResponse, type SingleBrowserSurface } from "../src/chatgpt-driver";
+import {selectPairingMedium} from "../src/pairing-model";
+import {captureSubmissionBaseline,waitForSubmissionAcceptance} from "../src/turn-binding";
 import { privateChromeExecutable } from "../src/chrome-executable";
 import { activeComposer, composerText, insertExactPrompt, uniqueSendButton } from "../src/composer";
 import { protocolBuild, renderActionPrompt, type ExecuteActionRequest } from "../src/protocol";
@@ -122,6 +124,7 @@ async function installFixtureRoutes(){
         const editor=document.querySelector('[contenteditable="true"]');
         const form=document.querySelector('form');const send=form.querySelector('button');
         const mentions=document.querySelector('[data-mention-list-scroll-area]');
+        mentions.querySelector('button').onclick=()=>{editor.innerHTML=${JSON.stringify("<p>"+pill(chipName)+"</p>")};mentions.hidden=true;};
         window.family=${JSON.stringify(initialModel.family)};
         window.definitions={
           '6':{min:0,value:4,labels:${JSON.stringify(fixtureUi[fixtureLanguage].efforts)},locked:[]},
@@ -695,6 +698,32 @@ test.skipIf(!native)("already-Medium pairing does not move the effort slider",as
   expect(await page.evaluate(()=>document.body.dataset.effortChanges)).toBe("0");
 },15_000);
 
+test.skipIf(!native)("hidden effort labels do not trigger full discovery when pairing is already Medium",async()=>{
+  try {
+    await fixture("",true,connector,0,false,true,{family:"6",value:1,locked:[]});
+    hideEffortLabels=true;await page.reload();
+    const signal=new AbortController().signal;
+    const selection=await selectPairingMedium(page,signal);
+    await selection.verify(signal);await selection.restore(signal);
+    expect(await page.evaluate(()=>document.body.dataset.effort)).toBe("Medium");
+    expect(await page.evaluate(()=>document.body.dataset.effortChanges)).toBe("0");
+  } finally {hideEffortLabels=false;}
+},15_000);
+
+test.skipIf(!native)("hidden effort labels stop pairing discovery at verified Medium and restore Pro",async()=>{
+  try {
+    await fixture("",true,connector,0,false,true,{family:"6",value:4,locked:[]});
+    hideEffortLabels=true;await page.reload();
+    const signal=new AbortController().signal;
+    const selection=await selectPairingMedium(page,signal);
+    expect(await page.evaluate(()=>document.body.dataset.effort)).toBe("Medium");
+    expect(await page.evaluate(()=>document.body.dataset.effortChanges)).toBe("3");
+    await selection.verify(signal);await selection.restore(signal);
+    expect(await page.evaluate(()=>document.body.dataset.effort)).toBe("Pro");
+    expect(await page.evaluate(()=>document.body.dataset.effortChanges)).toBe("6");
+  } finally {hideEffortLabels=false;}
+},15_000);
+
 test.skipIf(!native)("unavailable Medium preserves the chosen settings without sending a pairing turn",async()=>{
   const driver=await fixture("",true,connector,0,false,true,{family:"6",value:4,locked:[1]});
   let failure:unknown;
@@ -839,7 +868,7 @@ test.skipIf(!native)("a slow connector menu loads without clearing and retrigger
   expect(await page.locator('body').getAttribute('data-sends')).toBe('1');
 },15_000);
 
-test.skipIf(!native)("a missing connector sends the message once without a mention or a page reload",async()=>{
+test.skipIf(!native)("a missing connector refreshes the empty composer once before sending",async()=>{
   const driver=await fixture("Discard this existing draft");
   await page.locator('[data-mention-list-scroll-area]').evaluate(element=>element.remove());
   const loads=documentLoads;
@@ -848,12 +877,11 @@ test.skipIf(!native)("a missing connector sends the message once without a menti
   await executeCoordinatorFixture(coordinator,submitted);
   const events=[];for await(const event of coordinator.events(request.actionId,0))events.push(event);
   expect(events.at(-1)).toMatchObject({type:'submission_complete'});
-  expect(events.some(event=>event.type==='connector_verified')).toBeFalse();
+  expect(events.some(event=>event.type==='connector_verified')).toBeTrue();
   expect(await page.locator('body').getAttribute('data-sends')).toBe('1');
   expect(await page.locator('body').getAttribute('data-sent-text')).toContain('Proceed without a mention.');
   expect(await page.locator('body').getAttribute('data-sent-text')).not.toContain(`@${connector}`);
-  expect(await page.locator('[app-mention-path]').count()).toBe(0);
-  expect(documentLoads).toBe(loads);
+  expect(documentLoads).toBe(loads+1);
 },35_000);
 
 test.skipIf(!native)("a connector app identity changed after selection is rejected before Send",async()=>{
@@ -1012,14 +1040,14 @@ test.skipIf(!native)("offline Stop confirms an optional localized dialog before 
   }
 },30_000);
 
-test.skipIf(!native)("offline Stop resumes the captured already-open confirmation before sending",async()=>{
-  for(const scenario of [{frame:undefined,captured:true,draft:'Existing draft'},{frame:'srcdoc',captured:true,draft:''},{frame:undefined,captured:false,draft:''},{frame:'nested',captured:false,draft:''}] as const){
+for(const scenario of [{frame:undefined,captured:true,draft:''},{frame:'srcdoc',captured:true,draft:''},{frame:undefined,captured:false,draft:''},{frame:'nested',captured:false,draft:''}] as const)
+test.skipIf(!native)(`offline Stop resumes the captured already-open confirmation before sending (${scenario.frame??'main'}, captured=${scenario.captured})`,async()=>{
     const driver=await fixture(scenario.draft,true,connector,0,true);
     fixtureLanguage=scenario.frame==='nested'?'it':'en';
     stopConfirmation={preexisting:true,captured:scenario.captured,frame:scenario.frame};stopFinishDelayMs=1_200;
     await syncFixture();const loads=documentLoads;
     const offline=offlineRequest();
-    await executeFixture(driver,{request:offline,renderedPrompt:renderActionPrompt(offline.prompt),signal:AbortSignal.timeout(12_000),emit:()=>{}});
+    await executeFixture(driver,{request:offline,renderedPrompt:renderActionPrompt(offline.prompt),signal:AbortSignal.timeout(25_000),emit:()=>{}});
     expect(await page.locator('body').getAttribute('data-order')).toBe('confirm,stopped,send,');
     expect(await page.locator('body').getAttribute('data-stops')).toBe('0');
     expect(await page.locator('body').getAttribute('data-confirmations')).toBe('1');
@@ -1029,8 +1057,18 @@ test.skipIf(!native)("offline Stop resumes the captured already-open confirmatio
     expect(times.stopped-times.confirmed).toBeGreaterThanOrEqual(1_200);
     expect(times.sent).toBeGreaterThanOrEqual(times.stopped);
     expect(documentLoads).toBe(loads);
-  }
-},45_000);
+},30_000);
+
+test.skipIf(!native)("an already-open Stop confirmation preserves an unrelated user draft",async()=>{
+  await fixture('Existing draft',true,connector,0,true);
+  stopConfirmation={preexisting:true,captured:true};await syncFixture();
+  const loads=documentLoads;
+  await expect(stopLingeringResponse(page,new AbortController().signal,{canonicalUrl:url,accountFingerprint:request.expectedAccountFingerprint},()=>{})).rejects.toThrow();
+  expect(await composerText(page.locator('[data-composer-markdown]'))).toBe('Existing draft');
+  expect(await page.locator('body').getAttribute('data-confirmations')).toBe('0');
+  expect(await page.locator('body').getAttribute('data-sends')).toBe('0');
+  expect(documentLoads).toBe(loads);
+},30_000);
 
 test.skipIf(!native)("offline Stop never confirms unrelated or ambiguous dialogs",async()=>{
   for(const scenario of [{unrelated:true,preexisting:true},{unrelated:true},{duplicateSubmit:true}] as const) {
@@ -1290,15 +1328,15 @@ test.skipIf(!native)("a stuck Stop is rehydrated and stopped automatically befor
   expect(await page.locator("body").getAttribute("data-sends")).toBe("1");
 },55_000);
 
-test.skipIf(!native)("Stop recovery clears an existing draft and reloads before sending once",async()=>{
+test.skipIf(!native)("Stop recovery preserves an existing draft without stopping or reloading",async()=>{
   const driver=await fixture("A draft I am writing",true,connector,0,true,"reload");
   const offline:ExecuteActionRequest={...request,prompt:{kind:"offline_goal",goalRevision:1}};
-  await executeFixture(driver,{request:offline,renderedPrompt:renderActionPrompt(offline.prompt),signal:new AbortController().signal,emit:()=>{}});
-  expect(documentLoads).toBe(2);
-  expect(await composerText(await activeComposer(page))).toBe("");
-  expect(await page.locator("body").getAttribute("data-sends")).toBe("1");
-  expect(await page.locator("body").getAttribute("data-sent-text")).not.toContain("A draft I am writing");
-},55_000);
+  await expect(executeFixture(driver,{request:offline,renderedPrompt:renderActionPrompt(offline.prompt),signal:new AbortController().signal,emit:()=>{}})).rejects.toMatchObject({code:'external_interference'});
+  expect(documentLoads).toBe(1);
+  expect(await composerText(await activeComposer(page))).toBe("A draft I am writing");
+  expect(await page.locator("body").getAttribute("data-stops")).toBe("0");
+  expect(await page.locator("body").getAttribute("data-sends")).toBe("0");
+},10_000);
 
 test.skipIf(!native)("Stop recovery revalidates the account and conversation after reload",async()=>{
   for(const mismatch of ["account","conversation"]){
@@ -1458,6 +1496,13 @@ test.skipIf(!native)("a created conversation URL is retained when applying the s
 },20_000);
 
 
+test.skipIf(!native)("creation baselines still reject a switch between existing conversations",async()=>{
+  await fixture();
+  const baseline=await captureSubmissionBaseline(page,'Owned prompt',undefined,{allowCreatedConversation:true});
+  await page.evaluate(()=>history.replaceState({},'','/c/unrelated-conversation'));
+  await expect(waitForSubmissionAcceptance(page,baseline,Date.now()+5_000)).rejects.toMatchObject({code:'selector_drift'});
+},15_000);
+
 async function lazyJapanesePicker() {
   await page.evaluate(()=>{
     const script=document.createElement('script');script.textContent=`(()=>{
@@ -1487,7 +1532,7 @@ for(const creating of [false,true])test.skipIf(!native)(`Japanese lazy picker ${
   const coordinator=new SingleWindowCoordinator(driver,build);
   await executeCoordinatorFixture(coordinator,submitted);const events=[];
   for await(const event of coordinator.events(submitted.actionId,0))events.push(event);
-  expect(events.at(-1)?.type).toBe('submission_complete');
+  expect(events.at(-1)).toMatchObject({type:'submission_complete'});
   expect(events.filter(event=>event.type==='send_accepted')).toHaveLength(1);
   expect(await page.evaluate(()=>[document.body.dataset.sends,document.body.dataset.sentFamily,document.body.dataset.sentEffort,document.body.dataset.family,document.body.dataset.effort])).toEqual(['1','6','中','6','高']);
   await coordinator.close();

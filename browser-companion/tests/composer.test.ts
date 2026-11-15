@@ -1,6 +1,56 @@
 import { afterEach, expect, test } from "bun:test";
-import { insertPlainTextIntoComposer, isPairingVerificationDraft, verifyOwnedComposerText } from "../src/composer";
+import { activeComposer, insertPlainTextIntoComposer, isPairingVerificationDraft, verifyOwnedComposerText, uniqueSendButton } from "../src/composer";
 import { renderActionPrompt } from "../src/protocol";
+import type {Page,Locator} from "patchright";
+import {BrowserCompanionError} from "../src/errors";
+
+test("short readiness probes expire as missing editors and can retry the same page",async()=>{
+  let ready=false;
+  const composer={isEditable:async()=>true};
+  const candidates={
+    count:()=>ready?Promise.resolve(1):Bun.sleep(100).then(()=>0),
+    first:()=>composer,
+  };
+  const page={locator:()=>({filter:()=>candidates})} as unknown as Page;
+  let failure:unknown;
+  try {await activeComposer(page,15);}catch(error){failure=error;}
+  expect(failure).toBeInstanceOf(Error);
+  expect(failure).not.toBeInstanceOf(BrowserCompanionError);
+  expect((failure as Error).message).toContain("composer is unavailable");
+  ready=true;
+  expect(await activeComposer(page,1000)).toBe(composer as never);
+});
+
+test("short readiness probes preserve cancellation and immediate observation failures",async()=>{
+  const failed={locator:()=>({filter:()=>({count:()=>Promise.reject(new BrowserCompanionError("real failure","editor_unavailable"))})})} as unknown as Page;
+  await expect(activeComposer(failed,1000)).rejects.toBeInstanceOf(BrowserCompanionError);
+  const controller=new AbortController();
+  const pending={locator:()=>({filter:()=>({count:()=>Bun.sleep(200).then(()=>0)})})} as unknown as Page;
+  setTimeout(()=>controller.abort(),5);
+  await expect(activeComposer(pending,1000,controller.signal)).rejects.toMatchObject({name:"AbortError"});
+});
+
+test("a short composer probe also bounds the editable-state read",async()=>{
+  const page={locator:()=>({filter:()=>({count:async()=>1,first:()=>({isEditable:()=>new Promise(()=>{})})})})} as unknown as Page;
+  const started=performance.now();
+  await expect(activeComposer(page,20)).rejects.toThrow("composer is unavailable");
+  expect(performance.now()-started).toBeLessThan(500);
+});
+
+test("Send readiness cancels hung form and enabled-state reads without returning a submitter",async()=>{
+  for(const hungForm of [true,false]) {
+    const controller=new AbortController();
+    let enabledRead=false;
+    const send={count:async()=>1,first:()=>({isEnabled:()=>{enabledRead=true;return new Promise(()=>{});}})};
+    const form={count:()=>hungForm?new Promise(()=>{}):Promise.resolve(1),locator:()=>({filter:()=>send})};
+    const composer={locator:()=>form} as unknown as Locator;
+    const pending=uniqueSendButton(composer,1_000,controller.signal);
+    await Bun.sleep(5);
+    controller.abort(new Error("cancelled Send readiness"));
+    await expect(pending).rejects.toThrow("cancelled Send readiness");
+    expect(enabledRead).toBe(!hungForm);
+  }
+});
 
 interface FakeSelection {
   isCollapsed: boolean;

@@ -32,7 +32,7 @@ test.skipIf(!native)("handoff polls reuse the current document and bound visits 
   const driver=new ChatGptBrowserDriver(surface,protocolBuild('handoff-navigation-test'));
   await page.goto(url);expect(await driver.turnHandoffComplete(url,account,id)).toBe(true);expect(loads).toBe(0);
   running=true;await page.goto('https://chatgpt.com/c/other');expect(await driver.turnHandoffComplete(url,account,id)).toBe(false);expect(loads).toBe(1);
-  await page.goto('https://chatgpt.com/c/other');expect(await driver.turnHandoffComplete(url,account,id)).toBe(false);expect(loads).toBe(1);
+  await page.goto('https://chatgpt.com/c/other');await expect(driver.turnHandoffComplete(url,account,id)).rejects.toMatchObject({code:'editor_unavailable'});expect(loads).toBe(1);
   running=false;await page.goto(url);expect(await driver.turnHandoffComplete(url,account,id)).toBe(true);expect(loads).toBe(1);
  }finally{await browser.close();}
 },15_000);
@@ -50,6 +50,11 @@ for(const grouped of [false,true])test.skipIf(!native)(`real Chrome proves the e
    },{answer,running,grouped});
   };
   await render(`Turn handoff ${id}`);expect(await completedHandoff(page,url,account,id)).toBe(true);
+  await page.evaluate(grouped=>document.body.insertAdjacentHTML('beforeend',grouped
+    ? '<section data-turn-key="later-user"><div data-user-message-bubble>Continue.</div></section>'
+    : '<article data-testid="conversation-turn-2" data-turn="user" data-turn-id="later-user">Continue.</article>'),grouped);
+  expect(await completedHandoff(page,url,account,id)).toBe(false);
+  await render(`Turn handoff ${id}`);
   await render(`Turn handoff ${id}`,true);expect(await completedHandoff(page,url,account,id)).toBe(false);
   await render("An old final answer");expect(await completedHandoff(page,url,account,id)).toBe(false);
   await render(`Turn handoff ${id}`);expect(await completedHandoff(page,url,"wrong-account",id)).toBe(false);expect(await completedHandoff(page,url.replace("renewal-fixture","other"),account,id)).toBe(false);

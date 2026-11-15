@@ -7,6 +7,7 @@ import type { ChatGptMarkdownSegment } from "./response-stream";
 import { CHATGPT_STOPPED_THINKING_LABELS } from "./ui-labels";
 import {matchesUiLabel,uiLabels,escapeUiPattern} from "./ui-localization";
 import { BrowserCompanionError } from "./errors";
+import {observeReadOnly} from "./observation";
 
 const CHATGPT_DOM_REVISION_ATTRIBUTES = [
   "aria-hidden", "aria-label", "aria-busy", "aria-disabled", "aria-expanded", "class",
@@ -116,8 +117,10 @@ function chatGptBrowserTabClosedError(): BrowserCompanionError {
 export async function responseDomSnapshot(
   responseTurn: Locator,
   cache?: ChatGptResponseDomCache,
+  signal?: AbortSignal,
 ): Promise<ChatGptResponseDomSnapshot> {
-  const observed = await responseTurn.evaluate((element, options) => {
+  signal?.throwIfAborted();
+  const observed = await observeReadOnly(responseTurn.evaluate((element, options) => {
     const root = element as HTMLElement;
     type ObserverState = {
       id: number;
@@ -166,13 +169,26 @@ export async function responseDomSnapshot(
     // A browser turn can remain readable while Chrome is minimized or its content has no
     // measured width. Layout geometry is therefore not response visibility:
     // completed Markdown can have width=0 while remaining connected, rendered and readable.
+    // One snapshot is synchronous. Share ancestor visibility checks within
+    // that snapshot instead of repeatedly resolving the same styles for each
+    // paragraph, reference and toolbar in a long answer.
+    const renderedAncestors = new Map<HTMLElement, boolean>();
     const isRendered = (candidate: HTMLElement): boolean => {
       if (!candidate.isConnected) return false;
+      const chain: HTMLElement[] = [];
+      let rendered = true;
       for (let node: HTMLElement | null = candidate; node; node = node.parentElement) {
+        const known = renderedAncestors.get(node);
+        if (known !== undefined) { rendered = known; break; }
         const style = getComputedStyle(node);
-        if (node.hidden || style.display === "none" || style.visibility === "hidden" || style.opacity === "0") return false;
+        chain.push(node);
+        if (node.hidden || style.display === "none" || style.visibility === "hidden" || style.opacity === "0") {
+          rendered = false;
+          break;
+        }
       }
-      return true;
+      for (const node of chain) renderedAncestors.set(node, rendered);
+      return rendered;
     };
     // CSS animations and stylesheet changes can reveal an answer or its completion controls
     // without mutating this subtree. Recheck the rendering dependencies of the cached scan;
@@ -702,7 +718,7 @@ export async function responseDomSnapshot(
     stoppedThinkingLabels: [...CHATGPT_STOPPED_THINKING_LABELS],
     knownKey: cache?.key,
     attributeFilter: [...CHATGPT_DOM_REVISION_ATTRIBUTES],
-  }, { timeout: 2_000 }).catch(() => undefined);
+  }, { timeout: 2_000 }).catch(() => undefined), signal);
   if (!observed) {
     if (responseTurn.page().isClosed()) {
       throw chatGptBrowserTabClosedError();
