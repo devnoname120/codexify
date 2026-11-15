@@ -332,22 +332,57 @@ export async function moveChatGptEffortSlider(
   let state = await readChatGptEffortSnapshot(menu.sliderContainer);
   const { min, max } = state;
   if (target < min || target > max || !state.available[target - min]) throw new Error("ChatGPT locks the requested effort");
-  const control = menu.slider.locator("xpath=ancestor::*[@role='menuitem'][1]");
+  const menuItem = menu.slider.locator("xpath=ancestor::*[@role='menuitem'][1]");
+  const thumbFocusable = await menu.slider.evaluate(element => {
+    if (element.getAttribute("aria-hidden") === "true") return false;
+    const index = element.getAttribute("tabindex");
+    return index !== null ? Number(index) >= 0 : element.matches("input, button, select, textarea, a[href]");
+  }).catch(() => false);
   while (state.value !== target) {
     if (signal?.aborted) throw new DOMException("Browser action aborted", "AbortError");
     const direction = Math.sign(target - state.value);
     const before = state.value;
-    await control.press(direction > 0 ? "ArrowRight" : "ArrowLeft", { timeout:5_000, signal });
-    const deadline = Date.now() + 5_000;
-    do {
-      state = await readChatGptEffortSnapshot(menu.sliderContainer);
-      if (state.min !== min || state.max !== max || !state.available[target - min]) throw new Error("ChatGPT changed its effort range or availability");
-      if (state.value !== before) break;
-      await new Promise(resolve => setTimeout(resolve, 50));
-    } while (Date.now() < deadline);
-    if ((state.value - before) * direction <= 0 || (state.value - target) * direction > 0) {
-      throw new Error("ChatGPT did not move its effort slider toward the requested position");
+    const moved = async (): Promise<boolean> => {
+      const deadline = Date.now() + 300;
+      do {
+        state = await readChatGptEffortSnapshot(menu.sliderContainer);
+        if (state.min !== min || state.max !== max || !state.available[target - min]) {
+          throw new Error("ChatGPT changed its effort range or availability");
+        }
+        if (state.value !== before) {
+          if ((state.value - before) * direction <= 0 || (state.value - target) * direction > 0) {
+            throw new Error("ChatGPT moved its effort slider outside the requested range");
+          }
+          return true;
+        }
+        if (signal?.aborted) throw new DOMException("Browser action aborted", "AbortError");
+        await new Promise(resolve => setTimeout(resolve, 50));
+      } while (Date.now() < deadline);
+      return false;
+    };
+    const key = direction > 0 ? "ArrowRight" : "ArrowLeft";
+    let advanced = false;
+    // The current picker has a real slider thumb. The enclosing menu item is
+    // only a compatibility fallback for older layouts that own the key handler.
+    for (const control of thumbFocusable ? [menu.slider, menuItem] : [menuItem]) {
+      if (signal?.aborted) throw new DOMException("Browser action aborted", "AbortError");
+      await control.press(key, { timeout:1_500, signal }).catch(() => {});
+      if (await moved()) { advanced = true; break; }
     }
+    if (!advanced) {
+      // Some picker layouts ignore both keyboard targets but accept a trusted
+      // pointer event on the visible track. Do not synthesize ARIA value changes.
+      const track = menu.sliderContainer.locator('[data-orientation="horizontal"]').filter({visible:true}).first();
+      const box = await track.boundingBox().catch(() => null);
+      if (box && box.width >= 28 && max > min) {
+        const margin = Math.min(14, box.width / 4);
+        const ratio = (target - min) / (max - min);
+        const position = {x:margin + (box.width - 2 * margin) * ratio, y:box.height / 2};
+        await track.click({position,timeout:1_500,signal}).catch(() => {});
+        advanced = await moved();
+      }
+    }
+    if (!advanced) throw new Error("ChatGPT did not move its effort slider toward the requested position");
   }
 }
 
