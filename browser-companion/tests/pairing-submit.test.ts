@@ -978,6 +978,21 @@ test.skipIf(!native)("offline messages and goals stop lingering generation befor
   }
 },25_000);
 
+test.skipIf(!native)("finished responses ignore non-modal ChatGPT popovers rather than treating them as Stop confirmation",async()=>{
+  for(const aria of [' aria-modal="false"',''] as const){
+    const driver=await fixture();
+    // Search and tool menus can use role=dialog without modal semantics.
+    // They must not be interpreted as a Stop approval when no Stop button exists.
+    await page.evaluate(aria=>document.body.insertAdjacentHTML('beforeend',
+      '<div role="dialog"'+aria+' data-testid="nonmodal-menu">Suggestions</div>'),aria);
+    const offline=offlineRequest();
+    await executeFixture(driver,{request:offline,renderedPrompt:renderActionPrompt(offline.prompt),signal:new AbortController().signal,emit:()=>{}});
+    expect(await page.locator('body').getAttribute('data-sends')).toBe('1');
+    expect(await page.locator('body').getAttribute('data-stops')).toBe('0');
+    expect(await page.locator('[data-testid="nonmodal-menu"]').count()).toBe(1);
+  }
+},18_000);
+
 test.skipIf(!native)("offline Stop confirms an optional localized dialog before sending once",async()=>{
   const prompts:ExecuteActionRequest["prompt"][]=[
     {kind:"offline_chat",batchId:"dialog-batch",messages:[{id:"dialog-message",markdown:"Continue"}]},

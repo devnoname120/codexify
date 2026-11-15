@@ -98,6 +98,15 @@ pub trait AutomationExecutor: Send + Sync {
     ) -> Result<bool, String> {
         Ok(false)
     }
+    async fn inspect_pending_materialization(
+        &self,
+        _url: &str,
+        _account: &str,
+        _connector_name: &str,
+    ) -> Result<bool, String> {
+        Ok(false)
+    }
+
     async fn turn_handoff_complete(
         &self,
         _url: &str,
@@ -154,6 +163,42 @@ impl BrowserAutomationExecutor {
             .ensure_running(cancellation)
             .await
     }
+
+    async fn check_pending_approval(
+        &self,
+        url: &str,
+        account: &str,
+        connector_name: &str,
+        allow_navigation: bool,
+    ) -> Result<bool, String> {
+        if !self.config.auto_approve_tool_calls {
+            return Ok(false);
+        }
+        let lifecycle = super::BrowserCompanionControl::new(&self.config)?.public_status();
+        if lifecycle["manuallyStopped"] == true || lifecycle["waitingForServerRestart"] == true {
+            return if allow_navigation {
+                Err("Materialization inspection deferred while the browser is stopped".into())
+            } else {
+                Ok(false)
+            };
+        }
+        // Reuse an existing companion without starting or revealing it.
+        let client = BrowserCompanionClient::from_config(&self.config)?;
+        let cancellation = CancellationToken::new();
+        let result = tokio::time::timeout(
+            Duration::from_secs(if allow_navigation { 35 } else { 6 }),
+            client.approve_pending_conversation_with_navigation(
+                url,
+                account,
+                connector_name,
+                allow_navigation,
+                &cancellation,
+            ),
+        )
+        .await;
+        cancellation.cancel();
+        result.map_err(|_| "ChatGPT approval check timed out".to_string())?
+    }
 }
 
 #[async_trait]
@@ -187,23 +232,17 @@ impl AutomationExecutor for BrowserAutomationExecutor {
         account: &str,
         connector_name: &str,
     ) -> Result<bool, String> {
-        if !self.config.auto_approve_tool_calls {
-            return Ok(false);
-        }
-        let lifecycle = super::BrowserCompanionControl::new(&self.config)?.public_status();
-        if lifecycle["manuallyStopped"] == true || lifecycle["waitingForServerRestart"] == true {
-            return Ok(false);
-        }
-        // Passive checks reuse an existing companion; they never start or reveal it.
-        let client = BrowserCompanionClient::from_config(&self.config)?;
-        let cancellation = CancellationToken::new();
-        let result = tokio::time::timeout(
-            Duration::from_secs(6),
-            client.approve_pending_conversation(url, account, connector_name, &cancellation),
-        )
-        .await;
-        cancellation.cancel();
-        result.map_err(|_| "ChatGPT approval check timed out".to_string())?
+        self.check_pending_approval(url, account, connector_name, false)
+            .await
+    }
+    async fn inspect_pending_materialization(
+        &self,
+        url: &str,
+        account: &str,
+        connector_name: &str,
+    ) -> Result<bool, String> {
+        self.check_pending_approval(url, account, connector_name, true)
+            .await
     }
     async fn turn_handoff_complete(
         &self,
@@ -1710,10 +1749,6 @@ impl AgentAutomationSupervisor {
                     task.store.connector_name(&self.config.connector_name)?,
                 )
                 && let Ok(_run_guard) = self.run_lock.try_lock()
-                && let Ok(true) = self
-                    .executor
-                    .approve_pending_conversation(url, account, &connector)
-                    .await
             {
                 let epoch = activity
                     .activity_epoch
@@ -1724,9 +1759,32 @@ impl AgentAutomationSupervisor {
                 } else {
                     activity.activity_sequence
                 };
-                self.record_approved_resume(&task, &state, epoch, sequence, now_ms)
-                    .await?;
-                continue;
+                let visit = activity.materialization_pending
+                    && !activity.is_online(now_ms, task.store.offline_after_ms())
+                    && activity
+                        .agent_waiting_until_ms
+                        .is_none_or(|until| now_ms >= until);
+                let approval = if visit {
+                    self.executor
+                        .inspect_pending_materialization(url, account, &connector)
+                        .await
+                } else {
+                    self.executor
+                        .approve_pending_conversation(url, account, &connector)
+                        .await
+                };
+                if activity.materialization_pending
+                    && (visit && approval.is_ok() || matches!(approval, Ok(true)))
+                {
+                    task.chat
+                        .finish_materialization_check(epoch, sequence)
+                        .await?;
+                }
+                if matches!(approval, Ok(true)) {
+                    self.record_approved_resume(&task, &state, epoch, sequence, now_ms)
+                        .await?;
+                    continue;
+                }
             }
             let activity_epoch = activity
                 .activity_epoch

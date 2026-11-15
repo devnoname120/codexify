@@ -1368,6 +1368,9 @@ for (const [engineName, engine] of [["Chromium", chromium], ["WebKit", webkit]])
       await metrics.getByText("1m 10s (1392 turns)", { exact:true }).waitFor();
       const remaining = goal.timerUntilMs - clock;
       clock += remaining; await page.clock.fastForward(remaining);
+      // Wait for the local tick to render the capped duration before taking
+      // the offline snapshot; fastForward can return before that DOM update.
+      await metrics.getByText("4m 48s (1392 turns)", { exact:true }).waitFor();
       const atOffline = await metrics.textContent();
       clock += 60000; await page.clock.fastForward(60000);
       assert.equal(await metrics.textContent(), atOffline, "offline time must not increase even while polling fails");
@@ -1423,8 +1426,10 @@ for (const [engineName, engine] of [["Chromium",chromium],["WebKit",webkit]]) {
       const dialog=page.getByRole('dialog',{name:'New chat'});
       const open=async()=>{
         const back=page.locator('#chat-host').getByRole('button',{name:'Back to chats',exact:true});
-        if(await back.isVisible())await back.click();
-        await page.getByRole('button',{name:'New chat',exact:true}).click();
+        // On mobile the sidebar becomes visible only after the chat header hydrates.
+        const newChat=page.getByRole('button',{name:'New chat',exact:true});
+        if(!(await newChat.isVisible())){await back.waitFor({state:'visible'});await back.click();}
+        await newChat.click();
         await dialog.getByRole('button',{name:'Existing repo',exact:true}).waitFor();
         await dialog.locator('#new-chat-model:enabled').waitFor();
         assert.deepEqual(await dialog.getByLabel('Reasoning effort').locator('option').allTextContents(),['Pro','Extra High','High','Medium','Instant']);

@@ -1642,6 +1642,29 @@ impl ServerHandler for CodexHandler {
             tracing::warn!(%error, "could not expire pairing-only chat presence");
         }
 
+        if agent_call
+            && !result.is_error
+            && result
+                .content
+                .iter()
+                .any(|content| matches!(content, ToolContent::ResourceLink(_)))
+            && let (Some(activity), Some(root)) = (
+                activity.as_ref(),
+                self.selected_project_root(task_conversation.as_ref()),
+            )
+            && let Ok(chat) = self
+                .effective_task_config(task_conversation.as_ref(), root)
+                .and_then(|config| {
+                    self.markdown_chat
+                        .chat(&config, task_conversation.as_ref(), &self.session)
+                })
+            && let Err(error) = chat
+                .record_file_materialization(&activity.epoch, activity.sequence)
+                .await
+        {
+            tracing::warn!(%error, "could not schedule offline file materialization approval");
+        }
+
         let mut delivery = None;
         let chat_delivery_root = if !result.is_error
             && matches!(

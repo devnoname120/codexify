@@ -262,6 +262,7 @@ async fn targeted_github_urls_use_isolated_worktrees_without_moving_the_source()
     fs::create_dir_all(&access_root).unwrap();
 
     git(&upstream, &["init", "--quiet"]);
+    git(&upstream, &["config", "core.autocrlf", "false"]);
     git(&upstream, &["config", "user.name", "Codexify Tests"]);
     git(
         &upstream,
@@ -312,6 +313,7 @@ async fn targeted_github_urls_use_isolated_worktrees_without_moving_the_source()
         ],
     );
     git(&project_root, &["config", "protocol.file.allow", "always"]);
+    git(&project_root, &["config", "core.autocrlf", "false"]);
 
     let mut auto = config(&root, access_root.clone(), WorktreeMode::Auto);
     auto.project_catalog.codex_config.enabled = false;
@@ -352,7 +354,10 @@ async fn targeted_github_urls_use_isolated_worktrees_without_moving_the_source()
         .await
         .unwrap();
     assert!(!repeated.newly_selected);
-    assert_eq!(repeated.project_root, selection.project_root);
+    assert_eq!(
+        repeated.project_root,
+        fs::canonicalize(&selection.project_root).unwrap()
+    );
 
     let fetched_refs_before_switch = git(
         &project_root,
@@ -431,7 +436,10 @@ async fn targeted_github_urls_use_isolated_worktrees_without_moving_the_source()
         .await
         .unwrap();
     assert!(!repeated_commit.newly_selected);
-    assert_eq!(repeated_commit.project_root, commit_selection.project_root);
+    assert_eq!(
+        repeated_commit.project_root,
+        fs::canonicalize(&commit_selection.project_root).unwrap()
+    );
 
     let mut never = auto.clone();
     never.worktrees.mode = WorktreeMode::Never;
@@ -646,7 +654,7 @@ async fn new_worktrees_use_the_selected_base_commit_and_keep_authorized_source_m
             let reopened = ProjectBindingStore::new(root.path().join("bindings"));
             assert_eq!(
                 reopened.effective_config(&config, &task).unwrap().work_dir,
-                selected.project_root
+                fs::canonicalize(&selected.project_root).unwrap()
             );
             let retry = if explicit {
                 reopened
@@ -664,7 +672,8 @@ async fn new_worktrees_use_the_selected_base_commit_and_keep_authorized_source_m
             }
             .unwrap();
             assert_eq!(
-                retry.project_root, selected.project_root,
+                retry.project_root,
+                fs::canonicalize(&selected.project_root).unwrap(),
                 "retrying creation must reuse its saved workspace"
             );
         }

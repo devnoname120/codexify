@@ -2,7 +2,7 @@ import { z } from "zod";
 
 export const PROTOCOL_VERSION = 1 as const;
 export const COMPANION_KIND = "codexify-browser-companion" as const;
-export const PROTOCOL_SCHEMA_HASH = "2f7852fd999d639b18e829bc273b2e38021c40c839ec0feb0ff2c793cfeb9e03" as const;
+export const PROTOCOL_SCHEMA_HASH = "b8fe6b01a8bcfc067c29a28dd5620fa83ecad0f486f159d4c82413c2a59b8930" as const;
 export const PROTOCOL_BUILD_SUFFIX = `+protocol.${PROTOCOL_SCHEMA_HASH}` as const;
 export const MAX_DESCRIPTOR_BYTES = 8 * 1024;
 export const MAX_JSON_BYTES = 1024 * 1024;
@@ -82,6 +82,7 @@ export const chatGptUrlSchema = z.string().superRefine((value, context) => {
 });
 
 export const conversationApprovalRequestSchema = z.strictObject({
+  allowNavigation:z.boolean().optional(),
   url:chatGptUrlSchema.refine(value=>{
     try { return /^\/(?:g\/[^/]+\/)?c\/[^/]+\/?$/.test(new URL(value).pathname); }
     catch { return false; }
