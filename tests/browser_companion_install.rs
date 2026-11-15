@@ -1009,8 +1009,7 @@ async fn browser_watchdog_reopens_a_closed_companion_and_honors_manual_stop_acro
 }
 #[cfg(unix)]
 #[tokio::test]
-async fn browser_recovery_restarts_unavailable_and_frozen_processes_but_keeps_busy_or_signed_out_sessions()
- {
+async fn browser_recovery_confirms_renderer_failure_and_preserves_unobserved_processes() {
     use tokio_util::sync::CancellationToken;
     let (_root, manager, control) = recovery_fixture();
     let token = CancellationToken::new();
@@ -1032,18 +1031,54 @@ async fn browser_recovery_restarts_unavailable_and_frozen_processes_but_keeps_bu
         assert_eq!(control.ensure_running(&token).await.unwrap().pid(), first);
     }
     std::fs::write(&mode, "unavailable").unwrap();
-    let second = control.ensure_running(&token).await.unwrap().pid();
+    let deferred = control.ensure_running(&token).await.unwrap_err();
+    assert!(
+        deferred.contains("retaining its live process"),
+        "{deferred}"
+    );
+    assert_eq!(
+        codexify::agent_automation::BrowserCompanionClient::from_descriptor_path(
+            &manager.layout().descriptor_path
+        )
+        .unwrap()
+        .pid(),
+        first
+    );
+    // Recovery requires separate negative probes spanning a full minute.
+    // Exercise that policy with the real process instead of expecting the
+    // first unavailable observation to authorize a restart.
+    let second = tokio::time::timeout(std::time::Duration::from_secs(90), async {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            match control.ensure_running(&token).await {
+                Ok(client) => break client.pid(),
+                Err(error) => assert!(error.contains("retaining its live process"), "{error}"),
+            }
+        }
+    })
+    .await
+    .unwrap();
     assert_ne!(second, first);
     std::fs::write(&mode, "frozen").unwrap();
-    let third = tokio::time::timeout(
+    let unobserved = tokio::time::timeout(
         std::time::Duration::from_secs(40),
         control.ensure_running(&token),
     )
     .await
     .unwrap()
-    .unwrap()
-    .pid();
-    assert_ne!(third, second);
+    .unwrap_err();
+    assert!(
+        unobserved.contains("live browser was preserved"),
+        "{unobserved}"
+    );
+    assert_eq!(
+        codexify::agent_automation::BrowserCompanionClient::from_descriptor_path(
+            &manager.layout().descriptor_path
+        )
+        .unwrap()
+        .pid(),
+        second
+    );
     control.stop(&token).await.unwrap();
     assert!(
         std::fs::read_to_string(manager.layout().root.join("requests"))

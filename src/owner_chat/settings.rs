@@ -203,6 +203,10 @@ pub(super) async fn health(State(state): State<OwnerState>) -> ApiResult {
     let schema = crate::global_settings::read_schema_intent(&state.config);
     let (mut body, readiness) = super::readiness::snapshot(&state, schema.as_ref()).await;
     body["readiness"] = readiness;
+    if let Some(automation) = &state.automation {
+        body["automationActivity"] =
+            json!(automation.activity_snapshot(crate::markdown_chat::now_ms()));
+    }
     Ok(Json(body))
 }
 
@@ -356,7 +360,7 @@ pub(super) async fn save(State(state): State<OwnerState>, Json(body): Json<SaveB
 }
 
 pub(super) async fn restart(State(state): State<OwnerState>) -> ApiResult {
-    // Request rules and navigation timings are launch-time browser policy.
+    // Request rules, presentation, recovery, and navigation are launch-time policy.
     // Apply them only when no companion UI action is in progress.
     if let Some(path) = state.config.loaded_config_path.clone() {
         let next = tokio::task::spawn_blocking(move || {
@@ -376,6 +380,8 @@ pub(super) async fn restart(State(state): State<OwnerState>) -> ApiResult {
         let new = &next.markdown_chat.automation;
         if old.enabled
             && (!new.enabled
+                || old.effective_browser_simplicity() != new.effective_browser_simplicity()
+                || old.recovery_enhancements != new.recovery_enhancements
                 || old.effective_request_block_list() != new.effective_request_block_list()
                 || old.retry_timings.conversation_load_interval_seconds
                     != new.retry_timings.conversation_load_interval_seconds

@@ -43,6 +43,7 @@ pub struct ToolRequestContext {
     pub markdown_chat: Arc<crate::markdown_chat::MarkdownChatStore>,
     /// Task-rooted automation state, available only when browser automation is enabled.
     pub agent_automation: Option<Arc<AgentAutomationStore>>,
+    pub agent_runtime: Option<Arc<crate::agent_automation::agents::AgentRuntime>>,
     /// Cancelled when the transport drops or a per-call deadline (e.g. the
     /// artifact-ingress idle timeout) fires, so long-running tools can abort.
     pub cancellation: CancellationToken,

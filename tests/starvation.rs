@@ -133,6 +133,7 @@ async fn a_failed_checkpoint_prevents_sending_stdin() {
             root.path().join("artifacts"),
         )),
         agent_automation: None,
+        agent_runtime: None,
         cancellation: CancellationToken::new(),
     };
     let result = WriteStdin

@@ -384,6 +384,7 @@ mod tests {
             )),
             markdown_chat: Arc::default(),
             agent_automation: None,
+            agent_runtime: None,
             cancellation: CancellationToken::new(),
         };
         let session = Arc::new(SessionState::new());

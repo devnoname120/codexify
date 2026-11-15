@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
@@ -628,6 +628,33 @@ impl Drop for ExecSessionState {
 }
 
 type ConversationExecStates = HashMap<ConversationIdentity, Arc<ExecSessionState>>;
+static CONVERSATION_EXEC_ACTIVITY: OnceLock<
+    StdMutex<HashMap<String, Vec<Weak<ExecSessionState>>>>,
+> = OnceLock::new();
+
+pub(crate) fn conversation_has_running_commands(identity: &ConversationIdentity) -> bool {
+    let Some(registry) = CONVERSATION_EXEC_ACTIVITY.get() else {
+        return false;
+    };
+    let Ok(registry) = registry.try_lock() else {
+        return true;
+    };
+    let states = registry
+        .get(identity.stable_key())
+        .cloned()
+        .unwrap_or_default();
+    drop(registry);
+    states
+        .into_iter()
+        .filter_map(|state| state.upgrade())
+        .any(|state| {
+            state.sessions.try_lock().map_or(true, |sessions| {
+                sessions
+                    .values()
+                    .any(|command| command.exit_code().is_none())
+            })
+        })
+}
 
 /// Server-process ownership for ChatGPT resident commands. ChatGPT can replace
 /// its MCP transport between adjacent tool calls while retaining the same
@@ -657,6 +684,22 @@ impl ConversationExecSessionStore {
             .entry(identity.clone())
             .or_insert_with(|| Arc::new(ExecSessionState::new()))
             .clone();
+        if let Ok(mut registry) = CONVERSATION_EXEC_ACTIVITY
+            .get_or_init(Default::default)
+            .lock()
+        {
+            if registry.len() > 4096 {
+                registry.retain(|_, states| states.iter().any(|state| state.strong_count() > 0));
+            }
+            let states = registry
+                .entry(identity.stable_key().to_owned())
+                .or_default();
+            states.retain(|state| state.strong_count() > 0);
+            let weak = Arc::downgrade(&exec);
+            if !states.iter().any(|state| state.ptr_eq(&weak)) {
+                states.push(weak);
+            }
+        }
         transport_session.with_exec_state(exec)
     }
 

@@ -1,5 +1,14 @@
 #[tokio::test]
 async fn renewal_control_reaches_real_mcp_results_without_queue_or_progress_dependency() {
+    renewal_with_pending_messages(false).await;
+}
+
+#[tokio::test]
+async fn unread_messages_cannot_starve_due_turn_renewal() {
+    renewal_with_pending_messages(true).await;
+}
+
+async fn renewal_with_pending_messages(unread: bool) {
     use crate::agent_automation::turn_renewal::TurnSend;
     use crate::agent_automation::{
         AgentAutomationStore, AutomationActionKind, AutomationActionStatus,
@@ -84,6 +93,14 @@ async fn renewal_control_reaches_real_mcp_results_without_queue_or_progress_depe
     )
     .await
     .unwrap();
+    if unread {
+        chat.append_user(
+            "pending-owner".into(),
+            "Preserve this owner instruction for the next turn".into(),
+        )
+        .await
+        .unwrap();
+    }
     let (server_transport, client_transport) = tokio::io::duplex(128 * 1024);
     let server = tokio::spawn(async move {
         handler
@@ -95,6 +112,21 @@ async fn renewal_control_reaches_real_mcp_results_without_queue_or_progress_depe
             .unwrap()
     });
     let client = ().serve(client_transport).await.unwrap();
+    let assert_edit_tools = |tools: &[rmcp::model::Tool]| {
+        for name in ["exec_command", "apply_patch", "write_file"] {
+            let tool = tools
+                .iter()
+                .find(|tool| tool.name.as_ref() == name)
+                .expect("development tool stays advertised");
+            assert_eq!(
+                tool.annotations.as_ref().unwrap().read_only_hint,
+                Some(false),
+                "{name} must retain its real write behavior"
+            );
+        }
+    };
+    let initial_tools = client.list_all_tools().await.unwrap();
+    assert_edit_tools(&initial_tools);
     for tool in [
         "rollout_read",
         "chat_await",
@@ -120,6 +152,15 @@ async fn renewal_control_reaches_real_mcp_results_without_queue_or_progress_depe
                 .contains("FINAL CHATGPT ASSISTANT ANSWER"),
             "{tool}: {data}"
         );
+        if unread && tool == "rollout_read" {
+            assert!(
+                data["new_chat_message_from_user"]
+                    .as_str()
+                    .unwrap()
+                    .contains("Preserve this owner instruction"),
+                "owner messages and renewal must both reach the model"
+            );
+        }
         assert!(
             data.get("rollout_checkpoint_required")
                 .is_none_or(|v| v.is_null())
@@ -130,6 +171,39 @@ async fn renewal_control_reaches_real_mcp_results_without_queue_or_progress_depe
         }
     }
     assert_eq!(chat.queued_messages().await.unwrap().len(), 1);
+    let renewed_tools = client.list_all_tools().await.unwrap();
+    assert_eq!(renewed_tools.len(), initial_tools.len());
+    assert_edit_tools(&renewed_tools);
+    if unread {
+        let pending = chat.unread_snapshot().await.unwrap();
+        assert_eq!(
+            pending.messages.len(),
+            1,
+            "renewal must not consume owner instructions"
+        );
+        assert!(
+            pending.messages[0]
+                .markdown
+                .contains("Preserve this owner instruction")
+        );
+        chat.request_agent_stop("owner-stop".into()).await.unwrap();
+        let response = client
+            .call_tool(automation_request("rollout_read", json!({}), "mcp-renewal"))
+            .await
+            .unwrap();
+        assert!(
+            response
+                .structured_content
+                .as_ref()
+                .unwrap()
+                .get("turn_renewal_required")
+                .is_none_or(|value| value.is_null()),
+            "renewal must respect an explicit stop"
+        );
+        client.cancel().await.unwrap();
+        server.await.unwrap();
+        return;
+    }
     assert!(chat.unread_snapshot().await.unwrap().messages.is_empty());
     let handoff = store.load(&identity).unwrap().turn_renewal.handoff.unwrap();
     store.confirm_turn_handoff(&identity, &handoff.id).unwrap();

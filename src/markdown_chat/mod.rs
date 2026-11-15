@@ -48,6 +48,7 @@ pub(crate) const MAX_RETRY_DELAY_SECONDS: u64 = 86_400;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields, rename_all = "camelCase")]
 pub struct RetryTimings {
+    pub infinite_retries: bool,
     pub action_delays_seconds: Vec<u64>,
     pub chatgpt_access_delays_seconds: Vec<u64>,
     pub goal_recovery_delays_seconds: Vec<u64>,
@@ -61,6 +62,7 @@ pub struct RetryTimings {
 impl Default for RetryTimings {
     fn default() -> Self {
         Self {
+            infinite_retries: false,
             action_delays_seconds: vec![30, 60, 120, 240, 480],
             chatgpt_access_delays_seconds: vec![180, 300, 600, 1200, 1800, 3600],
             goal_recovery_delays_seconds: vec![60, 120, 240],
@@ -74,6 +76,13 @@ impl Default for RetryTimings {
 }
 
 impl RetryTimings {
+    pub(crate) fn delay_at(&self, schedule: &[u64], attempt: u32) -> Option<u64> {
+        schedule.get(attempt as usize).copied().or_else(|| {
+            self.infinite_retries
+                .then(|| schedule.last().copied())
+                .flatten()
+        })
+    }
     fn validate(&self) -> Result<(), String> {
         for (key, delays) in [
             ("actionDelaysSeconds", &self.action_delays_seconds),
@@ -130,6 +139,24 @@ impl RetryTimings {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BrowserSimplicity {
+    Off,
+    Simplified,
+    Bones,
+}
+
+impl BrowserSimplicity {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Simplified => "simplified",
+            Self::Bones => "bones",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields, rename_all = "camelCase")]
 pub struct AgentAutomationConfig {
@@ -137,6 +164,7 @@ pub struct AgentAutomationConfig {
     pub descriptor_path: String,
     pub connector_name: String,
     pub max_queued_actions: usize,
+    pub browser_action_lanes: usize,
     pub auto_approve_tool_calls: bool,
     pub automatic_retries: bool,
     pub new_conversation_on_load_rate_limit: bool,
@@ -145,6 +173,11 @@ pub struct AgentAutomationConfig {
     #[serde(deserialize_with = "deserialize_request_block_list")]
     pub request_block_list: Vec<String>,
     pub request_blocking_enabled: bool,
+    pub minimal_ui: bool,
+    /// None retains the older minimalUi boolean's exact behavior.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub browser_simplicity: Option<BrowserSimplicity>,
+    pub recovery_enhancements: bool,
 }
 
 impl Default for AgentAutomationConfig {
@@ -154,6 +187,7 @@ impl Default for AgentAutomationConfig {
             descriptor_path: DEFAULT_AUTOMATION_DESCRIPTOR_PATH.into(),
             connector_name: DEFAULT_AUTOMATION_CONNECTOR_NAME.into(),
             max_queued_actions: DEFAULT_AUTOMATION_MAX_QUEUED_ACTIONS,
+            browser_action_lanes: 1,
             auto_approve_tool_calls: true,
             automatic_retries: true,
             new_conversation_on_load_rate_limit: false,
@@ -167,11 +201,22 @@ impl Default for AgentAutomationConfig {
                 r"^https?://(www\.)?chatgpt\.com/backend-api/.*/sidebar".into(),
             ],
             request_blocking_enabled: false,
+            minimal_ui: false,
+            browser_simplicity: None,
+            recovery_enhancements: false,
         }
     }
 }
 
 impl AgentAutomationConfig {
+    pub fn effective_browser_simplicity(&self) -> BrowserSimplicity {
+        self.browser_simplicity.unwrap_or(if self.minimal_ui {
+            BrowserSimplicity::Simplified
+        } else {
+            BrowserSimplicity::Off
+        })
+    }
+
     pub(crate) fn effective_request_block_list(&self) -> &[String] {
         if self.request_blocking_enabled {
             &self.request_block_list
@@ -182,6 +227,9 @@ impl AgentAutomationConfig {
 
     fn validate(&self) -> Result<(), String> {
         self.retry_timings.validate()?;
+        if !(1..=4).contains(&self.browser_action_lanes) {
+            return Err("agentChat.automation.browserActionLanes must be between 1 and 4".into());
+        }
         if self.request_block_list.len() > 128 {
             return Err(
                 "agentChat.automation.requestBlockList accepts at most 128 patterns".into(),
@@ -298,6 +346,7 @@ pub struct MarkdownChatConfig {
     pub extras: ExtrasConfig,
     pub notifications: Option<NotificationsConfig>,
     pub automation: AgentAutomationConfig,
+    pub features: ChatFeatures,
 }
 
 impl Default for MarkdownChatConfig {
@@ -315,6 +364,37 @@ impl Default for MarkdownChatConfig {
             extras: Default::default(),
             notifications: None,
             automation: AgentAutomationConfig::default(),
+            features: ChatFeatures::default(),
+        }
+    }
+}
+
+pub const DEFAULT_MAX_ACTIVE_WORKERS: usize = 4;
+pub const MAX_ACTIVE_WORKERS_LIMIT: usize = 32;
+
+/// Feature gates stay opt-in. Delegation needs either this global switch or a
+/// per-team grant, and active workers are capped per project.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields, rename_all = "camelCase")]
+pub struct ChatFeatures {
+    pub agent_teams: bool,
+    pub default_delegation: bool,
+    pub max_active_workers: usize,
+    pub external_agent_control: bool,
+    pub auto_mode: bool,
+    pub agent_folders: bool,
+    pub conversation_recovery: bool,
+}
+impl Default for ChatFeatures {
+    fn default() -> Self {
+        Self {
+            agent_teams: false,
+            default_delegation: false,
+            max_active_workers: DEFAULT_MAX_ACTIVE_WORKERS,
+            external_agent_control: false,
+            auto_mode: false,
+            agent_folders: false,
+            conversation_recovery: false,
         }
     }
 }
@@ -448,6 +528,11 @@ impl MarkdownChatConfig {
             notifications.validate()?;
         }
         self.automation.validate()?;
+        if !(1..=MAX_ACTIVE_WORKERS_LIMIT).contains(&self.features.max_active_workers) {
+            return Err(format!(
+                "agentChat.features.maxActiveWorkers must be between 1 and {MAX_ACTIVE_WORKERS_LIMIT}"
+            ));
+        }
         Ok(())
     }
 }
@@ -689,6 +774,122 @@ pub(crate) async fn history_call(
 mod tests {
     use super::*;
     #[test]
+    fn browser_simplicity_levels_preserve_legacy_choices_and_validate_values() {
+        for (value, expected) in [
+            (serde_json::json!({}), BrowserSimplicity::Off),
+            (
+                serde_json::json!({"minimalUi":false}),
+                BrowserSimplicity::Off,
+            ),
+            (
+                serde_json::json!({"minimalUi":true}),
+                BrowserSimplicity::Simplified,
+            ),
+            (
+                serde_json::json!({"minimalUi":true,"browserSimplicity":"off"}),
+                BrowserSimplicity::Off,
+            ),
+            (
+                serde_json::json!({"minimalUi":false,"browserSimplicity":"bones"}),
+                BrowserSimplicity::Bones,
+            ),
+            (
+                serde_json::json!({"browserSimplicity":"simplified"}),
+                BrowserSimplicity::Simplified,
+            ),
+        ] {
+            let config: AgentAutomationConfig = serde_json::from_value(value).unwrap();
+            assert_eq!(config.effective_browser_simplicity(), expected);
+            let restored: AgentAutomationConfig =
+                serde_json::from_value(serde_json::to_value(config).unwrap()).unwrap();
+            assert_eq!(restored.effective_browser_simplicity(), expected);
+        }
+        for invalid in [
+            serde_json::json!(true),
+            serde_json::json!("fast"),
+            serde_json::json!(3),
+            serde_json::json!({}),
+        ] {
+            assert!(
+                serde_json::from_value::<AgentAutomationConfig>(
+                    serde_json::json!({"browserSimplicity":invalid})
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn added_features_are_opt_in_for_new_and_partial_configurations() {
+        for value in [
+            serde_json::json!({}),
+            serde_json::json!({"features":{},"automation":{"retryTimings":{}}}),
+        ] {
+            let config: MarkdownChatConfig = serde_json::from_value(value).unwrap();
+            assert_eq!(config.features, ChatFeatures::default());
+            assert!(!config.features.default_delegation);
+            assert_eq!(config.features.max_active_workers, 4);
+            assert!(
+                serde_json::to_value(&config.features)
+                    .unwrap()
+                    .as_object()
+                    .unwrap()
+                    .iter()
+                    .filter(|(key, _)| key.as_str() != "maxActiveWorkers")
+                    .all(|(_, value)| value == false)
+            );
+            assert_eq!(config.automation.browser_action_lanes, 1);
+            assert_eq!(
+                config
+                    .automation
+                    .retry_timings
+                    .conversation_load_interval_seconds,
+                180
+            );
+            assert_eq!(
+                config.automation.effective_browser_simplicity(),
+                BrowserSimplicity::Off
+            );
+            assert!(!config.automation.minimal_ui);
+            assert!(!config.automation.recovery_enhancements);
+            assert!(!config.automation.retry_timings.infinite_retries);
+            assert!(!config.automation.request_blocking_enabled);
+        }
+        let mut config: MarkdownChatConfig = serde_json::from_value(serde_json::json!({
+            "features":{"agentTeams":true},"automation":{"minimalUi":true}
+        }))
+        .unwrap();
+        assert!(config.features.agent_teams && config.automation.minimal_ui);
+        assert!(!config.features.auto_mode && !config.features.conversation_recovery);
+        config.features.agent_teams = false;
+        assert!(
+            !serde_json::from_value::<MarkdownChatConfig>(serde_json::to_value(config).unwrap())
+                .unwrap()
+                .features
+                .agent_teams
+        );
+        let enabled: MarkdownChatConfig = serde_json::from_value(
+            serde_json::json!({"features":{"agentTeams":true,"defaultDelegation":true}}),
+        )
+        .unwrap();
+        assert!(enabled.features.default_delegation);
+        let saved = serde_json::to_value(enabled).unwrap();
+        assert_eq!(saved["features"]["defaultDelegation"], true);
+        assert!(
+            serde_json::from_value::<MarkdownChatConfig>(saved)
+                .unwrap()
+                .features
+                .default_delegation
+        );
+        for (workers, valid) in [(0, false), (1, true), (4, true), (32, true), (33, false)] {
+            let config: MarkdownChatConfig = serde_json::from_value(
+                serde_json::json!({"features":{"maxActiveWorkers":workers}}),
+            )
+            .unwrap();
+            assert_eq!(config.validate().is_ok(), valid, "{workers} workers");
+        }
+    }
+    #[test]
     fn retry_timings_default_and_partial_configuration() {
         let defaults = AgentAutomationConfig::default();
         let omitted: AgentAutomationConfig = serde_json::from_str("{}").unwrap();
@@ -838,6 +1039,16 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn browser_action_lanes_default_to_one_and_are_bounded() {
+        assert_eq!(AgentAutomationConfig::default().browser_action_lanes, 1);
+        for lanes in [0, 1, 2, 4, 5] {
+            let config: AgentAutomationConfig =
+                serde_json::from_value(serde_json::json!({"browserActionLanes":lanes})).unwrap();
+            assert_eq!(config.validate().is_ok(), (1..=4).contains(&lanes));
+        }
     }
 
     #[test]

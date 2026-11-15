@@ -341,6 +341,23 @@ impl ConversationContinuationStore {
         Ok(token)
     }
 
+    /// The authenticated local owner can recover a task whose browser page is
+    /// inaccessible. Resolve the actual physical owner rather than cloning it.
+    pub(crate) fn issue_recovery_token(
+        &self,
+        task: &ConversationIdentity,
+        workspace: &Path,
+    ) -> Result<String, String> {
+        let snapshot = self.owner_snapshot(task)?;
+        if snapshot.task.stable_key() != task.stable_key() {
+            return Err("Recovery task identity changed".into());
+        }
+        let owner =
+            ConversationIdentity::from_stable_keys(snapshot.owner_key.clone(), snapshot.owner_key)
+                .ok_or("The current task owner is invalid")?;
+        self.issue_token(&owner, &snapshot.task, workspace)
+    }
+
     #[cfg(test)]
     pub(crate) fn claim<F>(
         &self,

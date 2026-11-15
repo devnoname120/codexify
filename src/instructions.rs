@@ -25,13 +25,15 @@ pub const COMMAND_REJECTION_INSTRUCTIONS: &str = concat!(
 
 pub const TURN_HANDOFF_INSTRUCTIONS: &str = concat!(
     "## Turn handoffs\n\n",
+    "Before claiming that access has become read-only, check the current assignment and the tools actually available in this turn. Elapsed time, a previous audit-only report, a read tool result, or a partial tool search does not establish a permission change. When the current assignment authorizes edits and execution and those tools are available, continue using them. If a tool is unavailable or denies an operation, report its exact name and error rather than assuming every tool is read-only. Respect explicit stops, read-only assignments, and permission or policy denials; do not bypass them.\n\n",
     "These cases authorize finishing the turn instead of calling chat_await, including when Markdown chat is enabled. When only read-only tools are available, give the summary as a normal final answer even though Markdown chat normally requires chat_write.\n\n",
     "If at some point you only have access to read-only tools then summarize what you did and the next steps and then finish the turn with this summary as the answer. You should not mark the goal as blocked/stopped/paused when this happens.\n\n",
-    "If at some point you notice that there are changes done in parallel in your workspace, it usually means that another agent is working in parallel on the same project and conflicting with you. So in this case check the most recent CHAT.md messages to see if the other agent also reported it and if not then you should use `chat_write` to inform the other agent that you will finish your turn to avoid conflicts but this other agent should continue, and then after you wrote that you should finish your turn."
+    "Concurrent workspace changes are expected during team work and never authorize ending the turn or abandoning the goal. Read the changed region before editing, preserve other workers' changes, and stay inside your owned scope. If edits actually overlap, use agent_status and agent_message to resolve ownership and continue independent work while waiting. Do not stop merely because another worker made progress or the worktree is dirty."
 );
 
 pub const AGENT_GOAL_INSTRUCTIONS: &str = concat!(
     "## Agent-chat goal control\n\n",
+    "- Before a substantial authorized implementation task, read `goal_read`. If no active objective covers the request, persist the user's objective with `goal_set` so automatic continuation can resume it after an interrupted turn. Do not create goals for greetings or quick questions, replace an unrelated active goal, or resume a paused/stopped goal without authorization.\n",
     "- Use `goal_set` to create or update a goal; it activates the goal automatically. Call `goal_read` first and pass its revision as expectedRevision, or 0 when no goal exists. An active update retains its elapsed time and turn count.\n",
     "- Use `goal_resume` to activate an existing paused or blocked goal without changing its text or progress. Pass the exact revision returned by `goal_read`. A completed goal requires `goal_set` for a new revision.\n",
     "- For either mutation, choose a fresh requestId for each operation and reuse it only when retrying the identical arguments. If the revision changed, read the current goal and reassess the update; do not overwrite a concurrent user edit blindly."
@@ -64,7 +66,13 @@ pub const AGENT_BRIEF: &str = concat!(
     "\n## Planning\n\n",
     "- Skip update_plan for straightforward tasks, roughly the easiest quarter of them.\n",
     "- Do not make single-step plans.\n",
-    "- After finishing a step, update the plan before starting the next one.\n",
+    "- Update the plan at meaningful milestones or when scope changes; keep planning calls out of the edit/test loop.\n",
+    "\n## Execution and tool speed\n\n",
+    "- A request to fix, build, improve, or investigate authorizes the concrete work. Continue until the requested result is implemented and verified, or an exact blocker requires user input. A plan, audit, progress report, or elapsed hour is not completion.\n",
+    "- Batch independent searches and file reads in the same tool round. Narrow searches to relevant paths and read only the needed windows. Reuse facts and instructions already in context instead of repeatedly loading the brief, tree, status, or unchanged files.\n",
+    "- Each working iteration should produce a concrete change, useful diagnostic evidence, or a relevant verification result. After the same failure twice, change the approach; do not loop on identical calls, acknowledgements, or speculative status checks.\n",
+    "- Keep implementing your own independent work while agents run. Give workers concrete deliverables, separate scopes and acceptance checks. Check their progress after dispatch and at milestones, verify their results, then integrate or assign a specific follow-up. Avoid coordination-only turns and do not message merely to acknowledge a report.\n",
+    "- Poll a running command using its existing session_id with a suitable wait instead of starting it again. Run the relevant tests after related edits, then move on when they pass; repeat only after a new change or unresolved failure.\n",
     "\n## Working memory\n\n",
     "- Your conversation window is smaller than the task. Assume that anything only said in chat will be gone by the next conversation, and that you will not be able to tell it is missing.\n",
     "- Call recall when you are resuming work, when a conversation starts mid-task, or when you are about to ask the user something they may already have answered.\n",
@@ -244,7 +252,7 @@ mod tests {
             ] {
                 assert!(!brief.contains("When only read-only tools are available"));
                 assert!(!brief.contains("only have access to read-only tools"));
-                assert!(brief.contains("check the most recent CHAT.md messages"));
+                assert!(brief.contains("Concurrent workspace changes are expected"));
             }
         }
         config.experimental.force_read_only_tool_annotations = false;
@@ -271,7 +279,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn turn_handoffs_override_conflicting_rules_in_initial_and_project_briefs() {
+    fn turn_handoffs_preserve_work_during_concurrent_edits() {
         let root = tempfile::tempdir().unwrap();
         let mut config = crate::config::default_config(root.path().to_path_buf());
         for _legacy_mode in [false, true] {
@@ -283,7 +291,9 @@ mod tests {
                 ] {
                     assert!(brief.contains(TURN_HANDOFF_INSTRUCTIONS));
                     assert!(brief.contains("blocked/stopped/paused"));
-                    assert!(brief.contains("check the most recent CHAT.md messages"));
+                    assert!(brief.contains("Concurrent workspace changes are expected"));
+                    assert!(brief.contains("continue independent work while waiting"));
+                    assert!(!brief.contains("finish your turn to avoid conflicts"));
                     assert!(brief.contains("instead of calling chat_await"));
                     assert!(!brief.contains("STOP and ask the user how to proceed"));
                     assert!(
@@ -293,6 +303,14 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn execution_guidance_requires_progress_without_busy_coordination() {
+        assert!(AGENT_BRIEF.contains("Batch independent searches and file reads"));
+        assert!(AGENT_BRIEF.contains("Keep implementing your own independent work"));
+        assert!(AGENT_BRIEF.contains("do not message merely to acknowledge a report"));
+        assert!(AGENT_BRIEF.contains("elapsed hour is not completion"));
     }
 
     #[test]

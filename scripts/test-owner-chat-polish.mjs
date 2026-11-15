@@ -11,7 +11,7 @@ const now=Date.parse('2026-10-15T12:00:00+02:00');
 const day=24*60*60*1000;
 
 async function fixture(browser, goalMarkdown='Goal completed: Review and analyze this PR', goalTimestamp=now-30000, latest=null, browserOptions={}) {
- const page=await browser.newPage({viewport:{width:1280,height:960},timezoneId:'Europe/Zurich'});
+ const page=await browser.newPage({viewport:{width:1280,height:960},timezoneId:'Europe/Zurich',locale:'en-US'});
  await page.clock.setFixedTime(new Date(now));page.setDefaultTimeout(6000);
  await page.addInitScript(()=>{
   window.testHidden=false;

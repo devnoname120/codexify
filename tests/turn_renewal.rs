@@ -18,6 +18,7 @@ struct Executor {
     sent: Mutex<Vec<AutomationExecution>>,
     fail: AtomicBool,
     ambiguous: AtomicBool,
+    probe_fail: AtomicBool,
     snapshot_only: AtomicBool,
     verified_only: AtomicBool,
     actual_selection: Mutex<Option<CompanionSelection>>,
@@ -26,6 +27,9 @@ struct Executor {
 #[async_trait]
 impl AutomationExecutor for Executor {
     async fn turn_handoff_complete(&self, _: &str, _: &str, _: &str) -> Result<bool, String> {
+        if self.probe_fail.load(Ordering::SeqCst) {
+            return Err("Observation failed".into());
+        }
         Ok(self.complete.load(Ordering::SeqCst))
     }
     async fn execute(
@@ -107,9 +111,19 @@ async fn fixture(enabled: bool) -> Fixture {
     config.memory.dir = Some(root.path().join("state").display().to_string());
     config.markdown_chat.enabled = true;
     config.markdown_chat.automation.enabled = true;
+    config.markdown_chat.automation.recovery_enhancements = true;
+    config
+        .markdown_chat
+        .automation
+        .retry_timings
+        .infinite_retries = false;
     config.markdown_chat.automation.connector_name = "Codexify".into();
     config.markdown_chat.turn_renewal.enabled = enabled;
-    let task = ConversationIdentity::from_openai_session("renewal-test").unwrap();
+    let task = ConversationIdentity::from_openai_session(&format!(
+        "renewal-test-{}",
+        root.path().file_name().unwrap().to_string_lossy()
+    ))
+    .unwrap();
     let chat = MarkdownChatStore::default()
         .chat(&config, Some(&task), &SessionState::new())
         .unwrap();
@@ -184,6 +198,310 @@ async fn fixture(enabled: bool) -> Fixture {
     }
 }
 const DUE: u64 = 1000 + 55 * 60_000;
+#[tokio::test]
+async fn missing_handoff_report_cannot_hold_an_idle_active_goal_forever() {
+    for newer_goal in [false, true] {
+        let f = fixture(true).await;
+        let goal = f
+            .store
+            .set_goal(&f.task, "Continue the real work", 1000)
+            .unwrap();
+        f.store.run_goal(&f.task, goal.revision, 1000).unwrap();
+        let pair = f.store.load(&f.task).unwrap().pairing.generation;
+        f.store
+            .queue_action(
+                &f.task,
+                "goal-before-handoff",
+                AutomationActionKind::OfflineGoal,
+                pair,
+                Some(goal.revision),
+                2000,
+            )
+            .unwrap();
+        f.store
+            .update_action_status(
+                &f.task,
+                "goal-before-handoff",
+                AutomationActionStatus::Ambiguous,
+                None,
+                None,
+                3000,
+            )
+            .unwrap();
+        f.store
+            .update_action_status(
+                &f.task,
+                "goal-before-handoff",
+                AutomationActionStatus::Idle,
+                None,
+                None,
+                3001,
+            )
+            .unwrap();
+        f.store.turn_renewal_notice(&f.task, DUE).unwrap();
+        if newer_goal {
+            // Auto mode preserves an accepted older action while atomically
+            // installing a newer active owner goal. Model that durable fixture.
+            let mut state = f.store.load(&f.task).unwrap();
+            let updated = state.goal.as_mut().unwrap();
+            updated.revision += 1;
+            updated.markdown = "Updated owner objective".into();
+            updated.updated_at_ms = DUE;
+            std::fs::write(
+                f.store
+                    .task_directory(&f.task)
+                    .unwrap()
+                    .join("automation.json"),
+                serde_json::to_vec(&state).unwrap(),
+            )
+            .unwrap();
+        }
+        f.supervisor.scan_once(DUE + 10 * 60_000 - 1).await.unwrap();
+        assert!(
+            f.store
+                .load(&f.task)
+                .unwrap()
+                .turn_renewal
+                .handoff
+                .is_some()
+        );
+        f.supervisor.scan_once(DUE + 10 * 60_000).await.unwrap();
+        let recovered = f.store.load(&f.task).unwrap();
+        assert!(
+            recovered.turn_renewal.handoff.is_none(),
+            "a verified incomplete report must yield to a distinct goal continuation after the inactivity deadline"
+        );
+        assert_eq!(recovered.retry_mode(), Some("continue_goal"));
+        assert_eq!(
+            recovered.action.send_accepted,
+            Some(true),
+            "accepted prior messages are never relabeled unsent"
+        );
+        assert_eq!(recovered.goal.as_ref().unwrap().status, GoalStatus::Active);
+        assert_eq!(
+            recovered.action.goal_revision,
+            Some(if newer_goal { 2 } else { 1 })
+        );
+        let due = recovered.automatic_retry_at_ms().unwrap();
+        f.supervisor.scan_once(due + 1).await.unwrap();
+        assert_eq!(
+            f.supervisor.next_queued_kind().await,
+            Some(AutomationActionKind::OfflineGoal)
+        );
+    }
+}
+
+#[tokio::test]
+async fn missing_report_after_accepted_renewal_continues_goal_without_replaying_renewal() {
+    for newer_goal in [false, true] {
+        let f = fixture(true).await;
+        let goal = f
+            .store
+            .set_goal(&f.task, "Continue verified development", 1000)
+            .unwrap();
+        f.store.run_goal(&f.task, goal.revision, 1000).unwrap();
+        let pair = f.store.load(&f.task).unwrap().pairing.generation;
+        f.store
+            .queue_action(
+                &f.task,
+                "accepted-renewal",
+                AutomationActionKind::TurnRenewal,
+                pair,
+                None,
+                1000,
+            )
+            .unwrap();
+        f.store
+            .record_turn_send(
+                &f.task,
+                TurnSend {
+                    action_id: "accepted-renewal".into(),
+                    at_ms: 1000,
+                    model: Some("gpt-6-astra".into()),
+                    effort: Some("max".into()),
+                    pairing_generation: pair,
+                    owner_generation: 0,
+                },
+            )
+            .unwrap();
+        f.store
+            .update_action_status(
+                &f.task,
+                "accepted-renewal",
+                AutomationActionStatus::Ambiguous,
+                None,
+                None,
+                3000,
+            )
+            .unwrap();
+        f.store
+            .update_action_status(
+                &f.task,
+                "accepted-renewal",
+                AutomationActionStatus::Idle,
+                None,
+                None,
+                3001,
+            )
+            .unwrap();
+        if newer_goal {
+            let next = f
+                .store
+                .set_goal(&f.task, "New explicit owner objective", 4000)
+                .unwrap();
+            f.store.run_goal(&f.task, next.revision, 4000).unwrap();
+        }
+        f.store.turn_renewal_notice(&f.task, DUE).unwrap();
+        f.supervisor.scan_once(DUE + 10 * 60_000).await.unwrap();
+        let recovered = f.store.load(&f.task).unwrap();
+        assert!(
+            recovered.turn_renewal.handoff.is_none(),
+            "a renewal's missing handoff must not hold the active goal forever"
+        );
+        assert_eq!(recovered.action.id.as_deref(), Some("accepted-renewal"));
+        assert_eq!(
+            recovered.action.kind,
+            Some(AutomationActionKind::TurnRenewal)
+        );
+        assert_eq!(recovered.action.send_accepted, Some(true));
+        assert_eq!(recovered.retry_mode(), Some("continue_goal"));
+        assert_eq!(
+            recovered.action.goal_revision,
+            Some(if newer_goal { 2 } else { 1 })
+        );
+        let due = recovered.automatic_retry_at_ms().unwrap();
+        f.supervisor.scan_once(due + 1).await.unwrap();
+        assert_eq!(
+            f.supervisor.next_queued_kind().await,
+            Some(AutomationActionKind::OfflineGoal)
+        );
+        assert_ne!(
+            f.store.load(&f.task).unwrap().action.id.as_deref(),
+            Some("accepted-renewal")
+        );
+    }
+}
+
+#[tokio::test]
+async fn stalled_handoff_recovery_respects_pauses_activity_commands_and_failed_observations() {
+    for kind in [
+        AutomationActionKind::OfflineGoal,
+        AutomationActionKind::TurnRenewal,
+    ] {
+        for guard in ["paused", "stop", "activity", "resident", "probe"] {
+            let f = fixture(true).await;
+            let goal = f.store.set_goal(&f.task, "Continue work", 1000).unwrap();
+            f.store.run_goal(&f.task, goal.revision, 1000).unwrap();
+            let pair = f.store.load(&f.task).unwrap().pairing.generation;
+            f.store
+                .queue_action(
+                    &f.task,
+                    "goal",
+                    kind,
+                    pair,
+                    (kind == AutomationActionKind::OfflineGoal).then_some(goal.revision),
+                    2000,
+                )
+                .unwrap();
+            if kind == AutomationActionKind::TurnRenewal {
+                f.store
+                    .record_turn_send(
+                        &f.task,
+                        TurnSend {
+                            action_id: "goal".into(),
+                            at_ms: 1000,
+                            model: Some("gpt-6-astra".into()),
+                            effort: Some("max".into()),
+                            pairing_generation: pair,
+                            owner_generation: 0,
+                        },
+                    )
+                    .unwrap();
+            }
+            f.store
+                .update_action_status(
+                    &f.task,
+                    "goal",
+                    AutomationActionStatus::Ambiguous,
+                    None,
+                    None,
+                    3000,
+                )
+                .unwrap();
+            f.store
+                .update_action_status(
+                    &f.task,
+                    "goal",
+                    AutomationActionStatus::Idle,
+                    None,
+                    None,
+                    3001,
+                )
+                .unwrap();
+            f.store.turn_renewal_notice(&f.task, DUE).unwrap();
+            let mut command = None;
+            let exec_store = codexify::exec_sessions::ConversationExecSessionStore::new();
+            let session = exec_store.session_for(&f.task, &SessionState::new());
+            match guard {
+                "paused" => {
+                    f.store.stop_goal(&f.task, goal.revision, DUE + 1).unwrap();
+                }
+                "stop" => {
+                    f.chat.request_agent_stop("test-stop".into()).await.unwrap();
+                }
+                "activity" => {
+                    f.chat.record_agent_call(DUE + 9 * 60_000).await.unwrap();
+                }
+                "resident" => {
+                    let (shell, cmd) = if cfg!(windows) {
+                        ("powershell", "Start-Sleep -Seconds 60")
+                    } else {
+                        ("sh", "sleep 60")
+                    };
+                    command = Some(
+                        codexify::exec_sessions::start_exec_session(
+                            &session,
+                            &f.config,
+                            cmd,
+                            &f._root.path().join("project"),
+                            Some(shell),
+                        )
+                        .unwrap(),
+                    );
+                }
+                "probe" => {
+                    f.executor.probe_fail.store(true, Ordering::SeqCst);
+                }
+                _ => unreachable!(),
+            }
+            f.supervisor.scan_once(DUE + 10 * 60_000).await.unwrap();
+            if !["stop", "paused"].contains(&guard) {
+                assert!(
+                    f.store
+                        .load(&f.task)
+                        .unwrap()
+                        .turn_renewal
+                        .handoff
+                        .is_some(),
+                    "guard {guard}"
+                );
+            }
+            assert_eq!(f.supervisor.queued_count().await, 0, "guard {guard}");
+            if guard == "resident" {
+                f.store.clear_turn_renewal(&f.task).unwrap();
+                f.supervisor.scan_once(DUE + 20 * 60_000).await.unwrap();
+                assert_eq!(
+                    f.supervisor.queued_count().await,
+                    0,
+                    "a long resident command also protects ordinary goal continuation"
+                );
+            }
+            if let Some(command) = command {
+                codexify::exec_sessions::kill_exec_session(&command);
+            }
+        }
+    }
+}
 fn wall_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -594,6 +912,66 @@ async fn active_goal_and_queue_survive_handoff() {
     assert_eq!(now.goal.as_ref().unwrap().revision, goal.revision);
     assert_eq!(now.goal.as_ref().unwrap().status, GoalStatus::Active);
 }
+
+#[tokio::test]
+async fn new_conversation_owner_drops_old_renewal_but_keeps_goal_and_queued_chat() {
+    // Both an unexpired send and an already-requested renewal belong to the
+    // previous physical conversation, even though the task itself continues.
+    // This remains true if the old conversation unlinked its browser pairing.
+    for (handoff_pending, unlinked) in [(false, false), (true, false), (false, true), (true, true)]
+    {
+        let f = fixture(true).await;
+        let goal = f
+            .store
+            .set_goal(&f.task, "Continue after handoff", 1_000)
+            .unwrap();
+        f.store.run_goal(&f.task, goal.revision, 1_000).unwrap();
+        f.chat
+            .queue_user_message(
+                "pending-after-handoff".into(),
+                "Keep this request private until the new owner is ready".into(),
+                vec![],
+            )
+            .await
+            .unwrap();
+        if handoff_pending {
+            assert!(f.store.turn_renewal_notice(&f.task, DUE).unwrap().is_some());
+        }
+        assert!(!f.store.load(&f.task).unwrap().turn_renewal.is_empty());
+        if unlinked {
+            f.store.unlink_pairing(&f.task, 2_000).unwrap();
+        }
+
+        f.supervisor
+            .register_task(AutomationTaskHandle::new(
+                f.task.clone(),
+                1,
+                f.store.clone(),
+                f.chat.clone(),
+            ))
+            .await
+            .unwrap();
+
+        let state = f.store.load(&f.task).unwrap();
+        assert!(
+            state.turn_renewal.is_empty(),
+            "stale owner renewal remained"
+        );
+        assert_eq!(state.pairing.verified_owner_generation, None);
+        assert_eq!(state.action.status, AutomationActionStatus::Unverified);
+        assert_eq!(state.goal.as_ref().unwrap().status, GoalStatus::Active);
+        assert_eq!(state.goal.as_ref().unwrap().revision, goal.revision);
+        assert_eq!(f.chat.queued_messages().await.unwrap().len(), 1);
+        assert!(
+            f.store
+                .turn_renewal_notice(&f.task, DUE + 1_000_000)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(f.supervisor.queued_count().await, 0);
+    }
+}
+
 #[tokio::test]
 async fn feature_disabled_never_nudges_and_stop_prevents_continuation() {
     let f = fixture(false).await;
@@ -978,4 +1356,266 @@ async fn stalled_goal_renewal_stops_after_three_retries_across_restart() {
         .unwrap();
     assert_eq!(f.supervisor.queued_count().await, 0);
     assert_eq!(f.executor.sent.lock().unwrap().len(), 4);
+}
+
+#[tokio::test]
+async fn combined_message_goal_handoff_recovers_without_replaying_messages() {
+    for newer_goal in [false, true] {
+        let f = fixture(true).await;
+        let goal = f
+            .store
+            .set_goal(&f.task, "Continue the real work", 1000)
+            .unwrap();
+        f.store.run_goal(&f.task, goal.revision, 1000).unwrap();
+        let pair = f.store.load(&f.task).unwrap().pairing.generation;
+        f.store
+            .queue_action(
+                &f.task,
+                "goal-before-handoff",
+                AutomationActionKind::OfflineCombined,
+                pair,
+                Some(goal.revision),
+                2000,
+            )
+            .unwrap();
+        f.store
+            .update_action_status(
+                &f.task,
+                "goal-before-handoff",
+                AutomationActionStatus::Ambiguous,
+                None,
+                None,
+                3000,
+            )
+            .unwrap();
+        f.store
+            .update_action_status(
+                &f.task,
+                "goal-before-handoff",
+                AutomationActionStatus::Idle,
+                None,
+                None,
+                3001,
+            )
+            .unwrap();
+        let mut accepted = f.store.load(&f.task).unwrap();
+        accepted.action.messages_fenced = true;
+        std::fs::write(
+            f.store
+                .task_directory(&f.task)
+                .unwrap()
+                .join("automation.json"),
+            serde_json::to_vec(&accepted).unwrap(),
+        )
+        .unwrap();
+        f.store.turn_renewal_notice(&f.task, DUE).unwrap();
+        if newer_goal {
+            // Auto mode preserves an accepted older action while atomically
+            // installing a newer active owner goal. Model that durable fixture.
+            let mut state = f.store.load(&f.task).unwrap();
+            let updated = state.goal.as_mut().unwrap();
+            updated.revision += 1;
+            updated.markdown = "Updated owner objective".into();
+            updated.updated_at_ms = DUE;
+            std::fs::write(
+                f.store
+                    .task_directory(&f.task)
+                    .unwrap()
+                    .join("automation.json"),
+                serde_json::to_vec(&state).unwrap(),
+            )
+            .unwrap();
+        }
+        f.supervisor.scan_once(DUE + 10 * 60_000 - 1).await.unwrap();
+        assert!(
+            f.store
+                .load(&f.task)
+                .unwrap()
+                .turn_renewal
+                .handoff
+                .is_some()
+        );
+        f.supervisor.scan_once(DUE + 10 * 60_000).await.unwrap();
+        let recovered = f.store.load(&f.task).unwrap();
+        assert!(
+            recovered.turn_renewal.handoff.is_none(),
+            "a verified incomplete report must yield to a distinct goal continuation after the inactivity deadline"
+        );
+        assert_eq!(recovered.retry_mode(), Some("continue_goal"));
+        assert_eq!(
+            recovered.action.send_accepted,
+            Some(true),
+            "accepted prior messages are never relabeled unsent"
+        );
+        assert_eq!(recovered.goal.as_ref().unwrap().status, GoalStatus::Active);
+        assert_eq!(
+            recovered.action.goal_revision,
+            Some(if newer_goal { 2 } else { 1 })
+        );
+        let due = recovered.automatic_retry_at_ms().unwrap();
+        f.supervisor.scan_once(due + 1).await.unwrap();
+        assert_eq!(
+            f.supervisor.next_queued_kind().await,
+            Some(AutomationActionKind::OfflineGoal)
+        );
+    }
+}
+
+#[tokio::test]
+async fn combined_handoff_without_message_fence_never_replays_unconfirmed_messages() {
+    let f = fixture(true).await;
+    let goal = f.store.set_goal(&f.task, "Continue", 1000).unwrap();
+    f.store.run_goal(&f.task, goal.revision, 1000).unwrap();
+    let pair = f.store.load(&f.task).unwrap().pairing.generation;
+    f.store
+        .queue_action(
+            &f.task,
+            "unfenced-combined",
+            AutomationActionKind::OfflineCombined,
+            pair,
+            Some(goal.revision),
+            2000,
+        )
+        .unwrap();
+    f.store
+        .update_action_status(
+            &f.task,
+            "unfenced-combined",
+            AutomationActionStatus::Ambiguous,
+            None,
+            None,
+            3000,
+        )
+        .unwrap();
+    f.store
+        .update_action_status(
+            &f.task,
+            "unfenced-combined",
+            AutomationActionStatus::Idle,
+            None,
+            None,
+            3001,
+        )
+        .unwrap();
+    f.store.turn_renewal_notice(&f.task, DUE).unwrap();
+    f.supervisor.scan_once(DUE + 10 * 60_000).await.unwrap();
+    let state = f.store.load(&f.task).unwrap();
+    assert!(state.turn_renewal.handoff.is_some());
+    assert_eq!(state.action.id.as_deref(), Some("unfenced-combined"));
+    assert_eq!(state.action.send_accepted, Some(true));
+    assert_eq!(state.retry_mode(), None);
+}
+
+#[tokio::test]
+async fn cleared_native_action_does_not_leave_an_active_goal_behind_a_missing_handoff() {
+    for guard in [
+        "none",
+        "timestamp",
+        "probe",
+        "recent",
+        "paused",
+        "stop",
+        "no_activity",
+    ] {
+        let f = fixture(true).await;
+        let first = f
+            .store
+            .set_goal(&f.task, "Original implementation", 1100)
+            .unwrap();
+        f.store.run_goal(&f.task, first.revision, 1100).unwrap();
+        let pair = f.store.load(&f.task).unwrap().pairing.generation;
+        f.store
+            .queue_action(
+                &f.task,
+                "accepted-native-turn",
+                AutomationActionKind::OfflineGoal,
+                pair,
+                Some(first.revision),
+                1200,
+            )
+            .unwrap();
+        f.store
+            .record_turn_send(
+                &f.task,
+                TurnSend {
+                    action_id: "accepted-native-turn".into(),
+                    at_ms: 1200,
+                    model: Some("gpt-6-astra".into()),
+                    effort: Some("max".into()),
+                    pairing_generation: pair,
+                    owner_generation: 0,
+                },
+            )
+            .unwrap();
+        f.store
+            .update_action_status(
+                &f.task,
+                "accepted-native-turn",
+                AutomationActionStatus::Idle,
+                None,
+                None,
+                1300,
+            )
+            .unwrap();
+        let next = f
+            .store
+            .set_goal(&f.task, "Current owner goal after native progress", 1400)
+            .unwrap();
+        f.store.run_goal(&f.task, next.revision, 1400).unwrap();
+        assert!(f.store.load(&f.task).unwrap().action.id.is_none());
+        if guard == "timestamp" {
+            let mut state = f.store.load(&f.task).unwrap();
+            state.action.updated_at_ms = Some(1450);
+            std::fs::write(
+                f.store
+                    .task_directory(&f.task)
+                    .unwrap()
+                    .join("automation.json"),
+                serde_json::to_vec(&state).unwrap(),
+            )
+            .unwrap();
+        }
+        if guard != "no_activity" {
+            f.chat.record_agent_call(1500).await.unwrap();
+        }
+        let due = DUE + 1200;
+        assert!(f.store.turn_renewal_notice(&f.task, due).unwrap().is_some());
+        match guard {
+            "probe" => {
+                f.executor.probe_fail.store(true, Ordering::SeqCst);
+            }
+            "recent" => {
+                f.chat.record_agent_call(due + 9 * 60_000).await.unwrap();
+            }
+            "paused" => {
+                f.store.stop_goal(&f.task, next.revision, due + 1).unwrap();
+            }
+            "stop" => {
+                f.chat
+                    .request_agent_stop("explicit-stop".into())
+                    .await
+                    .unwrap();
+            }
+            _ => {}
+        }
+        f.supervisor.scan_once(due + 10 * 60_000 - 1).await.unwrap();
+        assert_eq!(f.supervisor.queued_count().await, 0);
+        f.supervisor.scan_once(due + 10 * 60_000).await.unwrap();
+        let after = f.store.load(&f.task).unwrap();
+        if guard == "none" || guard == "timestamp" {
+            assert!(
+                after.turn_renewal.handoff.is_none(),
+                "native progress cleared the old action, not the active goal's right to a distinct continuation"
+            );
+            assert_eq!(
+                f.supervisor.next_queued_kind().await,
+                Some(AutomationActionKind::OfflineGoal)
+            );
+            assert_ne!(after.action.id.as_deref(), Some("accepted-native-turn"));
+            assert_eq!(after.action.send_accepted, Some(false));
+            assert_eq!(after.goal.unwrap().revision, next.revision);
+        } else {
+            assert_eq!(f.supervisor.queued_count().await, 0, "guard {guard}");
+        }
+    }
 }
