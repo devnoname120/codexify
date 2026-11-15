@@ -1,0 +1,138 @@
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Codexify Launcher" Width="900" Height="790" MinWidth="780" MinHeight="700"
+        WindowStartupLocation="CenterScreen" Background="#101419" Foreground="#EDF1F5"
+        FontFamily="Segoe UI" FontSize="14" UseLayoutRounding="True">
+  <Window.Resources>
+    <Style TargetType="Button">
+      <Setter Property="Foreground" Value="#EDF1F5"/>
+      <Setter Property="Background" Value="#252E38"/>
+      <Setter Property="BorderBrush" Value="#3A4653"/>
+      <Setter Property="BorderThickness" Value="1"/>
+      <Setter Property="Padding" Value="17,10"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border x:Name="ButtonBorder" CornerRadius="7" Background="{TemplateBinding Background}"
+                    BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}">
+              <ContentPresenter Margin="{TemplateBinding Padding}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="ButtonBorder" Property="Opacity" Value="0.82"/></Trigger>
+              <Trigger Property="IsEnabled" Value="False"><Setter TargetName="ButtonBorder" Property="Opacity" Value="0.38"/></Trigger>
+              <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="ButtonBorder" Property="BorderBrush" Value="#FFFFFF"/></Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+    <Style TargetType="CheckBox">
+      <Setter Property="Foreground" Value="#CBD3DE"/>
+      <Setter Property="VerticalContentAlignment" Value="Center"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Margin" Value="0,8,24,0"/>
+    </Style>
+    <Style x:Key="Card" TargetType="Border">
+      <Setter Property="Background" Value="#192129"/>
+      <Setter Property="BorderBrush" Value="#2C3743"/>
+      <Setter Property="BorderThickness" Value="1"/>
+      <Setter Property="CornerRadius" Value="10"/>
+      <Setter Property="Padding" Value="18"/>
+    </Style>
+    <Style x:Key="Muted" TargetType="TextBlock"><Setter Property="Foreground" Value="#99A9B9"/></Style>
+  </Window.Resources>
+  <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+    <Grid Margin="30,26,30,22">
+      <Grid.RowDefinitions>
+        <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
+        <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
+        <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
+      </Grid.RowDefinitions>
+      <Grid>
+        <StackPanel Orientation="Horizontal">
+          <Border Width="49" Height="49" Background="#92E3C0" CornerRadius="12" Margin="0,0,15,0">
+            <TextBlock Text="&gt;_" Foreground="#102D26" FontSize="23" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+          </Border>
+          <StackPanel VerticalAlignment="Center">
+            <TextBlock Text="codexify" FontSize="27" FontWeight="SemiBold"/>
+            <TextBlock Text="WINDOWS LAUNCHER" FontSize="10" Foreground="#99A9B9" Margin="1,2,0,0"/>
+          </StackPanel>
+        </StackPanel>
+        <Border HorizontalAlignment="Right" VerticalAlignment="Center" Background="#202A34" CornerRadius="14" Padding="12,6">
+          <TextBlock x:Name="ServiceBadge" Text="Checking service" FontSize="12" Foreground="#BDC9D5"/>
+        </Border>
+      </Grid>
+      <StackPanel Grid.Row="1" Margin="0,21,0,17">
+        <TextBlock x:Name="Headline" Text="Your workspace, ready to go." FontSize="23" FontWeight="SemiBold"/>
+        <TextBlock Text="Start your saved chat, tunnel and ChatGPT session in one place." Style="{StaticResource Muted}" Margin="0,7,0,0"/>
+      </StackPanel>
+      <Grid Grid.Row="2">
+        <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="14"/><ColumnDefinition/><ColumnDefinition Width="14"/><ColumnDefinition/></Grid.ColumnDefinitions>
+        <Border Style="{StaticResource Card}">
+          <StackPanel>
+            <TextBlock Text="LOCAL CHAT" FontSize="11" Foreground="#99A9B9"/>
+            <TextBlock x:Name="ChatState" Text="Checking" FontSize="22" FontWeight="SemiBold" Margin="0,13,0,9"/>
+            <TextBlock x:Name="ChatDetail" Text="Saved conversations" Foreground="#99A9B9" FontSize="12" TextWrapping="Wrap" MinHeight="35"/>
+          </StackPanel>
+        </Border>
+        <Border Grid.Column="2" Style="{StaticResource Card}">
+          <StackPanel>
+            <TextBlock Text="OPENAI TUNNEL" FontSize="11" Foreground="#99A9B9"/>
+            <TextBlock x:Name="TunnelState" Text="Checking" FontSize="22" FontWeight="SemiBold" Margin="0,13,0,9"/>
+            <TextBlock x:Name="TunnelDetail" Text="Existing secure connection" Foreground="#99A9B9" FontSize="12" TextWrapping="Wrap" MinHeight="35"/>
+          </StackPanel>
+        </Border>
+        <Border Grid.Column="4" Style="{StaticResource Card}">
+          <StackPanel>
+            <TextBlock Text="CHATGPT BROWSER" FontSize="11" Foreground="#99A9B9"/>
+            <TextBlock x:Name="BrowserState" Text="Checking" FontSize="22" FontWeight="SemiBold" Margin="0,13,0,9"/>
+            <TextBlock x:Name="BrowserDetail" Text="Saved sign-in and profile" Foreground="#99A9B9" FontSize="12" TextWrapping="Wrap" MinHeight="35"/>
+          </StackPanel>
+        </Border>
+      </Grid>
+      <StackPanel Grid.Row="3" Margin="0,18,0,0">
+        <Grid>
+          <StackPanel Orientation="Horizontal">
+            <Button x:Name="StartButton" Content="Start all" Background="#92E3C0" Foreground="#102D26" BorderBrush="#92E3C0" FontWeight="SemiBold" Margin="0,0,10,0"/>
+            <Button x:Name="OpenButton" Content="Open chat" IsEnabled="False" Margin="0,0,10,0"/>
+            <Button x:Name="StopButton" Content="Stop services"/>
+          </StackPanel>
+          <Button x:Name="RefreshButton" Content="Refresh" HorizontalAlignment="Right"/>
+        </Grid>
+        <ProgressBar x:Name="BusyBar" Height="3" Margin="0,14,0,0" IsIndeterminate="True" Foreground="#92E3C0" Background="#26333B" BorderThickness="0" Visibility="Hidden"/>
+        <TextBlock x:Name="StatusText" Text="Reading your saved setup..." TextWrapping="Wrap" Foreground="#BDC9D5" Margin="0,10,0,0" MinHeight="35"/>
+      </StackPanel>
+      <Border Grid.Row="4" Style="{StaticResource Card}" Padding="17,13" Margin="0,5,0,12">
+        <Grid>
+          <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+          <StackPanel>
+            <TextBlock Text="SAVED SETUP" FontSize="10" Foreground="#99A9B9"/>
+            <TextBlock x:Name="ConfigText" FontSize="12" Margin="0,6,12,0" TextTrimming="CharacterEllipsis"/>
+            <TextBlock x:Name="ProjectText" FontSize="12" Foreground="#99A9B9" Margin="0,4,12,0" TextTrimming="CharacterEllipsis"/>
+          </StackPanel>
+          <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+            <Button x:Name="RevealButton" Content="Browser" Padding="12,8" Margin="0,0,8,0"/>
+            <Button x:Name="LoginButton" Content="Sign in" Padding="12,8"/>
+          </StackPanel>
+        </Grid>
+      </Border>
+      <StackPanel Grid.Row="5">
+        <WrapPanel>
+          <CheckBox x:Name="StartupCheck" Content="Launch at Windows sign-in"/>
+          <CheckBox x:Name="OpenChatCheck" Content="Open chat after startup"/>
+        </WrapPanel>
+        <TextBlock Text="Opening this launcher starts your saved setup automatically." Style="{StaticResource Muted}" FontSize="12" Margin="0,8,0,11"/>
+      </StackPanel>
+      <Expander Grid.Row="6" x:Name="ActivityExpander" Header="Activity" Foreground="#CBD3DE" IsExpanded="True">
+        <TextBox x:Name="ActivityText" Height="75" Margin="0,9,0,0" Background="#0C1015" Foreground="#99A9B9"
+                 BorderBrush="#2C3743" BorderThickness="1" Padding="10,7" FontFamily="Consolas" FontSize="11"
+                 IsReadOnly="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto"/>
+      </Expander>
+      <Grid Grid.Row="7" Margin="0,11,0,0">
+        <TextBlock Text="Closing this window keeps Codexify running." Style="{StaticResource Muted}" FontSize="11"/>
+        <TextBlock x:Name="LastChecked" Text="" Style="{StaticResource Muted}" FontSize="11" HorizontalAlignment="Right"/>
+      </Grid>
+    </Grid>
+  </ScrollViewer>
+</Window>

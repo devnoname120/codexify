@@ -190,6 +190,14 @@ jobs:
         shell: pwsh
         run: ./scripts/test-windows-installer.ps1
 
+      - name: Test graceful browser update guards on Windows PowerShell 5.1
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          ./scripts/test-windows-chrome-profile-exit.ps1
+          ./scripts/test-windows-browser-graceful-update.ps1
+          ./scripts/test-windows-browser-graceful-update.ps1 -ChromeNeverExits
+
       - name: Test service contracts
         run: cargo test --all-targets service
 

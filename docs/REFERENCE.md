@@ -743,6 +743,12 @@ The supervisor also creates its ordinary server child with `CREATE_NO_WINDOW`. T
 prevents the otherwise empty console window without changing the Interactive
 logon principal required for tunnel and network access.
 
+For a read-only Windows autowork snapshot, run
+`./scripts/windows-autowork-status.ps1`. It reports server/browser readiness,
+supervisor count, free disk space, active goals, last tool activity, and retry
+errors. Use `-ChatPrefix` to follow particular conversation IDs. State reads
+allow atomic replacement, so monitoring does not block goal updates.
+
 The supervisor holds an operating-system lock for its lifetime. A second
 `service run` exits before launching another server or opening the shared log.
 The lock is released when the process exits, including after a crash; a leftover

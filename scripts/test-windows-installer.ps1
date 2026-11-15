@@ -2,7 +2,8 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 $ProgressPreference = 'SilentlyContinue'
 
-if (-not $IsWindows) {
+# $IsWindows does not exist in Windows PowerShell 5.1 under StrictMode.
+if ($env:OS -ne 'Windows_NT') {
     throw 'This test requires Windows.'
 }
 
@@ -97,7 +98,7 @@ fn main() {
         _ => std::process::exit(2),
     }
 }
-'@ | Set-Content -LiteralPath $Source -Encoding utf8NoBOM
+'@ | Set-Content -LiteralPath $Source -Encoding utf8
 
     $FakeBinary = Join-Path $Stage 'codexify.exe'
     & rustc $Source -o $FakeBinary
@@ -174,11 +175,13 @@ fn main() {
     $env:CODEXIFY_CONFIG = Join-Path $Root 'missing.json'
     Remove-Item Env:CODEXIFY_SKIP_SERVICE -ErrorAction SilentlyContinue
 
-    $NoConfigOutput = (& (Join-Path $RepositoryRoot 'install.ps1') *>&1 | Out-String)
+    # Windows PowerShell 5.1 wraps formatted output at the host's narrow width,
+    # destroying exact newline assertions unless a wide capture is requested.
+    $NoConfigOutput = (& (Join-Path $RepositoryRoot 'install.ps1') *>&1 | Out-String -Width 4096)
     $Config = Join-Path $Root 'custom-codexify.json'
     @{ multiProject = $true } | ConvertTo-Json | Set-Content -LiteralPath $Config -Encoding ascii
     $env:CODEXIFY_CONFIG = $Config
-    $InvalidConfigOutput = (& (Join-Path $RepositoryRoot 'install.ps1') *>&1 | Out-String)
+    $InvalidConfigOutput = (& (Join-Path $RepositoryRoot 'install.ps1') *>&1 | Out-String -Width 4096)
     $Project = Join-Path $Root 'project'
     New-Item -ItemType Directory -Path $Project | Out-Null
     @{ workDir = $Project } | ConvertTo-Json | Set-Content -LiteralPath $Config -Encoding ascii
