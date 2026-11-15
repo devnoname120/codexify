@@ -606,6 +606,55 @@ impl ChatFile {
         .await
     }
 
+    /// Records a resource result only while its tool call is still latest.
+    #[doc(hidden)]
+    pub async fn record_file_materialization(
+        self: &Arc<Self>,
+        epoch: &str,
+        sequence: u64,
+    ) -> Result<bool, String> {
+        self.update_materialization_check(epoch, sequence, true)
+            .await
+    }
+
+    pub(crate) async fn finish_materialization_check(
+        self: &Arc<Self>,
+        epoch: &str,
+        sequence: u64,
+    ) -> Result<bool, String> {
+        self.update_materialization_check(epoch, sequence, false)
+            .await
+    }
+
+    async fn update_materialization_check(
+        self: &Arc<Self>,
+        epoch: &str,
+        sequence: u64,
+        pending: bool,
+    ) -> Result<bool, String> {
+        let epoch = epoch.to_string();
+        self.run(move |chat| {
+            chat.with_cursor(|cursor, _| {
+                if cursor.tool_call_epoch.as_deref() != Some(epoch.as_str())
+                    || cursor.tool_call_sequence != sequence
+                {
+                    return Ok(false);
+                }
+                let mut next = cursor.clone();
+                if pending {
+                    next.offline_claims
+                        .insert(MATERIALIZATION_PENDING.into(), next.total_tool_calls);
+                } else {
+                    next.offline_claims.remove(MATERIALIZATION_PENDING);
+                }
+                chat.save_cursor(&next)?;
+                *cursor = next;
+                Ok(true)
+            })
+        })
+        .await
+    }
+
     pub(crate) async fn sync_agent_activity(
         self: &Arc<Self>,
         activity: super::super::AgentActivity,
@@ -1283,6 +1332,7 @@ fn resume_agent(chat: &ChatFile, cursor: &mut Cursor) -> Result<(), String> {
         next.agent_stop_requested = false;
         next.last_agent_call_at_ms = None;
         next.agent_presence_until_ms = None;
+        next.offline_claims.remove(MATERIALIZATION_PENDING);
         chat.save_cursor(&next)?;
         *cursor = next;
     }
@@ -1312,6 +1362,7 @@ fn persist_agent_activity(
         next.tool_call_epoch = Some(activity.epoch);
         next.tool_call_sequence = activity.sequence;
         next.agent_presence_until_ms = None;
+        next.offline_claims.remove(MATERIALIZATION_PENDING);
     }
     if next.last_agent_call_at_ms != cursor.last_agent_call_at_ms
         || next.total_tool_calls != cursor.total_tool_calls
@@ -1795,6 +1846,74 @@ mod tests {
         assert_eq!(page.total_tool_calls, 5);
         assert_eq!(page.last_agent_call_at_ms, Some(4000));
         assert_eq!(page.messages[0].tool_call_count, Some(5));
+    }
+
+    #[tokio::test]
+    async fn materialization_hint_tracks_only_the_latest_call_and_survives_restart() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("chat/CHAT.md");
+        let chat = Arc::new(ChatFile::new(path.clone(), true));
+        chat.sync_agent_activity(activity("first", 1, 1000))
+            .await
+            .unwrap();
+        assert!(chat.record_file_materialization("first", 1).await.unwrap());
+        let reopened = Arc::new(ChatFile::new(path, true));
+        assert!(
+            reopened
+                .offline_activity()
+                .await
+                .unwrap()
+                .materialization_pending
+        );
+        reopened
+            .sync_agent_activity(activity("first", 2, 2000))
+            .await
+            .unwrap();
+        assert!(
+            !reopened
+                .offline_activity()
+                .await
+                .unwrap()
+                .materialization_pending
+        );
+        assert!(
+            !reopened
+                .record_file_materialization("first", 1)
+                .await
+                .unwrap()
+        );
+        assert!(
+            reopened
+                .record_file_materialization("first", 2)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !reopened
+                .finish_materialization_check("first", 1)
+                .await
+                .unwrap()
+        );
+        assert!(
+            reopened
+                .offline_activity()
+                .await
+                .unwrap()
+                .materialization_pending
+        );
+        assert!(
+            reopened
+                .finish_materialization_check("first", 2)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !reopened
+                .offline_activity()
+                .await
+                .unwrap()
+                .materialization_pending
+        );
     }
 
     #[tokio::test]

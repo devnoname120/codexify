@@ -2274,7 +2274,17 @@ async fn restore_missing_automation(state: &OwnerState, chats: &[LocatedChat]) {
             && saved.turn_renewal.handoff.is_none()
             && !located.path.with_file_name("message-queue.json").exists()
         {
-            continue;
+            let pending = match state.chats.chat_at_path(located.path.clone(), true) {
+                Ok(chat) => chat
+                    .offline_activity()
+                    .await
+                    .map(|activity| activity.materialization_pending)
+                    .unwrap_or(false),
+                Err(_) => false,
+            };
+            if !pending {
+                continue;
+            }
         }
         match automation_context(state, located).await {
             Ok(_) => tracing::info!(
@@ -2579,7 +2589,7 @@ mod tests {
     struct OwnerNoopExecutor;
 
     const OWNER_COMPANION_TOKEN: &str = "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc";
-    const OWNER_COMPANION_BUILD: &str = "owner-companion-test-v1+protocol.36957a042ed31cae11d0401411999119d39c22af98278a46b25c412b0be765c6";
+    const OWNER_COMPANION_BUILD: &str = "owner-companion-test-v1+protocol.caed87c2a59aa10d656554f5b1e8e74a640e57c3bb5fa9315b6050f279212d92";
 
     #[test]
     fn project_groups_resolve_registered_worktrees_without_merging_same_named_projects() {
@@ -5647,6 +5657,33 @@ mod tests {
                     .contains("Continue this enabled objective")
             );
         }
+    }
+
+    #[tokio::test]
+    async fn materialization_only_chats_are_restored_without_a_goal_or_message_queue() {
+        let root = tempfile::tempdir().unwrap();
+        let state =
+            goal_recovery_state(root.path(), true, Arc::new(GoalRecoveryExecutor::default()));
+        let (task, chat, store) = persisted_recovery_goal(
+            &state,
+            "materialization-only",
+            crate::agent_automation::GoalStatus::Completed,
+        )
+        .await;
+        store.clear_goal(&task, 1).unwrap();
+        assert!(store.load(&task).unwrap().goal.is_none());
+        assert!(chat.record_file_materialization("direct", 1).await.unwrap());
+        let mut restarted = state.clone();
+        restarted.chats = Arc::new(MarkdownChatStore::default());
+        restore_chat_state(restarted.clone()).await;
+        assert!(
+            restarted
+                .automation
+                .as_ref()
+                .unwrap()
+                .is_registered(&task)
+                .await
+        );
     }
 
     #[tokio::test]

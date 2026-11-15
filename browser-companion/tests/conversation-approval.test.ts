@@ -80,6 +80,39 @@ test.skipIf(!native)("English, Greek and Italian approval menus grant conversati
   }
 });
 
+test.skipIf(!native)("offline materialization visits only the paired target and approves without sending",async()=>{
+  fixture();await surface.navigate('https://chatgpt.com/c/other');let visits=0;
+  const inspecting:SingleBrowserSurface={...surface,navigate:async(destination,signal)=>{
+    visits++;const target=await surface.navigate(destination,signal);
+    // The approval may hydrate after navigation has completed.
+    await target.evaluate(()=>{const card=document.querySelector('[data-codex-approval-surface]')!,parent=card.parentElement!;card.remove();setTimeout(()=>parent.append(card),150);});
+    return target;
+  }};
+  const coordinator=new SingleWindowCoordinator(new ChatGptBrowserDriver(inspecting,build),build);
+  expect(await coordinator.approvePendingConversation(request)).toMatchObject({approved:false});
+  expect(visits).toBe(0);
+  expect(await coordinator.approvePendingConversation({...request,allowNavigation:true})).toMatchObject({approved:true});
+  expect(visits).toBe(1);expect(page.url()).toBe(url);
+  expect(await page.evaluate(()=>JSON.parse(document.body.dataset.clicks!))).toEqual({arrow:1,once:0,conversation:1,deny:0,send:0});
+  expect((await coordinator.health()).activeActionId).toBeNull();expect(context.pages()).toEqual([page]);
+});
+
+test.skipIf(!native)("offline materialization reports a completed inspection when no card exists",async()=>{
+  body='<main>No approval request</main>';await surface.navigate('https://chatgpt.com/c/other');
+  const coordinator=new SingleWindowCoordinator(new ChatGptBrowserDriver(surface,build),build);
+  expect(await coordinator.approvePendingConversation({...request,allowNavigation:true})).toMatchObject({approved:false});
+  expect(page.url()).toBe(url);expect(context.pages()).toEqual([page]);
+});
+
+test.skipIf(!native)("offline materialization verifies the account before navigating",async()=>{
+  fixture();await surface.navigate('https://chatgpt.com/c/other');let visits=0;
+  const inspecting:SingleBrowserSurface={...surface,navigate:async(destination,signal)=>{visits++;return surface.navigate(destination,signal);}};
+  const coordinator=new SingleWindowCoordinator(new ChatGptBrowserDriver(inspecting,build),build);
+  await expect(coordinator.approvePendingConversation({...request,allowNavigation:true,expectedAccountFingerprint:'wrong-account'})).rejects.toMatchObject({code:'authentication_required'});
+  expect(visits).toBe(0);expect(page.url()).toBe('https://chatgpt.com/c/other');
+  expect(await page.evaluate(()=>JSON.parse(document.body.dataset.clicks!).conversation)).toBe(0);
+});
+
 test.skipIf(!native)("the owned opening relationship works when Radix omits menu association attributes",async()=>{
   fixture({owned:false});await surface.navigate(url);
   expect(await approveConversationCard(page,request,appId,new AbortController().signal)).toBeTrue();

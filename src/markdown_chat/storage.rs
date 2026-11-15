@@ -27,6 +27,7 @@ const AGENT_START: &str = "\n\n<!-- codexify-agent-message:v1:start id=\"";
 const WARNING_START: &str = "\n\n<!-- codexify-warning-message:v1:start id=\"";
 const ANCHOR_BYTES: usize = 64;
 const MAX_CURSOR_BYTES: u64 = 4096;
+const MATERIALIZATION_PENDING: &str = "file_materialization_pending";
 static MESSAGE_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -104,6 +105,7 @@ pub struct AppendReceipt {
 
 #[derive(Clone)]
 pub(crate) struct OfflineActivity {
+    pub(crate) materialization_pending: bool,
     pub(crate) agent_stop_requested: bool,
     pub(crate) last_call_at_ms: Option<u64>,
     pub(crate) agent_presence_until_ms: Option<u64>,
@@ -393,6 +395,8 @@ impl ChatFile {
         self.run(|chat| {
             chat.with_cursor(|cursor, _| {
                 Ok(OfflineActivity {
+                    materialization_pending: cursor.offline_claims.get(MATERIALIZATION_PENDING)
+                        == Some(&cursor.total_tool_calls),
                     agent_stop_requested: cursor.agent_stop_requested,
                     last_call_at_ms: cursor.last_agent_call_at_ms,
                     agent_presence_until_ms: cursor.agent_presence_until_ms,

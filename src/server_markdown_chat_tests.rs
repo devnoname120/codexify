@@ -123,6 +123,8 @@ async fn markdown_chat_bridged_results_and_widget_metadata_keep_their_contents()
             Some(serde_json::from_value(json!({"openai/session":"passthrough"})).unwrap());
         let result = client.call_tool(request).await.unwrap();
         assert_ne!(result.is_error, Some(true));
+        assert!(chat.offline_activity().await.unwrap().materialization_pending,
+            "a successful resource-link result schedules its offline approval check");
         let data = result.structured_content.as_ref().unwrap();
         assert!(
             data[crate::markdown_chat::USER_MESSAGE_FIELD]
