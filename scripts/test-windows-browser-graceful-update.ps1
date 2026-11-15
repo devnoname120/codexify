@@ -1,4 +1,4 @@
-param([string]$HelperPath)
+param([string]$HelperPath,[switch]$ChromeNeverExits)
 $ErrorActionPreference='Stop'
 if(-not $HelperPath){$HelperPath=Join-Path $PSScriptRoot 'windows-browser-graceful-update.ps1'}
 . $HelperPath
@@ -41,8 +41,8 @@ function Get-Process {
   if($Id -eq 42001){
     $p=[pscustomobject]@{MainWindowHandle=1}
     $p|Add-Member ScriptMethod Refresh {}
-    $p|Add-Member ScriptMethod CloseMainWindow {Set-Content -LiteralPath (Join-Path $script:fixtureRoot 'chrome-closed') -Value 'clean close';return $true}
-    $p|Add-Member ScriptMethod WaitForExit {param($timeout);return $true}
+    $p|Add-Member ScriptMethod CloseMainWindow {$this.MainWindowHandle=0;Set-Content -LiteralPath (Join-Path $script:fixtureRoot 'chrome-closed') -Value 'window closed';return $true}
+    $p|Add-Member ScriptMethod WaitForExit {param($timeout);return -not $ChromeNeverExits}
     return $p
   }
   if($Id -eq 42000){
@@ -63,6 +63,20 @@ function Start-Process {
   return $script:fixtureStop
 }
 try {
+  if($ChromeNeverExits){
+    $deferred=$false
+    try {Stop-ManagedBrowserGracefully -BrowserRoot $script:fixtureRoot -NativeExe $script:fixtureNative -BackupDirectory $script:fixtureBackup -ExpectedAccountFingerprint 'fixture-account'}
+    catch {
+      if($_.Exception.Message -notlike '*Chrome still owns its profile*'){throw}
+      $deferred=$true
+    }
+    if(-not $deferred){throw 'A live Chrome profile owner was accepted for teardown'}
+    if(-not $script:fixtureStop.HasExited){throw 'Native stop was not cancelled before releasing its lifecycle lock'}
+    if(Test-Path -LiteralPath (Join-Path $script:fixtureRoot 'stop-complete')){throw 'Native teardown ran while Chrome still owned its profile'}
+    if(Test-Path -LiteralPath (Join-Path $script:fixtureBackup 'browser-profile')){throw 'A live profile was certified as a closed backup'}
+    [pscustomobject]@{passed=$true;liveProfilePreserved=$true;nativeStopCancelled=$true;profileBackupNotCreated=$true}|ConvertTo-Json
+    return
+  }
   $result=Stop-ManagedBrowserGracefully -BrowserRoot $script:fixtureRoot -NativeExe $script:fixtureNative -BackupDirectory $script:fixtureBackup -ExpectedAccountFingerprint 'fixture-account'
   if(-not $result.graceful -or -not $result.profileBackupVerified){throw 'Missing verified shutdown receipt'}
   if(-not(Test-Path -LiteralPath (Join-Path $script:fixtureRoot 'stop-complete'))){throw 'Native stop did not finish'}
