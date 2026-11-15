@@ -92,23 +92,6 @@ pub struct CompanionHealth {
     pub active_action_ids: Vec<String>,
 }
 
-impl CompanionHealth {
-    pub(crate) fn owns_action(&self, action_id: &str) -> bool {
-        self.active_action_id.as_deref() == Some(action_id)
-            || self.active_action_ids.iter().any(|id| id == action_id)
-    }
-
-    pub(crate) fn free_action_slots(&self) -> usize {
-        self.available_action_slots.unwrap_or_else(|| {
-            usize::from(
-                self.status == CompanionSessionStatus::Idle
-                    && self.active_action_id.is_none()
-                    && self.active_action_ids.is_empty(),
-            )
-        })
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct CapabilityCatalog {
