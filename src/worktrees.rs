@@ -523,7 +523,7 @@ fn prepare_worktrees_root(configured: &Path) -> Result<PathBuf, String> {
 /// plain `C:\…` before any of these paths reach git. Only the drive-letter
 /// form is unwrapped; UNC and other prefixes, and every non-Windows path, are
 /// returned unchanged.
-fn strip_verbatim_prefix(path: PathBuf) -> PathBuf {
+pub(crate) fn strip_verbatim_prefix(path: PathBuf) -> PathBuf {
     #[cfg(windows)]
     {
         use std::path::{Component, Prefix};

@@ -743,6 +743,11 @@ The supervisor also creates its ordinary server child with `CREATE_NO_WINDOW`. T
 prevents the otherwise empty console window without changing the Interactive
 logon principal required for tunnel and network access.
 
+The supervisor holds an operating-system lock for its lifetime. A second
+`service run` exits before launching another server or opening the shared log.
+The lock is released when the process exits, including after a crash; a leftover
+lock file does not prevent recovery.
+
 The Windows supervisor begins liveness monitoring after the server first answers
 `/health` successfully. Six consecutive failed probes (with a five-second pause
 between them and a three-second request timeout) restart the contained server process tree. A slow

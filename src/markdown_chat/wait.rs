@@ -59,6 +59,89 @@ pub enum WaitOutcome {
 }
 
 impl ChatFile {
+    /// Wake a running tool for unread owner/team text without acknowledging it,
+    /// entering input-required mode, or releasing queued messages.
+    pub(crate) async fn wait_for_unread(
+        self: &Arc<Self>,
+        cancellation: CancellationToken,
+    ) -> Result<(), String> {
+        self.wait_for_unread_with_watcher(cancellation, true).await
+    }
+
+    async fn wait_for_unread_with_watcher(
+        self: &Arc<Self>,
+        cancellation: CancellationToken,
+        native: bool,
+    ) -> Result<(), String> {
+        if cancellation.is_cancelled() {
+            return Err("Owner message observation cancelled".into());
+        }
+        let unread = self.unread_snapshot().await?;
+        if cancellation.is_cancelled() {
+            return Err("Owner message observation cancelled".into());
+        }
+        if !unread.messages.is_empty() {
+            return Ok(());
+        }
+        let (sender, mut events) = mpsc::channel(1);
+        let path = std::fs::canonicalize(self.path()).unwrap_or_else(|_| self.path().to_path_buf());
+        let mut watcher = if native {
+            notify::recommended_watcher(move |result: notify::Result<notify::Event>| match result {
+                Ok(event)
+                    if !matches!(event.kind, EventKind::Access(_))
+                        && (event.need_rescan()
+                            || event.paths.iter().any(|changed| changed == &path)) =>
+                {
+                    let _ = sender.try_send(false);
+                }
+                Err(_) => {
+                    let _ = sender.try_send(true);
+                }
+                _ => {}
+            })
+            .ok()
+        } else {
+            None
+        };
+        if let Some(watching) = watcher.as_mut()
+            && watching
+                .watch(
+                    self.path().parent().ok_or("CHAT.md has no parent")?,
+                    RecursiveMode::NonRecursive,
+                )
+                .is_err()
+        {
+            watcher = None;
+        }
+        loop {
+            if cancellation.is_cancelled() {
+                return Err("Owner message observation cancelled".into());
+            }
+            // The post-registration check closes the append/watch race. This
+            // snapshot also leaves the cursor and agent-wait state untouched.
+            let unread = self.unread_snapshot().await?;
+            if cancellation.is_cancelled() {
+                return Err("Owner message observation cancelled".into());
+            }
+            if !unread.messages.is_empty() {
+                return Ok(());
+            }
+            let poll = if watcher.is_some() {
+                Duration::from_secs(2)
+            } else {
+                Duration::from_millis(500)
+            };
+            tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => return Err("Owner message observation cancelled".into()),
+                event = events.recv(), if watcher.is_some() => {
+                    if event != Some(false) { watcher = None; }
+                }
+                _ = tokio::time::sleep(poll) => {}
+            }
+        }
+    }
+
     #[cfg(test)]
     fn begin_agent_wait(&self, remaining: Duration) -> WaitGuard<'_> {
         self.begin_wait(remaining, true)
@@ -236,6 +319,84 @@ impl ChatFile {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[tokio::test]
+    async fn owner_message_wake_observation_preserves_cursor_and_wait_state() {
+        let root = tempfile::tempdir().unwrap();
+        let chat = Arc::new(ChatFile::new(root.path().join("chat/CHAT.md"), true));
+        chat.ensure().await.unwrap();
+        chat.append_user("pending-owner".into(), "Do this next".into())
+            .await
+            .unwrap();
+        let before = chat.unread_snapshot().await.unwrap();
+        let _waiting = chat.begin_agent_wait(Duration::from_secs(30));
+        let wait_until = chat.agent_waiting_until_ms();
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            chat.wait_for_unread(CancellationToken::new()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(chat.unread_snapshot().await.unwrap(), before);
+        assert_eq!(
+            chat.agent_waiting_until_ms(),
+            wait_until,
+            "observation must not enter or clear an input wait"
+        );
+    }
+
+    #[tokio::test]
+    async fn owner_message_wake_fallback_observes_external_append_and_cancels_without_consuming() {
+        let root = tempfile::tempdir().unwrap();
+        let chat = Arc::new(ChatFile::new(root.path().join("chat/CHAT.md"), true));
+        chat.ensure().await.unwrap();
+        let waiting = tokio::spawn({
+            let chat = chat.clone();
+            async move {
+                chat.wait_for_unread_with_watcher(CancellationToken::new(), false)
+                    .await
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(chat.path())
+            .unwrap()
+            .write_all(b"Fallback owner message\n")
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), waiting)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(chat.agent_waiting_until_ms().is_none());
+        assert!(
+            chat.read(true)
+                .await
+                .unwrap()
+                .text
+                .contains("Fallback owner message")
+        );
+        let before = chat.unread_snapshot().await.unwrap();
+        let cancellation = CancellationToken::new();
+        let observing = tokio::spawn({
+            let chat = chat.clone();
+            let cancellation = cancellation.clone();
+            async move { chat.wait_for_unread(cancellation).await }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        cancellation.cancel();
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), observing)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_err()
+        );
+        assert_eq!(chat.unread_snapshot().await.unwrap(), before);
+        assert!(chat.agent_waiting_until_ms().is_none());
+    }
 
     #[test]
     fn waiting_deadline_tracks_the_actual_wait_duration() {

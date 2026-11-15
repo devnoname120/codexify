@@ -634,9 +634,20 @@ async fn load_or_initialize_persistent(
     legacy_owner_key: &str,
 ) -> Result<CheckpointPair, String> {
     let refs = checkpoint_refs(&workspace.key, owner_key);
-    migrate_legacy_checkpoint_refs(config, workspace, owner_key, legacy_owner_key, &refs).await?;
-    let project_open = read_ref(config, &workspace.git_root, &refs.project_open).await?;
-    let last_diff = read_ref(config, &workspace.git_root, &refs.last_diff).await?;
+    // Most calls already have both baselines. Do not repeat the legacy namespace
+    // probes before every edit or command; Windows pays for each Git process.
+    let (mut project_open, mut last_diff) = tokio::try_join!(
+        read_ref(config, &workspace.git_root, &refs.project_open),
+        read_ref(config, &workspace.git_root, &refs.last_diff),
+    )?;
+    if project_open.is_none() || last_diff.is_none() {
+        migrate_legacy_checkpoint_refs(config, workspace, owner_key, legacy_owner_key, &refs)
+            .await?;
+        (project_open, last_diff) = tokio::try_join!(
+            read_ref(config, &workspace.git_root, &refs.project_open),
+            read_ref(config, &workspace.git_root, &refs.last_diff),
+        )?;
+    }
 
     match (project_open, last_diff) {
         (Some(project_open), Some(last_diff)) => Ok(CheckpointPair {
@@ -1379,12 +1390,19 @@ fn strings(values: &[&str]) -> Vec<OsString> {
     values.iter().map(OsString::from).collect()
 }
 
+#[cfg(test)]
+tokio::task_local! {
+    static TEST_GIT_COMMAND_COUNT: std::cell::Cell<usize>;
+}
+
 fn git_command(
     config: &AppConfig,
     cwd: &Path,
     args: &[OsString],
     environment: &[(OsString, OsString)],
 ) -> Command {
+    #[cfg(test)]
+    let _ = TEST_GIT_COMMAND_COUNT.try_with(|count| count.set(count.get() + 1));
     let mut command = Command::new("git");
     command.args(args).current_dir(cwd);
     scrub_untrusted_child_env(&mut command, config);
@@ -1474,19 +1492,7 @@ async fn run_git(
             }
             Ok::<_, std::io::Error>(data)
         };
-        let err = async {
-            let mut data = Vec::new();
-            stderr
-                .take(MAX_GIT_ERROR_BYTES as u64 + 1)
-                .read_to_end(&mut data)
-                .await?;
-            if data.len() > MAX_GIT_ERROR_BYTES {
-                return Err(std::io::Error::other(
-                    "Git checkpoint diagnostics exceeded 64 KiB.",
-                ));
-            }
-            Ok::<_, std::io::Error>(data)
-        };
+        let err = read_git_diagnostics(stderr);
         let (_, stdout, stderr, status) = tokio::try_join!(send, out, err, child.wait())?;
         Ok::<_, std::io::Error>(Output {
             status,
@@ -1515,6 +1521,26 @@ async fn run_git(
             ))
         }
     }
+}
+
+// Git may emit a warning for every path (for example CRLF conversion). Drain
+// stderr under run_git's deadline so pipe backpressure cannot stall a checkpoint,
+// while retaining bounded diagnostics and the command's actual exit status.
+async fn read_git_diagnostics<R: tokio::io::AsyncRead + Unpin>(
+    mut reader: R,
+) -> std::io::Result<Vec<u8>> {
+    let mut data = Vec::new();
+    (&mut reader)
+        .take(MAX_GIT_ERROR_BYTES as u64 + 1)
+        .read_to_end(&mut data)
+        .await?;
+    if data.len() > MAX_GIT_ERROR_BYTES {
+        tokio::io::copy(&mut reader, &mut tokio::io::sink()).await?;
+        const TRUNCATED: &[u8] = b"\n[Additional Git diagnostics omitted.]\n";
+        data.truncate(MAX_GIT_ERROR_BYTES - TRUNCATED.len());
+        data.extend_from_slice(TRUNCATED);
+    }
+    Ok(data)
 }
 
 async fn git_checked_input(
@@ -1582,6 +1608,55 @@ mod tests {
 
     use super::*;
 
+    #[tokio::test]
+    async fn checkpoint_diagnostics_are_bounded_but_fully_drained() {
+        for length in [0, 128, MAX_GIT_ERROR_BYTES, MAX_GIT_ERROR_BYTES * 16] {
+            let input = vec![b'w'; length];
+            let mut reader = input.as_slice();
+            let output = read_git_diagnostics(&mut reader).await.unwrap();
+            assert!(reader.is_empty(), "all stderr must be consumed");
+            assert!(output.len() <= MAX_GIT_ERROR_BYTES);
+            if length <= MAX_GIT_ERROR_BYTES {
+                assert_eq!(output, input);
+            } else {
+                assert!(output.ends_with(b"[Additional Git diagnostics omitted.]\n"));
+            }
+        }
+        // A producer which never closes remains subject to the command deadline.
+        let (_writer, reader) = tokio::io::duplex(16);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), read_git_diagnostics(reader))
+                .await
+                .is_err()
+        );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn noisy_checkpoint_preserves_success_and_failure_exit_statuses() {
+        for code in [0, 7] {
+            let mut command = Command::new("powershell.exe");
+            command.args(["-NoProfile", "-NonInteractive", "-Command", &format!(
+                "[Console]::Error.Write(('warning' * 20000)); [Console]::Out.Write('checkpoint'); exit {code}"
+            )]).kill_on_drop(true);
+            let output = super::run_git(command, None, 10_000).await.unwrap();
+            assert_eq!(output.status.code(), Some(code));
+            assert_eq!(output.stdout, b"checkpoint");
+            assert_eq!(output.stderr.len(), MAX_GIT_ERROR_BYTES);
+            assert!(
+                output
+                    .stderr
+                    .ends_with(b"[Additional Git diagnostics omitted.]\n")
+            );
+            if code != 0 {
+                assert!(
+                    git_failure("git checkpoint", &output.stderr, output.status.code())
+                        .contains("failed")
+                );
+            }
+        }
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn checkpoint_deadlines_terminate_the_owned_process_group() {
@@ -1626,6 +1701,52 @@ mod tests {
         args.into_iter()
             .map(|value| value.to_string_lossy().into_owned())
             .collect()
+    }
+
+    #[tokio::test]
+    async fn warm_mutation_validates_refs_without_repeating_legacy_probes() {
+        let repo = tempfile::tempdir().unwrap();
+        run_git(repo.path(), &["init", "--quiet"]);
+        std::fs::write(repo.path().join("file.txt"), "before\n").unwrap();
+        let config = crate::config::default_config(repo.path().to_path_buf());
+        let owner = DiffOwner::conversation(
+            &ConversationIdentity::from_openai_session("warm-checkpoint").unwrap(),
+        );
+        let manager = DiffCheckpointManager::new();
+        manager
+            .ensure_initialized(&config, owner.clone())
+            .await
+            .unwrap();
+        std::fs::write(repo.path().join("file.txt"), "after\n").unwrap();
+
+        TEST_GIT_COMMAND_COUNT
+            .scope(std::cell::Cell::new(0), async {
+                let (availability, guard) = manager
+                    .begin_mutation(&config, owner.clone())
+                    .await
+                    .unwrap();
+                assert_eq!(availability, DiffAvailability::Ready);
+                // Resolve the workspace and validate the two current commit refs.
+                // Missing/corrupt baselines still take the initialization path.
+                assert_eq!(TEST_GIT_COMMAND_COUNT.with(|count| count.get()), 3);
+                drop(guard);
+            })
+            .await;
+
+        let diff = manager
+            .show_diff(
+                &config,
+                owner,
+                DiffRequest {
+                    since: DiffBaseline::ProjectOpen,
+                    advance: false,
+                    include_patch: true,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(diff.patch.contains("-before"));
+        assert!(diff.patch.contains("+after"));
     }
 
     #[test]
