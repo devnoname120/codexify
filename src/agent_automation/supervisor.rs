@@ -4945,10 +4945,122 @@ fn activity_class(
         return ActivityClass::Recovery;
     }
     match execution_kind(execution) {
+        AutomationActionKind::PairVerify
+        | AutomationActionKind::OfflineChat
+        | AutomationActionKind::OfflineCombined => ActivityClass::Owner,
         AutomationActionKind::TurnRenewal => ActivityClass::Renewal,
+        AutomationActionKind::OfflineGoal if worker => ActivityClass::WorkerTurn,
         AutomationActionKind::OfflineGoal => ActivityClass::Recovery,
-        _ if worker => ActivityClass::WorkerTurn,
-        _ => ActivityClass::Owner,
+    }
+}
+
+#[cfg(test)]
+mod activity_policy_tests {
+    use super::*;
+    use crate::agent_automation::activity_guard::{ActivityClass, ActivityGuard};
+
+    fn execution(prompt: ActionPrompt) -> AutomationExecution {
+        AutomationExecution {
+            task_key: "worker-chat".into(),
+            owner_generation: 1,
+            account_fingerprint: "fixture-account".into(),
+            catalog_revision: "fixture".into(),
+            activity_epoch: "owner-message".into(),
+            activity_sequence: 1,
+            tool_call_count_at_start: 0,
+            unread_message_ids: vec!["owner-message".into()],
+            transcript_revision: "fixture".into(),
+            pairing_commit: None,
+            request: ExecuteActionRequest {
+                action_id: "fixture".into(),
+                idempotency_key: "fixture".into(),
+                url: "https://chatgpt.com/c/worker".into(),
+                pairing_generation: 1,
+                connector_name: "Fixture".into(),
+                model: None,
+                effort: None,
+                expected_account_fingerprint: "fixture-account".into(),
+                prompt,
+                expected_url: "https://chatgpt.com/c/worker".into(),
+                auto_approve_tool_calls: false,
+                bypass_conversation_cooldown: false,
+                retain_pairing_window: false,
+                pairing_continuation_of: None,
+                agent_ticket: None,
+            },
+        }
+    }
+
+    fn open_breaker() -> ActivityGuard {
+        let guard = ActivityGuard::default();
+        for offset in 0..12 {
+            guard.record_dispatch(ActivityClass::Recovery, 1_000_000 + offset);
+        }
+        assert!(guard.snapshot(1_000_020).breaker_open);
+        guard
+    }
+
+    #[test]
+    fn owner_messages_and_setup_bypass_an_open_breaker_in_worker_chats() {
+        let guard = open_breaker();
+        for prompt in [
+            ActionPrompt::OfflineChat {
+                batch_id: "owner-batch".into(),
+                messages: vec![CompanionUnreadMessage {
+                    id: "owner-message".into(),
+                    markdown: "Read this correction".into(),
+                }],
+            },
+            ActionPrompt::OfflineCombined {
+                batch_id: "owner-goal-batch".into(),
+                messages: vec![CompanionUnreadMessage {
+                    id: "owner-message".into(),
+                    markdown: "Read this correction".into(),
+                }],
+                goal_revision: 1,
+            },
+            ActionPrompt::PairVerify {
+                reference: "fixture".into(),
+            },
+            ActionPrompt::CreateChat {
+                continuation_token: "fixture".into(),
+                reference: "fixture".into(),
+                setup_reference: None,
+            },
+        ] {
+            let execution = execution(prompt);
+            for worker in [false, true] {
+                let class = activity_class(&execution, worker);
+                assert_eq!(class, ActivityClass::Owner);
+                assert_eq!(guard.hold_until(class, 1_000_020), None);
+            }
+        }
+    }
+
+    #[test]
+    fn automatic_worker_turns_recoveries_and_renewals_stay_held() {
+        let guard = open_breaker();
+        let goal = execution(ActionPrompt::OfflineGoal { goal_revision: 1 });
+        assert_eq!(activity_class(&goal, true), ActivityClass::WorkerTurn);
+        assert_eq!(activity_class(&goal, false), ActivityClass::Recovery);
+        let renewal = execution(ActionPrompt::TaskContinuation {});
+        assert_eq!(activity_class(&renewal, true), ActivityClass::Renewal);
+        let mut rollover = execution(ActionPrompt::CreateChat {
+            continuation_token: "fixture".into(),
+            reference: "fixture".into(),
+            setup_reference: None,
+        });
+        rollover.activity_epoch = "conversation-rollover".into();
+        assert_eq!(activity_class(&rollover, true), ActivityClass::Recovery);
+        for execution in [goal, renewal, rollover] {
+            for worker in [false, true] {
+                assert!(
+                    guard
+                        .hold_until(activity_class(&execution, worker), 1_000_020)
+                        .is_some()
+                );
+            }
+        }
     }
 }
 
