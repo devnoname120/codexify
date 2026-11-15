@@ -436,7 +436,7 @@ impl AutomationTaskState {
             return false;
         };
         let action = &self.action;
-        if goal.status != GoalStatus::Active
+        !(goal.status != GoalStatus::Active
             || action.goal_revision != Some(goal.revision)
             || action.id.is_none()
             || action.status == AutomationActionStatus::Idle
@@ -454,11 +454,7 @@ impl AutomationTaskState {
                     && action.status != AutomationActionStatus::Cancelled
                     && action.send_accepted == Some(true)
                     && action.messages_fenced
-                || self.recovered_goal_renewal())
-        {
-            return false;
-        }
-        true
+                || self.recovered_goal_renewal()))
     }
 
     pub(crate) fn goal_retry_at_ms(&self) -> Option<u64> {

@@ -6,8 +6,9 @@ import { join } from "node:path";
 import { chromium, type BrowserContext, type Page } from "patchright";
 import { fingerprintAccountIdentity } from "../src/account";
 import { SingleWindowCoordinator, type DriverExecution } from "../src/browser-window";
-import { ChatGptBrowserDriver, type SingleBrowserSurface } from "../src/chatgpt-driver";
+import { ChatGptBrowserDriver, stopLingeringResponse, type SingleBrowserSurface } from "../src/chatgpt-driver";
 import {selectPairingMedium} from "../src/pairing-model";
+import {captureSubmissionBaseline,waitForSubmissionAcceptance} from "../src/turn-binding";
 import { privateChromeExecutable } from "../src/chrome-executable";
 import { activeComposer, composerText, insertExactPrompt, uniqueSendButton } from "../src/composer";
 import { protocolBuild, renderActionPrompt, type ExecuteActionRequest } from "../src/protocol";
@@ -1024,14 +1025,14 @@ test.skipIf(!native)("offline Stop confirms an optional localized dialog before 
   }
 },30_000);
 
-test.skipIf(!native)("offline Stop resumes the captured already-open confirmation before sending",async()=>{
-  for(const scenario of [{frame:undefined,captured:true,draft:'Existing draft'},{frame:'srcdoc',captured:true,draft:''},{frame:undefined,captured:false,draft:''},{frame:'nested',captured:false,draft:''}] as const){
+for(const scenario of [{frame:undefined,captured:true,draft:''},{frame:'srcdoc',captured:true,draft:''},{frame:undefined,captured:false,draft:''},{frame:'nested',captured:false,draft:''}] as const)
+test.skipIf(!native)(`offline Stop resumes the captured already-open confirmation before sending (${scenario.frame??'main'}, captured=${scenario.captured})`,async()=>{
     const driver=await fixture(scenario.draft,true,connector,0,true);
     fixtureLanguage=scenario.frame==='nested'?'it':'en';
     stopConfirmation={preexisting:true,captured:scenario.captured,frame:scenario.frame};stopFinishDelayMs=1_200;
     await syncFixture();const loads=documentLoads;
     const offline=offlineRequest();
-    await executeFixture(driver,{request:offline,renderedPrompt:renderActionPrompt(offline.prompt),signal:AbortSignal.timeout(12_000),emit:()=>{}});
+    await executeFixture(driver,{request:offline,renderedPrompt:renderActionPrompt(offline.prompt),signal:AbortSignal.timeout(25_000),emit:()=>{}});
     expect(await page.locator('body').getAttribute('data-order')).toBe('confirm,stopped,send,');
     expect(await page.locator('body').getAttribute('data-stops')).toBe('0');
     expect(await page.locator('body').getAttribute('data-confirmations')).toBe('1');
@@ -1041,8 +1042,18 @@ test.skipIf(!native)("offline Stop resumes the captured already-open confirmatio
     expect(times.stopped-times.confirmed).toBeGreaterThanOrEqual(1_200);
     expect(times.sent).toBeGreaterThanOrEqual(times.stopped);
     expect(documentLoads).toBe(loads);
-  }
-},45_000);
+},30_000);
+
+test.skipIf(!native)("an already-open Stop confirmation preserves an unrelated user draft",async()=>{
+  await fixture('Existing draft',true,connector,0,true);
+  stopConfirmation={preexisting:true,captured:true};await syncFixture();
+  const loads=documentLoads;
+  await expect(stopLingeringResponse(page,new AbortController().signal,{canonicalUrl:url,accountFingerprint:request.expectedAccountFingerprint},()=>{})).rejects.toThrow();
+  expect(await composerText(page.locator('[data-composer-markdown]'))).toBe('Existing draft');
+  expect(await page.locator('body').getAttribute('data-confirmations')).toBe('0');
+  expect(await page.locator('body').getAttribute('data-sends')).toBe('0');
+  expect(documentLoads).toBe(loads);
+},30_000);
 
 test.skipIf(!native)("offline Stop never confirms unrelated or ambiguous dialogs",async()=>{
   for(const scenario of [{unrelated:true,preexisting:true},{unrelated:true},{duplicateSubmit:true}] as const) {
@@ -1469,6 +1480,13 @@ test.skipIf(!native)("a created conversation URL is retained when applying the s
  expect(await page.evaluate(()=>document.body.dataset.sends)).toBe('1');
 },20_000);
 
+
+test.skipIf(!native)("creation baselines still reject a switch between existing conversations",async()=>{
+  await fixture();
+  const baseline=await captureSubmissionBaseline(page,'Owned prompt',undefined,{allowCreatedConversation:true});
+  await page.evaluate(()=>history.replaceState({},'','/c/unrelated-conversation'));
+  await expect(waitForSubmissionAcceptance(page,baseline,Date.now()+5_000)).rejects.toMatchObject({code:'selector_drift'});
+},15_000);
 
 async function lazyJapanesePicker() {
   await page.evaluate(()=>{

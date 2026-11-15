@@ -965,7 +965,7 @@ export class ChatGptBrowserDriver implements BrowserDriver {
         await stopLingeringResponse(page,execution.signal,{canonicalUrl,accountFingerprint:account.fingerprint},execution.emit,
           {mayReload:false,budgetMs:20_000});
       }
-      let baseline = await captureSubmissionBaseline(page, execution.renderedPrompt, execution.signal);
+      let baseline = await captureSubmissionBaseline(page, execution.renderedPrompt, execution.signal,{allowCreatedConversation:creating});
       this.draftRecovery.prepare(account.fingerprint,canonicalUrl,execution.request.actionId,execution.renderedPrompt);
       insertionAttempted = true;
       step("inserting prompt");
@@ -1027,7 +1027,7 @@ export class ChatGptBrowserDriver implements BrowserDriver {
         await stopLingeringResponse(page,execution.signal,{canonicalUrl,accountFingerprint:account.fingerprint},execution.emit,{mayReload:false,budgetMs:20_000});
         await ensureEmptyOwnedComposer(await activeComposer(page,3_000,execution.signal));
         if(selectedConnector)selectedConnector=await selectConnector(page,execution.request.connectorName,execution.signal);
-        baseline=await captureSubmissionBaseline(page,execution.renderedPrompt,execution.signal);
+        baseline=await captureSubmissionBaseline(page,execution.renderedPrompt,execution.signal,{allowCreatedConversation:creating});
         await insertExactPrompt(await activeComposer(page,3_000,execution.signal),execution.renderedPrompt);
         send=await uniqueSendButton(await activeComposer(page,3_000,execution.signal),10_000,execution.signal,()=>throwIfConversationApproval(page));
         await verifyFallbackDestination();
