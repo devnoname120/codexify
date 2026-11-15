@@ -30,6 +30,7 @@ export interface SubmissionBaseline {
   submittedText: string;
   acceptedUserIdentity?: string;
   browserBaselineId?: number;
+  allowCreatedConversation?: boolean;
 }
 
 export interface AssistantTurnBinding {
@@ -89,11 +90,11 @@ function unique(values: string[], kind: string): string[] {
   return [...new Set(values)];
 }
 
-export function readTurnDomState(page: Page, browserBaselineId?: undefined, signal?: AbortSignal, timeoutMs?: number): Promise<TurnDomState>;
-export function readTurnDomState(page: Page, browserBaselineId: number, signal?: AbortSignal, timeoutMs?: number): Promise<TurnDeltaState>;
-export async function readTurnDomState(page: Page, browserBaselineId?: number, signal?: AbortSignal, timeoutMs=5_000): Promise<TurnDomState | TurnDeltaState> {
+export function readTurnDomState(page: Page, browserBaselineId?: undefined, signal?: AbortSignal, timeoutMs?: number, allowCreatedConversation?: boolean): Promise<TurnDomState>;
+export function readTurnDomState(page: Page, browserBaselineId: number, signal?: AbortSignal, timeoutMs?: number, allowCreatedConversation?: boolean): Promise<TurnDeltaState>;
+export async function readTurnDomState(page: Page, browserBaselineId?: number, signal?: AbortSignal, timeoutMs=5_000, allowCreatedConversation=false): Promise<TurnDomState | TurnDeltaState> {
   signal?.throwIfAborted();
-  return observeReadOnly(page.evaluate(({ userSelector, assistantSelector, stopSelector, baselineId }) => {
+  return observeReadOnly(page.evaluate(({ userSelector, assistantSelector, stopSelector, baselineId, allowCreatedConversation }) => {
     type TurnIdentityCache = {
       url: string;
       dirty: boolean;
@@ -146,7 +147,15 @@ export async function readTurnDomState(page: Page, browserBaselineId?: number, s
       scope.__CODEXIFY_TURN_IDENTITIES__ = current;
     }
     if (cache.dirty || cache.url !== location.href || cache.state === null) {
-    if (cache.url !== location.href) cache.baseline = undefined;
+    if (cache.url !== location.href) {
+      // A creation Send assigns this same document its first conversation ID.
+      // Other route changes still invalidate the action's history baseline.
+      const previous=cache.url?new URL(cache.url):null;
+      const created=allowCreatedConversation&&previous?.origin===location.origin
+        &&!/(?:^|\/)c\//.test(previous.pathname)
+        &&/^\/(?:g\/[^/]+\/)?c\/[^/]+\/?$/.test(location.pathname);
+      if(!created)cache.baseline=undefined;
+    }
     const legacy = (selector: string) => [...document.querySelectorAll<HTMLElement>(selector)]
       .filter(element => !element.closest("[data-turn-key]"));
     const legacyIdentity = (element: HTMLElement): string => {
@@ -209,6 +218,7 @@ export async function readTurnDomState(page: Page, browserBaselineId?: number, s
     assistantSelector:CHATGPT_ASSISTANT_TURN_SELECTOR,
     stopSelector:CHATGPT_STOP_BUTTON_SELECTOR,
     baselineId:browserBaselineId,
+    allowCreatedConversation,
   }).catch(error=>{
     const reasons=["ChatGPT legacy turn has no stable data-turn-id","ChatGPT turn container has no stable identity","ChatGPT grouped turn has no stable data-turn-key"];
     const detail=error instanceof Error?reasons.find(reason=>error.message.includes(reason)):undefined;
@@ -229,7 +239,7 @@ function baselineIdIsPresent(value: number | undefined): value is number {
   return value !== undefined;
 }
 
-export async function captureSubmissionBaseline(page: Page, submittedText: string, signal?: AbortSignal): Promise<SubmissionBaseline> {
+export async function captureSubmissionBaseline(page: Page, submittedText: string, signal?: AbortSignal, options:{allowCreatedConversation?:boolean}={}): Promise<SubmissionBaseline> {
   if (!submittedText) throw new Error("Submitted prompt must not be empty");
   const initialTurnIdentities = (await readTurnDomState(page, undefined, signal)).turnIdentities;
   signal?.throwIfAborted();
@@ -240,12 +250,12 @@ export async function captureSubmissionBaseline(page: Page, submittedText: strin
     cache.baseline = { id, known:new Set(known) };
     return id as number;
   },initialTurnIdentities), signal);
-  return { initialTurnIdentities, browserBaselineId, submittedText };
+  return { initialTurnIdentities, browserBaselineId, submittedText, allowCreatedConversation:options.allowCreatedConversation };
 }
 
 async function submissionPoll(page: Page, baseline: SubmissionBaseline, signal?: AbortSignal, timeoutMs?: number) {
   if (baseline.browserBaselineId === undefined) return readTurnDomState(page, undefined, signal, timeoutMs);
-  const state = await readTurnDomState(page, baseline.browserBaselineId, signal, timeoutMs);
+  const state = await readTurnDomState(page, baseline.browserBaselineId, signal, timeoutMs, baseline.allowCreatedConversation);
   return {
     userIdentities:state.newUserIdentities,
     responseIdentities:state.newResponseIdentities,
