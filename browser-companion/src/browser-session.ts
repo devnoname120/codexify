@@ -8,20 +8,18 @@ import {composerText,isAutomationGoalDraft} from "./composer";
 import {CHATGPT_COMPOSER_SELECTOR} from "./session";
 import {observeReadOnly} from "./observation";
 
-const rateLimitDialog = (page: Page): Locator => page.locator('[role="dialog"]')
-  .filter({ hasText:uiLabelPattern("rateTitle",false) })
-  .filter({ hasText:uiLabelPattern("rateBody",false) })
-  .last();
-
-const expiredSessionAlert = (page: Page): Locator => page
-  .locator('[role="alert"], [role="dialog"]')
-  .filter({ hasText:uiLabelPattern("expiredTitle",false) })
-  .last();
-
-const subscriptionFailureAlert = (page: Page): Locator => page
-  .locator('[role="alert"]')
-  .filter({ hasText:uiTemplatePattern("subscriptionFailure") })
-  .last();
+async function sessionAttention(page:Page) {
+  // Evaluate the locale patterns in one read. Serializing them into chained
+  // text selectors can exceed the observer deadline before the alert is read.
+  return page.locator('[role="alert"], [role="dialog"]').filter({visible:true}).evaluateAll((nodes,patterns)=>{
+    const match=(node:Element,source:string)=>new RegExp(source,'iu').test(node.textContent??'');
+    if(nodes.some(node=>match(node,patterns.expired)))return 'authentication_required' as const;
+    if(nodes.some(node=>node.getAttribute('role')==='dialog'&&match(node,patterns.rateTitle)&&match(node,patterns.rateBody)))return 'rate_limited' as const;
+    if(nodes.some(node=>node.getAttribute('role')==='alert'&&match(node,patterns.subscription)))return 'failed' as const;
+    return undefined;
+  },{expired:uiLabelPattern('expiredTitle',false).source,rateTitle:uiLabelPattern('rateTitle',false).source,
+    rateBody:uiLabelPattern('rateBody',false).source,subscription:uiTemplatePattern('subscriptionFailure').source});
+}
 
 // Error semantics and the support destination are stable across UI languages.
 // Scope the fallback to alerts/error surfaces so ordinary answer links do not match.
@@ -178,13 +176,14 @@ export async function throwIfSessionAttention(page: Page,signal?:AbortSignal): P
     signal?.throwIfAborted();return observeReadOnly(operation(),signal);
   };
   throwIfConversationRateLimited(page);
-  if (await read(()=>expiredSessionAlert(page).isVisible().catch(() => false))) {
+  const attention=await read(()=>sessionAttention(page));
+  if (attention==='authentication_required') {
     throw new BrowserCompanionError("The ChatGPT session has expired. Sign in again in the browser companion.", "authentication_required");
   }
-  if (await read(()=>rateLimitDialog(page).isVisible().catch(() => false))) {
+  if (attention==='rate_limited') {
     throw new BrowserCompanionError("ChatGPT rate limit: too many requests. Retry only after the account cooldown clears.", "rate_limited");
   }
-  if (await read(()=>subscriptionFailureAlert(page).isVisible().catch(() => false))) {
+  if (attention==='failed') {
     throw new BrowserCompanionError("ChatGPT could not load the current subscription.", "failed");
   }
   await throwIfConversationLimit(page);
