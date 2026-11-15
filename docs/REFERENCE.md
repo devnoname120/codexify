@@ -1966,8 +1966,12 @@ the card's options and grants the named connector permission for that conversati
 The account, verified pairing, connector chip and menu structure must match;
 localized button labels are not used to identify the controls. Unknown or ambiguous
 cards remain for manual approval. Disabling auto-approval leaves them untouched.
-These bounded checks yield to active browser actions and never navigate, press Stop,
-or submit a prompt. Continuation actions also check their destination's latest turn
+These bounded passive checks yield to active browser actions and never navigate,
+press Stop, or submit a prompt. If the latest tool call returned a file resource,
+the supervisor also visits that chat once it goes offline to inspect and approve
+materialization, even without an active goal or queued message. Busy or failed
+inspections are deferred; a completed inspection is not repeated for that call,
+and a newer tool call discards the pending check. Continuation actions also check their destination's latest turn
 for approvals after opening it and again during preparation, before Send. An approval
 found there is resolved on that same page before another continuation can be sent.
 Granting permission resumes the existing turn and preserves queued messages and

@@ -2,7 +2,7 @@ import type { Frame, Locator, Page } from "patchright";
 import {completedHandoff} from "./turn-renewal";
 import {classifyPlan,completeAccountPlan,readBillingPlan,identifyConnectorApp,observedConnectorApp,inspectConnectorSettings,setConnectorAllowAll,verifyConnectorAllowAll,beginConnectorToolRefresh,type ConnectorRefreshObservation,type AccountPlan} from "./account-settings";
 import {ConnectorAppCache} from "./connector-cache";
-import {approveConversationCard,throwIfConversationApproval} from "./conversation-approval";
+import {approveConversationCard,latestConversationApprovalCards,throwIfConversationApproval} from "./conversation-approval";
 import {openNewChat, createdChatUrl, assertNewChatDraft} from "./new-chat";
 import { HealthAccountCache, readChatGptAccount, type ChatGptAccount } from "./account";
 import { throwIfSessionAttention, throwIfConversationLimit, toolApprovalVisible } from "./browser-session";
@@ -352,9 +352,19 @@ export class ChatGptBrowserDriver implements BrowserDriver {
   }
 
   async approvePendingConversation(request:ConversationApprovalRequest,signal:AbortSignal):Promise<boolean> {
-    const page = await this.surface.page();
     await this.surface.beginAction();
     try {
+      let page=await this.surface.page();
+      if(request.allowNavigation){
+        if((await readChatGptAccount(page)).fingerprint!==request.expectedAccountFingerprint)throw new BrowserCompanionError('ChatGPT account changed before materialization inspection','authentication_required');
+        let same=false;try{same=canonicalChatGptConversationUrl(page.url())===canonicalChatGptConversationUrl(request.url);}catch{}
+        if(!same)page=await this.surface.navigate(request.url,signal);
+        if(canonicalChatGptConversationUrl(page.url())!==canonicalChatGptConversationUrl(request.url)
+          ||(await readChatGptAccount(page)).fingerprint!==request.expectedAccountFingerprint)throw new BrowserCompanionError('ChatGPT changed account or conversation during materialization inspection','external_interference');
+        await (await latestConversationApprovalCards(page)).first().waitFor({state:'visible',timeout:2_000,signal}).catch(error=>{
+          signal.throwIfAborted();if(!(error instanceof Error&&error.name==='TimeoutError'))throw error;
+        });
+      }
       return await approveConversationCard(page,request,this.connectorApps.get(request.expectedAccountFingerprint,request.connectorName),signal);
     } finally { await this.surface.endAction(); }
   }

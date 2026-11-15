@@ -769,6 +769,7 @@ test("passive approval checks yield to active sends and never start another acti
   while(!driver.releases.has(action.actionId))await Bun.sleep(1);
   const approval={url:action.url,expectedAccountFingerprint:"account-1",connectorName:"Codexify"};
   expect(await coordinator.approvePendingConversation(approval)).toMatchObject({approved:false});
+  await expect(coordinator.approvePendingConversation({...approval,allowNavigation:true})).rejects.toThrow('deferred');
   expect(driver.checks).toBe(0);expect((await coordinator.health()).activeActionId).toBe(action.actionId);
   driver.releases.get(action.actionId)!();await collect(coordinator,action.actionId);
   expect(await coordinator.approvePendingConversation(approval)).toMatchObject({approved:true});
