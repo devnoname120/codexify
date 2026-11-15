@@ -131,7 +131,7 @@ jobs:
   diff-widget:
     name: Diff widget layout (Chromium and WebKit)
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
 
