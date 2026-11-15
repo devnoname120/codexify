@@ -212,6 +212,7 @@ async fn workspace_picker_wait_and_switch_require_brief_without_touching_old_fil
             crate::types::ToolLogLevel::Info,
         );
         handler.config = Arc::new(config);
+        let chat_store = handler.markdown_chat.clone();
         let (server, client_transport) = tokio::io::duplex(128 * 1024);
         let server_task = tokio::spawn(async move {
             handler
@@ -281,12 +282,34 @@ async fn workspace_picker_wait_and_switch_require_brief_without_touching_old_fil
                     .unwrap()
                     .contains("Instructions for project a")
             );
+            let read = client
+                .call_tool(request("chat_read", json!({})))
+                .await
+                .unwrap();
+            let chat = chat_store
+                .chat_at_path(
+                    std::path::PathBuf::from(
+                        read.structured_content.unwrap()["chat_file"]
+                            .as_str()
+                            .unwrap(),
+                    ),
+                    stable,
+                )
+                .unwrap();
             let waiting = client.call_tool(request("chat_await", json!({})));
             tokio::pin!(waiting);
-            tokio::select! {
-                _ = &mut waiting => panic!("Selected chat should wait for input"),
-                _ = tokio::time::sleep(Duration::from_millis(100)) => {}
-            }
+            // A fixed delay does not establish that the server entered its wait.
+            // Switching first would leave a late request waiting for selection.
+            tokio::time::timeout(Duration::from_secs(3), async {
+                while chat.agent_waiting_until_ms().is_none() {
+                    tokio::select! {
+                        _ = &mut waiting => panic!("Selected chat should wait for input"),
+                        _ = tokio::time::sleep(Duration::from_millis(5)) => {}
+                    }
+                }
+            })
+            .await
+            .expect("Selected chat should enter its wait before switching workspace");
             let switch = client
                 .call_tool(request(
                     "setup_ui_switch_project",
