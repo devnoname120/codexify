@@ -78,3 +78,16 @@ test.skipIf(!native)("unrelated terminal failure remains a blocker",async()=>{
   expect(await previousResponseDeliveryTimedOut(page)).toBe(false);
   await expect(throwIfSessionAttention(page)).rejects.toMatchObject({code:"failed"});
 },60_000);
+
+const timeoutCard=`<div role="alert">${localizedTimeouts[2]}<button data-testid="regenerate-thread-error-button">Retry old response</button></div>`;
+const terminalCard='<div role="alert">Something went wrong. See help.openai.com.<button data-testid="regenerate-thread-error-button">Retry current response</button></div>';
+for(const [name,cards] of [
+  ['timeout before terminal',timeoutCard+terminalCard],
+  ['terminal before timeout',terminalCard+timeoutCard],
+  ['separate Retry in a shared wrapper',`<section><div role="alert">${localizedTimeouts[2]}</div><div><button data-testid="regenerate-thread-error-button">Retry unrelated response</button></div></section>`],
+  ['timeout without ARIA alert',`<div><p>${localizedTimeouts[2]}</p><button data-testid="regenerate-thread-error-button">Retry old response</button></div>`+terminalCard],
+] as const)test.skipIf(!native)(`a previous timeout never exempts a different error: ${name}`,async()=>{
+    await page.setContent(`<main><form><div id="prompt-textarea" contenteditable="true"></div></form>${cards}</main>`);
+    expect(await previousResponseDeliveryTimedOut(page)).toBe(true);
+    await expect(throwIfSessionAttention(page)).rejects.toMatchObject({code:"failed"});
+},30_000);

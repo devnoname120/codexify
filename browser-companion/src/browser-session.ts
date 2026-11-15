@@ -22,43 +22,52 @@ const subscriptionFailureAlert = (page: Page): Locator => page
 
 // Error semantics and the support destination are stable across UI languages.
 // Scope the fallback to alerts/error surfaces so ordinary answer links do not match.
+const RESPONSE_ERROR_SELECTOR = '[role="alert"], [data-testid="conversation-turn-error"], [data-testid="conversation-error"], [data-error-code]';
 const terminalErrorAlert = (page: Page): Locator => page
-  .locator('[role="alert"], [data-testid="conversation-turn-error"], [data-testid="conversation-error"], [data-error-code]')
+  .locator(RESPONSE_ERROR_SELECTOR)
   .filter({hasText:uiLabelPattern("terminalFailure",false)})
-  .filter({hasText:/help\.openai\.com/i}).filter({visible:true}).last();
+  .filter({hasText:/help\.openai\.com/i}).filter({visible:true});
 
 // These notices are failures of the previous *response*, not permission to
 // resubmit its already accepted user message via the UI's Retry button.
 // The supervisor owns any later goal continuation and its idempotency key.
 export const deliveryTimeoutText = /(?:message delivery (?:has )?timed out|timed out (?:while )?delivering (?:the )?message|\u010das za dostavo sporo\u010dila se je iztekel)/iu;
 
-export async function previousResponseDeliveryTimedOut(page:Page):Promise<boolean> {
+async function responseDeliveryTimeoutMatches(page:Page,surfaces:Locator):Promise<boolean[]> {
   const url = new URL(page.url());
-  if(url.origin !== "https://chatgpt.com" || !/^\/(?:g\/[^/]+\/)?c\/[^/]+\/?$/.test(url.pathname))return false;
-  const failures=page.locator('[role="alert"], [data-testid="conversation-turn-error"], [data-testid="conversation-error"], [data-error-code]')
-    .filter({hasText:deliveryTimeoutText}).filter({visible:true});
-  if(await failures.evaluateAll(nodes=>nodes.some(node=>{
-    if(node.closest('[data-user-message-bubble], [data-conversation-role], [data-message-author-role], article, [data-turn-key], [data-turn-id], pre, code, [hidden], [inert], [aria-hidden="true"]'))return false;
-    for(let parent:Element|null=node;parent;parent=parent.parentElement)if(getComputedStyle(parent).opacity==="0")return false;
-    return true;
-  })))return true;
-  // Some localized response cards lack an ARIA alert. In that case require
-  // the app's exact regeneration control AND a short adjacent timeout message.
-  // Never scan the whole conversation or click the regeneration control.
-  return page.getByTestId("regenerate-thread-error-button").filter({visible:true}).evaluateAll((buttons,patternSource)=>{
+  if(url.origin !== "https://chatgpt.com" || !/^\/(?:g\/[^/]+\/)?c\/[^/]+\/?$/.test(url.pathname))return surfaces.evaluateAll(nodes=>nodes.map(()=>false));
+  return surfaces.evaluateAll((nodes,{patternSource,errorSelector})=>{
     const timeoutPattern=new RegExp(patternSource,"iu");
-    return buttons.some(button=>{
-      if(button.closest('[data-user-message-bubble], [data-conversation-role], [data-message-author-role], article, [data-turn-key], [data-turn-id], pre, code, [hidden], [inert]'))return false;
-      for(let parent:Element|null=button;parent;parent=parent.parentElement)if(getComputedStyle(parent).opacity==="0")return false;
-      const parent=button.parentElement, grandparent=parent?.parentElement;
-      return [parent,grandparent].some(node=>{
-        if(!node || node.matches('html, body, main, article, form, [data-app-shell-focus-area], [data-conversation-role], [data-message-author-role]'))return false;
-        if(node.querySelector('article, [data-user-message-bubble], [data-conversation-role], [data-message-author-role], [data-turn-key], [data-turn-id]'))return false;
-        const message=node?.textContent?.trim();
+    const content='[data-user-message-bubble], [data-conversation-role], [data-message-author-role], article, [data-turn-key], [data-turn-id], pre, code';
+    const excluded=content+', [hidden], [inert], [aria-hidden="true"]';
+    const owned=(node:Element)=>{
+      if(node.closest(excluded))return false;
+      for(let parent:Element|null=node;parent;parent=parent.parentElement)if(getComputedStyle(parent).opacity==="0")return false;
+      return true;
+    };
+    return nodes.map(surface=>{
+      if(!owned(surface))return false;
+      // An alert can exempt only itself and the Retry control inside it.
+      const alert=surface.closest(errorSelector);
+      if(alert)return owned(alert)&&!alert.querySelector(errorSelector)&&!alert.querySelector(content)
+        &&timeoutPattern.test((alert as HTMLElement).innerText??alert.textContent??'');
+      if(!surface.matches('[data-testid="regenerate-thread-error-button"]'))return false;
+      // Some cards have no alert semantics. Their short adjacent text belongs
+      // to this control only if the container has no other errors or retries.
+      return [surface.parentElement,surface.parentElement?.parentElement].some(node=>{
+        if(!node || !owned(node) || node.matches('html, body, main, article, form, [data-app-shell-focus-area]'))return false;
+        if(node.querySelector(content)||node.querySelector(errorSelector)
+          ||node.querySelectorAll('[data-testid="regenerate-thread-error-button"]').length!==1)return false;
+        const message=((node as HTMLElement).innerText??node.textContent)?.trim();
         return Boolean(message && message.length<=350 && timeoutPattern.test(message));
       });
     });
-  },deliveryTimeoutText.source);
+  },{patternSource:deliveryTimeoutText.source,errorSelector:RESPONSE_ERROR_SELECTOR});
+}
+
+export async function previousResponseDeliveryTimedOut(page:Page):Promise<boolean> {
+  const surfaces=page.locator(RESPONSE_ERROR_SELECTOR).or(page.getByTestId("regenerate-thread-error-button")).filter({visible:true});
+  return (await responseDeliveryTimeoutMatches(page,surfaces)).some(Boolean);
 }
 
 export async function conversationUnavailableVisible(page: Page): Promise<boolean> {
@@ -147,9 +156,8 @@ export async function throwIfSessionAttention(page: Page): Promise<void> {
     if(conversationLoadWasRateLimited(page))throw new BrowserCompanionError("ChatGPT conversation loading is temporarily rate limited; wait before retrying","conversation_load_rate_limited");
     throw new BrowserCompanionError("ChatGPT conversation temporarily not accessible", "conversation_unavailable");
   }
-  const responseTimedOut=await previousResponseDeliveryTimedOut(page);
-  if ((await page.getByTestId("regenerate-thread-error-button").last().isVisible().catch(() => false)
-    || await terminalErrorAlert(page).isVisible().catch(() => false)) && !responseTimedOut) {
+  const failures=page.getByTestId("regenerate-thread-error-button").filter({visible:true}).or(terminalErrorAlert(page));
+  if ((await responseDeliveryTimeoutMatches(page,failures)).some(timeout=>!timeout)) {
     throw new BrowserCompanionError("ChatGPT displayed a terminal response error.", "failed");
   }
 }
