@@ -10258,6 +10258,7 @@ async fn offline_materialization_checks_need_no_goal_or_message_and_preserve_exi
         "unverified",
         "ordinary",
         "newer-call",
+        "completed",
     ] {
         let f = fixture().await;
         f.chat.record_agent_call(1000).await.unwrap();
@@ -10280,6 +10281,21 @@ async fn offline_materialization_checks_need_no_goal_or_message_and_preserve_exi
         }
         if mode == "unverified" {
             f.store.unlink_pairing(&f.task, 2000).unwrap();
+        }
+        if mode == "completed" {
+            let goal = f
+                .store
+                .set_goal(&f.task, "Already completed", 1001)
+                .unwrap();
+            f.store.run_goal(&f.task, goal.revision, 1002).unwrap();
+            f.store
+                .finish_goal(
+                    &f.task,
+                    goal.revision,
+                    GoalFinish::Completed { summary: None },
+                    1003,
+                )
+                .unwrap();
         }
         let mut config = f.config.markdown_chat.automation.clone();
         config.auto_approve_tool_calls = mode != "disabled";
@@ -10304,14 +10320,21 @@ async fn offline_materialization_checks_need_no_goal_or_message_and_preserve_exi
             1000 + AUTOMATION_OFFLINE_AFTER_MS
         };
         supervisor.scan_once(now).await.unwrap();
-        let inspected = matches!(mode, "approved" | "missing" | "busy");
+        let inspected = matches!(mode, "approved" | "missing" | "busy" | "completed");
         assert_eq!(
             executor.visits.load(Ordering::SeqCst),
             usize::from(inspected),
             "{mode}"
         );
         assert_eq!(supervisor.queued_count().await, 0, "{mode}");
-        assert!(f.store.load(&f.task).unwrap().goal.is_none());
+        if mode == "completed" {
+            assert_eq!(
+                f.store.load(&f.task).unwrap().goal.unwrap().status,
+                GoalStatus::Completed
+            );
+        } else {
+            assert!(f.store.load(&f.task).unwrap().goal.is_none());
+        }
         assert!(f.chat.unread_snapshot().await.unwrap().messages.is_empty());
         if inspected {
             supervisor.scan_once(now + 5000).await.unwrap();

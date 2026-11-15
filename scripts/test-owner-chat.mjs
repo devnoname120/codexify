@@ -1368,6 +1368,7 @@ for (const [engineName, engine] of [["Chromium", chromium], ["WebKit", webkit]])
       await metrics.getByText("1m 10s (1392 turns · 0 failed chats)", { exact:true }).waitFor();
       const remaining = goal.timerUntilMs - clock;
       clock += remaining; await page.clock.fastForward(remaining);
+      await metrics.getByText("4m 48s (1392 turns · 0 failed chats)", { exact:true }).waitFor();
       const atOffline = await metrics.textContent();
       clock += 60000; await page.clock.fastForward(60000);
       assert.equal(await metrics.textContent(), atOffline, "offline time must not increase even while polling fails");
