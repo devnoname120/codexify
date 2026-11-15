@@ -27,7 +27,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 const COMPANION_TOKEN: &str = "YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE";
-const COMPANION_BUILD: &str = "supervisor-fake-build+protocol.36957a042ed31cae11d0401411999119d39c22af98278a46b25c412b0be765c6";
+const COMPANION_BUILD: &str = "supervisor-fake-build+protocol.caed87c2a59aa10d656554f5b1e8e74a640e57c3bb5fa9315b6050f279212d92";
 
 struct FakeExecutor {
     calls: AtomicUsize,
@@ -9699,6 +9699,117 @@ struct ApprovalOnOpenExecutor {
     opened: AtomicBool,
     approvals: AtomicUsize,
     visits: AtomicUsize,
+}
+
+struct MaterializationInspectionExecutor {
+    visits: AtomicUsize,
+    approved: bool,
+    busy: AtomicBool,
+}
+
+#[async_trait]
+impl AutomationExecutor for MaterializationInspectionExecutor {
+    async fn inspect_pending_materialization(
+        &self,
+        url: &str,
+        account: &str,
+        connector: &str,
+    ) -> Result<bool, String> {
+        assert_eq!(url, "https://chatgpt.com/c/example");
+        assert_eq!(account, "account-1");
+        assert_eq!(connector, "Codexify");
+        self.visits.fetch_add(1, Ordering::SeqCst);
+        if self.busy.swap(false, Ordering::SeqCst) {
+            return Err("browser busy".into());
+        }
+        Ok(self.approved)
+    }
+    async fn execute(
+        &self,
+        _: AutomationExecution,
+        _: mpsc::UnboundedSender<CompanionEvent>,
+        _: CancellationToken,
+    ) -> Result<CompanionActionSnapshot, AutomationExecutionError> {
+        panic!("materialization inspection must never submit a new message")
+    }
+}
+
+#[tokio::test]
+async fn offline_materialization_checks_need_no_goal_or_message_and_preserve_existing_gates() {
+    for mode in [
+        "approved",
+        "missing",
+        "busy",
+        "online",
+        "stopped",
+        "disabled",
+        "unverified",
+        "ordinary",
+        "newer-call",
+    ] {
+        let f = fixture().await;
+        f.chat.record_agent_call(1000).await.unwrap();
+        if mode != "ordinary" {
+            assert!(
+                f.chat
+                    .record_file_materialization("direct", 1)
+                    .await
+                    .unwrap()
+            );
+        }
+        if mode == "newer-call" {
+            f.chat.record_agent_call(2000).await.unwrap();
+        }
+        if mode == "stopped" {
+            f.chat
+                .request_agent_stop("stop-materialization".into())
+                .await
+                .unwrap();
+        }
+        if mode == "unverified" {
+            f.store.unlink_pairing(&f.task, 2000).unwrap();
+        }
+        let mut config = f.config.markdown_chat.automation.clone();
+        config.auto_approve_tool_calls = mode != "disabled";
+        let executor = Arc::new(MaterializationInspectionExecutor {
+            visits: AtomicUsize::new(0),
+            approved: mode != "missing",
+            busy: AtomicBool::new(mode == "busy"),
+        });
+        let supervisor = AgentAutomationSupervisor::new(config, executor.clone());
+        supervisor
+            .register_task(AutomationTaskHandle::new(
+                f.task.clone(),
+                0,
+                f.store.clone(),
+                f.chat.clone(),
+            ))
+            .await
+            .unwrap();
+        let now = if mode == "online" {
+            1001
+        } else {
+            1000 + AUTOMATION_OFFLINE_AFTER_MS
+        };
+        supervisor.scan_once(now).await.unwrap();
+        let inspected = matches!(mode, "approved" | "missing" | "busy");
+        assert_eq!(
+            executor.visits.load(Ordering::SeqCst),
+            usize::from(inspected),
+            "{mode}"
+        );
+        assert_eq!(supervisor.queued_count().await, 0, "{mode}");
+        assert!(f.store.load(&f.task).unwrap().goal.is_none());
+        assert!(f.chat.unread_snapshot().await.unwrap().messages.is_empty());
+        if inspected {
+            supervisor.scan_once(now + 5000).await.unwrap();
+            assert_eq!(
+                executor.visits.load(Ordering::SeqCst),
+                if mode == "busy" { 2 } else { 1 },
+                "{mode}"
+            );
+        }
+    }
 }
 #[async_trait]
 impl AutomationExecutor for ApprovalOnOpenExecutor {

@@ -368,10 +368,16 @@ export class SingleWindowCoordinator {
   async approvePendingConversation(raw:ConversationApprovalRequest,signal?:AbortSignal,navigate=false,once=false):Promise<{protocolVersion:number;build:string;approved:boolean}> {
     const request = conversationApprovalRequestSchema.parse(raw);
     const receipt = (approved:boolean) => ({protocolVersion:PROTOCOL_VERSION,build:this.build,approved});
-    if (this.activeActionId || this.windowOperationActive || !this.driver.approvePendingConversation) return receipt(false);
-    const bounded = AbortSignal.any([AbortSignal.timeout(navigate?30_000:5_000),...(signal ? [signal] : [])]);
+    if (this.activeActionId || this.windowOperationActive || !this.driver.approvePendingConversation) {
+      if(request.allowNavigation)throw new Error('Browser companion is busy; materialization inspection was deferred');
+      return receipt(false);
+    }
+    const bounded = AbortSignal.any([AbortSignal.timeout(navigate||request.allowNavigation?30_000:5_000),...(signal ? [signal] : [])]);
     return this.withWindowOperation(async operationSignal => {
-      if (this.activeActionId) return receipt(false);
+      if (this.activeActionId) {
+        if(request.allowNavigation)throw new Error('Browser companion is busy; materialization inspection was deferred');
+        return receipt(false);
+      }
       if(navigate){
         const health=await this.driver.health(operationSignal);
         if(!health.authenticated||health.accountFingerprint!==request.expectedAccountFingerprint)

@@ -183,7 +183,8 @@
   "conversationApproval": {
     "request": ["url", "expectedAccountFingerprint", "connectorName"],
     "response": ["protocolVersion", "build", "approved"],
-    "scope": "Current verified conversation and its configured connector only; no navigation or message submission",
+    "optionalRequest": {"allowNavigation":"boolean, default false; visit the paired conversation only for an offline pending file materialization check"},
+    "scope": "Verified conversation and its configured connector only; passive checks never navigate, explicit materialization checks may navigate without submitting a message",
     "policy": "Core calls only while autoApproveToolCalls is enabled; checks yield to browser actions"
   },
   "navigationDeferral": {

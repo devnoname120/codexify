@@ -17,9 +17,9 @@ use crate::markdown_chat::AgentAutomationConfig;
 pub const PROTOCOL_VERSION: u32 = 1;
 pub const COMPANION_KIND: &str = "codexify-browser-companion";
 pub const PROTOCOL_SCHEMA_HASH: &str =
-    "36957a042ed31cae11d0401411999119d39c22af98278a46b25c412b0be765c6";
+    "caed87c2a59aa10d656554f5b1e8e74a640e57c3bb5fa9315b6050f279212d92";
 pub const PROTOCOL_BUILD_SUFFIX: &str =
-    "+protocol.36957a042ed31cae11d0401411999119d39c22af98278a46b25c412b0be765c6";
+    "+protocol.caed87c2a59aa10d656554f5b1e8e74a640e57c3bb5fa9315b6050f279212d92";
 
 const MAX_DESCRIPTOR_BYTES: u64 = 8192;
 const MAX_JSON_BYTES: usize = 1024 * 1024;
@@ -542,6 +542,24 @@ impl BrowserCompanionClient {
         connector_name: &str,
         cancellation: &CancellationToken,
     ) -> Result<bool, String> {
+        self.approve_pending_conversation_with_navigation(
+            url,
+            account,
+            connector_name,
+            false,
+            cancellation,
+        )
+        .await
+    }
+
+    pub async fn approve_pending_conversation_with_navigation(
+        &self,
+        url: &str,
+        account: &str,
+        connector_name: &str,
+        allow_navigation: bool,
+        cancellation: &CancellationToken,
+    ) -> Result<bool, String> {
         validate_chatgpt_url(url)?;
         validate_opaque(account, "browser account fingerprint")?;
         validate_visible(connector_name, 128, "browser connector name")?;
@@ -552,8 +570,18 @@ impl BrowserCompanionClient {
             build: String,
             approved: bool,
         }
-        let receipt: Receipt = self.request_json(Method::POST, "/v1/approvals/conversation",
-            Some(&serde_json::json!({"url":url,"expectedAccountFingerprint":account,"connectorName":connector_name})), cancellation).await?;
+        let mut request = serde_json::json!({"url":url,"expectedAccountFingerprint":account,"connectorName":connector_name});
+        if allow_navigation {
+            request["allowNavigation"] = true.into();
+        }
+        let receipt: Receipt = self
+            .request_json(
+                Method::POST,
+                "/v1/approvals/conversation",
+                Some(&request),
+                cancellation,
+            )
+            .await?;
         self.validate_envelope(receipt.protocol_version, &receipt.build)?;
         Ok(receipt.approved)
     }
