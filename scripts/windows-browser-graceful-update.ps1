@@ -15,6 +15,18 @@ function Test-CleanBrowserStopExitRace([string]$BrowserRoot,[string]$DescriptorP
   }
   return $true
 }
+function Wait-ManagedChromeProfileExit([object]$Owner,[int]$ChromeId,[string]$BackupDirectory) {
+  if($Owner.WaitForExit(45000)){return}
+  # Closing the last window can leave a background profile owner alive.
+  # Absence of windows/renderers is not evidence that its writes finished.
+  $Owner.Refresh()
+  $renderers=@(Get-CimInstance Win32_Process -Filter "Name='chrome.exe'" | Where-Object {$_.ParentProcessId -eq $ChromeId -and $_.CommandLine -like '*--type=renderer*'})
+  if($Owner.MainWindowHandle -ne [IntPtr]::Zero -or $renderers.Count){throw 'Chrome did not close cleanly; no forced termination attempted'}
+  if(-not $Owner.WaitForExit(30000)){
+    @{windowClosed=$true;backgroundProcessRetained=$ChromeId;atUtc=[DateTime]::UtcNow.ToString('o')}|ConvertTo-Json|Set-Content -LiteralPath (Join-Path $BackupDirectory 'chrome-background-after-close.json')
+    throw 'Chrome still owns its profile after closing the window; update deferred without native teardown'
+  }
+}
 function Stop-ManagedBrowserGracefully([string]$BrowserRoot,[string]$NativeExe,[string]$BackupDirectory,[string]$ExpectedAccountFingerprint) {
   $ErrorActionPreference='Stop'
   $descriptorPath=Join-Path $BrowserRoot 'descriptor.json'
@@ -73,17 +85,7 @@ function Stop-ManagedBrowserGracefully([string]$BrowserRoot,[string]$NativeExe,[
     if($current.ExecutablePath -ine $chrome[0].ExecutablePath -or $current.ParentProcessId -ne $descriptor.pid){throw 'Managed Chrome identity changed'}
     $owner.Refresh()
     if(-not $owner.CloseMainWindow()){throw 'Chrome declined clean shutdown; no forced termination attempted'}
-    if(-not $owner.WaitForExit(45000)){
-      # Closing the last window can leave Chrome's background process alive.
-      # Accept that only when no window or renderer remains, then allow a
-      # further 30 seconds for profile and cookie writes before native stop.
-      $owner.Refresh()
-      $renderers=@(Get-CimInstance Win32_Process -Filter "Name='chrome.exe'" | Where-Object {$_.ParentProcessId -eq $chromeId -and $_.CommandLine -like '*--type=renderer*'})
-      if($owner.MainWindowHandle -ne [IntPtr]::Zero -or $renderers.Count){throw 'Chrome did not close cleanly; no forced termination attempted'}
-      if(-not $owner.WaitForExit(30000)){
-        @{windowClosed=$true;backgroundProcessRetained=$chromeId;atUtc=[DateTime]::UtcNow.ToString('o')}|ConvertTo-Json|Set-Content -LiteralPath (Join-Path $BackupDirectory 'chrome-background-after-close.json')
-      }
-    }
+    Wait-ManagedChromeProfileExit -Owner $owner -ChromeId $chromeId -BackupDirectory $BackupDirectory
     $launcher=Get-Process -Id ([int]$descriptor.pid) -ErrorAction SilentlyContinue
     # Chrome has saved and closed its profile. The native stop command owns
     # launcher shutdown and must acquire this lock before it can finish.
@@ -112,8 +114,10 @@ function Stop-ManagedBrowserGracefully([string]$BrowserRoot,[string]$NativeExe,[
     return @{graceful=$true;profileBackupVerified=$true;chromePid=$chromeId}
   } finally {
     if(-not $success -and $stop -and -not $stop.HasExited){
-      $client=Get-CimInstance Win32_Process -Filter ("ProcessId="+$stop.Id)
-      if($client.ExecutablePath -ieq $NativeExe){Stop-Process -Id $stop.Id}
+      # Use the handle opened for our own stop receipt above. Its cancellation
+      # must finish before releasing the lock that prevents native teardown.
+      try {$stop.Kill()}catch{if(-not $stop.HasExited){throw}}
+      $stop.WaitForExit()
     }
     if($locked){$lock.Unlock(0,1)}
     if($lock){$lock.Dispose()}
