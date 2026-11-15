@@ -437,6 +437,7 @@ export class ChatGptBrowserDriver implements BrowserDriver {
         account = await read(()=>this.healthAccount.read(page));
       } catch (error) {
         if (page.isClosed()) throw new BrowserCompanionError("The shared Chrome ChatGPT window was closed", "external_interference", {cause:error});
+        if (error instanceof BrowserCompanionError && error.code === "authentication_required") throw error;
         // Missing/hydrating editors do not prove sign-out. Only explicit
         // authentication UI may turn a failed session observation into that
         // state; a slow API read must preserve the live browser and account.

@@ -180,6 +180,27 @@ test.skipIf(process.env.CODEXIFY_TEST_BROWSER_COMPANION_CHROME!=="1")("passive p
 },30000);
 
 
+test.skipIf(process.env.CODEXIFY_TEST_BROWSER_COMPANION_CHROME!=="1")("confirmed sign-out survives conversation errors while failed session reads remain unavailable",async()=>{
+ const executablePath=await privateChromeExecutable(join(import.meta.dirname,'../.browsers',`${process.platform}-${process.arch}`));
+ const browser=await chromium.launch({executablePath,headless:true});
+ try {
+  const page=await browser.newPage();let session:unknown={},responseCode=200;
+  await page.route('https://chatgpt.com/**',route=>{
+   if(new URL(route.request().url()).pathname==='/api/auth/session')return route.fulfill({status:responseCode,json:session});
+   return route.fulfill({contentType:'text/html',body:'<main><h2>Could not load this ChatGPT conversation</h2><button type="button">Try again</button></main>'});
+  });
+  const driver=new ChatGptBrowserDriver({page:async()=>page,navigate:async url=>{await page.goto(url);return page;},reveal:async()=>{},beginAction:async()=>{},endAction:async()=>{},close:async()=>{}},protocolBuild('signed-out-test'));
+  for(const payload of [null,{}, {expires:'2000-01-01T00:00:00Z'}, {error:'RefreshAccessTokenError'}]){
+   session=payload;await page.goto('https://chatgpt.com/c/original');
+   expect(await driver.health()).toMatchObject({authenticated:false,status:'authentication_required'});
+  }
+  for(const [code,payload] of [[503,{}],[200,{user:{id:'fixture-user'}}]] as const){
+   responseCode=code;session=payload;await page.reload();
+   expect(await driver.health()).toMatchObject({authenticated:false,status:'unavailable'});
+  }
+ }finally{await browser.close();}
+},30_000);
+
 test.skipIf(process.env.CODEXIFY_TEST_BROWSER_COMPANION_CHROME!=="1")("explicit billing inspection resolves nested plan text and a missing label within its observation budget",async()=>{
  const executablePath=await privateChromeExecutable(join(import.meta.dirname,'../.browsers',`${process.platform}-${process.arch}`));
  const browser=await chromium.launch({executablePath,headless:true});
@@ -195,7 +216,7 @@ test.skipIf(process.env.CODEXIFY_TEST_BROWSER_COMPANION_CHROME!=="1")("explicit 
   expect((await readBillingPlan(page)).label).toBe('Pro 20x');
   await page.goto('https://chatgpt.com/c/original');
   billing='<h2>Billing</h2><p>Subscription details are loading.</p>';
-  const started=Date.now();expect((await readBillingPlan(page)).label).toBe('');
+  const started=Date.now();expect((await readBillingPlan(page)).label).toBe('Pro');
   expect(Date.now()-started).toBeLessThan(8_000);
   expect(page.url()).toBe('https://chatgpt.com/settings/billing');expect(context.pages()).toEqual([page]);
   await readBillingPlan(page);expect(visits).toBe(2);
@@ -233,8 +254,8 @@ test.skipIf(process.env.CODEXIFY_TEST_BROWSER_COMPANION_CHROME!=="1")("explicit 
    label='Pro 200';await page.locator('#prompt-textarea').fill('Keep my draft');const beforeMenuPlan=billingReads;await check('Pro 20x','pro');expect(billingReads).toBe(beforeMenuPlan);expect(await page.locator('#prompt-textarea').innerText()).toBe('Keep my draft');await page.locator('#prompt-textarea').fill('');
    name='Pro';label='Go';testId=false;await check('Go','go');
    name='Another person';label='Research membership';await check('Research membership','unknown');
-   label='';await check('','unknown');
-   const missingReads={billingReads,menuReads};await check('','unknown');expect(billingReads).toBeGreaterThan(missingReads.billingReads);expect(menuReads).toBeGreaterThan(missingReads.menuReads);
+   label='';await check('Pro','pro');
+   const missingReads={billingReads,menuReads};await check('Pro','pro');expect(billingReads).toBeGreaterThan(missingReads.billingReads);expect(menuReads).toBeGreaterThan(missingReads.menuReads);
    billing='<h2>ChatGPT Pro 200</h2>';label='Research membership';await check('Pro 20x','pro');
    billing='<h2>ChatGPT Pro 200</h2>';label='Pro';const before=menuReads;
    await check('Pro 20x','pro');expect(menuReads).toBe(before+1);
