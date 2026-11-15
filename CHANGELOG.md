@@ -6,6 +6,33 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.4.0] - 2026-11-15
+
+### Added
+
+- Add optional agent teams with parent and worker goals, an Agents panel,
+  grouped worker chats, progress reports, and controls for instructions, goals,
+  pause, resume, and stop. Agent teams and per-chat delegation are disabled by
+  default; active workers have a configurable per-project limit.
+- Expose an optional scoped MCP, HTTP, and JavaScript connection for external
+  coding clients to manage agent teams. Print connection details with
+  `codexify agents connection` and usage with `codexify agents instructions`.
+- Add opt-in recovery for inaccessible conversations while preserving their
+  workspace, goal, queued messages, and model selection. Add a working-tree
+  changes counter and bounded parallel loading of owner-chat listings.
+- Support up to four browser action pages when enabled, with one page by default.
+  Add browser simplicity and runtime settings, lighter page observation, and
+  recovery for stalled editors and safely recorded unsent drafts.
+- Add an optional native Windows launcher for the installed service, saved
+  tunnels, browser companion, and local chat, with live status and desktop,
+  Start menu, and sign-in shortcuts. The launcher supports the Windows-provided
+  PowerShell 5.1; see `docs/WINDOWS_LAUNCHER.md` for installation.
+- Add Windows console startup, diagnostics, and guarded local-update helpers
+  that reuse the installed configuration and saved port.
+- Report automatic browser activity and apply a circuit breaker to repeated
+  automatic recovery, renewal, and worker activity, while keeping owner
+  messages, pairing, and new-chat setup responsive.
+
 ### Fixed
 
 - Inspect offline conversations for file-materialization approvals after a
@@ -13,6 +40,26 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Preserve the existing approval policy and avoid sending another prompt.
 - Preserve text-only MCP results in response envelopes while bounding the
   generated structured text and retaining upstream metadata and full user notices.
+- Retain final command output and exit codes until polled, while allowing
+  finished sessions to make room for new commands. Improve interruption of
+  command waits without terminating or resending the running command.
+- Drain Git checkpoint stderr without blocking on a full pipe, retain bounded
+  diagnostics, and correct Windows workspace paths and service handling.
+- Flatten the `goal_finish` input schema so MCP adapters retain completion
+  summaries and blocker reasons; keep outcome-specific validation at runtime.
+- Recognize only modal Stop confirmations, and detect response-delivery timeouts
+  without replaying Send or automatically requesting regeneration. Keep timeout
+  exceptions scoped to the error card that reports them.
+- Preserve browser rate-limit backoff across restarts, distinguish history-load
+  limits from submission limits, and retain uncertain-send protections during
+  new-chat creation and recovery.
+- Wait for the actual Chrome profile owner to exit before a Windows browser
+  update, and keep update guards held until cancelled stop processes have exited.
+  Verify graceful cancellation under Windows PowerShell 5.1.
+- Recover demonstrably unresponsive browser processes only after repeated
+  negative observations; retain live processes when observation is unavailable.
+- Improve goal continuation, blocker auditing, worker ownership checks, and
+  reconciliation of activity, acknowledgments, and failed-chat counts.
 
 ## [2.3.29] - 2026-11-09
 
