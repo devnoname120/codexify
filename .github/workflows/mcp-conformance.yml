@@ -1,0 +1,45 @@
+name: MCP protocol smoke
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/mcp-conformance.yml"
+      - "scripts/run-mcp-conformance.mjs"
+      - "src/server.rs"
+      - "src/bridge.rs"
+      - "src/mcp_catalog.rs"
+      - "src/codex_mcp.rs"
+      - "src/auth.rs"
+      - "src/config.rs"
+      - "src/registry.rs"
+      - "src/types.rs"
+      - "Cargo.toml"
+      - "Cargo.lock"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mcp-protocol-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+      - name: Syntax-check conformance launcher
+        run: node --check scripts/run-mcp-conformance.mjs
+      - name: Build isolated Codexify binary
+        run: cargo build --locked --bin codexify
+      - name: Verify MCP initialization and tool listing
+        env:
+          CI: "true"
+        run: node scripts/run-mcp-conformance.mjs
