@@ -4,6 +4,7 @@ const { spawnSync } = require("node:child_process");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const { archiveTool } = require("./archive-tool.cjs");
 const { installChrome } = require("./install-chrome.cjs");
 const { stageWindowsApplication } = require("./package-stage.cjs");
 
@@ -182,9 +183,9 @@ try {
   fs.rmSync(artifact, { force:true });
   if (targetPlatform === "win32") {
     const zipOptions=process.env.CODEXIFY_BROWSER_FAST_LOCAL_PACKAGE==="1"?["--options","zip:compression-level=1"]:[];
-    runChecked("tar", ["-a", "-cf", artifact,...zipOptions, "-C", packageStage, packageRootName]);
+    runChecked(archiveTool(), ["-a", "-cf", artifact,...zipOptions, "-C", packageStage, packageRootName]);
   } else {
-    runChecked("tar", ["-czf", artifact, "-C", packageStage, packageRootName], {
+    runChecked(archiveTool(), ["-czf", artifact, "-C", packageStage, packageRootName], {
       env:{ ...process.env, COPYFILE_DISABLE:"1" },
     });
   }

@@ -3,6 +3,7 @@ const { spawnSync } = require("node:child_process");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const { archiveTool } = require("./archive-tool.cjs");
 
 const root = path.resolve(__dirname, "..");
 const repositoryRoot = path.resolve(root, "..");
@@ -52,7 +53,7 @@ const descriptor = path.join(scratch, "browser", "descriptor.json");
 try {
   const extract = path.join(scratch, "extract");
   fs.mkdirSync(extract);
-  run("tar", process.platform === "win32"
+  run(archiveTool(), process.platform === "win32"
     ? ["-xf", artifact, "-C", extract]
     : ["-xzf", artifact, "-C", extract], { timeout:PACKAGE_EXTRACTION_TIMEOUT_MS });
   const packageRoot = path.join(extract, packageRootName);
