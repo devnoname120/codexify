@@ -1,11 +1,64 @@
 //! Per-connection admission and failure containment; never retries tool calls.
-use crate::types::McpRequestLimits;
+use crate::types::{McpRequestLimits, McpServerSpec};
+use rmcp::model::CallToolRequestParams;
 use serde_json::{Value, json};
 use std::sync::Mutex;
 use std::time::Duration;
 use tokio::sync::{Semaphore, SemaphorePermit};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
+
+// Capability is tied to a configured upstream, never inferred from a tab name.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum PlaywrightBackendMode {
+    #[default]
+    Other,
+    Browser,
+    Cdp,
+    Extension,
+}
+
+impl PlaywrightBackendMode {
+    fn from_spec(name: &str, spec: &McpServerSpec) -> Self {
+        let playwright = name.to_ascii_lowercase().contains("playwright")
+            || spec
+                .args
+                .iter()
+                .any(|arg| arg.to_ascii_lowercase().contains("playwright"))
+            || spec
+                .command
+                .as_deref()
+                .is_some_and(|command| command.to_ascii_lowercase().contains("playwright"));
+        if !playwright {
+            return Self::Other;
+        }
+        let extension_env = spec
+            .env
+            .get("PLAYWRIGHT_MCP_EXTENSION")
+            .is_some_and(|value| {
+                matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes")
+            });
+        if spec
+            .args
+            .iter()
+            .any(|arg| arg == "--extension" || arg == "--extension=true")
+            || extension_env
+            || name.eq_ignore_ascii_case("playwright-extension")
+            || name.eq_ignore_ascii_case("playwright_extension")
+        {
+            Self::Extension
+        } else if spec
+            .args
+            .iter()
+            .any(|arg| arg == "--cdp-endpoint" || arg.starts_with("--cdp-endpoint="))
+            || spec.env.contains_key("PLAYWRIGHT_MCP_CDP_ENDPOINT")
+        {
+            Self::Cdp
+        } else {
+            Self::Browser
+        }
+    }
+}
 
 #[derive(Default)]
 struct State {
@@ -17,6 +70,7 @@ struct State {
 
 pub(crate) struct UpstreamControl {
     limits: McpRequestLimits,
+    playwright_mode: PlaywrightBackendMode,
     active: Semaphore,
     pending: Semaphore,
     state: Mutex<State>,
@@ -55,10 +109,79 @@ impl UpstreamControl {
             active: Semaphore::new(limits.max_concurrent_requests),
             pending: Semaphore::new(limits.max_concurrent_requests + limits.max_pending_requests),
             limits,
+            playwright_mode: PlaywrightBackendMode::Other,
             state: Mutex::new(State::default()),
             unavailable: tokio::sync::watch::channel(false).0,
         }
     }
+    /// Keep capability stable for this upstream connection and all exposure modes.
+    pub(crate) fn for_server(mut self, name: &str, spec: &McpServerSpec) -> Self {
+        self.playwright_mode = PlaywrightBackendMode::from_spec(name, spec);
+        self
+    }
+
+    /// Advertise only what the connection mode can establish, not what a
+    /// similar tool on another upstream may be able to do.
+    pub(crate) fn browser_context_capability(&self) -> Option<&'static str> {
+        match self.playwright_mode {
+            PlaywrightBackendMode::Other => None,
+            PlaywrightBackendMode::Browser => Some("browser-level"),
+            PlaywrightBackendMode::Cdp => Some("cdp-permission-dependent"),
+            PlaywrightBackendMode::Extension => Some("existing-tabs-only"),
+        }
+    }
+
+    pub(crate) fn isolated_tab_requested(
+        &self,
+        tool: &str,
+        params: &CallToolRequestParams,
+    ) -> bool {
+        self.playwright_mode != PlaywrightBackendMode::Other
+            && tool == "browser_tabs"
+            && params.arguments.as_ref().is_some_and(|args| {
+                args.get("action").and_then(Value::as_str) == Some("new")
+                    && args
+                        .get("isolatedContext")
+                        .and_then(Value::as_str)
+                        .is_some_and(|name| !name.is_empty() && name != "default")
+            })
+    }
+
+    /// An extension is attached to existing tabs; it cannot provide real
+    /// BrowserContexts. No attempt or fallback is safe for an isolation request.
+    pub(crate) fn check_browser_context_request(
+        &self,
+        tool: &str,
+        params: &CallToolRequestParams,
+    ) -> Result<(), String> {
+        if self.isolated_tab_requested(tool, params)
+            && self.playwright_mode == PlaywrightBackendMode::Extension
+        {
+            return Err(
+                "Playwright extension/existing-tab mode cannot create a genuinely isolated                  browser context (Target.createBrowserContext requires browser-level access).                  No request was dispatched. Use a connected browser-level Playwright MCP                  backend for browser_tabs(new, isolatedContext), then keep subsequent tab                  operations on that backend. If it is unavailable, repair its startup;                  do not fall back to shared extension tabs."
+                    .into(),
+            );
+        }
+        Ok(())
+    }
+
+    /// Some CDP endpoints are page-scoped; translate the exact refusal but
+    /// do not assume a context was created or automatically retry any tool.
+    pub(crate) fn browser_context_refusal(
+        &self,
+        isolated_requested: bool,
+        message: &str,
+    ) -> Option<String> {
+        (isolated_requested
+            && message.contains("Target.createBrowserContext")
+            && message.contains("-32000")
+            && message.contains("Not allowed"))
+        .then(|| {
+            "CDP -32000 Not allowed: this Playwright/CDP session lacks browser-level              Target.createBrowserContext permission. No isolated context was confirmed.              Do not reuse an extension tab or assume creation succeeded; connect a              browser-level Playwright backend, verify session identity and existing              resources before retrying."
+                .into()
+        })
+    }
+
     pub(crate) async fn wait_unavailable(&self) {
         let mut receiver = self.unavailable.subscribe();
         loop {
@@ -128,10 +251,14 @@ impl UpstreamControl {
             .saturating_sub(self.active.available_permits());
         let admitted = (self.limits.max_concurrent_requests + self.limits.max_pending_requests)
             .saturating_sub(self.pending.available_permits());
-        json!({"state": if state.probe_active {"probing"} else if state.open_until.is_some() {"unresponsive"} else if state.failures > 0 {"degraded"} else {"connected"},
+        let mut snapshot = json!({"state": if state.probe_active {"probing"} else if state.open_until.is_some() {"unresponsive"} else if state.failures > 0 {"degraded"} else {"connected"},
             "activeRequests":active,"queuedRequests":admitted.saturating_sub(active),"consecutiveFailures":state.failures,
             "retryAfterMs":state.open_until.map(|until| until.saturating_duration_since(Instant::now()).as_millis() as u64).unwrap_or(0),
-            "lastOutcome":state.last_outcome})
+            "lastOutcome":state.last_outcome});
+        if let Some(capability) = self.browser_context_capability() {
+            snapshot["browserContextCapability"] = json!(capability);
+        }
+        snapshot
     }
 }
 
@@ -178,6 +305,187 @@ impl Drop for Admission<'_> {
             state.open_until =
                 Some(Instant::now() + Duration::from_millis(self.control.limits.recovery_delay_ms));
         }
+    }
+}
+
+#[cfg(test)]
+mod browser_context_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn exposed_capability_matches_configured_backend() {
+        let full = UpstreamControl::default().for_server(
+            "playwright",
+            &McpServerSpec {
+                command: Some("node".into()),
+                args: vec!["@playwright/mcp".into()],
+                ..Default::default()
+            },
+        );
+        let extension = UpstreamControl::default().for_server(
+            "playwright-extension",
+            &McpServerSpec {
+                command: Some("node".into()),
+                args: vec!["@playwright/mcp".into(), "--extension".into()],
+                ..Default::default()
+            },
+        );
+        assert_eq!(full.snapshot()["browserContextCapability"], "browser-level");
+        assert_eq!(
+            extension.snapshot()["browserContextCapability"],
+            "existing-tabs-only"
+        );
+        assert!(
+            UpstreamControl::default()
+                .snapshot()
+                .get("browserContextCapability")
+                .is_none()
+        );
+    }
+
+    fn spec(args: &[&str]) -> McpServerSpec {
+        McpServerSpec {
+            command: Some("node".into()),
+            args: args.iter().map(|arg| (*arg).to_string()).collect(),
+            ..Default::default()
+        }
+    }
+
+    fn request(action: &str, context: Option<&str>) -> CallToolRequestParams {
+        let mut arguments = json!({ "action": action, "url": "https://example.invalid/form" });
+        if let Some(context) = context {
+            arguments["isolatedContext"] = json!(context);
+        }
+        CallToolRequestParams::new("browser_tabs")
+            .with_arguments(arguments.as_object().unwrap().clone())
+    }
+
+    #[test]
+    fn extension_mode_fails_before_isolated_creation() {
+        let control = UpstreamControl::default().for_server(
+            "playwright-extension",
+            &spec(&["playwright/mcp.js", "--extension"]),
+        );
+        let request = request("new", Some("lane06_grants_funding"));
+        assert!(control.isolated_tab_requested("browser_tabs", &request));
+        let error = control
+            .check_browser_context_request("browser_tabs", &request)
+            .unwrap_err();
+        assert!(error.contains("No request was dispatched"));
+        assert!(error.contains("cannot create a genuinely isolated"));
+    }
+
+    #[test]
+    fn extension_env_and_renamed_server_also_fail_closed() {
+        let mut settings = spec(&["playwright/mcp.js"]);
+        settings
+            .env
+            .insert("PLAYWRIGHT_MCP_EXTENSION".into(), "true".into());
+        let control = UpstreamControl::default().for_server("my_browser", &settings);
+        assert!(
+            control
+                .check_browser_context_request("browser_tabs", &request("new", Some("lane01")))
+                .is_err()
+        );
+        settings
+            .env
+            .insert("PLAYWRIGHT_MCP_EXTENSION".into(), "false".into());
+        let control = UpstreamControl::default().for_server("my_browser", &settings);
+        assert!(
+            control
+                .check_browser_context_request("browser_tabs", &request("new", Some("lane01")))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn normal_extension_tab_operations_remain_compatible() {
+        let control = UpstreamControl::default().for_server(
+            "playwright-extension",
+            &spec(&["playwright/mcp.js", "--extension"]),
+        );
+        for request in [
+            request("list", Some("lane06")),
+            request("new", None),
+            request("new", Some("default")),
+            request("select", Some("lane06")),
+        ] {
+            assert!(
+                control
+                    .check_browser_context_request("browser_tabs", &request)
+                    .is_ok()
+            );
+        }
+        assert!(
+            control
+                .check_browser_context_request("browser_navigate", &request("new", Some("lane06")))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn browser_and_cdp_backend_allow_capable_context_attempts() {
+        for settings in [
+            spec(&["playwright/mcp.js"]),
+            spec(&["playwright/mcp.js", "--cdp-endpoint=http://127.0.0.1:9222"]),
+        ] {
+            let control = UpstreamControl::default().for_server("playwright", &settings);
+            assert!(
+                control
+                    .check_browser_context_request(
+                        "browser_tabs",
+                        &request("new", Some("lane06_grants_funding"))
+                    )
+                    .is_ok()
+            );
+        }
+    }
+
+    #[test]
+    fn cdp_minus_32000_is_precise_but_unrelated_errors_stay_untouched() {
+        let control = UpstreamControl::default().for_server(
+            "playwright",
+            &spec(&["playwright/mcp.js", "--cdp-endpoint=chrome"]),
+        );
+        let error = r#"Protocol error (Target.createBrowserContext): {"code":-32000,"message":"Not allowed"}"#;
+        assert!(
+            control
+                .browser_context_refusal(true, error)
+                .unwrap()
+                .contains("No isolated context was confirmed")
+        );
+        assert!(control.browser_context_refusal(false, error).is_none());
+        assert!(
+            control
+                .browser_context_refusal(
+                    true,
+                    "Protocol error -32000: Not allowed for Page.navigate"
+                )
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn unrelated_mcp_backend_and_disconnect_cannot_silently_switch_modes() {
+        let ordinary = UpstreamControl::default()
+            .for_server("other-mcp", &spec(&["unrelated-server.js", "--extension"]));
+        assert!(
+            ordinary
+                .check_browser_context_request("browser_tabs", &request("new", Some("lane06")))
+                .is_ok()
+        );
+        let extension = UpstreamControl::default().for_server(
+            "playwright_extension",
+            &spec(&["playwright/mcp.js", "--extension"]),
+        );
+        extension.health_result(false);
+        extension.health_result(true);
+        assert!(
+            extension
+                .check_browser_context_request("browser_tabs", &request("new", Some("lane06")))
+                .is_err()
+        );
     }
 }
 

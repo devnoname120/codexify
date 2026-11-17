@@ -1125,6 +1125,32 @@ The catalogue is a startup snapshot. Dynamic `tools/list_changed` notifications
 are not used to mutate the downstream fixed surface; restart the process to
 rematerialize an upstream catalogue.
 
+**Playwright browser-context capability boundary.** A `browser_tabs` call with
+`action: "new"` and a non-default `isolatedContext` requires a real browser-level
+connection. An upstream launched with `--extension` (or
+`PLAYWRIGHT_MCP_EXTENSION=true`) only attaches to existing tabs, so Codexify
+rejects the isolated request **before upstream dispatch**, whether invoked
+through direct, gateway or catalog exposure. An ordinary new/default-context
+tab is unaffected. Browser-level Playwright may create isolated contexts; a CDP
+endpoint may or may not have browser-level permission. If CDP reports the exact
+`Target.createBrowserContext` `-32000 Not allowed` error, Codexify explains
+the missing capability and does not retry or substitute the extension.
+
+A connected extension is **not** a fallback for an unavailable browser-level
+backend. These are separate upstreams with distinct session identities; routing
+one tab-creation call to another upstream would not route subsequent navigation,
+selection or cleanup there. Backend and tab ownership must remain stable for
+the entire workflow. Playwright's index-based global tab selection is not
+per-agent ownership enforcement; callers sharing one backend must still prevent
+cross-agent tab interference until stable target identity is integrated upstream.
+
+MCP initialization is a startup snapshot as well: a `playwright` server that
+misses `startupTimeoutSec` is omitted from the downstream catalogue, even if
+`playwright-extension` succeeds. Investigate its startup diagnostics and set
+a bounded per-upstream `startupTimeoutSec` appropriate for the machine before
+restarting Codexify during a safe maintenance window. Never restart an active
+browser or resubmit an external action just to repair a missing MCP tool.
+
 ### 7.3 Direct compatibility mode (`"mode": "direct"`)
 
 Each selected upstream tool becomes a `BridgedTool` named `<server>__<tool>`
