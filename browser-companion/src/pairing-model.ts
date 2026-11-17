@@ -8,6 +8,7 @@ import {
   requireChatGptEffortControl, activateChatGptEffortMenu, discoverChatGptEfforts,
   moveChatGptEffortSlider, readChatGptEffortSnapshot, readCurrentEffortLabel,
 } from "./session";
+import {retryPickerAfterControlTimeout} from "./pairing-retry";
 
 export interface PairingMediumSelection {
   verify(signal: AbortSignal): Promise<void>;
@@ -23,8 +24,18 @@ export async function selectPairingMedium(page: Page, signal: AbortSignal): Prom
 
 async function selectPairingMediumInner(page: Page, signal: AbortSignal): Promise<PairingMediumSelection> {
   const composer = await browserStage("composer_lookup","ChatGPT did not expose one editable pairing composer",()=>activeComposer(page, 10_000, signal));
-  const control = await requireChatGptEffortControl(composer.locator("xpath=ancestor::form[1]"),signal);
-  const activate=(operationSignal=signal)=>browserStage("picker_open","ChatGPT did not open its pairing effort picker",()=>activateChatGptEffortMenu(page,control,{signal:operationSignal}));
+  let control = await requireChatGptEffortControl(composer.locator("xpath=ancestor::form[1]"),signal);
+  const originalUrl=page.url();
+  const activate=(operationSignal=signal)=>browserStage("picker_open","ChatGPT did not open its pairing effort picker",()=>retryPickerAfterControlTimeout(
+    ()=>activateChatGptEffortMenu(page,control,{settleMs:5_000,signal:operationSignal}),
+    async()=>{
+      // Only a definite pre-Send picker timeout permits one control reacquire.
+      // Re-verify the active composer; do not reuse a stale task's control.
+      const current=await activeComposer(page,5_000,operationSignal);
+      control=await requireChatGptEffortControl(current.locator("xpath=ancestor::form[1]"),operationSignal);
+      return activateChatGptEffortMenu(page,control,{settleMs:5_000,signal:operationSignal});
+    },operationSignal,()=>page.url()===originalUrl,
+  ));
   const close=()=>control.press("Escape",{timeout:1_000}).catch(()=>{});
   const checkedFamily = async (menu: Awaited<ReturnType<typeof activateChatGptEffortMenu>>,operationSignal=signal) => {
     const {value:rows}=await withChatGptModelOptions(menu,()=>activate(operationSignal),async(_scope,rows)=>rows,{signal:operationSignal});
