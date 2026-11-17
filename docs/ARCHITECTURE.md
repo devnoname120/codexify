@@ -1127,10 +1127,13 @@ rematerialize an upstream catalogue.
 
 **Playwright browser-context capability boundary.** A `browser_tabs` call with
 `action: "new"` and a non-default `isolatedContext` requires a real browser-level
-connection. An upstream launched with `--extension` (or
-`PLAYWRIGHT_MCP_EXTENSION=true`) only attaches to existing tabs, so Codexify
-rejects the isolated request **before upstream dispatch**, whether invoked
-through direct, gateway or catalog exposure. An ordinary new/default-context
+connection. An upstream launched with `--extension`, `PLAYWRIGHT_MCP_EXTENSION=true`,
+or `extension: true` in its Playwright JSON config only attaches to existing tabs,
+so Codexify rejects the isolated request **before upstream dispatch**, whether
+invoked through direct, gateway or catalog exposure. If an explicitly supplied
+Playwright JSON configuration cannot be read or parsed, isolated-context
+creation also fails closed instead of assuming the backend has browser-level
+permissions. An ordinary new/default-context
 tab is unaffected. Browser-level Playwright may create isolated contexts; a CDP
 endpoint may or may not have browser-level permission. If CDP reports the exact
 `Target.createBrowserContext` `-32000 Not allowed` error, Codexify explains

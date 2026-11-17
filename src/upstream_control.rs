@@ -16,9 +16,42 @@ enum PlaywrightBackendMode {
     Browser,
     Cdp,
     Extension,
+    Unverified,
 }
 
 impl PlaywrightBackendMode {
+    // Playwright accepts --config and PLAYWRIGHT_MCP_CONFIG as well as
+    // command-line flags. A hidden extension configuration must not be
+    // mistaken for a browser-level backend.
+    fn config_document(spec: &McpServerSpec) -> Option<Option<Value>> {
+        let path = spec
+            .args
+            .iter()
+            .enumerate()
+            .filter_map(|(index, arg)| {
+                if arg == "--config" {
+                    Some(spec.args.get(index + 1).map_or("", String::as_str))
+                } else {
+                    arg.strip_prefix("--config=")
+                }
+            })
+            .last()
+            .map(str::to_owned)
+            .or_else(|| spec.env.get("PLAYWRIGHT_MCP_CONFIG").cloned())
+            .or_else(|| std::env::var("PLAYWRIGHT_MCP_CONFIG").ok())?;
+
+        let mut path = std::path::PathBuf::from(path);
+        if path.is_relative() {
+            if let Some(cwd) = spec.cwd.as_ref() {
+                path = std::path::Path::new(cwd).join(path);
+            }
+        }
+        let parsed = std::fs::read_to_string(path)
+            .ok()
+            .and_then(|source| serde_json::from_str::<Value>(&source).ok());
+        Some(parsed)
+    }
+
     fn from_spec(name: &str, spec: &McpServerSpec) -> Self {
         let playwright = name.to_ascii_lowercase().contains("playwright")
             || spec
@@ -32,31 +65,52 @@ impl PlaywrightBackendMode {
         if !playwright {
             return Self::Other;
         }
-        let extension_env = spec
+
+        let configured = Self::config_document(spec);
+        let read_config = configured.as_ref().and_then(Option::as_ref);
+
+        let cli_extension = spec.args.iter().rev().find_map(|arg| match arg.as_str() {
+            "--extension" | "--extension=true" => Some(true),
+            "--extension=false" => Some(false),
+            _ => None,
+        });
+        let env_extension = spec
             .env
             .get("PLAYWRIGHT_MCP_EXTENSION")
-            .is_some_and(|value| {
-                matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes")
+            .cloned()
+            .or_else(|| std::env::var("PLAYWRIGHT_MCP_EXTENSION").ok())
+            .and_then(|value| match value.to_ascii_lowercase().as_str() {
+                "1" | "true" | "yes" => Some(true),
+                "0" | "false" | "no" => Some(false),
+                _ => None,
             });
-        if spec
-            .args
-            .iter()
-            .any(|arg| arg == "--extension" || arg == "--extension=true")
-            || extension_env
+        let config_extension = read_config
+            .and_then(|value| value.get("extension"))
+            .and_then(Value::as_bool);
+        if cli_extension.or(env_extension).or(config_extension) == Some(true)
             || name.eq_ignore_ascii_case("playwright-extension")
             || name.eq_ignore_ascii_case("playwright_extension")
         {
-            Self::Extension
-        } else if spec
+            return Self::Extension;
+        }
+
+        // Failure to read an explicitly configured backend leaves its
+        // permissions unknown. Do not dispatch real isolation requests.
+        if configured.as_ref().is_some_and(Option::is_none) {
+            return Self::Unverified;
+        }
+
+        let cdp = spec
             .args
             .iter()
             .any(|arg| arg == "--cdp-endpoint" || arg.starts_with("--cdp-endpoint="))
             || spec.env.contains_key("PLAYWRIGHT_MCP_CDP_ENDPOINT")
-        {
-            Self::Cdp
-        } else {
-            Self::Browser
-        }
+            || std::env::var_os("PLAYWRIGHT_MCP_CDP_ENDPOINT").is_some()
+            || read_config
+                .and_then(|value| value.pointer("/browser/cdpEndpoint"))
+                .and_then(Value::as_str)
+                .is_some_and(|url| !url.is_empty());
+        if cdp { Self::Cdp } else { Self::Browser }
     }
 }
 
@@ -128,6 +182,7 @@ impl UpstreamControl {
             PlaywrightBackendMode::Browser => Some("browser-level"),
             PlaywrightBackendMode::Cdp => Some("cdp-permission-dependent"),
             PlaywrightBackendMode::Extension => Some("existing-tabs-only"),
+            PlaywrightBackendMode::Unverified => Some("unverified-config"),
         }
     }
 
@@ -154,6 +209,13 @@ impl UpstreamControl {
         tool: &str,
         params: &CallToolRequestParams,
     ) -> Result<(), String> {
+        if self.isolated_tab_requested(tool, params)
+            && self.playwright_mode == PlaywrightBackendMode::Unverified
+        {
+            return Err(
+                "Playwright config file is missing, invalid or unreadable, so browser-context                  capabilities cannot be verified. No request was dispatched. Restore the                  configured MCP file before creating an isolated browser context.".into()
+            );
+        }
         if self.isolated_tab_requested(tool, params)
             && self.playwright_mode == PlaywrightBackendMode::Extension
         {
@@ -421,6 +483,97 @@ mod browser_context_tests {
             control
                 .check_browser_context_request("browser_navigate", &request("new", Some("lane06")))
                 .is_ok()
+        );
+    }
+
+    #[test]
+    fn playwright_json_extension_mode_cannot_bypass_guard() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("playwright.json");
+        std::fs::write(&file, r#"{"extension":true}"#).unwrap();
+        let config_name = file.to_str().unwrap();
+        let settings = spec(&["@playwright/mcp", "--config", config_name]);
+        let control = UpstreamControl::default().for_server("playwright", &settings);
+        assert_eq!(
+            control.browser_context_capability(),
+            Some("existing-tabs-only")
+        );
+        assert!(
+            control
+                .check_browser_context_request("browser_tabs", &request("new", Some("lane06")))
+                .unwrap_err()
+                .contains("No request was dispatched")
+        );
+
+        std::fs::write(
+            &file,
+            r#"{"extension":false,"browser":{"cdpEndpoint":"chrome"}}"#,
+        )
+        .unwrap();
+        let control = UpstreamControl::default().for_server("playwright", &settings);
+        assert_eq!(
+            control.browser_context_capability(),
+            Some("cdp-permission-dependent")
+        );
+
+        std::fs::write(&file, r#"{"extension":true}"#).unwrap();
+        let mut overriding = settings.clone();
+        overriding
+            .env
+            .insert("PLAYWRIGHT_MCP_EXTENSION".into(), "false".into());
+        let control = UpstreamControl::default().for_server("playwright", &overriding);
+        assert_eq!(control.browser_context_capability(), Some("browser-level"));
+    }
+
+    #[test]
+    fn missing_or_invalid_json_config_fails_closed_without_blocking_default_tab() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("config.json");
+        let mut settings = spec(&["@playwright/mcp", "--config"]);
+        settings.args.push(file.to_string_lossy().into_owned());
+        let control = UpstreamControl::default().for_server("playwright", &settings);
+        assert_eq!(
+            control.snapshot()["browserContextCapability"],
+            "unverified-config"
+        );
+        assert!(
+            control
+                .check_browser_context_request("browser_tabs", &request("new", Some("lane06")))
+                .unwrap_err()
+                .contains("No request was dispatched")
+        );
+        assert!(
+            control
+                .check_browser_context_request("browser_tabs", &request("new", None))
+                .is_ok()
+        );
+
+        std::fs::write(&file, "not json").unwrap();
+        let control = UpstreamControl::default().for_server("playwright", &settings);
+        assert_eq!(
+            control.snapshot()["browserContextCapability"],
+            "unverified-config"
+        );
+
+        std::fs::write(&file, r#"{"extension":true}"#).unwrap();
+        settings.args.push("--extension=false".into());
+        let control = UpstreamControl::default().for_server("playwright", &settings);
+        assert_eq!(
+            control.snapshot()["browserContextCapability"],
+            "browser-level"
+        );
+    }
+
+    #[test]
+    fn playwright_config_relative_to_upstream_cwd_is_resolved() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("playwright.json"), r#"{"extension":true}"#).unwrap();
+        let mut settings = spec(&["@playwright/mcp", "--config=playwright.json"]);
+        settings.cwd = Some(temp.path().to_string_lossy().into_owned());
+        let control = UpstreamControl::default().for_server("playwright", &settings);
+        assert_eq!(
+            control.snapshot()["browserContextCapability"],
+            "existing-tabs-only"
         );
     }
 
