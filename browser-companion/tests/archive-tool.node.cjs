@@ -21,5 +21,10 @@ test("Windows rejects a missing native tar.exe instead of searching arbitrary PA
   assert.throws(()=>archiveTool({platform:"win32",systemRoot:"C:\\Windows",exists:()=>false}),/unavailable/);
 });
 test("Windows rejects a relative system directory",()=>{
-  assert.throws(()=>archiveTool({platform:"win32",systemRoot:"relative",exists:()=>true}),/not absolute/);
+  assert.throws(()=>archiveTool({platform:"win32",systemRoot:"relative",exists:()=>true}),/local absolute drive/);
+});
+test("Windows rejects remote UNC roots and traversal in SystemRoot",()=>{
+  for(const root of ["\\\\server\\share", "C:\\Windows\\..\\Temp", "\\Windows"]){
+    assert.throws(()=>archiveTool({platform:"win32",systemRoot:root,exists:()=>true}),/local absolute drive/);
+  }
 });

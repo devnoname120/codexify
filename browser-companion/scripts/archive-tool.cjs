@@ -7,7 +7,8 @@ const path=require("node:path");
 function archiveTool({platform=process.platform,systemRoot=process.env.SystemRoot,exists=fs.existsSync}={}) {
   if(platform!=="win32")return "tar";
   const root=systemRoot||"C:\\Windows";
-  if(!path.win32.isAbsolute(root))throw new Error("Windows system directory is not absolute");
+  if(!/^[A-Za-z]:[\\/]/.test(root) || root.split(/[\\/]/).includes("..") || root.includes("\0"))
+    throw new Error("Windows system directory must be a local absolute drive path without traversal");
   const executable=path.win32.join(root,"System32","tar.exe");
   if(!exists(executable))throw new Error("Windows System32 tar.exe is unavailable");
   return executable;
