@@ -213,6 +213,14 @@ export function isChatGptPage(value:string):boolean {
   try {return new URL(value).origin === "https://chatgpt.com";} catch {return false;}
 }
 
+/** Cloudflare's documented, unambiguous challenge-response header.
+ * Do not infer challenges from ordinary HTTP 403/503 errors or page text.
+ * This checks responses only; it never solves challenges or exports cookies.
+ */
+export function isCloudflareChallengeHeader(value:string|null):boolean {
+  return value?.trim().toLowerCase()==="challenge";
+}
+
 export async function navigatePage(page:Page,url:string,options:{signal?:AbortSignal;timeout?:number;reload?:boolean}={}):Promise<void> {
   observeConversationRateLimits(page);
   options.signal?.throwIfAborted();
@@ -255,6 +263,23 @@ export async function navigatePage(page:Page,url:string,options:{signal?:AbortSi
     // navigation does not reliably cancel on an AbortSignal on every platform.
     const settings={waitUntil:"domcontentloaded" as const,timeout:options.timeout??15_000,signal:options.signal};
     const response=options.reload?await page.reload(settings):await page.goto(target.href,settings);
+    // Some browser transports throw while reading headers. That must never
+    // mask an HTTP 429 diagnosis or bypass the existing cooldown.
+    let mitigation:string|null=null;
+    if(target.origin==="https://chatgpt.com" && response){
+      try { mitigation=await response.headerValue?.("cf-mitigated")??null; }
+      catch { /* No reliable Cloudflare challenge evidence. */ }
+    }
+    if(isCloudflareChallengeHeader(mitigation)) {
+      // A challenged document is not evidence of a selector change or a
+      // successful transcript load. Preserve the shared recovery budget, and
+      // require manual verification in the original signed-in browser.
+      if(conversation)recordConversationUnavailable(page);
+      throw new BrowserCompanionError(
+        "ChatGPT returned a Cloudflare verification challenge; finish verification in the existing browser before retrying",
+        "external_interference",
+      );
+    }
     if(response?.status()===429){
       // A proxy or browser transport can fail to expose response headers.
       // Preserve the 429 diagnosis and the normal cooldown in that case.
