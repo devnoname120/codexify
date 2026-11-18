@@ -35,16 +35,16 @@ impl PlaywrightBackendMode {
                     arg.strip_prefix("--config=")
                 }
             })
-            .last()
+            .next_back()
             .map(str::to_owned)
             .or_else(|| spec.env.get("PLAYWRIGHT_MCP_CONFIG").cloned())
             .or_else(|| std::env::var("PLAYWRIGHT_MCP_CONFIG").ok())?;
 
         let mut path = std::path::PathBuf::from(path);
-        if path.is_relative() {
-            if let Some(cwd) = spec.cwd.as_ref() {
-                path = std::path::Path::new(cwd).join(path);
-            }
+        if path.is_relative()
+            && let Some(cwd) = spec.cwd.as_ref()
+        {
+            path = std::path::Path::new(cwd).join(path);
         }
         let parsed = std::fs::read_to_string(path)
             .ok()
