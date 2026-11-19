@@ -335,6 +335,7 @@ impl HotReloadRuntime {
         if cancellation.is_some_and(CancellationToken::is_cancelled) {
             return Err("CANCELLED");
         }
+        let started = std::time::Instant::now();
         let previous = self.snapshot().sources.get(name).cloned();
         let old_generation = previous.as_ref().map_or(0, |source| source.number);
         let future = connect_one(name, &spec, &self.config);
@@ -403,6 +404,7 @@ impl HotReloadRuntime {
                 .filter(|(key, value)| before.get(**key).is_some_and(|old| old == *value))
                 .count();
         }
+        let initialization_ms = started.elapsed().as_millis() as u64;
         let new = Generation::new(
             spec,
             service,
@@ -414,6 +416,7 @@ impl HotReloadRuntime {
         // Connection preparation and view construction are outside the write
         // lock. Compare-and-rebuild prevents concurrent distinct-source reloads
         // from overwriting each other.
+        let switching = std::time::Instant::now();
         loop {
             let before = self.snapshot();
             let mut sources = before.sources.clone();
@@ -430,6 +433,7 @@ impl HotReloadRuntime {
             .write()
             .unwrap()
             .insert(name.to_owned(), new.control.clone());
+        let switching_ms = switching.elapsed().as_millis() as u64;
 
         if new.spec.exposure() == McpToolExposure::Gateway {
             let funcs = new
@@ -454,11 +458,15 @@ impl HotReloadRuntime {
         let drain_ms = previous
             .as_ref()
             .map_or(0, |source| source.spec.request_limits.slow_cancellation_ms);
+        let draining = std::time::Instant::now();
         let drained = if let Some(old) = &previous {
             old.wait_for_calls(Duration::from_millis(drain_ms)).await
         } else {
             true
         };
+        let in_flight = previous
+            .as_ref()
+            .map_or(0, |old| *old.calls.lock().unwrap());
         Ok(json!({
             "source": name,
             "outcome": "reloaded",
@@ -471,8 +479,15 @@ impl HotReloadRuntime {
                 "added": added, "removed": removed, "changed": changed, "unchanged": unchanged
             },
             "oldCallsDrained": drained,
+            "oldCallsStillRunning": in_flight,
             "oldGenerationRetiring": !drained,
             "rollback": "not_required",
+            "timingsMs": {
+                "initializationAndReadiness": initialization_ms,
+                "registrySwitch": switching_ms,
+                "drain": draining.elapsed().as_millis() as u64,
+                "total": started.elapsed().as_millis() as u64
+            },
             "clientRediscoveryRequired": true,
             "diagnosticCode": "OK"
         }))
