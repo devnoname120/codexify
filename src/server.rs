@@ -1812,7 +1812,7 @@ impl ServerHandler for CodexHandler {
             && name != "automation_verify_pairing"
             && !pairing_continuation
             && !ticket_wait
-            && !tool.is_some_and(|tool| app_only_tool(tool.as_ref()))
+            && !tool.is_some_and(app_only_tool)
             && !context.ct.is_cancelled()
             && self
                 .conversation_auth_error("chat_read", conversation.as_ref())
