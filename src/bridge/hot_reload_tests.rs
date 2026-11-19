@@ -629,7 +629,7 @@ fn stdio_process_id(result: ToolResult, expected_version: &str) -> u32 {
 }
 
 #[tokio::test]
-async fn isolated_real_stdio_process_reload_preserves_unrelated_sources() {
+async fn service_isolated_real_stdio_process_reload_preserves_unrelated_sources() {
     // This fixture actually spawns three independent OS processes through the
     // production TokioChildProcess transport; no live Codexify is involved.
     let directory = tempfile::tempdir().unwrap();
