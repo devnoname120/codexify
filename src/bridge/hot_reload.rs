@@ -84,9 +84,11 @@ impl Generation {
     }
 
     fn version(&self) -> Option<String> {
-        self.peer
-            .peer_info()
-            .and_then(|info| info.server_info.as_ref().map(|info| info.version.to_string()))
+        self.peer.peer_info().and_then(|info| {
+            info.server_info
+                .as_ref()
+                .map(|info| info.version.to_string())
+        })
     }
 }
 
@@ -202,8 +204,7 @@ impl HotReloadRuntime {
                     let mut used = HashSet::new();
                     for tool in &source.tools {
                         let raw_name = tool.name.to_string();
-                        let display =
-                            unique_name(bridged_name(&sanitized, &raw_name), &used);
+                        let display = unique_name(bridged_name(&sanitized, &raw_name), &used);
                         used.insert(display.clone());
                         let description = tool
                             .description
@@ -284,8 +285,8 @@ impl HotReloadRuntime {
         // request: only the operator's configured source ID is accepted.
         let cli = crate::config::Cli::try_parse_from(std::env::args_os())
             .map_err(|_| "CONFIG_CLI_INVALID")?;
-        let config = crate::config::load_config_quiet_read_only(cli)
-            .map_err(|_| "CONFIG_INVALID")?;
+        let config =
+            crate::config::load_config_quiet_read_only(cli).map_err(|_| "CONFIG_INVALID")?;
         config
             .mcp_servers
             .get(name)
@@ -366,14 +367,30 @@ impl HotReloadRuntime {
                 .map(|generation| &generation.tools)
                 .into_iter()
                 .flatten()
-                .map(|tool| (tool.name.as_ref(), serde_json::to_value(tool).unwrap_or(Value::Null)))
+                .map(|tool| {
+                    (
+                        tool.name.as_ref(),
+                        serde_json::to_value(tool).unwrap_or(Value::Null),
+                    )
+                })
                 .collect();
             let after: HashMap<_, _> = tools
                 .iter()
-                .map(|tool| (tool.name.as_ref(), serde_json::to_value(tool).unwrap_or(Value::Null)))
+                .map(|tool| {
+                    (
+                        tool.name.as_ref(),
+                        serde_json::to_value(tool).unwrap_or(Value::Null),
+                    )
+                })
                 .collect();
-            added = after.keys().filter(|key| !before.contains_key(**key)).count();
-            removed = before.keys().filter(|key| !after.contains_key(**key)).count();
+            added = after
+                .keys()
+                .filter(|key| !before.contains_key(**key))
+                .count();
+            removed = before
+                .keys()
+                .filter(|key| !after.contains_key(**key))
+                .count();
             changed = after
                 .iter()
                 .filter(|(key, value)| before.get(**key).is_some_and(|old| old != *value))
@@ -417,7 +434,11 @@ impl HotReloadRuntime {
                 .iter()
                 .map(|t| GatewayFunction {
                     name: t.name.to_string(),
-                    description: t.description.as_ref().map(ToString::to_string).unwrap_or_default(),
+                    description: t
+                        .description
+                        .as_ref()
+                        .map(ToString::to_string)
+                        .unwrap_or_default(),
                     input_schema: Value::Object((*t.input_schema).clone()),
                 })
                 .collect::<Vec<_>>();
@@ -520,9 +541,13 @@ impl ReloadMcpTool {
             return ToolResult::error("SOURCE_ID_INVALID");
         };
         match self.runtime.reload(source, cancellation).await {
-            Ok(report) => ToolResult::text("MCP source reloaded; rediscover tools to refresh client schemas.")
-                .with_structured(report),
-            Err(code) => ToolResult::error(format!("MCP reload did not switch connections: {code}")),
+            Ok(report) => {
+                ToolResult::text("MCP source reloaded; rediscover tools to refresh client schemas.")
+                    .with_structured(report)
+            }
+            Err(code) => {
+                ToolResult::error(format!("MCP reload did not switch connections: {code}"))
+            }
         }
     }
 }
