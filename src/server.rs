@@ -146,6 +146,7 @@ type HttpServerTask = JoinHandle<Result<(), std::io::Error>>;
 pub struct CodexHandler {
     config: Arc<AppConfig>,
     tools: Arc<Vec<Box<dyn Tool>>>,
+    bridge_runtime: Option<Arc<crate::bridge::HotReloadRuntime>>,
     project_bindings: Arc<ProjectBindingStore>,
     connector_schemas: Arc<crate::connector_schema::ConnectorSchemaStore>,
     markdown_chat: Arc<crate::markdown_chat::MarkdownChatStore>,
@@ -653,11 +654,20 @@ impl ServerHandler for CodexHandler {
         })
         .await
         .unwrap_or_else(|_| self.config.as_ref().clone());
-        let tools = self
-            .tools
-            .iter()
-            .map(|tool| advertised_tool(tool.as_ref(), &advertising))
-            .collect();
+        let mut names = std::collections::HashSet::new();
+        let mut tools = Vec::new();
+        for tool in self.tools.iter() {
+            names.insert(tool.name());
+            tools.push(advertised_tool(tool.as_ref(), &advertising));
+        }
+        if let Some(runtime) = &self.bridge_runtime {
+            let view = runtime.snapshot();
+            for tool in view.tools.iter() {
+                if names.insert(tool.name()) {
+                    tools.push(advertised_tool(tool.as_ref(), &advertising));
+                }
+            }
+        }
         let mut result = ListToolsResult::with_all_items(tools);
         let caller = crate::connector_schema::caller_key(&context.meta).or_else(|| {
             request
@@ -826,7 +836,18 @@ impl ServerHandler for CodexHandler {
             .arguments
             .map(Value::Object)
             .unwrap_or_else(|| json!({}));
-        let tool = self.tools.iter().find(|t| t.name() == name);
+        // Pin a complete immutable upstream registry through the entire async
+        // dispatch. Hot reload cannot close this request's source generation.
+        let bridge_view = self.bridge_runtime.as_ref().map(|runtime| runtime.snapshot());
+        let tool = self
+            .tools
+            .iter()
+            .find(|tool| tool.name() == name)
+            .or_else(|| {
+                bridge_view.as_ref().and_then(|view| {
+                    view.tools.iter().find(|tool| tool.name() == name)
+                })
+            });
         let ticket_wait = name == TicketWait::NAME && tool.is_some();
         let model_call = !tool.is_some_and(|tool| app_only_tool(tool.as_ref()));
         let mut task_conversation = conversation.clone();
@@ -2062,7 +2083,8 @@ struct HealthState {
     tool_count: usize,
     ready: Arc<AtomicBool>,
     multi_tunnel: Option<(Arc<TunnelAvailability>, usize)>,
-    upstreams: Arc<HashMap<String, Arc<crate::upstream_control::UpstreamControl>>>,
+    upstreams: Arc<std::sync::RwLock<HashMap<String, Arc<crate::upstream_control::UpstreamControl>>>>,
+    runtime: Option<Arc<crate::bridge::HotReloadRuntime>>,
     filesystem: Option<Arc<crate::filesystem::FilesystemWorker>>,
 }
 
@@ -2083,17 +2105,15 @@ async fn health(State(state): State<HealthState>) -> (StatusCode, Json<Value>) {
         || state.ready.load(Ordering::Acquire),
         |(active, _)| *active > 0,
     );
+    let exposed = state.runtime.as_ref().map_or(0, |runtime| runtime.snapshot().tools.len());
     let mut payload = json!({
         "status": if is_ready { "ok" } else { "starting" },
-        "tools": state.tool_count,
+        "tools": state.tool_count + exposed,
     });
-    if !state.upstreams.is_empty() {
+    let upstreams = state.upstreams.read().unwrap();
+    if !upstreams.is_empty() {
         payload["upstreams"] = Value::Object(
-            state
-                .upstreams
-                .iter()
-                .map(|(name, state)| (name.clone(), state.snapshot()))
-                .collect(),
+            upstreams.iter().map(|(name, state)| (name.clone(), state.snapshot())).collect(),
         );
     }
     if let Some(filesystem) = &state.filesystem {
@@ -2180,35 +2200,18 @@ pub async fn start_http_server(mut config: AppConfig) -> anyhow::Result<()> {
     let bridge = crate::bridge::connect_upstreams(&config).await;
     let bridge_report = bridge.report;
     let bridged_resources = bridge.resources;
-    let _bridge_services = bridge.services;
-    let _bridge_monitors = bridge.monitors;
     let upstreams = bridge.upstreams;
+    let bridge_runtime = bridge.runtime;
 
     let mut all_tools = validate_and_wrap_tools(load_tools_for_config(&config))
         .map_err(|error| anyhow::anyhow!("invalid native tool contract: {error}"))?;
-    let native: std::collections::HashSet<&'static str> =
-        all_tools.iter().map(|t| t.name()).collect();
-    let mut seen = native.clone();
-    for tool in bridge.tools {
-        let name = tool.name();
-        if seen.contains(name) {
-            tracing::warn!("bridged tool '{name}' collides with an existing tool; skipping");
-            continue;
-        }
-        match validate_and_wrap_tool(tool) {
-            Ok(tool) => {
-                seen.insert(name);
-                all_tools.push(tool);
-            }
-            Err(error) => {
-                tracing::warn!(
-                    "bridged tool '{name}' has an invalid contract and was skipped: {error}"
-                );
-            }
-        }
+    let bridged_count = bridge_runtime.snapshot().tools.len();
+    if !config.mcp_servers.is_empty() {
+        all_tools.push(validate_and_wrap_tool(Box::new(crate::bridge::ReloadMcpTool {
+            runtime: bridge_runtime.clone(),
+        }))
+        .map_err(|error| anyhow::anyhow!("invalid reload MCP tool contract: {error}"))?);
     }
-    let bridged_count = all_tools.len() - native.len();
-
     let tools = Arc::new(all_tools);
     if let Some(supervisor) = &agent_automation {
         supervisor
@@ -2272,6 +2275,7 @@ pub async fn start_http_server(mut config: AppConfig) -> anyhow::Result<()> {
         let factory_diff_checkpoints = diff_checkpoints.clone();
         let factory_artifact_egress = artifact_egress.clone();
         let factory_bridged_resources = bridged_resources.clone();
+        let factory_bridge_runtime = bridge_runtime.clone();
         let factory_audit = audit.clone();
         let factory_tool_logging = tool_logging.clone();
         let factory_next_tool_call_id = next_tool_call_id.clone();
@@ -2294,6 +2298,7 @@ pub async fn start_http_server(mut config: AppConfig) -> anyhow::Result<()> {
                     diff_checkpoints: factory_diff_checkpoints.clone(),
                     artifact_egress: factory_artifact_egress.clone(),
                     bridged_resources: factory_bridged_resources.clone(),
+                    bridge_runtime: Some(factory_bridge_runtime.clone()),
                     audit: factory_audit.clone(),
                     tool_logging: factory_tool_logging.clone(),
                     next_tool_call_id: factory_next_tool_call_id.clone(),
@@ -2320,6 +2325,7 @@ pub async fn start_http_server(mut config: AppConfig) -> anyhow::Result<()> {
         .with_state(HealthState {
             tool_count,
             upstreams: upstreams.clone(),
+            runtime: Some(bridge_runtime.clone()),
             filesystem: Some(config.filesystem_worker.clone()),
             ready: ready.clone(),
             multi_tunnel: multi_availability.as_ref().map(|availability| {
@@ -3292,6 +3298,7 @@ mod tests {
         let tools = validate_and_wrap_tools(tools).expect("test tool contracts must be valid");
         CodexHandler {
             config: Arc::new(config),
+            bridge_runtime: None,
             tools: Arc::new(tools),
             connector_schemas: Arc::new(crate::connector_schema::ConnectorSchemaStore::default()),
             markdown_chat: Arc::new(crate::markdown_chat::MarkdownChatStore::default()),
@@ -4039,6 +4046,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let mut handler = CodexHandler {
             config: Arc::new(crate::config::default_config(root.path().to_path_buf())),
+            bridge_runtime: None,
             tools: Arc::new(crate::registry::load_tools()),
             connector_schemas: Arc::new(crate::connector_schema::ConnectorSchemaStore::default()),
             markdown_chat: Arc::new(crate::markdown_chat::MarkdownChatStore::default()),
@@ -4158,6 +4166,7 @@ mod tests {
 
         let handler = CodexHandler {
             config: Arc::new(config),
+            bridge_runtime: None,
             tools: Arc::new(crate::registry::load_tools()),
             connector_schemas: Arc::new(crate::connector_schema::ConnectorSchemaStore::default()),
             markdown_chat: Arc::new(crate::markdown_chat::MarkdownChatStore::default()),
@@ -4202,6 +4211,7 @@ mod tests {
         let authorizations = Arc::new(ConversationAuthorizationStore::new());
         let handler = CodexHandler {
             config: Arc::new(config),
+            bridge_runtime: None,
             tools: Arc::new(tools),
             connector_schemas: Arc::new(crate::connector_schema::ConnectorSchemaStore::default()),
             markdown_chat: Arc::new(crate::markdown_chat::MarkdownChatStore::default()),
@@ -4808,7 +4818,8 @@ mod tests {
         let ready = Arc::new(AtomicBool::new(false));
         let state = HealthState {
             tool_count: 38,
-            upstreams: Arc::new(HashMap::new()),
+            upstreams: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            runtime: None,
             filesystem: None,
             ready: ready.clone(),
             multi_tunnel: None,
@@ -4833,7 +4844,8 @@ mod tests {
         });
         let state = HealthState {
             tool_count: 38,
-            upstreams: Arc::new(HashMap::new()),
+            upstreams: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            runtime: None,
             filesystem: None,
             ready,
             multi_tunnel: Some((availability.clone(), 2)),
