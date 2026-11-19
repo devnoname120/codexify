@@ -536,18 +536,7 @@ pub async fn connect_upstreams(config: &AppConfig) -> Bridge {
                 let count = tools.len();
                 let mode = spec.exposure();
                 if mode == McpToolExposure::Gateway {
-                    let functions = tools
-                        .iter()
-                        .map(|tool| GatewayFunction {
-                            name: tool.name.to_string(),
-                            description: tool
-                                .description
-                                .as_ref()
-                                .map(ToString::to_string)
-                                .unwrap_or_default(),
-                            input_schema: Value::Object((*tool.input_schema).clone()),
-                        })
-                        .collect::<Vec<_>>();
+                    let functions = gateway_functions(&tools);
                     write_gateway_skill(config, name, &sanitize(name), &functions);
                 }
                 let generation = hot_reload::Generation::new(
@@ -574,6 +563,23 @@ pub async fn connect_upstreams(config: &AppConfig) -> Bridge {
         upstreams: runtime.upstreams.clone(),
         runtime,
     }
+}
+
+/// Use one conversion for startup registration, registry replacement and
+/// generated gateway skills, so schema/description metadata cannot diverge.
+fn gateway_functions(tools: &[rmcp::model::Tool]) -> Vec<GatewayFunction> {
+    tools
+        .iter()
+        .map(|tool| GatewayFunction {
+            name: tool.name.to_string(),
+            description: tool
+                .description
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_default(),
+            input_schema: Value::Object((*tool.input_schema).clone()),
+        })
+        .collect()
 }
 
 /// One function exposed by a gateway-mode server.
