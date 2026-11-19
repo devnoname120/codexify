@@ -601,3 +601,176 @@ async fn unrelated_in_flight_call_does_not_retain_a_retired_source() {
     task_a2.abort();
     task_b.abort();
 }
+
+
+fn isolated_stdio_spec(version: &str) -> crate::types::McpServerSpec {
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("scripts")
+        .join("fixtures")
+        .join("hot-reload-stdio-mcp.mjs");
+    crate::types::McpServerSpec {
+        command: Some("node".into()),
+        args: vec![fixture.to_string_lossy().into_owned(), version.into()],
+        mode: Some(McpToolExposure::Direct),
+        startup_timeout_sec: Some(8.0),
+        ..Default::default()
+    }
+}
+
+fn stdio_process_id(result: ToolResult, expected_version: &str) -> u32 {
+    assert!(!result.is_error, "stdio call failed: {}", result.joined_text());
+    let response = result.joined_text();
+    let (version, pid) = response
+        .trim()
+        .split_once(':')
+        .unwrap_or_else(|| panic!("invalid stdio fixture response: {response}"));
+    assert_eq!(version, expected_version);
+    pid.parse().expect("stdio fixture process id must be numeric")
+}
+
+#[tokio::test]
+async fn isolated_real_stdio_process_reload_preserves_unrelated_sources() {
+    // This fixture actually spawns three independent OS processes through the
+    // production TokioChildProcess transport; no live Codexify is involved.
+    let directory = tempfile::tempdir().unwrap();
+    let started = directory.path().join("slow_started");
+    let mut old_spec = isolated_stdio_spec("old");
+    old_spec.env.insert(
+        "HOT_RELOAD_SLOW_MARKER_FILE".into(),
+        started.to_string_lossy().into_owned(),
+    );
+
+    let mut config = crate::config::default_config(std::env::temp_dir());
+    config.mcp_servers.insert("alpha".into(), old_spec);
+    config
+        .mcp_servers
+        .insert("beta".into(), isolated_stdio_spec("beta"));
+    config
+        .mcp_servers
+        .insert("gamma".into(), isolated_stdio_spec("gamma"));
+    let bridge = connect_upstreams(&config).await;
+    assert_eq!(
+        bridge.runtime.snapshot().sources.len(),
+        3,
+        "all isolated stdio fixtures must start: {:?}",
+        bridge.report
+    );
+    let runtime = bridge.runtime.clone();
+    drop(bridge);
+
+    let initial = runtime.snapshot();
+    let retired = Arc::downgrade(&initial.sources["alpha"]);
+    let old_probe = initial
+        .tools
+        .iter()
+        .find(|tool| tool.name() == "alpha__probe")
+        .unwrap()
+        .clone();
+    let old_slow = initial
+        .tools
+        .iter()
+        .find(|tool| tool.name() == "alpha__slow")
+        .unwrap()
+        .clone();
+    drop(initial);
+    let config_for_call = crate::config::default_config(std::env::temp_dir());
+    let original_pid = stdio_process_id(
+        old_probe.call(json!({}), &config_for_call, &SessionState::new()).await,
+        "old",
+    );
+    let beta_pid = stdio_process_id(invoke(runtime.snapshot(), "beta__probe").await, "beta");
+    let gamma_pid = stdio_process_id(invoke(runtime.snapshot(), "gamma__probe").await, "gamma");
+
+    let pending = tokio::spawn(async move {
+        old_slow
+            .call(
+                json!({}),
+                &crate::config::default_config(std::env::temp_dir()),
+                &SessionState::new(),
+            )
+            .await
+    });
+    // The marker is written by the actual old process when it receives the
+    // slow request, making this test independent of host scheduling.
+    tokio::time::timeout(Duration::from_secs(4), async {
+        while !started.exists() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("old stdio process did not begin the slow call");
+
+    let result = runtime
+        .reload_with_spec("alpha", isolated_stdio_spec("new"), None)
+        .await
+        .unwrap();
+    assert_eq!(result["previousVersion"], "old");
+    assert_eq!(result["replacementVersion"], "new");
+    assert_eq!(result["previousGeneration"], 1);
+    assert_eq!(result["replacementGeneration"], 2);
+    assert_eq!(result["toolChanges"]["added"], 1);
+    assert_eq!(result["oldCallsDrained"], true);
+    assert_eq!(stdio_process_id(pending.await.unwrap(), "old"), original_pid);
+    assert_eq!(
+        stdio_process_id(
+            old_probe.call(json!({}), &config_for_call, &SessionState::new()).await,
+            "old",
+        ),
+        original_pid,
+        "a pinned retired generation must remain callable until released"
+    );
+    let new_pid = stdio_process_id(invoke(runtime.snapshot(), "alpha__probe").await, "new");
+    assert_ne!(new_pid, original_pid, "replacement must be a new OS process");
+    assert_eq!(
+        stdio_process_id(invoke(runtime.snapshot(), "alpha__new_tool").await, "new"),
+        new_pid
+    );
+    assert_eq!(
+        stdio_process_id(invoke(runtime.snapshot(), "beta__probe").await, "beta"),
+        beta_pid,
+        "beta must not reconnect"
+    );
+    assert_eq!(
+        stdio_process_id(invoke(runtime.snapshot(), "gamma__probe").await, "gamma"),
+        gamma_pid,
+        "gamma must not reconnect"
+    );
+
+    let mut invalid_spec = isolated_stdio_spec("broken");
+    invalid_spec.command = Some("codexify-nonexistent-hot-reload-fixture".into());
+    assert_eq!(
+        runtime
+            .reload_with_spec("alpha", invalid_spec, None)
+            .await
+            .err(),
+        Some("INITIALIZE_FAILED")
+    );
+    assert_eq!(
+        stdio_process_id(invoke(runtime.snapshot(), "alpha__probe").await, "new"),
+        new_pid,
+        "an unsuccessful replacement must preserve the healthy process"
+    );
+
+    drop(old_probe);
+    tokio::task::yield_now().await;
+    assert!(
+        retired.upgrade().is_none(),
+        "the retired generation must be released after its last handle drops"
+    );
+
+    let repeated = runtime
+        .reload_with_spec("alpha", isolated_stdio_spec("new"), None)
+        .await
+        .unwrap();
+    assert_eq!(repeated["previousGeneration"], 2);
+    assert_eq!(repeated["replacementGeneration"], 3);
+    assert_eq!(repeated["toolChanges"]["unchanged"], 3);
+    assert_eq!(
+        stdio_process_id(invoke(runtime.snapshot(), "beta__probe").await, "beta"),
+        beta_pid
+    );
+    assert_eq!(
+        stdio_process_id(invoke(runtime.snapshot(), "gamma__probe").await, "gamma"),
+        gamma_pid
+    );
+}
