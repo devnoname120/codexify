@@ -560,7 +560,10 @@ pub async fn connect_upstreams(config: &AppConfig) -> Bridge {
                 // diagnostic and should not be hidden as an initialization
                 // failure; neither diagnostic includes the configured URL.
                 let legacy_transport = spec.transport.as_deref().is_some_and(|kind| {
-                    matches!(kind.to_ascii_lowercase().as_str(), "sse" | "websocket" | "ws")
+                    matches!(
+                        kind.to_ascii_lowercase().as_str(),
+                        "sse" | "websocket" | "ws"
+                    )
                 });
                 if legacy_transport {
                     report.push(format!("{name} -> not supported (transport)"));
