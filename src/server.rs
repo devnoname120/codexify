@@ -838,15 +838,18 @@ impl ServerHandler for CodexHandler {
             .unwrap_or_else(|| json!({}));
         // Pin a complete immutable upstream registry through the entire async
         // dispatch. Hot reload cannot close this request's source generation.
-        let bridge_view = self.bridge_runtime.as_ref().map(|runtime| runtime.snapshot());
+        let bridge_view = self
+            .bridge_runtime
+            .as_ref()
+            .map(|runtime| runtime.snapshot());
         let tool = self
             .tools
             .iter()
             .find(|tool| tool.name() == name)
             .or_else(|| {
-                bridge_view.as_ref().and_then(|view| {
-                    view.tools.iter().find(|tool| tool.name() == name)
-                })
+                bridge_view
+                    .as_ref()
+                    .and_then(|view| view.tools.iter().find(|tool| tool.name() == name))
             });
         let ticket_wait = name == TicketWait::NAME && tool.is_some();
         let model_call = !tool.is_some_and(|tool| app_only_tool(tool.as_ref()));
@@ -2083,7 +2086,8 @@ struct HealthState {
     tool_count: usize,
     ready: Arc<AtomicBool>,
     multi_tunnel: Option<(Arc<TunnelAvailability>, usize)>,
-    upstreams: Arc<std::sync::RwLock<HashMap<String, Arc<crate::upstream_control::UpstreamControl>>>>,
+    upstreams:
+        Arc<std::sync::RwLock<HashMap<String, Arc<crate::upstream_control::UpstreamControl>>>>,
     runtime: Option<Arc<crate::bridge::HotReloadRuntime>>,
     filesystem: Option<Arc<crate::filesystem::FilesystemWorker>>,
 }
@@ -2105,7 +2109,10 @@ async fn health(State(state): State<HealthState>) -> (StatusCode, Json<Value>) {
         || state.ready.load(Ordering::Acquire),
         |(active, _)| *active > 0,
     );
-    let exposed = state.runtime.as_ref().map_or(0, |runtime| runtime.snapshot().tools.len());
+    let exposed = state
+        .runtime
+        .as_ref()
+        .map_or(0, |runtime| runtime.snapshot().tools.len());
     let mut payload = json!({
         "status": if is_ready { "ok" } else { "starting" },
         "tools": state.tool_count + exposed,
@@ -2113,7 +2120,10 @@ async fn health(State(state): State<HealthState>) -> (StatusCode, Json<Value>) {
     let upstreams = state.upstreams.read().unwrap();
     if !upstreams.is_empty() {
         payload["upstreams"] = Value::Object(
-            upstreams.iter().map(|(name, state)| (name.clone(), state.snapshot())).collect(),
+            upstreams
+                .iter()
+                .map(|(name, state)| (name.clone(), state.snapshot()))
+                .collect(),
         );
     }
     if let Some(filesystem) = &state.filesystem {
@@ -2207,10 +2217,12 @@ pub async fn start_http_server(mut config: AppConfig) -> anyhow::Result<()> {
         .map_err(|error| anyhow::anyhow!("invalid native tool contract: {error}"))?;
     let bridged_count = bridge_runtime.snapshot().tools.len();
     if !config.mcp_servers.is_empty() {
-        all_tools.push(validate_and_wrap_tool(Box::new(crate::bridge::ReloadMcpTool {
-            runtime: bridge_runtime.clone(),
-        }))
-        .map_err(|error| anyhow::anyhow!("invalid reload MCP tool contract: {error}"))?);
+        all_tools.push(
+            validate_and_wrap_tool(Box::new(crate::bridge::ReloadMcpTool {
+                runtime: bridge_runtime.clone(),
+            }))
+            .map_err(|error| anyhow::anyhow!("invalid reload MCP tool contract: {error}"))?,
+        );
     }
     let tools = Arc::new(all_tools);
     if let Some(supervisor) = &agent_automation {
