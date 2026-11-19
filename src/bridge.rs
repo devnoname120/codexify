@@ -39,6 +39,7 @@ mod hot_reload;
 #[cfg(test)]
 mod hot_reload_tests;
 mod stderr;
+mod stderr;
 pub(crate) use hot_reload::{Generation, HotReloadRuntime, ReloadMcpTool};
 
 /// How long to wait for an upstream to start up and answer `tools/list` before
