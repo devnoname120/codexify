@@ -850,7 +850,7 @@ impl ServerHandler for CodexHandler {
             .map(|tool| tool.as_ref())
             .or_else(|| bridge_tool.as_deref());
         let ticket_wait = name == TicketWait::NAME && tool.is_some();
-        let model_call = !tool.is_some_and(|tool| app_only_tool(tool.as_ref()));
+        let model_call = !tool.is_some_and(app_only_tool);
         let mut task_conversation = conversation.clone();
         let mut task_owner_generation = None;
         let mut conversation_retired = false;
@@ -1046,7 +1046,7 @@ impl ServerHandler for CodexHandler {
         // Keep `tool` as an Option so that even an unknown-tool call flows through
         // the audit begin/finish pairing below rather than short-circuiting.
         let agent_call = self.config.markdown_chat.enabled
-            && tool.is_some_and(|tool| !app_only_tool(tool.as_ref()))
+            && tool.is_some_and(|tool| !app_only_tool(tool))
             && !ticket_wait
             && !context.ct.is_cancelled();
         let called_at_ms = crate::markdown_chat::now_ms();
@@ -1679,7 +1679,7 @@ impl ServerHandler for CodexHandler {
                 .await;
             }
         }
-        finalize_model_visible_result(tool.map(|tool| tool.as_ref()), &mut result, &self.config);
+        finalize_model_visible_result(tool, &mut result, &self.config);
         if !result.is_error
             && let Some(tool) = tool
             && let Err(error) = tool.validate_structured_output(result.structured_content.as_ref())
