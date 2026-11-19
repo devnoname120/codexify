@@ -2212,6 +2212,10 @@ pub async fn start_http_server(mut config: AppConfig) -> anyhow::Result<()> {
     let bridged_resources = bridge.resources;
     let upstreams = bridge.upstreams;
     let bridge_runtime = bridge.runtime;
+    // The test-facing startup tool vector holds references to generation 1.
+    // Drop it immediately: only the runtime's replaceable snapshot may retain
+    // active sources, or retired child processes would remain pinned forever.
+    drop(bridge.tools);
 
     let mut all_tools = validate_and_wrap_tools(load_tools_for_config(&config))
         .map_err(|error| anyhow::anyhow!("invalid native tool contract: {error}"))?;
