@@ -30,13 +30,16 @@ unsupported; the operation never silently falls back to a process-wide restart.
 3. The new tool definitions are validated and an immutable registry view is
    constructed. The new view replaces the old view in one atomic pointer swap.
    Concurrent distinct-source reloads rebuild against the latest view.
-4. Calls already using an old registry snapshot stay pinned to that snapshot
-   and connection generation; write-capable calls are **never replayed**.
+4. Each dispatch retains only its selected validated upstream tool and that
+   source's connection generation. Write-capable calls are **never replayed**;
+   unrelated direct/gateway sources are not retained by a long-running call.
    Cancellation and timeout semantics remain those of the forwarded request.
-5. The old generation is released when no surviving snapshot or call retains
-   it. The operation reports whether active calls drained within the source's
-   configured `requestLimits.slowCancellationMs` interval. A drain timeout
-   does **not** kill or replay an in-progress side-effecting call.
+5. The old generation is released when no selected old tool or catalog
+   snapshot retains it. The operation reports whether forwarded calls drained
+   within the source's configured `requestLimits.slowCancellationMs` interval.
+   The separate `oldGenerationStillReferenced` flag covers retained references
+   even when no forwarded calls remain. A drain timeout does **not** kill or
+   replay an in-progress side-effecting call.
 6. On failure **before** the swap, the new candidate is dropped and the old
    view is never replaced. Errors use bounded diagnostic codes and do not
    echo credentials, command lines, headers, environment variables, or raw
@@ -53,7 +56,8 @@ A successful result includes `source`, `outcome`,
 `previousGeneration`, `replacementGeneration`, old/new reported MCP
 server versions, readiness, counts of added/removed/changed/unchanged
 tool definitions, `oldCallsDrained`, `oldCallsStillRunning`,
-`oldGenerationRetiring`, `rollback`, `diagnosticCode`, and measured
+`oldGenerationStillReferenced`, `oldGenerationRetiring`, `rollback`,
+`diagnosticCode`, and measured
 `timingsMs` for initialization/readiness, registry switch, draining and total
 reload duration.
 
