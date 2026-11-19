@@ -109,7 +109,7 @@ impl NamePool {
 }
 
 pub(crate) struct BridgeView {
-    pub(crate) tools: Arc<Vec<Box<dyn Tool>>>,
+    pub(crate) tools: Arc<Vec<Arc<dyn Tool>>>,
     pub(crate) sources: HashMap<String, Arc<Generation>>,
 }
 
@@ -253,7 +253,7 @@ impl HotReloadRuntime {
                     return None;
                 }
                 match crate::tool::validate_and_wrap_tool(tool) {
-                    Ok(tool) => Some(tool),
+                    Ok(tool) => Some(Arc::<dyn Tool>::from(tool)),
                     Err(error) => {
                         tracing::warn!(%error, "invalid upstream MCP tool skipped");
                         None
