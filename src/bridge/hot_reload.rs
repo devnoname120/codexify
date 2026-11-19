@@ -13,7 +13,6 @@ const MAX_INTERNED_TOOL_NAMES: usize = 4096;
 const REPLACEMENT_PING_TIMEOUT: Duration = Duration::from_secs(3);
 
 pub(crate) struct Generation {
-    pub(super) name: String,
     pub(super) spec: crate::types::McpServerSpec,
     pub(super) peer: Peer<RoleClient>,
     pub(super) tools: Vec<rmcp::model::Tool>,
@@ -41,7 +40,6 @@ impl Drop for CallLease<'_> {
 
 impl Generation {
     pub(super) fn new(
-        name: String,
         spec: crate::types::McpServerSpec,
         service: RunningService<RoleClient, ()>,
         tools: Vec<rmcp::model::Tool>,
@@ -54,7 +52,6 @@ impl Generation {
         ));
         let monitor = monitor_upstream(peer.clone(), control.clone());
         Arc::new(Self {
-            name,
             spec,
             peer,
             tools,
@@ -294,14 +291,24 @@ impl HotReloadRuntime {
         if name.is_empty() || name.len() > 128 || name.chars().any(char::is_control) {
             return Err("SOURCE_ID_INVALID");
         }
+        let spec = self.latest_spec(name)?;
+        self.reload_with_spec(name, spec, cancellation).await
+    }
+
+    // A test harness can supply an isolated spec without reloading real
+    // operator configuration. Production accepts source ID only and always
+    // resolves the current configured spec before reaching this boundary.
+    pub(super) async fn reload_with_spec(
+        &self,
+        name: &str,
+        spec: crate::types::McpServerSpec,
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<Value, &'static str> {
         let lock = self.locks.get(name).ok_or("SOURCE_UNKNOWN")?;
         let _lease = lock.try_lock().map_err(|_| "RELOAD_IN_PROGRESS")?;
-        let spec = self.latest_spec(name)?;
         self.reload_with_spec_locked(name, spec, cancellation).await
     }
 
-    // Injecting a spec is intentionally private to the server process. It also
-    // allows hermetic fault-injection tests without reading the operator config.
     async fn reload_with_spec_locked(
         &self,
         name: &str,
@@ -367,7 +374,6 @@ impl HotReloadRuntime {
                 .count();
         }
         let new = Generation::new(
-            name.to_owned(),
             spec,
             service,
             tools,
