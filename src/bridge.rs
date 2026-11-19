@@ -48,7 +48,7 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 /// Connected MCP sources are owned by a transactional registry. Its immutable
 /// view is shared across transport sessions, while calls pin their generation.
 pub struct Bridge {
-    pub tools: Arc<Vec<Box<dyn Tool>>>,
+    pub tools: Arc<Vec<Arc<dyn Tool>>>,
     pub resources: Arc<BridgedResourceStore>,
     pub report: Vec<String>,
     pub(crate) runtime: Arc<HotReloadRuntime>,
