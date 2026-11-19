@@ -108,7 +108,7 @@ impl NamePool {
 
 pub(crate) struct BridgeView {
     pub(crate) tools: Arc<Vec<Box<dyn Tool>>>,
-    sources: HashMap<String, Arc<Generation>>,
+    pub(crate) sources: HashMap<String, Arc<Generation>>,
 }
 
 pub(crate) struct HotReloadRuntime {
