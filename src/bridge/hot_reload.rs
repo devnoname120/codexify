@@ -12,7 +12,7 @@ use tokio::sync::{Mutex as AsyncMutex, Notify};
 const MAX_INTERNED_TOOL_NAMES: usize = 4096;
 const REPLACEMENT_PING_TIMEOUT: Duration = Duration::from_secs(3);
 
-pub(super) struct Generation {
+pub(crate) struct Generation {
     pub(super) name: String,
     pub(super) spec: crate::types::McpServerSpec,
     pub(super) peer: Peer<RoleClient>,
@@ -27,7 +27,7 @@ pub(super) struct Generation {
     drained: Notify,
 }
 
-pub(super) struct CallLease<'a>(&'a Generation);
+pub(crate) struct CallLease<'a>(&'a Generation);
 
 impl Drop for CallLease<'_> {
     fn drop(&mut self) {
@@ -68,7 +68,7 @@ impl Generation {
         })
     }
 
-    pub(super) fn begin_call(&self) -> CallLease<'_> {
+    pub(crate) fn begin_call(&self) -> CallLease<'_> {
         *self.calls.lock().unwrap() += 1;
         CallLease(self)
     }
@@ -98,7 +98,7 @@ struct NamePool(HashMap<String, &'static str>);
 impl NamePool {
     fn intern(&mut self, name: String) -> Result<&'static str, &'static str> {
         if let Some(value) = self.0.get(&name) {
-            return Ok(value);
+            return Ok(*value);
         }
         if self.0.len() >= MAX_INTERNED_TOOL_NAMES {
             return Err("TOOL_NAME_LIMIT");
