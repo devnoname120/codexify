@@ -391,3 +391,30 @@ async fn direct_name_collisions_are_not_ambiguous_after_reload() {
     task1.abort();
     task2.abort();
 }
+
+#[tokio::test]
+async fn old_generation_is_released_after_draining_without_stale_snapshots() {
+    let (old_url, _, old_task) =
+        fixture("old", false, Duration::ZERO, Duration::ZERO).await;
+    let (new_url, _, new_task) =
+        fixture("new", true, Duration::ZERO, Duration::ZERO).await;
+    let mut config = crate::config::default_config(std::env::temp_dir());
+    config.mcp_servers.insert("alpha".into(), spec(&old_url, McpToolExposure::Direct));
+    let bridge = connect_upstreams(&config).await;
+    let runtime = bridge.runtime.clone();
+    let first = runtime.snapshot();
+    let weak = Arc::downgrade(&first.sources["alpha"]);
+    drop(first);
+    // The service keeps only the runtime after consuming the startup report.
+    drop(bridge);
+    assert!(weak.upgrade().is_some());
+
+    let result = runtime.reload_with_spec(
+        "alpha", spec(&new_url, McpToolExposure::Direct), None
+    ).await.unwrap();
+    assert_eq!(result["oldCallsDrained"], true);
+    assert!(weak.upgrade().is_none(), "retired service generation leaked");
+    assert_eq!(invoke(runtime.snapshot(), "alpha__probe").await.joined_text(), "new");
+    old_task.abort();
+    new_task.abort();
+}
