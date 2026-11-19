@@ -536,12 +536,18 @@ pub async fn connect_upstreams(config: &AppConfig) -> Bridge {
                 let count = tools.len();
                 let mode = spec.exposure();
                 if mode == McpToolExposure::Gateway {
-                    let functions = tools.iter().map(|tool| GatewayFunction {
-                        name: tool.name.to_string(),
-                        description: tool.description.as_ref()
-                            .map(ToString::to_string).unwrap_or_default(),
-                        input_schema: Value::Object((*tool.input_schema).clone()),
-                    }).collect::<Vec<_>>();
+                    let functions = tools
+                        .iter()
+                        .map(|tool| GatewayFunction {
+                            name: tool.name.to_string(),
+                            description: tool
+                                .description
+                                .as_ref()
+                                .map(ToString::to_string)
+                                .unwrap_or_default(),
+                            input_schema: Value::Object((*tool.input_schema).clone()),
+                        })
+                        .collect::<Vec<_>>();
                     write_gateway_skill(config, name, &sanitize(name), &functions);
                 }
                 let generation = hot_reload::Generation::new(
