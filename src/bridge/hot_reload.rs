@@ -252,13 +252,23 @@ impl HotReloadRuntime {
         }
         let mut tools = build_catalog_tools(catalog, self.resources.clone());
         tools.append(&mut exposed);
+        let mut seen = HashSet::new();
         let tools = tools
             .into_iter()
-            .filter_map(|tool| match crate::tool::validate_and_wrap_tool(tool) {
-                Ok(tool) => Some(tool),
-                Err(error) => {
-                    tracing::warn!(%error, "invalid upstream MCP tool skipped");
-                    None
+            .filter_map(|tool| {
+                if !seen.insert(tool.name()) {
+                    tracing::warn!(
+                        name = tool.name(),
+                        "duplicate upstream MCP tool name skipped"
+                    );
+                    return None;
+                }
+                match crate::tool::validate_and_wrap_tool(tool) {
+                    Ok(tool) => Some(tool),
+                    Err(error) => {
+                        tracing::warn!(%error, "invalid upstream MCP tool skipped");
+                        None
+                    }
                 }
             })
             .collect();
