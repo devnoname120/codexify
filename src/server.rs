@@ -2391,8 +2391,8 @@ pub async fn start_http_server(mut config: AppConfig) -> anyhow::Result<()> {
         );
     }
     println!(
-        "Tools loaded ({tool_count}): {} native + {bridged_count} upstream-facing MCP tools",
-        tool_count - bridged_count
+        "Tools loaded ({}): {tool_count} native + {bridged_count} upstream-facing MCP tools",
+        tool_count + bridged_count
     );
     if !bridge_report.is_empty() {
         println!("Upstream MCP servers:");
