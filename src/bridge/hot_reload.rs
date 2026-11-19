@@ -1,8 +1,8 @@
 //! Transactional replacement of one upstream MCP connection.
 //!
-//! All model-visible tools are rebuilt as one immutable registry snapshot. A
-//! dispatch keeps its snapshot for its entire call, so old generations cannot
-//! be disposed while requests are using them.
+//! Tool definitions are rebuilt into an immutable registry snapshot. Dispatch
+//! clones only its selected tool into the call, preserving that source's old
+//! generation without retaining unrelated MCP connections.
 use super::*;
 use clap::Parser;
 use std::collections::{HashMap, HashSet};
@@ -431,7 +431,7 @@ impl HotReloadRuntime {
             write_gateway_skill(&self.config, name, &sanitize(name), &funcs);
         }
 
-        // The old generation stays alive in any request's registry snapshot.
+        // The old generation stays alive in requests pinned to its tools.
         // On a bounded drain timeout its existing calls are NOT cancelled or
         // replayed; the generation retires when the last call releases it.
         let drain_ms = previous
