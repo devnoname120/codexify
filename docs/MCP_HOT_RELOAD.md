@@ -52,8 +52,10 @@ required acceptance gates before production activation.
 A successful result includes `source`, `outcome`,
 `previousGeneration`, `replacementGeneration`, old/new reported MCP
 server versions, readiness, counts of added/removed/changed/unchanged
-tool definitions, `oldCallsDrained`, `oldGenerationRetiring`,
-`rollback`, and `diagnosticCode`.
+tool definitions, `oldCallsDrained`, `oldCallsStillRunning`,
+`oldGenerationRetiring`, `rollback`, `diagnosticCode`, and measured
+`timingsMs` for initialization/readiness, registry switch, draining and total
+reload duration.
 
 The source's discovery data and forwarded-call routes change together in the
 server's tool registry. Existing transport sessions can observe changed
@@ -82,6 +84,11 @@ and generated skill after reload.
 - If the old generation became unhealthy independently, a successful new
   connection is preferred; the operation does not imply that the old peer can
   be resurrected.
+- Resource links issued before a reload are separate capabilities. An upstream
+  resource fetched **after** its old connection retires can fail; request a
+  fresh resource link from the new source. Already-running resource reads
+  retain their own peer and cancellation semantics, but cross-generation
+  resource-link durability is not claimed by this implementation.
 - Invalid data from upstream tool descriptions must remain untrusted.
   Reload permission uses existing Codexify connector authorization and audit
   boundaries. Do not expose the control plane to unauthenticated clients.
