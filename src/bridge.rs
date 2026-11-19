@@ -1015,7 +1015,7 @@ async fn connect_one_with_env(
     server_name: &str,
     spec: &crate::types::McpServerSpec,
     config: &AppConfig,
-    env_lookup: &dyn Fn(&str) -> Option<String>,
+    env_lookup: &(dyn Fn(&str) -> Option<String> + Sync),
 ) -> Result<
     (
         RunningService<RoleClient, ()>,
@@ -2756,7 +2756,7 @@ mod tests {
             bridge.tools.is_empty(),
             "a failing upstream must be skipped, not fatal"
         );
-        assert!(bridge.services.is_empty());
+        assert!(bridge.runtime.snapshot().sources.is_empty());
         // The failure is surfaced in the report, not swallowed.
         assert!(bridge.report.iter().any(|l| l.contains("bad -> FAILED")));
     }
