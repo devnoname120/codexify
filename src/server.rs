@@ -836,21 +836,19 @@ impl ServerHandler for CodexHandler {
             .arguments
             .map(Value::Object)
             .unwrap_or_else(|| json!({}));
-        // Pin a complete immutable upstream registry through the entire async
-        // dispatch. Hot reload cannot close this request's source generation.
-        let bridge_view = self
-            .bridge_runtime
-            .as_ref()
-            .map(|runtime| runtime.snapshot());
+        // Pin only the selected upstream tool for this entire async dispatch.
+        // Holding the full registry snapshot here would keep *unrelated* retired
+        // MCP processes alive while another source runs a long request.
+        let bridge_tool = self.bridge_runtime.as_ref().and_then(|runtime| {
+            let view = runtime.snapshot();
+            view.tools.iter().find(|tool| tool.name() == name).cloned()
+        });
         let tool = self
             .tools
             .iter()
             .find(|tool| tool.name() == name)
-            .or_else(|| {
-                bridge_view
-                    .as_ref()
-                    .and_then(|view| view.tools.iter().find(|tool| tool.name() == name))
-            });
+            .map(|tool| tool.as_ref())
+            .or_else(|| bridge_tool.as_deref());
         let ticket_wait = name == TicketWait::NAME && tool.is_some();
         let model_call = !tool.is_some_and(|tool| app_only_tool(tool.as_ref()));
         let mut task_conversation = conversation.clone();
