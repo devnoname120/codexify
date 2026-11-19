@@ -37,7 +37,7 @@ use crate::types::{AppConfig, McpToolExposure, ToolContent, ToolResult};
 
 mod stderr;
 mod hot_reload;
-pub(crate) use hot_reload::{HotReloadRuntime, ReloadMcpTool};
+pub(crate) use hot_reload::{Generation, HotReloadRuntime, ReloadMcpTool};
 
 /// How long to wait for an upstream to start up and answer `tools/list` before
 /// giving up on it.
