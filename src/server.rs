@@ -848,7 +848,7 @@ impl ServerHandler for CodexHandler {
             .iter()
             .find(|tool| tool.name() == name)
             .map(|tool| tool.as_ref())
-            .or_else(|| bridge_tool.as_deref());
+            .or(bridge_tool.as_deref());
         let ticket_wait = name == TicketWait::NAME && tool.is_some();
         let model_call = !tool.is_some_and(app_only_tool);
         let mut task_conversation = conversation.clone();
