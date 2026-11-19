@@ -36,25 +36,22 @@ use crate::tool::{Tool, ToolBehavior, ToolCallIdentity, ToolRequestContext};
 use crate::types::{AppConfig, McpToolExposure, ToolContent, ToolResult};
 
 mod stderr;
+mod hot_reload;
+pub(crate) use hot_reload::{HotReloadRuntime, ReloadMcpTool};
 
 /// How long to wait for an upstream to start up and answer `tools/list` before
 /// giving up on it.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 
-/// The result of connecting to every configured upstream: the tools to merge
-/// into the registry, plus the running services kept alive for the server's
-/// lifetime (dropping one closes its transport and any child process).
+/// Connected MCP sources are owned by a transactional registry. Its immutable
+/// view is shared across transport sessions, while calls pin their generation.
 pub struct Bridge {
-    pub tools: Vec<Box<dyn Tool>>,
-    /// Shared opaque-capability store for resource links returned by upstream tools.
+    pub tools: Arc<Vec<Box<dyn Tool>>>,
     pub resources: Arc<BridgedResourceStore>,
-    /// Held only to keep upstream transports alive; never read directly.
-    pub services: Vec<RunningService<RoleClient, ()>>,
-    /// One human-readable line per configured server (connected or failed),
-    /// printed in the startup banner so a bad path or handshake is never silent.
     pub report: Vec<String>,
-    pub(crate) upstreams: Arc<HashMap<String, Arc<crate::upstream_control::UpstreamControl>>>,
-    pub(crate) monitors: Vec<UpstreamMonitor>,
+    pub(crate) runtime: Arc<HotReloadRuntime>,
+    pub(crate) upstreams:
+        Arc<std::sync::RwLock<HashMap<String, Arc<crate::upstream_control::UpstreamControl>>>>,
 }
 
 pub(crate) struct UpstreamMonitor(tokio::task::JoinHandle<()>);
@@ -120,10 +117,12 @@ struct BridgedTool {
     tool_timeout: Option<Duration>,
     control: Arc<crate::upstream_control::UpstreamControl>,
     resources: Arc<BridgedResourceStore>,
+    generation: Arc<hot_reload::Generation>,
 }
 
 impl BridgedTool {
     async fn run(&self, args: Value, cancellation: Option<&CancellationToken>) -> ToolResult {
+        let _lease = self.generation.begin_call();
         let mut params = CallToolRequestParams::new(self.original_name.clone());
         if let Some(obj) = args.as_object()
             && !obj.is_empty()
@@ -518,154 +517,54 @@ fn unique_name(base: String, used: &std::collections::HashSet<String>) -> String
 /// materialize its effective exposure mode. A server that fails to launch or
 /// answer is logged and skipped — it never blocks startup.
 pub async fn connect_upstreams(config: &AppConfig) -> Bridge {
-    let mut tools: Vec<Box<dyn Tool>> = Vec::new();
-    let mut services: Vec<RunningService<RoleClient, ()>> = Vec::new();
-    let mut upstreams = HashMap::new();
-    let mut monitors = Vec::new();
-    let mut report: Vec<String> = Vec::new();
-    let mut catalog_sources = Vec::new();
     let resources = Arc::new(BridgedResourceStore::new(config.artifact_egress.clone()));
-
-    // Deterministic order so logs and tool ordering are stable across runs.
-    let mut names: Vec<&String> = config.mcp_servers.keys().collect();
+    let mut sources = HashMap::new();
+    let mut report = Vec::new();
+    let mut names: Vec<_> = config.mcp_servers.keys().collect();
     names.sort();
 
-    for server_name in names {
-        let spec = &config.mcp_servers[server_name];
+    for name in names {
+        let spec = &config.mcp_servers[name];
         if spec.disabled {
-            report.push(format!("{server_name} -> disabled"));
+            report.push(format!("{name} -> disabled"));
             continue;
         }
-        let sanitized = sanitize(server_name);
-        let exposure = spec.exposure();
-
-        match connect_one(server_name, spec, config).await {
-            Ok((service, upstream_tools, tool_timeout)) => {
-                let peer = service.peer().clone();
-                let control = Arc::new(crate::upstream_control::UpstreamControl::new(
-                    spec.request_limits.clone(),
-                ));
-                upstreams.insert(server_name.clone(), control.clone());
-                monitors.push(monitor_upstream(peer.clone(), control.clone()));
-                let count = upstream_tools.len();
-
-                match exposure {
-                    McpToolExposure::Gateway => {
-                        let functions: Vec<GatewayFunction> = upstream_tools
-                            .iter()
-                            .map(|t| GatewayFunction {
-                                name: t.name.to_string(),
-                                description: t
-                                    .description
-                                    .as_ref()
-                                    .map(|c| c.to_string())
-                                    .unwrap_or_default(),
-                                input_schema: Value::Object((*t.input_schema).clone()),
-                            })
-                            .collect();
-
-                        write_gateway_skill(config, server_name, &sanitized, &functions);
-
-                        let leaked: &'static str = Box::leak(sanitized.clone().into_boxed_str());
-                        tools.push(Box::new(GatewayTool {
-                            name: leaked,
-                            server: server_name.clone(),
-                            description: gateway_description(server_name, &functions),
-                            function_names: functions.iter().map(|f| f.name.clone()).collect(),
-                            peer: peer.clone(),
-                            tool_timeout,
-                            control: control.clone(),
-                            resources: resources.clone(),
-                        }));
-                        report.push(format!(
-                            "{server_name} -> gateway ({count} functions via `{sanitized}`)"
-                        ));
-                        tracing::info!(
-                            "bridged MCP server '{server_name}' as gateway: {count} function(s)"
-                        );
-                    }
-                    McpToolExposure::Direct => {
-                        report.push(format!("{server_name} -> direct ({count} tool(s))"));
-                        let mut used: std::collections::HashSet<String> =
-                            std::collections::HashSet::new();
-                        for tool in upstream_tools {
-                            let original_name = tool.name.to_string();
-                            let display =
-                                unique_name(bridged_name(&sanitized, &original_name), &used);
-                            used.insert(display.clone());
-                            let leaked: &'static str = Box::leak(display.into_boxed_str());
-                            let title = tool.title.filter(|title| !title.trim().is_empty());
-                            let description = tool
-                                .description
-                                .map(|description| description.to_string())
-                                .filter(|description| !description.trim().is_empty())
-                                .unwrap_or_else(|| {
-                                    format!(
-                                        "Call the `{original_name}` tool on the `{server_name}` MCP server."
-                                    )
-                                });
-                            tools.push(Box::new(BridgedTool {
-                                name: leaked,
-                                original_name,
-                                server: server_name.clone(),
-                                title,
-                                description,
-                                input_schema: Value::Object((*tool.input_schema).clone()),
-                                output_schema: tool
-                                    .output_schema
-                                    .map(|schema| Value::Object((*schema).clone())),
-                                annotations: tool.annotations,
-                                icons: tool.icons,
-                                meta: tool.meta,
-                                peer: peer.clone(),
-                                tool_timeout,
-                                control: control.clone(),
-                                resources: resources.clone(),
-                            }));
-                        }
-                        tracing::info!(
-                            "bridged MCP server '{server_name}' directly: {count} tool(s)"
-                        );
-                    }
-                    McpToolExposure::Catalog => {
-                        report.push(format!(
-                            "{server_name} -> catalog ({count} private tool(s))"
-                        ));
-                        catalog_sources.push(CatalogSourceInput {
-                            raw_name: server_name.clone(),
-                            provenance: spec.provenance,
-                            transport: transport_label(spec),
-                            peer_info: peer.peer_info(),
-                            tools: upstream_tools,
-                            peer: peer.clone(),
-                            tool_timeout,
-                            control: control.clone(),
-                        });
-                        tracing::info!(
-                            "indexed MCP server '{server_name}' privately: {count} tool(s)"
-                        );
-                    }
+        match connect_one(name, spec, config).await {
+            Ok((service, tools, timeout)) => {
+                let count = tools.len();
+                let mode = spec.exposure();
+                if mode == McpToolExposure::Gateway {
+                    let functions = tools.iter().map(|tool| GatewayFunction {
+                        name: tool.name.to_string(),
+                        description: tool.description.as_ref()
+                            .map(ToString::to_string).unwrap_or_default(),
+                        input_schema: Value::Object((*tool.input_schema).clone()),
+                    }).collect::<Vec<_>>();
+                    write_gateway_skill(config, name, &sanitize(name), &functions);
                 }
-                services.push(service);
+                let generation = hot_reload::Generation::new(
+                    name.clone(), spec.clone(), service, tools, timeout, 1,
+                );
+                sources.insert(name.clone(), generation);
+                report.push(format!("{name} -> {} ({count} tool(s))", mode.as_str()));
+                tracing::info!(source = %name, %count, exposure = mode.as_str(), "MCP source connected");
             }
-            Err(e) => {
-                report.push(format!("{server_name} -> FAILED: {e}"));
-                tracing::warn!("skipping MCP server '{server_name}': {e}");
+            Err(_) => {
+                // Upstream configuration can contain private header or command
+                // values; do not echo a failed spawn/handshake error to clients.
+                report.push(format!("{name} -> FAILED (initialization)"));
+                tracing::warn!(source = %name, "MCP source failed initialization");
             }
         }
     }
 
-    let mut catalog_tools = build_catalog_tools(catalog_sources, resources.clone());
-    catalog_tools.append(&mut tools);
-    tools = catalog_tools;
-
+    let runtime = HotReloadRuntime::new(Arc::new(config.clone()), resources.clone(), sources);
     Bridge {
-        tools,
+        tools: runtime.snapshot().tools.clone(),
         resources,
-        services,
         report,
-        upstreams: Arc::new(upstreams),
-        monitors,
+        upstreams: runtime.upstreams.clone(),
+        runtime,
     }
 }
 
@@ -767,10 +666,12 @@ struct GatewayTool {
     tool_timeout: Option<Duration>,
     control: Arc<crate::upstream_control::UpstreamControl>,
     resources: Arc<BridgedResourceStore>,
+    generation: Arc<hot_reload::Generation>,
 }
 
 impl GatewayTool {
     async fn run(&self, args: Value, cancellation: Option<&CancellationToken>) -> ToolResult {
+        let _lease = self.generation.begin_call();
         let Some(function) = args.get("function").and_then(|v| v.as_str()) else {
             return ToolResult::error("`function` is required (the name of the function to call)");
         };
@@ -1133,6 +1034,7 @@ async fn connect_one_with_env(
     let connect = match select_transport(spec)? {
         UpstreamTransport::Stdio(command_path) => {
             let mut command = Command::new(command_path);
+            command.kill_on_drop(true);
             command.args(&spec.args);
             for (key, value) in &spec.env {
                 command.env(key, value);
