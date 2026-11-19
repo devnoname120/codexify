@@ -530,3 +530,65 @@ async fn old_generation_is_released_after_draining_without_stale_snapshots() {
     old_task.abort();
     new_task.abort();
 }
+
+#[tokio::test]
+async fn unrelated_in_flight_call_does_not_retain_a_retired_source() {
+    let (a1, _, task_a1) =
+        fixture("alpha-1", false, Duration::ZERO, Duration::ZERO).await;
+    let (a2, _, task_a2) =
+        fixture("alpha-2", false, Duration::ZERO, Duration::ZERO).await;
+    let (b, b_calls, task_b) =
+        fixture("beta", false, Duration::ZERO, Duration::from_millis(400)).await;
+    let mut config = crate::config::default_config(std::env::temp_dir());
+    config
+        .mcp_servers
+        .insert("alpha".into(), spec(&a1, McpToolExposure::Direct));
+    config
+        .mcp_servers
+        .insert("beta".into(), spec(&b, McpToolExposure::Direct));
+    let runtime = connect_upstreams(&config).await.runtime;
+    let initial = runtime.snapshot();
+    let alpha = Arc::downgrade(&initial.sources["alpha"]);
+    // Copy only beta's validated descriptor, just as server dispatch does.
+    let beta = initial
+        .tools
+        .iter()
+        .find(|tool| tool.name() == "beta__slow")
+        .unwrap()
+        .clone();
+    drop(initial);
+
+    let pending = tokio::spawn(async move {
+        beta.call(
+            json!({}),
+            &crate::config::default_config(std::env::temp_dir()),
+            &SessionState::new(),
+        )
+        .await
+    });
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while b_calls.load(Ordering::SeqCst) == 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+
+    let result = runtime
+        .reload_with_spec("alpha", spec(&a2, McpToolExposure::Direct), None)
+        .await
+        .unwrap();
+    assert_eq!(result["oldCallsDrained"], true);
+    assert!(
+        alpha.upgrade().is_none(),
+        "a beta request must not retain alpha's retired connection"
+    );
+    assert_eq!(pending.await.unwrap().joined_text(), "beta");
+    assert_eq!(
+        invoke(runtime.snapshot(), "alpha__probe").await.joined_text(),
+        "alpha-2"
+    );
+    task_a1.abort();
+    task_a2.abort();
+    task_b.abort();
+}
