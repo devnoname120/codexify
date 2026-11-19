@@ -440,6 +440,12 @@ impl HotReloadRuntime {
         let in_flight = previous
             .as_ref()
             .map_or(0, |old| *old.calls.lock().unwrap());
+        // A selected but not yet forwarded call, an old catalog snapshot,
+        // or an active resource may still pin the retiring generation.
+        // Do not misreport that its process has already been released.
+        let still_referenced = previous
+            .as_ref()
+            .is_some_and(|old| Arc::strong_count(old) > 1);
         Ok(json!({
             "source": name,
             "outcome": "reloaded",
@@ -453,7 +459,8 @@ impl HotReloadRuntime {
             },
             "oldCallsDrained": drained,
             "oldCallsStillRunning": in_flight,
-            "oldGenerationRetiring": !drained,
+            "oldGenerationStillReferenced": still_referenced,
+            "oldGenerationRetiring": !drained || still_referenced,
             "rollback": "not_required",
             "timingsMs": {
                 "initializationAndReadiness": initialization_ms,
