@@ -174,19 +174,7 @@ impl HotReloadRuntime {
             let sanitized = sanitize(name);
             match source.spec.exposure() {
                 McpToolExposure::Gateway => {
-                    let functions: Vec<GatewayFunction> = source
-                        .tools
-                        .iter()
-                        .map(|tool| GatewayFunction {
-                            name: tool.name.to_string(),
-                            description: tool
-                                .description
-                                .as_ref()
-                                .map(ToString::to_string)
-                                .unwrap_or_default(),
-                            input_schema: Value::Object((*tool.input_schema).clone()),
-                        })
-                        .collect();
+                    let functions = gateway_functions(&source.tools);
                     let tool = GatewayTool {
                         name: names.intern(sanitized)?,
                         server: name.clone(),
@@ -436,19 +424,7 @@ impl HotReloadRuntime {
         let switching_ms = switching.elapsed().as_millis() as u64;
 
         if new.spec.exposure() == McpToolExposure::Gateway {
-            let funcs = new
-                .tools
-                .iter()
-                .map(|t| GatewayFunction {
-                    name: t.name.to_string(),
-                    description: t
-                        .description
-                        .as_ref()
-                        .map(ToString::to_string)
-                        .unwrap_or_default(),
-                    input_schema: Value::Object((*t.input_schema).clone()),
-                })
-                .collect::<Vec<_>>();
+            let funcs = gateway_functions(&new.tools);
             write_gateway_skill(&self.config, name, &sanitize(name), &funcs);
         }
 
