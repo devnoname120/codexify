@@ -73,10 +73,16 @@ impl Generation {
     async fn wait_for_calls(&self, limit: Duration) -> bool {
         tokio::time::timeout(limit, async {
             loop {
+                // Register the waiter before checking the counter. Otherwise
+                // the last call can finish between the check and registration,
+                // losing its wakeup and spuriously timing out the drain.
+                let notified = self.drained.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
                 if *self.calls.lock().unwrap() == 0 {
                     break;
                 }
-                self.drained.notified().await;
+                notified.await;
             }
         })
         .await
