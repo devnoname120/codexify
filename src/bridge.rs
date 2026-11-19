@@ -35,10 +35,10 @@ use crate::process_env::scrub_untrusted_child_env;
 use crate::tool::{Tool, ToolBehavior, ToolCallIdentity, ToolRequestContext};
 use crate::types::{AppConfig, McpToolExposure, ToolContent, ToolResult};
 
-mod stderr;
 mod hot_reload;
 #[cfg(test)]
 mod hot_reload_tests;
+mod stderr;
 pub(crate) use hot_reload::{Generation, HotReloadRuntime, ReloadMcpTool};
 
 /// How long to wait for an upstream to start up and answer `tools/list` before
