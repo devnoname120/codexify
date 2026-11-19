@@ -542,14 +542,33 @@ pub async fn connect_upstreams(config: &AppConfig) -> Bridge {
                 let generation =
                     hot_reload::Generation::new(spec.clone(), service, tools, timeout, 1);
                 sources.insert(name.clone(), generation);
-                report.push(format!("{name} -> {} ({count} tool(s))", mode.as_str()));
+                let visibility = if mode == McpToolExposure::Catalog {
+                    " private"
+                } else {
+                    ""
+                };
+                report.push(format!(
+                    "{name} -> {} ({count}{visibility} tool(s))",
+                    mode.as_str()
+                ));
                 tracing::info!(source = %name, %count, exposure = mode.as_str(), "MCP source connected");
             }
             Err(_) => {
                 // Upstream configuration can contain private header or command
                 // values; do not echo a failed spawn/handshake error to clients.
-                report.push(format!("{name} -> FAILED (initialization)"));
-                tracing::warn!(source = %name, "MCP source failed initialization");
+                // An unsupported transport type is a safe, useful static
+                // diagnostic and should not be hidden as an initialization
+                // failure; neither diagnostic includes the configured URL.
+                let legacy_transport = spec.transport.as_deref().is_some_and(|kind| {
+                    matches!(kind.to_ascii_lowercase().as_str(), "sse" | "websocket" | "ws")
+                });
+                if legacy_transport {
+                    report.push(format!("{name} -> not supported (transport)"));
+                    tracing::warn!(source = %name, "MCP source transport is not supported");
+                } else {
+                    report.push(format!("{name} -> FAILED (initialization)"));
+                    tracing::warn!(source = %name, "MCP source failed initialization");
+                }
             }
         }
     }
