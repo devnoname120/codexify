@@ -302,6 +302,9 @@ impl HotReloadRuntime {
         if name.is_empty() || name.len() > 128 || name.chars().any(char::is_control) {
             return Err("SOURCE_ID_INVALID");
         }
+        if !self.locks.contains_key(name) {
+            return Err("SOURCE_UNKNOWN");
+        }
         let spec = self.latest_spec(name)?;
         self.reload_with_spec(name, spec, cancellation).await
     }
@@ -546,7 +549,18 @@ impl ReloadMcpTool {
                     .with_structured(report)
             }
             Err(code) => {
+                let old = self.runtime.snapshot().sources.get(source).cloned();
+                let report = json!({
+                    "source": source,
+                    "outcome": "failed_without_switch",
+                    "previousGeneration": old.as_ref().map(|generation| generation.number),
+                    "previousVersion": old.as_ref().and_then(|generation| generation.version()),
+                    "rollback": "previous_registry_retained",
+                    "clientRediscoveryRequired": false,
+                    "diagnosticCode": code
+                });
                 ToolResult::error(format!("MCP reload did not switch connections: {code}"))
+                    .with_structured(report)
             }
         }
     }
