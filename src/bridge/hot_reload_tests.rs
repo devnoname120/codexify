@@ -602,7 +602,6 @@ async fn unrelated_in_flight_call_does_not_retain_a_retired_source() {
     task_b.abort();
 }
 
-
 fn isolated_stdio_spec(version: &str) -> crate::types::McpServerSpec {
     let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("scripts")
@@ -618,14 +617,30 @@ fn isolated_stdio_spec(version: &str) -> crate::types::McpServerSpec {
 }
 
 fn stdio_process_id(result: ToolResult, expected_version: &str) -> u32 {
-    assert!(!result.is_error, "stdio call failed: {}", result.joined_text());
+    assert!(
+        !result.is_error,
+        "stdio call failed: {}",
+        result.joined_text()
+    );
     let response = result.joined_text();
     let (version, pid) = response
         .trim()
         .split_once(':')
         .unwrap_or_else(|| panic!("invalid stdio fixture response: {response}"));
     assert_eq!(version, expected_version);
-    pid.parse().expect("stdio fixture process id must be numeric")
+    pid.parse()
+        .expect("stdio fixture process id must be numeric")
+}
+
+async fn stdio_process_still_alive(pid: u32) -> bool {
+    // Signal 0 checks existence without terminating or signaling a process.
+    tokio::process::Command::new("node")
+        .arg("-e")
+        .arg("try { process.kill(Number(process.argv[1]), 0); } catch { process.exit(1); }")
+        .arg(pid.to_string())
+        .status()
+        .await
+        .is_ok_and(|status| status.success())
 }
 
 #[tokio::test]
@@ -675,7 +690,9 @@ async fn service_isolated_real_stdio_process_reload_preserves_unrelated_sources(
     drop(initial);
     let config_for_call = crate::config::default_config(std::env::temp_dir());
     let original_pid = stdio_process_id(
-        old_probe.call(json!({}), &config_for_call, &SessionState::new()).await,
+        old_probe
+            .call(json!({}), &config_for_call, &SessionState::new())
+            .await,
         "old",
     );
     let beta_pid = stdio_process_id(invoke(runtime.snapshot(), "beta__probe").await, "beta");
@@ -710,17 +727,25 @@ async fn service_isolated_real_stdio_process_reload_preserves_unrelated_sources(
     assert_eq!(result["replacementGeneration"], 2);
     assert_eq!(result["toolChanges"]["added"], 1);
     assert_eq!(result["oldCallsDrained"], true);
-    assert_eq!(stdio_process_id(pending.await.unwrap(), "old"), original_pid);
+    assert_eq!(
+        stdio_process_id(pending.await.unwrap(), "old"),
+        original_pid
+    );
     assert_eq!(
         stdio_process_id(
-            old_probe.call(json!({}), &config_for_call, &SessionState::new()).await,
+            old_probe
+                .call(json!({}), &config_for_call, &SessionState::new())
+                .await,
             "old",
         ),
         original_pid,
         "a pinned retired generation must remain callable until released"
     );
     let new_pid = stdio_process_id(invoke(runtime.snapshot(), "alpha__probe").await, "new");
-    assert_ne!(new_pid, original_pid, "replacement must be a new OS process");
+    assert_ne!(
+        new_pid, original_pid,
+        "replacement must be a new OS process"
+    );
     assert_eq!(
         stdio_process_id(invoke(runtime.snapshot(), "alpha__new_tool").await, "new"),
         new_pid
@@ -751,12 +776,23 @@ async fn service_isolated_real_stdio_process_reload_preserves_unrelated_sources(
         "an unsuccessful replacement must preserve the healthy process"
     );
 
+    assert!(
+        stdio_process_still_alive(original_pid).await,
+        "retiring process must remain alive while a pinned old handle exists"
+    );
     drop(old_probe);
     tokio::task::yield_now().await;
     assert!(
         retired.upgrade().is_none(),
         "the retired generation must be released after its last handle drops"
     );
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while stdio_process_still_alive(original_pid).await {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("retired OS child process remained alive after the last handle dropped");
 
     let repeated = runtime
         .reload_with_spec("alpha", isolated_stdio_spec("new"), None)
