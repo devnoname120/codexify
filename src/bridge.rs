@@ -543,7 +543,7 @@ pub async fn connect_upstreams(config: &AppConfig) -> Bridge {
                     write_gateway_skill(config, name, &sanitize(name), &functions);
                 }
                 let generation = hot_reload::Generation::new(
-                    name.clone(), spec.clone(), service, tools, timeout, 1,
+                    spec.clone(), service, tools, timeout, 1,
                 );
                 sources.insert(name.clone(), generation);
                 report.push(format!("{name} -> {} ({count} tool(s))", mode.as_str()));
