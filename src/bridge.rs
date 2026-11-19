@@ -39,7 +39,6 @@ mod hot_reload;
 #[cfg(test)]
 mod hot_reload_tests;
 mod stderr;
-mod stderr;
 pub(crate) use hot_reload::{Generation, HotReloadRuntime, ReloadMcpTool};
 
 /// How long to wait for an upstream to start up and answer `tools/list` before
@@ -540,9 +539,8 @@ pub async fn connect_upstreams(config: &AppConfig) -> Bridge {
                     let functions = gateway_functions(&tools);
                     write_gateway_skill(config, name, &sanitize(name), &functions);
                 }
-                let generation = hot_reload::Generation::new(
-                    spec.clone(), service, tools, timeout, 1,
-                );
+                let generation =
+                    hot_reload::Generation::new(spec.clone(), service, tools, timeout, 1);
                 sources.insert(name.clone(), generation);
                 report.push(format!("{name} -> {} ({count} tool(s))", mode.as_str()));
                 tracing::info!(source = %name, %count, exposure = mode.as_str(), "MCP source connected");
