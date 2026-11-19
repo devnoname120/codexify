@@ -393,13 +393,7 @@ impl HotReloadRuntime {
                 .count();
         }
         let initialization_ms = started.elapsed().as_millis() as u64;
-        let new = Generation::new(
-            spec,
-            service,
-            tools,
-            timeout,
-            old_generation + 1,
-        );
+        let new = Generation::new(spec, service, tools, timeout, old_generation + 1);
         let new_version = new.version();
         // Connection preparation and view construction are outside the write
         // lock. Compare-and-rebuild prevents concurrent distinct-source reloads
