@@ -404,6 +404,9 @@ impl HotReloadRuntime {
         // Connection preparation and view construction are outside the write
         // lock. Compare-and-rebuild prevents concurrent distinct-source reloads
         // from overwriting each other.
+        if cancellation.is_some_and(CancellationToken::is_cancelled) {
+            return Err("CANCELLED");
+        }
         let switching = std::time::Instant::now();
         loop {
             let before = self.snapshot();
