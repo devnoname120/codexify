@@ -506,12 +506,12 @@ async fn direct_name_collisions_are_not_ambiguous_after_reload() {
 
 #[tokio::test]
 async fn old_generation_is_released_after_draining_without_stale_snapshots() {
-    let (old_url, _, old_task) =
-        fixture("old", false, Duration::ZERO, Duration::ZERO).await;
-    let (new_url, _, new_task) =
-        fixture("new", true, Duration::ZERO, Duration::ZERO).await;
+    let (old_url, _, old_task) = fixture("old", false, Duration::ZERO, Duration::ZERO).await;
+    let (new_url, _, new_task) = fixture("new", true, Duration::ZERO, Duration::ZERO).await;
     let mut config = crate::config::default_config(std::env::temp_dir());
-    config.mcp_servers.insert("alpha".into(), spec(&old_url, McpToolExposure::Direct));
+    config
+        .mcp_servers
+        .insert("alpha".into(), spec(&old_url, McpToolExposure::Direct));
     let bridge = connect_upstreams(&config).await;
     let runtime = bridge.runtime.clone();
     let first = runtime.snapshot();
@@ -521,22 +521,29 @@ async fn old_generation_is_released_after_draining_without_stale_snapshots() {
     drop(bridge);
     assert!(weak.upgrade().is_some());
 
-    let result = runtime.reload_with_spec(
-        "alpha", spec(&new_url, McpToolExposure::Direct), None
-    ).await.unwrap();
+    let result = runtime
+        .reload_with_spec("alpha", spec(&new_url, McpToolExposure::Direct), None)
+        .await
+        .unwrap();
     assert_eq!(result["oldCallsDrained"], true);
-    assert!(weak.upgrade().is_none(), "retired service generation leaked");
-    assert_eq!(invoke(runtime.snapshot(), "alpha__probe").await.joined_text(), "new");
+    assert!(
+        weak.upgrade().is_none(),
+        "retired service generation leaked"
+    );
+    assert_eq!(
+        invoke(runtime.snapshot(), "alpha__probe")
+            .await
+            .joined_text(),
+        "new"
+    );
     old_task.abort();
     new_task.abort();
 }
 
 #[tokio::test]
 async fn unrelated_in_flight_call_does_not_retain_a_retired_source() {
-    let (a1, _, task_a1) =
-        fixture("alpha-1", false, Duration::ZERO, Duration::ZERO).await;
-    let (a2, _, task_a2) =
-        fixture("alpha-2", false, Duration::ZERO, Duration::ZERO).await;
+    let (a1, _, task_a1) = fixture("alpha-1", false, Duration::ZERO, Duration::ZERO).await;
+    let (a2, _, task_a2) = fixture("alpha-2", false, Duration::ZERO, Duration::ZERO).await;
     let (b, b_calls, task_b) =
         fixture("beta", false, Duration::ZERO, Duration::from_millis(400)).await;
     let mut config = crate::config::default_config(std::env::temp_dir());
@@ -585,7 +592,9 @@ async fn unrelated_in_flight_call_does_not_retain_a_retired_source() {
     );
     assert_eq!(pending.await.unwrap().joined_text(), "beta");
     assert_eq!(
-        invoke(runtime.snapshot(), "alpha__probe").await.joined_text(),
+        invoke(runtime.snapshot(), "alpha__probe")
+            .await
+            .joined_text(),
         "alpha-2"
     );
     task_a1.abort();
