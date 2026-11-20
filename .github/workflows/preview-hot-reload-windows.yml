@@ -6,6 +6,8 @@ on:
       - feat/per-mcp-hot-reload-20261119
     paths:
       - .github/workflows/preview-hot-reload-windows.yml
+      - src/markdown_chat/mod.rs
+      - src/agent_automation/install.rs
 
 permissions:
   contents: read
