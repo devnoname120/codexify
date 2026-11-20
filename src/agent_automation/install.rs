@@ -326,6 +326,9 @@ impl BrowserCompanionManager {
             .stdin(Stdio::null())
             .stdout(Stdio::from(log))
             .stderr(Stdio::from(stderr));
+        if let Some(path) = &self.config.provider_send_gate_path {
+            command.env("CODEXIFY_BROWSER_SEND_GATE_PATH", path);
+        }
         configure_detached_process(&mut command);
         let mut child = command
             .spawn()

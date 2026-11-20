@@ -178,6 +178,9 @@ pub struct AgentAutomationConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub browser_simplicity: Option<BrowserSimplicity>,
     pub recovery_enhancements: bool,
+    /// Preserve the operator-configured browser Send gate in the v2.4 preview.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_send_gate_path: Option<String>,
 }
 
 impl Default for AgentAutomationConfig {
@@ -204,6 +207,7 @@ impl Default for AgentAutomationConfig {
             minimal_ui: false,
             browser_simplicity: None,
             recovery_enhancements: false,
+            provider_send_gate_path: None,
         }
     }
 }
@@ -227,6 +231,15 @@ impl AgentAutomationConfig {
 
     fn validate(&self) -> Result<(), String> {
         self.retry_timings.validate()?;
+        if let Some(path) = &self.provider_send_gate_path
+            && (path.len() > 4096
+                || !std::path::Path::new(path).is_absolute()
+                || path.contains('\0'))
+        {
+            return Err(
+                "agentChat.automation.providerSendGatePath must be an absolute path".into(),
+            );
+        }
         if !(1..=4).contains(&self.browser_action_lanes) {
             return Err("agentChat.automation.browserActionLanes must be between 1 and 4".into());
         }
@@ -1048,6 +1061,27 @@ mod tests {
             let config: AgentAutomationConfig =
                 serde_json::from_value(serde_json::json!({"browserActionLanes":lanes})).unwrap();
             assert_eq!(config.validate().is_ok(), (1..=4).contains(&lanes));
+        }
+    }
+
+    #[test]
+    fn browser_send_gate_path_round_trips_and_rejects_relative_paths() {
+        let absolute = if cfg!(windows) {
+            r"C:\codexify\browser-send-gate.json"
+        } else {
+            "/tmp/codexify/browser-send-gate.json"
+        };
+        let config: AgentAutomationConfig =
+            serde_json::from_value(serde_json::json!({"providerSendGatePath": absolute})).unwrap();
+        assert_eq!(config.provider_send_gate_path.as_deref(), Some(absolute));
+        assert!(config.validate().is_ok());
+        let encoded = serde_json::to_value(&config).unwrap();
+        assert_eq!(encoded["providerSendGatePath"], absolute);
+        for invalid in ["", "relative/send-gate.json"] {
+            let config: AgentAutomationConfig =
+                serde_json::from_value(serde_json::json!({"providerSendGatePath": invalid}))
+                    .unwrap();
+            assert!(config.validate().is_err());
         }
     }
 
