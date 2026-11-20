@@ -811,7 +811,6 @@ async fn service_isolated_real_stdio_process_reload_preserves_unrelated_sources(
     );
 }
 
-
 /// Opt-in, isolated acceptance test using two real, read-only GodPrompt stdio
 /// installs. Only initialize, tools/list, and ping are sent; no GodPrompt tool
 /// calls, external APIs, operator configuration, or running service are touched.
