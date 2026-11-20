@@ -810,3 +810,118 @@ async fn service_isolated_real_stdio_process_reload_preserves_unrelated_sources(
         gamma_pid
     );
 }
+
+
+/// Opt-in, isolated acceptance test using two real, read-only GodPrompt stdio
+/// installs. Only initialize, tools/list, and ping are sent; no GodPrompt tool
+/// calls, external APIs, operator configuration, or running service are touched.
+///
+/// CI installs and selects the pinned published 1.0.3 / 1.1.1 npm versions.
+/// A developer can instead supply two existing entrypoint paths locally.
+#[tokio::test]
+async fn service_local_godprompt_candidate_upgrade_and_failed_rollback() {
+    let old_entry = std::env::var_os("CODEXIFY_CANARY_OLD_GODPROMPT");
+    let new_entry = std::env::var_os("CODEXIFY_CANARY_NEW_GODPROMPT");
+    let (Some(old_entry), Some(new_entry)) = (old_entry, new_entry) else {
+        assert!(
+            std::env::var_os("CODEXIFY_CANARY_OLD_GODPROMPT").is_none()
+                && std::env::var_os("CODEXIFY_CANARY_NEW_GODPROMPT").is_none(),
+            "provide both isolated GodPrompt entrypoints, or neither"
+        );
+        return;
+    };
+    let node = std::env::var("CODEXIFY_CANARY_NODE").unwrap_or_else(|_| "node".into());
+    for entry in [&old_entry, &new_entry] {
+        assert!(
+            std::path::Path::new(entry).is_file(),
+            "GodPrompt candidate stdio entrypoint does not exist"
+        );
+    }
+    let make_candidate = |entry: &std::ffi::OsStr| crate::types::McpServerSpec {
+        command: Some(node.clone()),
+        args: vec![entry.to_string_lossy().into_owned()],
+        mode: Some(McpToolExposure::Direct),
+        startup_timeout_sec: Some(18.0),
+        ..Default::default()
+    };
+
+    let (beta_url, _, beta_server) = fixture("beta", false, Duration::ZERO, Duration::ZERO).await;
+    let (gamma_url, _, gamma_server) =
+        fixture("gamma", false, Duration::ZERO, Duration::ZERO).await;
+    let mut config = crate::config::default_config(std::env::temp_dir());
+    config.mcp_servers.insert(
+        "godprompt_canary".into(),
+        make_candidate(old_entry.as_os_str()),
+    );
+    config
+        .mcp_servers
+        .insert("beta".into(), spec(&beta_url, McpToolExposure::Direct));
+    config
+        .mcp_servers
+        .insert("gamma".into(), spec(&gamma_url, McpToolExposure::Direct));
+
+    let bridge = connect_upstreams(&config).await;
+    assert_eq!(
+        bridge.runtime.snapshot().sources.len(),
+        3,
+        "{:?}",
+        bridge.report
+    );
+    let runtime = bridge.runtime.clone();
+    drop(bridge);
+    let before = runtime.snapshot();
+    let old = before.sources["godprompt_canary"].clone();
+    let beta = before.sources["beta"].clone();
+    let gamma = before.sources["gamma"].clone();
+    let old_tool_count = old.tools.len();
+    assert!(old_tool_count > 0, "old GodPrompt must advertise tools");
+    drop(before);
+
+    let result = runtime
+        .reload_with_spec(
+            "godprompt_canary",
+            make_candidate(new_entry.as_os_str()),
+            None,
+        )
+        .await
+        .expect("replacement GodPrompt must initialize, discover tools and pass ping");
+    assert_eq!(result["previousGeneration"], 1);
+    assert_eq!(result["replacementGeneration"], 2);
+    assert_eq!(result["ready"], true);
+    assert_eq!(result["previousVersion"], "1.0.3");
+    assert_eq!(result["replacementVersion"], "1.1.1");
+    let updated = runtime.snapshot();
+    let new = updated.sources["godprompt_canary"].clone();
+    assert!(!Arc::ptr_eq(&old, &new));
+    assert!(Arc::ptr_eq(&beta, &updated.sources["beta"]));
+    assert!(Arc::ptr_eq(&gamma, &updated.sources["gamma"]));
+    assert!(new.tools.len() > 0, "new GodPrompt must advertise tools");
+    println!(
+        "isolated GodPrompt {} -> {}: {} -> {} tools; timings {:?}; testing rollback",
+        result["previousVersion"],
+        result["replacementVersion"],
+        old_tool_count,
+        new.tools.len(),
+        result["timingsMs"]
+    );
+    drop(updated);
+
+    let mut broken = make_candidate(new_entry.as_os_str());
+    broken.command = Some("codexify-nonexistent-godprompt-canary".into());
+    assert_eq!(
+        runtime
+            .reload_with_spec("godprompt_canary", broken, None)
+            .await
+            .err(),
+        Some("INITIALIZE_FAILED")
+    );
+    let after_rollback = runtime.snapshot();
+    assert!(Arc::ptr_eq(
+        &new,
+        &after_rollback.sources["godprompt_canary"]
+    ));
+    assert!(Arc::ptr_eq(&beta, &after_rollback.sources["beta"]));
+    assert!(Arc::ptr_eq(&gamma, &after_rollback.sources["gamma"]));
+    beta_server.abort();
+    gamma_server.abort();
+}
