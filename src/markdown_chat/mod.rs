@@ -236,7 +236,9 @@ impl AgentAutomationConfig {
                 || !std::path::Path::new(path).is_absolute()
                 || path.contains('\0'))
         {
-            return Err("agentChat.automation.providerSendGatePath must be an absolute path".into());
+            return Err(
+                "agentChat.automation.providerSendGatePath must be an absolute path".into(),
+            );
         }
         if !(1..=4).contains(&self.browser_action_lanes) {
             return Err("agentChat.automation.browserActionLanes must be between 1 and 4".into());
