@@ -6,10 +6,15 @@ service without separate approval and validation.
 
 ## Scope
 
-`reload_mcp` reloads exactly one existing upstream source, identified by the
-key in the resolved `mcpServers` configuration. A caller provides
-`{"source":"god_prompt_mcp"}`; it cannot provide a command, executable,
-working directory, URL, environment variables, or credentials.
+`reload_mcp` reloads exactly one existing upstream source. Its `source`
+argument must match the **exact configured MCP server key** from the resolved
+`mcpServers` configuration (including inherited Codex MCP sources). For example,
+if the configured key is `god-prompt-mcp`, call
+`{"source":"god-prompt-mcp"}`. Do not substitute a normalized catalog source ID
+such as `god_prompt_mcp` from `mcp_list_sources`: it is not necessarily the
+configuration key and can return `SOURCE_UNKNOWN` without changing the running
+connection. The call cannot supply a command, executable, working directory,
+URL, environment variables, or credentials.
 
 The server rereads its operator configuration (including inherited Codex MCP
 sources) **read-only** using its startup CLI selection. A target that was
@@ -77,8 +82,9 @@ and generated skill after reload.
 
 ## Failure and boundary conditions
 
-- `SOURCE_UNKNOWN` / `SOURCE_REMOVED` / `SOURCE_DISABLED`: do not spawn
-  an arbitrary process or reinterpret the input as a path.
+- `SOURCE_UNKNOWN` / `SOURCE_REMOVED` / `SOURCE_DISABLED`: verify the
+  exact configured MCP key, not a normalized catalog ID. Do not spawn an
+  arbitrary process or reinterpret the input as a path.
 - `RELOAD_IN_PROGRESS`: no duplicate replacement of the same source.
 - `CONFIG_INVALID`, `CONFIG_CLI_INVALID`, `INITIALIZE_FAILED`,
   `READINESS_FAILED`: old healthy generation is retained.
