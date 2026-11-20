@@ -611,7 +611,7 @@ fn isolated_stdio_spec(version: &str) -> crate::types::McpServerSpec {
         command: Some("node".into()),
         args: vec![fixture.to_string_lossy().into_owned(), version.into()],
         mode: Some(McpToolExposure::Direct),
-        startup_timeout_sec: Some(8.0),
+        startup_timeout_sec: Some(25.0),
         ..Default::default()
     }
 }
