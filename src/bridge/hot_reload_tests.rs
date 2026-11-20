@@ -894,7 +894,7 @@ async fn service_local_godprompt_candidate_upgrade_and_failed_rollback() {
     assert!(!Arc::ptr_eq(&old, &new));
     assert!(Arc::ptr_eq(&beta, &updated.sources["beta"]));
     assert!(Arc::ptr_eq(&gamma, &updated.sources["gamma"]));
-    assert!(new.tools.len() > 0, "new GodPrompt must advertise tools");
+    assert!(!new.tools.is_empty(), "new GodPrompt must advertise tools");
     println!(
         "isolated GodPrompt {} -> {}: {} -> {} tools; timings {:?}; testing rollback",
         result["previousVersion"],
