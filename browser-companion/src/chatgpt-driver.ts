@@ -7,7 +7,7 @@ import {DraftRecoveryJournal} from './draft-recovery';
 import {approveConversationCard,latestConversationApprovalCards,throwIfConversationApproval} from "./conversation-approval";
 import {openNewChat, createdChatUrl, assertNewChatDraft} from "./new-chat";
 import { HealthAccountCache, readChatGptAccount, type ChatGptAccount } from "./account";
-import { throwIfSessionAttention, throwIfConversationLimit, toolApprovalVisible } from "./browser-session";
+import { conversationLimitVisible, throwIfSessionAttention, throwIfConversationLimit, toolApprovalVisible } from "./browser-session";
 import {navigatePage,recordConversationAvailable,acquireSubmissionSlot,conversationLoadAvailableAt} from "./navigation";
 import {waitForConversationComposer} from "./conversation-readiness";
 import {refreshConversationEditor} from "./editor-recovery";
@@ -63,6 +63,21 @@ async function generationRunning(page: Page,signal?:AbortSignal): Promise<boolea
   return observeReadOnly(stopControls(page).count(),signal)
     .then(count => count > 0)
     .catch(error=>{throw new BrowserCompanionError("ChatGPT's turn state could not be verified before continuing","editor_unavailable",{cause:error});});
+}
+
+async function conversationLimitAfterRejection(page:Page,error:unknown,signal:AbortSignal):Promise<boolean> {
+  if(!(error instanceof BrowserCompanionError) || error.code!=="failed"
+    || !/^ChatGPT's conversation submission returned HTTP (400|413|422)$/.test(error.message))return false;
+  // A rejected request can settle before React renders its terminal banner.
+  // Observe that exact app-owned error briefly; never retry Send or infer a
+  // length limit from the HTTP status alone. Transport uncertainty stays fenced.
+  const deadline=Date.now()+1_500;
+  do {
+    if(signal.aborted)return false;
+    if(await observeReadOnly(conversationLimitVisible(page),signal,Math.max(1,deadline-Date.now())).catch(()=>false))return true;
+    if(Date.now()>=deadline)return false;
+    await new Promise(resolve=>setTimeout(resolve,50));
+  }while(true);
 }
 
 async function clearExistingDraft(page:Page,signal?:AbortSignal,expectedText?:string):Promise<Locator> {
@@ -301,7 +316,23 @@ async function exactConversationPage(
   let page = await surface.page();
   let sameConversation=false;
   try {sameConversation=canonicalChatGptConversationUrl(page.url())===canonicalChatGptConversationUrl(expectedUrl);}catch{}
-  if(!sameConversation)page=await surface.navigate(requestedUrl,signal);
+  if(!sameConversation) {
+    try {page=await surface.navigate(requestedUrl,signal);}
+    catch(error) {
+      signal?.throwIfAborted();
+      if(!(error instanceof Error&&error.name==='TimeoutError'))throw error;
+      const rendered=await surface.page();
+      let expectedConversation=false;
+      try {expectedConversation=canonicalChatGptConversationUrl(rendered.url())===canonicalChatGptConversationUrl(expectedUrl);}catch{}
+      if(!expectedConversation)throw error;
+      // A delayed page lifecycle event can time out after the thread and its
+      // editor have rendered. Prove the exact target's composer is usable,
+      // then continue through the normal account, draft and Send checks.
+      await waitForConversationComposer(rendered,signal,3_000);
+      signal?.throwIfAborted();
+      page=rendered;
+    }
+  }
   else {
     let recoveryNeeded=false;
     try {await throwIfSessionAttention(page);}
@@ -394,7 +425,7 @@ export class ChatGptBrowserDriver implements BrowserDriver {
     }catch{return false;}
   }
 
-  async approvePendingConversation(request:ConversationApprovalRequest,signal:AbortSignal,once=false):Promise<boolean> {
+  async approvePendingConversation(request:ConversationApprovalRequest,signal:AbortSignal):Promise<boolean> {
     await this.surface.beginAction();
     try {
       let page=await this.surface.page();
@@ -408,8 +439,24 @@ export class ChatGptBrowserDriver implements BrowserDriver {
           signal.throwIfAborted();if(!(error instanceof Error&&error.name==='TimeoutError'))throw error;
         });
       }
-      return await approveConversationCard(page,request,this.connectorApps.get(request.expectedAccountFingerprint,request.connectorName),signal,once?'once':'conversation');
+      return await approveConversationCard(page,request,this.connectorApps.get(request.expectedAccountFingerprint,request.connectorName),signal);
     } finally { await this.surface.endAction(); }
+  }
+
+  async pendingConversationApproval(request:ConversationApprovalRequest,signal:AbortSignal):Promise<boolean|undefined> {
+    signal.throwIfAborted();
+    const page=await this.surface.page();
+    const sameConversation=()=>{try{return canonicalChatGptConversationUrl(page.url())===canonicalChatGptConversationUrl(request.url);}catch{return false;}};
+    if(!sameConversation()
+      ||(await readChatGptAccount(page,signal)).fingerprint!==request.expectedAccountFingerprint)return undefined;
+    const pending=(await latestConversationApprovalCards(page)).count();
+    if(await pending)return true;
+    // No card during an active setup turn does not authorize interrupting it.
+    if(await generationRunning(page,signal))return undefined;
+    signal.throwIfAborted();
+    if(!sameConversation()
+      ||(await readChatGptAccount(page,signal)).fingerprint!==request.expectedAccountFingerprint)return undefined;
+    return false;
   }
 
   async health(signal?:AbortSignal):Promise<Awaited<ReturnType<ChatGptBrowserDriver["inspectHealth"]>>> {
@@ -785,6 +832,7 @@ export class ChatGptBrowserDriver implements BrowserDriver {
       ? connectorIsSelected(composer,execution.request.connectorName,selectedConnector.identity)
       : await composer.locator(SELECTED_CONNECTOR_SELECTOR).filter({visible:true}).count()===0;
     let pairingSelection: PairingMediumSelection | undefined;
+    let submissionFailed = false;
     let restoreUrl: string | undefined;
     let submissionStep = "opening conversation";
     const preparationStarted=performance.now();
@@ -1052,7 +1100,11 @@ export class ChatGptBrowserDriver implements BrowserDriver {
           throw new BrowserCompanionError('ChatGPT changed the prepared continuation after Stop','external_interference');
         if(await generationRunning(page))throw new BrowserCompanionError("ChatGPT's previous turn is still running; the continuation was not sent","editor_unavailable");
       }
-      if(this.surface.requireSubmissionNetworkProof)submissionNetwork=observeSubmissionNetwork(page);
+      if(this.surface.requireSubmissionNetworkProof)submissionNetwork=observeSubmissionNetwork(page,{
+        allowSteering:['offline_chat','offline_combined'].includes(execution.request.prompt.kind),
+        recoverOversizedContinuation:['offline_goal','task_continuation','turn_renewal'].includes(execution.request.prompt.kind)
+          && Buffer.byteLength(execution.renderedPrompt,'utf8')<=16*1024,
+      });
       submissionSlot.markSent();
       this.draftRecovery.beforeSend(execution.request.actionId);
       sendActivated = true;
@@ -1065,12 +1117,19 @@ export class ChatGptBrowserDriver implements BrowserDriver {
       submissionSettlesAt = Date.now() + 5_000;
       step("confirming Send acceptance");
       try {
-        await Promise.all([
-          waitForSubmissionAcceptance(page, baseline, Date.now() + 25_000, execution.signal),
+        const acceptanceDeadline=Date.now()+25_000;
+        const [,route]=await Promise.all([
+          waitForSubmissionAcceptance(page, baseline, acceptanceDeadline, execution.signal),
           submissionNetwork?.wait(execution.signal),
         ]);
+        if(route==='steering'&&!baseline.acceptedUserIdentity)
+          await waitForSubmissionAcceptance(page,baseline,acceptanceDeadline,execution.signal,{requireUserTurn:true});
       } catch (error) {
         if(error instanceof BrowserCompanionError&&error.code==="conversation_limit")throw error;
+        if(await conversationLimitAfterRejection(page,error,execution.signal)) {
+          throw new BrowserCompanionError("ChatGPT rejected this message because the conversation reached its length limit. Continuing in a new conversation.",
+            "conversation_limit",{sendAccepted:false,cause:error});
+        }
         throw new BrowserCompanionError(
           error instanceof BrowserCompanionError ? error.message : "ChatGPT Send may have been accepted, but semantic acceptance could not be proven",
           "ambiguous_send",
@@ -1086,11 +1145,15 @@ export class ChatGptBrowserDriver implements BrowserDriver {
         execution.emit({type:"conversation_created",canonicalUrl});
       }
       restoreUrl = canonicalUrl;
-      if (pairingSelection) {
+      if (pairingSelection && !(creating && execution.request.model !== null && execution.request.effort !== null)) {
         await this.restorePairingSelection(page, pairingSelection, restoreUrl, execution.request.expectedAccountFingerprint);
         pairingSelection = undefined;
       }
       if (creating && execution.request.model !== null && execution.request.effort !== null) {
+        // A new chat can hydrate a different picker after Send. Its explicitly
+        // requested preferences replace the temporary Medium selection; there
+        // is no reason to restore the previous new-chat defaults first.
+        pairingSelection = undefined;
         // The initialization message only borrows Medium. Apply the user's
         // conversation preferences after acceptance, never to the pairing send.
         if (canonicalChatGptConversationUrl(page.url()) !== canonicalChatGptConversationUrl(canonicalUrl)
@@ -1109,6 +1172,12 @@ export class ChatGptBrowserDriver implements BrowserDriver {
       execution.emit({ type:"submission_complete", canonicalUrl });
       timing.totalMs=Math.round(performance.now()-preparationStarted);
     } catch (error) {
+      submissionFailed = true;
+      if(error instanceof BrowserCompanionError&&error.code==='editor_unavailable'
+        && error.message.startsWith('Browser observation did not settle')) {
+        error=new BrowserCompanionError(`ChatGPT browser read timed out while ${submissionStep}; ${sendActivated?'Send may already have happened':'nothing was sent'}`,
+          error.code,{sendAccepted:sendActivated||error.sendAccepted,phase:error.phase,cause:error});
+      }
       if(ownedPage&&error instanceof BrowserCompanionError&&error.message.includes("routed the message into the previous turn")) {
         await traceStopControls(ownedPage,"unexpected-steer");
         if(this.recoveryEnhancements && execution.request.prompt.kind==="offline_goal") {
@@ -1188,7 +1257,8 @@ export class ChatGptBrowserDriver implements BrowserDriver {
         if (pairingSelection && ownedPage && restoreUrl) {
           try { await this.restorePairingSelection(ownedPage, pairingSelection, restoreUrl, execution.request.expectedAccountFingerprint); }
           catch (error) {
-            throw new BrowserCompanionError("Could not restore the conversation's model and effort after the one-off pairing request", "model_unavailable", {sendAccepted:sendActivated, cause:error});
+            // Cleanup must not replace the failure that interrupted submission.
+            if (!submissionFailed) throw new BrowserCompanionError("Could not restore the conversation's model and effort after the one-off pairing request", "model_unavailable", {sendAccepted:sendActivated, cause:error});
           }
         }
       } finally {

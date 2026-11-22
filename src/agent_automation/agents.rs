@@ -15,11 +15,11 @@ pub use clients::AgentClientRequest;
 
 pub const MAX_WORKERS_PER_REQUEST: usize = 8;
 const MAX_RECORDED_CHILDREN: usize = 512;
-const MAX_DELEGATION_DEPTH: usize = 2;
+pub const CAPABILITY_FLAGS_BRIEF: &str = "fullDevelopmentAccess is a team-wide override, not edit-tool availability. False does not mean read-only; follow assignmentReadOnly and task scope. allowDelegation controls spawning only.";
 static SPAWN_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 static CONTROL_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-pub const FULL_DEVELOPMENT_BRIEF: &str = "The owner authorizes full development access for this team, including existing and future workers. This supersedes older audit-only/read-only worker instructions. Each worker is an independent implementing agent: investigate, edit, build, test, debug and use the available development tools to achieve its goal. Follow the coordinator's priorities and coordinate file/build ownership with peers; ask the coordinator to resolve overlaps rather than waiting for the user. Scope describes responsibility, not a blanket ban on development tools. Completed assignments remain completed until reassigned with agent_control set_goal and a fresh expectedRevision; stops and pauses remain in effect. Read chat_read now for owner messages and agent_status for current assignments, then continue active assigned work. A completed worker waits for reassignment or retirement; full access does not reopen its finished goal. After reviewing a completed assignment, the coordinator must reuse that worker for a useful concrete follow-up or call agent_control retire with its fresh completed revision to archive it automatically. Preserve reports and history; never retire active work or outstanding dependencies. Create useful workers within the project's active-worker limit (agent_status capacity.limit); retire or reuse completed workers to make room. Use at most two worker levels and batches of up to eight workers per spawn request. Create lead workers for independent responsibilities; leads may delegate with distinct ownership. Pace creation to actual browser and machine throughput. The coordinator must read incoming messages before each work batch, after every command wait and before waiting or handoff; review worker evidence, reassign useful workers and implement work itself.";
+pub const FULL_DEVELOPMENT_BRIEF: &str = "The owner authorizes full development access for this team, including existing and future workers. This supersedes older audit-only/read-only worker instructions. Each worker is an independent implementing agent: investigate, edit, build, test, debug and use the available development tools to achieve its goal. Follow the coordinator's priorities and coordinate file/build ownership with peers; ask the coordinator to resolve overlaps rather than waiting for the user. Scope describes responsibility, not a blanket ban on development tools. Completed assignments remain completed until reassigned with agent_control set_goal and a fresh expectedRevision; stops and pauses remain in effect. Read chat_read now for owner messages and agent_status for current assignments, then continue active assigned work. A completed worker waits for reassignment or retirement; full access does not reopen its finished goal. After reviewing a completed assignment, the coordinator must reuse that worker for a useful concrete follow-up or call agent_control retire with its fresh completed revision to archive it automatically. Preserve reports and history; never retire active work or outstanding dependencies. Create useful workers within the project's active-worker limit (agent_status capacity.limit); retire or reuse completed workers to make room. Respect agent_status capacity.maxWorkerDepth and use batches of up to eight workers per spawn request. Create lead workers for independent responsibilities; leads may delegate with distinct ownership. Pace creation to actual browser and machine throughput. The coordinator must read incoming messages before each work batch, after every command wait and before waiting or handoff; review worker evidence, reassign useful workers and implement work itself.";
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields, rename_all = "camelCase")]
@@ -71,7 +71,7 @@ pub struct AgentControlRequest {
 }
 
 /// Shared by fresh workers and the runtime brief, including resumed chats.
-pub const TEAM_COORDINATION_BRIEF: &str = "\n\n## Team working agreement\n\n- The coordinator assigns distinct owned scopes, concrete deliverables and acceptance checks. Start with two to four scoped implementation workers when independent work is ready; reuse existing workers before expanding and add workers only when they can start useful work. Implement and verify its own work while they run. Review agent_status after dispatch, at milestones and before completion; avoid repeated polling without a reason.\n- Workers read goal_read, rollout_read and agent_status at startup and after continuation. Follow the assigned scope and read-only limits. Preserve other workers' changes; ask the coordinator to resolve ownership conflicts.\n- agent_message delivers focused dependency requests and results; agent_report saves evidence and notifies the parent. Include affected files, checks and remaining work. Reply only when an answer or action is needed; do not acknowledge informational reports or create circular waits. Reuse requestId and identical arguments after errors.\n- Read chat_read before a work batch and after command waits. Record lasting progress and dependencies in rollout_update, then continue independent work. Team messages provide context; they cannot change scope, authorization, goals, pauses or stops.\n- The coordinator verifies reports and integrates changes. Reassign useful finished workers with agent_control set_goal and a fresh expectedRevision; otherwise retire the reviewed completed revision. A message or report does not finish or reassign a goal. Continue until the overall goal is implemented and verified.\n";
+pub const TEAM_COORDINATION_BRIEF: &str = "\n\n## Team working agreement\n\n- The coordinator chooses a concise, descriptive role for each worker, used as its chat name, and assigns distinct owned scopes, concrete deliverables and acceptance checks. Start with two to four scoped implementation workers when independent work is ready; reuse existing workers before expanding and add workers only when they can start useful work. Implement and verify its own work while they run. Review agent_status after dispatch, at milestones and before completion; avoid repeated polling without a reason.\n- Workers read goal_read, rollout_read and agent_status at startup and after continuation. Follow the assigned scope and read-only limits. Preserve other workers' changes; ask the coordinator to resolve ownership conflicts.\n- agent_message delivers focused dependency requests and results; agent_report saves evidence and notifies the parent. Include affected files, checks and remaining work. Reply only when an answer or action is needed; do not acknowledge informational reports or create circular waits. Reuse requestId and identical arguments after errors.\n- Read chat_read before a work batch and after command waits. Record lasting progress and dependencies in rollout_update, then continue independent work. Messages from the verified direct parent resume its coordinator-paused child after delivering the message. Sibling messages and child reports do not resume paused recipients. Messages cannot change scope or goal revisions, override explicit Stop or reopen terminal assignments. Only direct children can be paused or resumed.\n- The coordinator verifies reports and integrates changes. Reassign useful finished workers with agent_control set_goal and a fresh expectedRevision; otherwise retire the reviewed completed revision. A message or report does not finish or reassign a goal. Continue until the overall goal is implemented and verified.\n";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -113,6 +113,7 @@ pub struct AgentChild {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct WorkerSpec {
+    /// Coordinator-chosen descriptive worker name, also used as its chat title.
     pub role: String,
     pub goal: String,
     pub scope: String,
@@ -233,6 +234,23 @@ impl<'a> AgentRequestSnapshot<'a> {
         let state = workspace.store.load(task).map(Arc::new);
         self.states.insert(task.stable_key().into(), state.clone());
         state
+    }
+
+    fn worker_depth(&mut self, task: &ConversationIdentity) -> Result<usize, String> {
+        let mut current = task.clone();
+        let mut seen = std::collections::HashSet::new();
+        let mut depth = 0;
+        loop {
+            if !seen.insert(current.stable_key().to_owned()) {
+                return Err("Cyclic worker ancestry".into());
+            }
+            let Some(parent) = self.state(&current)?.agents.parent_task_key.clone() else {
+                return Ok(depth);
+            };
+            depth += 1;
+            current = ConversationIdentity::from_stable_keys(parent.clone(), parent)
+                .ok_or("Invalid team parent")?;
+        }
     }
 
     fn full_development_access(&mut self, task: &ConversationIdentity) -> Result<bool, String> {
@@ -421,6 +439,9 @@ impl AgentRuntime {
     pub fn full_development_access(&self, task: &ConversationIdentity) -> Result<bool, String> {
         AgentRequestSnapshot::new(self).full_development_access(task)
     }
+    pub(crate) fn worker_depth(&self, task: &ConversationIdentity) -> Result<usize, String> {
+        AgentRequestSnapshot::new(self).worker_depth(task)
+    }
 
     /// Owner-only settings surface: changes authority, never goals or Send receipts.
     pub async fn set_full_development_access(
@@ -492,9 +513,9 @@ impl AgentRuntime {
                 continue;
             }
             let notice = if enabled {
-                FULL_DEVELOPMENT_BRIEF
+                "Internal team settings update: full development access is enabled. Read agent_status and get_agent_brief for the current policy and assignments. Do not acknowledge this control notice in the owner conversation; continue your active assignment. Completed goals, pauses and stops remain unchanged."
             } else {
-                "The owner revoked the blanket development-access override. Read agent_status and get_agent_brief for current assignment authority before more development. Existing goals, pauses and stops remain unchanged."
+                "Internal team settings update: the blanket development-access override is disabled. Read agent_status and get_agent_brief for current assignment authority before more development. Do not acknowledge this control notice in the owner conversation. Existing goals, pauses and stops remain unchanged."
             };
             chat.append_worker_instruction(receipt_id.clone(), notice.into())
                 .await?;
@@ -591,8 +612,11 @@ impl AgentRuntime {
             let mut depth = 0;
             while let Some(key) = ancestor {
                 depth += 1;
-                if depth >= MAX_DELEGATION_DEPTH {
-                    return Err("Delegate through the main coordinator or a lead worker; maximum team depth is two worker levels".into());
+                if depth >= self.config.markdown_chat.features.max_worker_depth {
+                    return Err(format!(
+                        "Delegate through a shallower coordinator; maximum team depth is {} worker levels",
+                        self.config.markdown_chat.features.max_worker_depth
+                    ));
                 }
                 let identity = ConversationIdentity::from_stable_keys(key.clone(), key)
                     .ok_or("Invalid team parent")?;
@@ -834,6 +858,9 @@ impl AgentRuntime {
                     &crate::exec_sessions::SessionState::new(),
                 )?;
                 chat.ensure().await?;
+                if chat.owner_summary().await?.custom_title.is_none() {
+                    chat.set_owner_title(child.role.clone()).await?;
+                }
                 let token = self.continuations.issue_token(&task, &task, &root)?;
                 let issue = child_store.issue_creation_pairing(&task, &destination, 1, now)?;
                 self.supervisor
@@ -914,6 +941,7 @@ impl AgentRuntime {
         snapshot: &mut AgentRequestSnapshot<'_>,
     ) -> Result<Value, String> {
         let own = snapshot.state(task)?;
+        let worker_depth = snapshot.worker_depth(task)?;
         let parent = own
             .agents
             .parent_task_key
@@ -923,6 +951,13 @@ impl AgentRuntime {
             .ok_or("Invalid team owner")?;
         let mut team = snapshot.state(&parent)?.agents.clone();
         let full_development_access = snapshot.full_development_access(task)?;
+        let assignment_read_only = own.agents.parent_task_key.is_some()
+            && !full_development_access
+            && team
+                .children
+                .iter()
+                .find(|child| child.task_key == task.stable_key())
+                .is_none_or(|child| child.read_only);
         for child in &own.agents.children {
             if !team
                 .children
@@ -1032,7 +1067,7 @@ impl AgentRuntime {
             .map(|worker| worker.ok_or_else(|| "Worker status row was not initialized".to_string()))
             .collect::<Result<Vec<_>, _>>()?;
         Ok(
-            json!({"capacity":{"active":self.active_project_workers(task,snapshot)?,"limit":self.config.markdown_chat.features.max_active_workers,"automaticWorkHeldUntilMs":self.supervisor.activity_snapshot(crate::markdown_chat::now_ms()).breaker_open_until_ms,"maxWorkersPerRequest":MAX_WORKERS_PER_REQUEST,"maxWorkerDepth":MAX_DELEGATION_DEPTH},"allowDelegation":self.config.markdown_chat.features.agent_teams && (own.agents.delegation_enabled_with_default(self.config.markdown_chat.features.default_delegation) || !own.agents.delegation_disabled && full_development_access),"fullDevelopmentAccess":full_development_access,"developmentInstructions":if full_development_access {Some(FULL_DEVELOPMENT_BRIEF)}else{None},"parentTaskKey":own.agents.parent_task_key,"communication":{"messageTool":"agent_message","reportTool":"agent_report","statusTool":"agent_status"},"workers":workers}),
+            json!({"capacity":{"active":self.active_project_workers(task,snapshot)?,"limit":self.config.markdown_chat.features.max_active_workers,"automaticWorkHeldUntilMs":self.supervisor.activity_snapshot(crate::markdown_chat::now_ms()).breaker_open_until_ms,"maxWorkersPerRequest":MAX_WORKERS_PER_REQUEST,"maxWorkerDepth":self.config.markdown_chat.features.max_worker_depth},"allowDelegation":self.config.markdown_chat.features.agent_teams && worker_depth < self.config.markdown_chat.features.max_worker_depth && (own.agents.delegation_enabled_with_default(self.config.markdown_chat.features.default_delegation) || !own.agents.delegation_disabled && full_development_access),"fullDevelopmentAccess":full_development_access,"assignmentReadOnly":assignment_read_only,"capabilityInstructions":CAPABILITY_FLAGS_BRIEF,"developmentInstructions":if full_development_access {Some(FULL_DEVELOPMENT_BRIEF)}else{None},"parentTaskKey":own.agents.parent_task_key,"communication":{"messageTool":"agent_message","reportTool":"agent_report","statusTool":"agent_status"},"workers":workers}),
         )
     }
 
@@ -1088,8 +1123,8 @@ impl AgentRuntime {
         )
     }
 
-    /// Peer communication is scoped to a verified parent/child team; it never
-    /// grants the sender lifecycle control over another chat.
+    /// Only a verified direct parent may resume its coordinator-paused child.
+    /// Peer communication never grants lifecycle control over another chat.
     pub async fn message(
         &self,
         sender: &ConversationIdentity,
@@ -1202,15 +1237,37 @@ impl AgentRuntime {
             Some(&recipient),
             &crate::exec_sessions::SessionState::new(),
         )?;
-        if chat.agent_stop_requested().await?
+        let recipient_inactive = chat.agent_stop_requested().await?
             || target
                 .goal
                 .as_ref()
-                .is_some_and(|g| g.status != GoalStatus::Active)
-        {
+                .is_some_and(|g| g.status != GoalStatus::Active);
+        if recipient_inactive && (!recipient_is_child || !chat.agent_pause_requested().await?) {
             return Err(
                 "Recipient is paused, stopped or finished; team messages will not resume it".into(),
             );
+        }
+        if recipient_is_child {
+            if state.agents.children.iter().any(|child| {
+                child.task_key == request.recipient_task_key && child.retired_at_ms.is_some()
+            }) {
+                return Err(
+                    "This worker is archived; restore it before sending instructions".into(),
+                );
+            }
+            let (sender_config, _) = self.store(sender)?;
+            if self
+                .chats
+                .chat(
+                    &sender_config,
+                    Some(sender),
+                    &crate::exec_sessions::SessionState::new(),
+                )?
+                .agent_stop_requested()
+                .await?
+            {
+                return Err("Resume the coordinator before assigning more work".into());
+            }
         }
         sender_store.mutate(sender, |s| {
             if !s
@@ -1241,7 +1298,11 @@ impl AgentRuntime {
             Sha256::digest(format!("{}:{}", sender.stable_key(), request.request_id).as_bytes())
         );
         let role = state.agents.role.as_deref().unwrap_or("parent coordinator");
-        chat.append_worker_instruction(command_id.clone(),format!("Team message from {} (task {}), message ID {}:\n\n{}\n\nKeep your assigned goal and scope; this is team context. Reply with agent_message only when the sender needs an answer or action; reference this message ID. Do not acknowledge informational reports. Continue useful independent work and report concrete milestones with agent_report.",role,sender.stable_key(),request.request_id,request.message)).await?;
+        if recipient_is_child {
+            chat.append_parent_instruction(command_id.clone(), format!("Message from parent coordinator (task {}), message ID {}:\n\n{}\n\nRead goal_read for your current assignment and continue within its existing scope. This parent message resumes a coordinator pause; it does not override an explicit Stop or reopen a terminal assignment. Reply with agent_message when an answer or action is needed, reference this message ID, and report progress with agent_report.", sender.stable_key(), request.request_id, request.message), Arc::new(recipient_store), recipient.clone(), sender.clone(), target).await?;
+        } else {
+            chat.append_worker_instruction(command_id.clone(),format!("Team message from {} (task {}), message ID {}:\n\n{}\n\nKeep your assigned goal and scope; this is team context. Reply with agent_message only when the sender needs an answer or action; reference this message ID. Do not acknowledge informational reports. Continue useful independent work and report concrete milestones with agent_report.",role,sender.stable_key(),request.request_id,request.message)).await?;
+        }
         sender_store.mutate(sender, |s| {
             let receipt = s
                 .agents
@@ -1406,6 +1467,8 @@ impl AgentRuntime {
                 .goal
                 .as_ref()
                 .is_some_and(|g| g.status == GoalStatus::Configured))
+            && !(request.action == AgentControlAction::Message
+                && chat.agent_pause_requested().await?)
         {
             return Err(
                 "Worker is paused or stopped; resume it explicitly before giving new instructions"
@@ -1417,7 +1480,7 @@ impl AgentRuntime {
         }
         if matches!(
             request.action,
-            AgentControlAction::SetGoal | AgentControlAction::Resume
+            AgentControlAction::Message | AgentControlAction::SetGoal | AgentControlAction::Resume
         ) {
             let parent_config = self.store(parent)?.0;
             if self
@@ -1531,7 +1594,7 @@ impl AgentRuntime {
             })?;
             self.supervisor.discard_queued_work(&task).await;
         } else if request.action == AgentControlAction::Message {
-            chat.append_worker_instruction(command_id,format!("Coordinator instruction for {} (scope: {}):\n\n{}\n\nKeep the existing goal and scope. Report progress with agent_report.",child.role,child.scope,request.content.as_deref().unwrap())).await?;
+            chat.append_parent_instruction(command_id,format!("Coordinator instruction for {} (scope: {}):\n\n{}\n\nRead goal_read, keep the existing goal and scope, and continue the assignment. This parent message resumes a coordinator pause; it does not override an explicit Stop or reopen a terminal assignment. Report progress with agent_report.",child.role,child.scope,request.content.as_deref().unwrap()), Arc::new(store), task.clone(), parent.clone(), state).await?;
         } else {
             let command = match request.action {
                 AgentControlAction::Pause | AgentControlAction::Stop => OwnerGoalCommand::Stop,
@@ -1582,14 +1645,24 @@ impl AgentRuntime {
             }
             {
                 match request.action {
-                    AgentControlAction::Pause | AgentControlAction::Stop => {
+                    AgentControlAction::Pause => {
+                        chat.request_agent_pause(command_id.clone()).await?;
+                    }
+                    AgentControlAction::Stop => {
                         // Keep queued intents with their durable send ledger. The
                         // runner checks the paused goal and stop flag before Send;
                         // dropping only its ticket would leave a stuck Queued action.
                         chat.request_agent_stop(command_id.clone()).await?;
                     }
                     AgentControlAction::Resume => {
+                        let was_paused = chat.agent_pause_requested().await?;
                         chat.resume_agent().await?;
+                        if was_paused {
+                            // Wake a resident instruction wait. If the worker
+                            // timed out offline, normal unread-message delivery
+                            // carries this notice in the resumed browser turn.
+                            chat.append_worker_instruction(command_id.clone(), "The coordinator explicitly resumed your assignment. Call goal_read and rollout_read, then continue within your existing scope and report progress with agent_report.".into()).await?;
+                        }
                         let activity = chat.offline_activity().await?;
                         let now = crate::markdown_chat::now_ms();
                         store.sync_goal_presence(
@@ -1769,6 +1842,121 @@ mod tests {
         catalog: CapabilityCatalog,
         sent: Mutex<Vec<AutomationExecution>>,
     }
+
+    include!("agent_parent_message_tests.rs");
+
+    #[tokio::test]
+    async fn paused_offline_workers_receive_no_browser_wakes_until_explicit_resume() {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = crate::config::default_config(root.path().to_owned());
+        config.memory.dir = Some(root.path().join("state").display().to_string());
+        config.markdown_chat.enabled = true;
+        config.markdown_chat.automation.enabled = true;
+        config.markdown_chat.automation.connector_name = "Test".into();
+        let worker = ConversationIdentity::from_openai_session("paused-offline-worker").unwrap();
+        let chat = MarkdownChatStore::default()
+            .chat(
+                &config,
+                Some(&worker),
+                &crate::exec_sessions::SessionState::new(),
+            )
+            .unwrap();
+        let store = Arc::new(AgentAutomationStore::for_config(&config).unwrap());
+        store
+            .set_selection(&worker, "fixture-model", "high", "catalog", "account", 100)
+            .unwrap();
+        let pair = store
+            .issue_pairing(&worker, "https://chatgpt.com/c/paused-worker", 0, 100)
+            .unwrap();
+        store
+            .record_pairing_canonical_url(
+                &worker,
+                pair.generation,
+                "https://chatgpt.com/c/paused-worker",
+                101,
+            )
+            .unwrap();
+        store
+            .verify_pairing(&worker, pair.generation, 0, &pair.reference, 102)
+            .unwrap();
+        let goal = store
+            .set_goal(&worker, "Finish the assigned module", 103)
+            .unwrap();
+        store.run_goal(&worker, goal.revision, 104).unwrap();
+        chat.append_user(
+            "already-pending".into(),
+            "Existing instruction before the pause".into(),
+        )
+        .await
+        .unwrap();
+        chat.record_agent_call(105).await.unwrap();
+        store
+            .pause_goal_for_agent_stop(&worker, "coordinator-pause", 106)
+            .unwrap();
+        chat.request_agent_pause("coordinator-pause".into())
+            .await
+            .unwrap();
+        let catalog: CapabilityCatalog = serde_json::from_value(json!({
+            "protocolVersion":1, "build":format!("fixture{}", PROTOCOL_BUILD_SUFFIX),
+            "accountFingerprint":"account", "catalogRevision":"catalog",
+            "models":[{"id":"fixture-model","label":"Fixture","efforts":[{"id":"high","label":"High","available":true,"reason":null}]}]
+        })).unwrap();
+        let executor = Arc::new(Executor {
+            catalog,
+            sent: Mutex::default(),
+        });
+        // Reload both the cursor and scheduler, so the pause gate must be durable.
+        let chat = MarkdownChatStore::default()
+            .chat(
+                &config,
+                Some(&worker),
+                &crate::exec_sessions::SessionState::new(),
+            )
+            .unwrap();
+        assert!(
+            chat.agent_suspension_message()
+                .await
+                .unwrap()
+                .contains("Repeat chat_await")
+        );
+        let supervisor = AgentAutomationSupervisor::new(
+            config.markdown_chat.automation.clone(),
+            executor.clone(),
+        );
+        supervisor
+            .register_task(AutomationTaskHandle::new(
+                worker.clone(),
+                0,
+                store.clone(),
+                chat.clone(),
+            ))
+            .await
+            .unwrap();
+        for now in [600_000, 3_600_000, 86_400_000] {
+            supervisor.scan_once(now).await.unwrap();
+            assert_eq!(
+                supervisor.queued_count().await,
+                0,
+                "a paused offline worker must not receive keep-alives"
+            );
+            assert!(supervisor.run_next(now).await.unwrap().is_none());
+            assert!(executor.sent.lock().unwrap().is_empty());
+        }
+        assert_eq!(chat.unread_snapshot().await.unwrap().messages.len(), 1);
+        let paused_revision = store.load(&worker).unwrap().goal.unwrap().revision;
+        store
+            .run_goal(&worker, paused_revision, 86_400_001)
+            .unwrap();
+        chat.resume_agent().await.unwrap();
+        supervisor.scan_once(86_400_002).await.unwrap();
+        assert_eq!(
+            supervisor.queued_count().await,
+            1,
+            "explicit resume must still dispatch the normal continuation"
+        );
+        assert!(supervisor.run_next(86_400_003).await.unwrap().is_some());
+        assert_eq!(executor.sent.lock().unwrap().len(), 1);
+    }
     #[async_trait]
     impl AutomationExecutor for Executor {
         async fn prepare_new_chat(
@@ -1891,7 +2079,26 @@ mod tests {
             .unwrap();
         assert_eq!(team["allowDelegation"], true);
         assert_eq!(team["fullDevelopmentAccess"], false);
+        assert_eq!(team["assignmentReadOnly"], false);
         assert_eq!(team["workers"][0]["readOnly"], false);
+        for worker in team["workers"].as_array().unwrap() {
+            let key = worker["taskKey"].as_str().unwrap();
+            let child = ConversationIdentity::from_stable_keys(key.into(), key.into()).unwrap();
+            let (child_config, child_store) = runtime.store(&child).unwrap();
+            let chat = runtime
+                .chats
+                .chat(
+                    &child_config,
+                    Some(&child),
+                    &crate::exec_sessions::SessionState::new(),
+                )
+                .unwrap();
+            assert_eq!(
+                chat.owner_summary().await.unwrap().title,
+                worker["role"].as_str().unwrap()
+            );
+            assert!(child_store.load(&child).unwrap().pairing.resume_task);
+        }
         assert_eq!(team["workers"][1]["readOnly"], true);
         assert_eq!(supervisor.queued_count().await, 2);
         let saved = runtime.store(&parent).unwrap().1.load(&parent).unwrap();
@@ -1903,12 +2110,46 @@ mod tests {
             disabled.status(&parent).await.unwrap()["allowDelegation"],
             false
         );
+        let root_status = disabled.status(&parent).await.unwrap();
+        assert_eq!(root_status["fullDevelopmentAccess"], false);
+        assert_eq!(root_status["assignmentReadOnly"], false);
+        assert!(
+            root_status["capabilityInstructions"]
+                .as_str()
+                .unwrap()
+                .contains("does not mean read-only")
+        );
         let editor = ConversationIdentity::from_stable_keys(
             saved.agents.children[0].task_key.clone(),
             saved.agents.children[0].task_key.clone(),
         )
         .unwrap();
         let editor_state = runtime.store(&editor).unwrap().1.load(&editor).unwrap();
+        assert_eq!(team["capacity"]["maxWorkerDepth"], 1);
+        assert_eq!(
+            runtime.status(&editor).await.unwrap()["allowDelegation"],
+            false
+        );
+        assert_eq!(
+            runtime.status(&editor).await.unwrap()["assignmentReadOnly"],
+            false
+        );
+        let nested = SpawnWorkersRequest {
+            request_id: "default-depth-denied".into(),
+            workers: vec![WorkerSpec {
+                role: "Nested implementer".into(),
+                goal: "Implement another module".into(),
+                scope: "src/nested.rs".into(),
+                read_only: false,
+            }],
+        };
+        assert!(
+            runtime
+                .spawn(&editor, nested, false)
+                .await
+                .unwrap_err()
+                .contains("maximum team depth is 1")
+        );
         let goal = editor_state.goal.unwrap().markdown;
         assert!(goal.contains("implement, edit, build, test and debug"));
         assert!(!goal.contains("Inspect and test only"));
@@ -1921,9 +2162,17 @@ mod tests {
             saved.agents.children[1].task_key.clone(),
         )
         .unwrap();
+        assert_eq!(
+            runtime.status(&auditor).await.unwrap()["assignmentReadOnly"],
+            true
+        );
         let nested:SpawnWorkersRequest=serde_json::from_value(json!({"requestId":"auditor-editor","workers":[{"role":"Editor","goal":"Implement owned code","scope":"src/other.rs"}]})).unwrap();
+        let mut two_levels = runtime.clone();
+        let mut two_level_config = (*runtime.config).clone();
+        two_level_config.markdown_chat.features.max_worker_depth = 2;
+        two_levels.config = Arc::new(two_level_config);
         assert!(
-            runtime
+            two_levels
                 .spawn(&auditor, nested, false)
                 .await
                 .unwrap_err()
@@ -2224,6 +2473,7 @@ mod tests {
         config.markdown_chat.features.agent_teams = true;
         config.markdown_chat.features.max_active_workers =
             crate::markdown_chat::MAX_ACTIVE_WORKERS_LIMIT;
+        config.markdown_chat.features.max_worker_depth = 2;
         config.markdown_chat.features.conversation_recovery = true;
         config.markdown_chat.automation.connector_name = "Codexify".into();
         config.memory.dir = Some(root.path().join("metadata").display().to_string());
@@ -2427,7 +2677,7 @@ mod tests {
             runtime.control(&parent, message.clone()).await.unwrap()["replayed"],
             true
         );
-        let page = chat.widget_page(None, None).await.unwrap();
+        let page = chat.unread_snapshot().await.unwrap();
         assert_eq!(
             page.messages
                 .iter()
@@ -2497,30 +2747,31 @@ mod tests {
         let pause = control("pause-1", AgentControlAction::Pause, Some(revision), None);
         runtime.control(&parent, pause.clone()).await.unwrap();
         assert!(chat.agent_stop_requested().await.unwrap());
+        assert!(
+            chat.agent_suspension_message()
+                .await
+                .unwrap()
+                .contains("Repeat chat_await")
+        );
         assert_eq!(
             child_store.load(&identity).unwrap().goal.unwrap().status,
             GoalStatus::Configured
         );
         assert_eq!(child_store.load(&identity).unwrap().action, original_action);
         assert!(
-            runtime
-                .control(
-                    &parent,
-                    control(
-                        "paused-message",
-                        AgentControlAction::Message,
-                        None,
-                        Some("Resume implicitly")
-                    )
-                )
-                .await
-                .is_err()
-        );
-        assert!(
             chat.append_worker_instruction("paused-direct".into(), "Do not resume".into())
                 .await
                 .is_err()
         );
+        chat.read(true).await.unwrap();
+        let resumed_inbox = tokio::spawn({
+            let chat = chat.clone();
+            async move {
+                chat.wait(std::time::Duration::from_secs(10), CancellationToken::new())
+                    .await
+                    .unwrap()
+            }
+        });
         runtime
             .control(
                 &parent,
@@ -2528,6 +2779,16 @@ mod tests {
             )
             .await
             .unwrap();
+        match tokio::time::timeout(std::time::Duration::from_secs(2), resumed_inbox)
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            crate::markdown_chat::WaitOutcome::Message(message) => {
+                assert!(message.text.contains("explicitly resumed your assignment"))
+            }
+            _ => panic!("explicit resume must wake the resident instruction wait"),
+        }
         assert!(!chat.agent_stop_requested().await.unwrap());
         assert_eq!(
             child_store.load(&identity).unwrap().goal.unwrap().status,
@@ -2546,6 +2807,12 @@ mod tests {
             .await
             .unwrap();
         assert!(chat.agent_stop_requested().await.unwrap());
+        assert!(
+            chat.agent_suspension_message()
+                .await
+                .unwrap()
+                .contains("immediately finish your turn")
+        );
         assert!(
             !runtime.status(&sibling).await.unwrap()["workers"][0]["canControl"]
                 .as_bool()
@@ -2578,7 +2845,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             target
-                .widget_page(None, None)
+                .unread_snapshot()
                 .await
                 .unwrap()
                 .messages
@@ -2589,7 +2856,7 @@ mod tests {
         );
         assert!(
             target
-                .widget_page(None, None)
+                .unread_snapshot()
                 .await
                 .unwrap()
                 .messages
@@ -2703,7 +2970,7 @@ mod tests {
         runtime.report(&recipient, evidence).await.unwrap();
         assert_eq!(
             parent_chat
-                .widget_page(None, None)
+                .unread_snapshot()
                 .await
                 .unwrap()
                 .messages
@@ -2827,7 +3094,7 @@ mod tests {
         runtime.report(&recipient, evidence).await.unwrap();
         assert_eq!(
             parent_chat
-                .widget_page(None, None)
+                .unread_snapshot()
                 .await
                 .unwrap()
                 .messages
@@ -2927,7 +3194,7 @@ mod tests {
             .unwrap();
         assert!(
             nested_chat
-                .widget_page(None, None)
+                .unread_snapshot()
                 .await
                 .unwrap()
                 .messages
@@ -2968,13 +3235,25 @@ mod tests {
                 .await
                 .is_err()
         );
-        let page = nested_chat.widget_page(None, None).await.unwrap();
+        let page = nested_chat.unread_snapshot().await.unwrap();
         assert_eq!(
             page.messages
                 .iter()
-                .filter(|message| message.markdown.contains("supersedes older audit-only"))
+                .filter(|message| message.id.starts_with("dev-access-")
+                    && message
+                        .markdown
+                        .contains("full development access is enabled"))
                 .count(),
             1
+        );
+        assert!(
+            !nested_chat
+                .widget_page(None, None)
+                .await
+                .unwrap()
+                .messages
+                .iter()
+                .any(|message| message.id.starts_with("dev-access-"))
         );
         let new = runtime
             .spawn(

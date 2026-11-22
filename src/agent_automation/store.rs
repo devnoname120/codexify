@@ -139,6 +139,10 @@ pub struct PendingPairing {
 #[serde(default, deny_unknown_fields, rename_all = "camelCase")]
 pub struct PairingState {
     pub creating_chat: bool,
+    #[serde(skip_serializing_if = "is_false")]
+    pub initialization_pending: bool,
+    #[serde(skip_serializing_if = "is_false")]
+    pub allow_paused_setup: bool,
     pub candidate_url: Option<String>,
     pub canonical_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -418,6 +422,8 @@ impl AutomationTaskState {
                 | AutomationActionStatus::Ambiguous
                 | AutomationActionStatus::Failed
                 | AutomationActionStatus::Stalled
+                | AutomationActionStatus::ApprovalRequired
+                | AutomationActionStatus::ConversationUnavailable
         ) && self.action.pairing_generation == Some(self.pairing.generation)
             && self.pairing.verified_owner_generation == Some(owner_generation)
     }
@@ -635,6 +641,9 @@ impl AutomationTaskState {
         {
             return None;
         }
+        if self.action.kind == Some(AutomationActionKind::PairVerify) {
+            return self.worker_creation_retry_at_ms();
+        }
         if chatgpt_access_failure(self.action.status) {
             return self.chatgpt_access_retry_at_ms();
         }
@@ -714,6 +723,108 @@ impl AutomationTaskState {
                         | AutomationActionStatus::Sending
                         | AutomationActionStatus::Generating
                 )
+    }
+
+    pub(crate) fn worker_creation_retry_at_ms(&self) -> Option<u64> {
+        let action = &self.action;
+        if !self.automatic_retries_enabled
+            || action.automatic_retry_paused
+            || self.agents.parent_task_key.is_none()
+            || !self.pairing.creating_chat
+            || self.pairing.verified_owner_generation.is_some()
+            || self.pairing.pending.is_none()
+            || action.kind != Some(AutomationActionKind::PairVerify)
+            || !matches!(
+                action.status,
+                AutomationActionStatus::Failed | AutomationActionStatus::Interference
+            )
+            || action.id.is_none()
+            || action.send_accepted != Some(false)
+            || action.messages_fenced
+            || action.goal_turn_counted
+            || action.last_error.as_deref() == Some("Browser action cancelled before Send")
+            || self
+                .goal
+                .as_ref()
+                .is_none_or(|goal| goal.status != GoalStatus::Active)
+        {
+            return None;
+        }
+        let delay = self.retry_timings.delay_at(
+            &self.retry_timings.action_delays_seconds,
+            action.automatic_retry_attempts,
+        )? * 1000;
+        action.updated_at_ms.map(|finished| {
+            retry_deadline(
+                action,
+                action.automatic_retry_attempts,
+                finished,
+                delay,
+                self.retry_timings.jitter_percent,
+            )
+        })
+    }
+
+    pub(crate) fn paused_creation_without_url(&self) -> bool {
+        self.agents.parent_task_key.is_some()
+            && self.pairing.creating_chat
+            && self.pairing.verified_owner_generation.is_none()
+            && self.pairing.canonical_url.is_none()
+            && ![
+                self.pairing.candidate_url.as_deref(),
+                self.pairing.last_attempted_url.as_deref(),
+            ]
+            .into_iter()
+            .flatten()
+            .any(|url| conversation_url_for_retry(url).is_some())
+            && self.conversation_recovery.previous_urls.is_empty()
+            && self
+                .goal
+                .as_ref()
+                .is_some_and(|goal| goal.status == GoalStatus::Configured)
+            && self.action.id.is_some()
+            && self.action.kind == Some(AutomationActionKind::PairVerify)
+            && self.action.send_accepted != Some(false)
+            && !self.action.messages_fenced
+            && !self.action.goal_turn_counted
+            && matches!(
+                self.action.status,
+                AutomationActionStatus::Ambiguous
+                    | AutomationActionStatus::Failed
+                    | AutomationActionStatus::Unverified
+            )
+            && self.action.last_error.is_some()
+    }
+    pub(crate) fn permits_paused_setup(&self, owner: u64) -> bool {
+        self.pairing.allow_paused_setup
+            && self
+                .goal
+                .as_ref()
+                .is_some_and(|goal| goal.status == GoalStatus::Configured)
+            && (self
+                .pairing
+                .pending
+                .as_ref()
+                .is_some_and(|pending| pending.owner_generation == owner)
+                || self.pairing.verified_owner_generation == Some(owner))
+    }
+
+    pub(crate) fn initializing_owner(&self, owner: u64) -> bool {
+        // Queueing the first ordinary action does not end initialization: the
+        // browser may still be waiting for its setup response to finish. Only
+        // an accepted task-turn Send for this physical pairing opens delivery.
+        self.pairing.generation > 0
+            && (self.pairing.initialization_pending
+                || self.action.kind == Some(AutomationActionKind::PairVerify))
+            && (self
+                .pairing
+                .pending
+                .as_ref()
+                .is_some_and(|p| p.owner_generation == owner)
+                || self.pairing.verified_owner_generation == Some(owner))
+            && !self.turn_renewal.send.as_ref().is_some_and(|send| {
+                send.owner_generation == owner && send.pairing_generation == self.pairing.generation
+            })
     }
 
     pub fn pairing_verification_wait_until_ms(&self) -> Option<u64> {
@@ -879,6 +990,32 @@ struct PairingIndexRecord {
 static PROCESS_LOCKS: OnceLock<Mutex<HashMap<PathBuf, Weak<Mutex<()>>>>> = OnceLock::new();
 
 impl AgentAutomationStore {
+    /// Inspect durable team membership without registering or migrating a task.
+    pub(crate) fn chat_is_subagent(chat_file: &Path) -> Result<bool, String> {
+        let Some(bytes) = read_private_record(&chat_file.with_file_name(STATE_FILE))? else {
+            return Ok(false);
+        };
+        #[derive(Default, Deserialize)]
+        #[serde(default, rename_all = "camelCase")]
+        struct Membership {
+            parent_task_key: Option<String>,
+        }
+        #[derive(Deserialize)]
+        struct Record {
+            #[serde(default)]
+            agents: Membership,
+        }
+        let record: Record = serde_json::from_slice(&bytes)
+            .map_err(|_| "Could not read agent notification membership".to_owned())?;
+        match record.agents.parent_task_key {
+            Some(parent) => {
+                validate_task_key(&parent)?;
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
     pub fn for_config(config: &AppConfig) -> Result<Self, String> {
         let root = crate::memory::task_state_dir(config).join("chats");
         let pairing_index_root = pairing_index_root(config, &root);
@@ -1190,6 +1327,7 @@ impl AgentAutomationStore {
     ) -> Result<GoalRecord, String> {
         validate_goal_markdown(markdown)?;
         self.mutate(task, |state| {
+            state.pairing.allow_paused_setup = false;
             let revision = state.goal.as_ref().map_or(Ok(1), |goal| {
                 goal.revision
                     .checked_add(1)
@@ -1230,7 +1368,10 @@ impl AgentAutomationStore {
         expected_revision: u64,
         now_ms: u64,
     ) -> Result<GoalRecord, String> {
-        self.mutate(task, |state| start_goal(state, expected_revision, now_ms))
+        self.mutate(task, |state| {
+            state.pairing.allow_paused_setup = false;
+            start_goal(state, expected_revision, now_ms)
+        })
     }
 
     pub fn stop_goal(
@@ -1240,6 +1381,7 @@ impl AgentAutomationStore {
         now_ms: u64,
     ) -> Result<GoalRecord, String> {
         self.mutate(task, |state| {
+            state.pairing.allow_paused_setup = false;
             let result = {
                 let goal = exact_goal_mut(state, expected_revision)?;
                 match goal.status {
@@ -1387,6 +1529,38 @@ impl AgentAutomationStore {
         )
     }
 
+    pub(crate) fn append_parent_message<T>(
+        &self,
+        task: &ConversationIdentity,
+        parent: &ConversationIdentity,
+        expected: &AutomationTaskState,
+        resume_pause: bool,
+        append: impl FnOnce() -> Result<T, String>,
+    ) -> Result<T, String> {
+        self.mutate(task, |state| {
+            let assignment = |saved: &AutomationTaskState| saved.goal.as_ref().map(|g| (g.revision, g.status));
+            if state.agents.parent_task_key.as_deref() != Some(parent.stable_key())
+                || assignment(state) != assignment(expected)
+                || state.owner_goal_requests != expected.owner_goal_requests
+                || state.selection.account_fingerprint != expected.selection.account_fingerprint
+            {
+                return Err("Worker assignment or owner controls changed before message delivery; refresh agent_status and retry".into());
+            }
+            match state.goal.as_ref().map(|goal| goal.status) {
+                Some(GoalStatus::Configured) if resume_pause => {
+                    let revision = state.goal.as_ref().unwrap().revision;
+                    start_goal(state, revision, crate::markdown_chat::now_ms())?;
+                    state.pairing.allow_paused_setup = false;
+                }
+                None | Some(GoalStatus::Active) => {}
+                _ => return Err("Parent messages cannot reopen stopped or terminal assignments; use the explicit lifecycle control".into()),
+            }
+            // The caller holds the inbox lock. Publish the message before the
+            // resumed goal, then clear the pause only after this commit succeeds.
+            append()
+        })
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn owner_goal_command(
         &self,
@@ -1461,6 +1635,7 @@ impl AgentAutomationStore {
             }
 
             let mut updated_active_goal = false;
+            state.pairing.allow_paused_setup=false;
             let (kind, goal) = match command {
                 OwnerGoalCommand::Set { markdown } => {
                     let revision = state.goal.as_ref().map_or(Ok(1), |goal| {
@@ -1558,6 +1733,28 @@ impl AgentAutomationStore {
                     state.goal_wake = GoalWakeState::default();
                     if !preserve_action && state.action.goal_revision == Some(revision) {
                         state.action = AutomationActionState::default();
+                    } else if preserve_action
+                        && state.action.kind != Some(AutomationActionKind::PairVerify)
+                        && state.action.send_accepted == Some(false)
+                        && !state.action.messages_fenced
+                        && !state.action.goal_turn_counted
+                        && matches!(state.action.status,
+                            AutomationActionStatus::Failed
+                            | AutomationActionStatus::ConversationUnavailable
+                            | AutomationActionStatus::ApprovalRequired
+                            | AutomationActionStatus::Interference)
+                    {
+                        // A parent pause ends an unsent failed dispatch, while
+                        // its unread instructions remain in the mailbox. Keep
+                        // accepted/uncertain Sends and setup credentials intact.
+                        state.action.status = AutomationActionStatus::Cancelled;
+                        state.action.last_error = None;
+                        state.action.automatic_retry_paused = true;
+                        state.action.automatic_retry_in_progress = false;
+                        state.action.chatgpt_access_retry_in_progress = false;
+                        state.action.cooldown_until_ms = None;
+                        state.action.updated_at_ms = Some(now_ms);
+                        state.suspended_retry = None;
                     }
                     (OwnerGoalCommandKind::Stop, Some(goal))
                 }
@@ -1725,6 +1922,54 @@ impl AgentAutomationStore {
         )
     }
 
+    pub(crate) fn issue_worker_creation_retry(
+        &self,
+        task: &ConversationIdentity,
+        expected: &AutomationTaskState,
+        now_ms: u64,
+    ) -> Result<Option<PairingIssue>, String> {
+        if expected
+            .worker_creation_retry_at_ms()
+            .is_none_or(|at| now_ms < at)
+        {
+            return Ok(None);
+        }
+        let Some(candidate) = expected.pairing.candidate_url.as_deref() else {
+            return Ok(None);
+        };
+        self.issue_pairing_guarded(
+            task,
+            candidate,
+            expected.pairing.pending.as_ref().unwrap().owner_generation,
+            now_ms,
+            Some(&expected.action),
+            Some(&expected.pairing),
+            true,
+        )
+    }
+
+    pub(crate) fn issue_paused_creation_replacement(
+        &self,
+        task: &ConversationIdentity,
+        destination: &str,
+        owner_generation: u64,
+        now_ms: u64,
+        expected: &AutomationTaskState,
+    ) -> Result<Option<PairingIssue>, String> {
+        if !expected.paused_creation_without_url() {
+            return Ok(None);
+        }
+        self.issue_pairing_guarded(
+            task,
+            destination,
+            owner_generation,
+            now_ms,
+            Some(&expected.action),
+            Some(&expected.pairing),
+            true,
+        )
+    }
+
     pub(crate) fn issue_schema_rollover_pairing(
         &self,
         task: &ConversationIdentity,
@@ -1807,6 +2052,15 @@ impl AgentAutomationStore {
         let task_key = task.stable_key().to_string();
         self.with_locked_task(task, |path| {
             let mut state = load_state(path)?;
+            state.automatic_retries_enabled = self.automatic_retries_enabled()?;
+            state.retry_timings = self.retry_timings.clone();
+            let worker_retry = expected.is_some()
+                && expected_pairing.is_some()
+                && state.worker_creation_retry_at_ms().is_some_and(|at| now_ms >= at)
+                && state.pairing.pending.as_ref().is_some_and(|pending| pending.owner_generation == owner_generation);
+            let retry_attempts = state.action.automatic_retry_attempts;
+            let paused_replacement = expected.is_some() && expected_pairing.is_some()
+                && state.paused_creation_without_url();
             if let Some(expected) = expected
                 && (state.action != *expected
                     || expected_pairing.map_or(
@@ -1825,7 +2079,7 @@ impl AgentAutomationStore {
                             .map(|pairing| pairing.generation)
                             .or(expected.pairing_generation)
                             .unwrap_or(0)
-                    || state.pairing.verified_owner_generation != owner_generation.checked_sub(1))
+                    || !worker_retry && !paused_replacement && state.pairing.verified_owner_generation != owner_generation.checked_sub(1))
             {
                 return Ok(None);
             }
@@ -1849,6 +2103,8 @@ impl AgentAutomationStore {
                 && state.action.send_accepted == Some(false);
             state.pairing = PairingState {
                 creating_chat: creating_chat || expected.is_some(),
+                initialization_pending: true,
+                allow_paused_setup: paused_replacement,
                 last_attempted_url: conversation_url_for_retry(&candidate_url).map(str::to_owned),
                 candidate_url: Some(candidate_url),
                 canonical_url: None,
@@ -1864,7 +2120,8 @@ impl AgentAutomationStore {
                 connector_schema_version: None,
                 schema_rollover_pending: state.pairing.schema_rollover_pending
                     && expected.is_some(),
-                resume_task: expected.is_some()
+                resume_task: creating_chat && state.agents.parent_task_key.is_some()
+                    || expected.is_some()
                     && (state.pairing.resume_task
                         || state.action.kind == Some(AutomationActionKind::TurnRenewal)),
                 load_rate_limit_recovery,
@@ -1881,6 +2138,8 @@ impl AgentAutomationStore {
                 pairing_generation: Some(generation),
                 updated_at_ms: Some(now_ms),
                 send_accepted: expected.is_some().then_some(false),
+                automatic_retry_attempts: if worker_retry { retry_attempts.saturating_add(1) } else { 0 },
+                automatic_retry_in_progress: worker_retry,
                 ..Default::default()
             };
             // Turn clocks and handoffs belong to the previous physical pairing.
@@ -1941,6 +2200,43 @@ impl AgentAutomationStore {
                 let _ = self.remove_pairing_index(&previous_digest);
             }
             Ok(state.pairing)
+        })
+    }
+
+    pub(crate) fn finish_paused_setup(
+        &self,
+        task: &ConversationIdentity,
+        owner: u64,
+    ) -> Result<(), String> {
+        self.mutate(task, |state| {
+            if state.pairing.verified_owner_generation == Some(owner) {
+                state.pairing.allow_paused_setup = false;
+            }
+            Ok(())
+        })
+    }
+    pub(crate) fn permit_paused_pairing(
+        &self,
+        task: &ConversationIdentity,
+        generation: u64,
+        owner: u64,
+    ) -> Result<(), String> {
+        self.mutate(task, |state| {
+            if state.pairing.generation == generation
+                && state
+                    .pairing
+                    .pending
+                    .as_ref()
+                    .is_some_and(|pending| pending.owner_generation == owner)
+                && state.agents.parent_task_key.is_some()
+                && state
+                    .goal
+                    .as_ref()
+                    .is_some_and(|goal| goal.status == GoalStatus::Configured)
+            {
+                state.pairing.allow_paused_setup = true;
+            }
+            Ok(())
         })
     }
 
@@ -2441,6 +2737,11 @@ impl AgentAutomationStore {
             }
             if !state.action.automatic_retry_in_progress {
                 state.suspended_retry = None;
+            }
+            // Preserve the initialization fence when upgrading a pairing that
+            // was created before the explicit flag was persisted.
+            if state.action.kind == Some(AutomationActionKind::PairVerify) {
+                state.pairing.initialization_pending = true;
             }
             state.action = AutomationActionState {
                 id: Some(action_id.to_string()),
@@ -3155,6 +3456,48 @@ impl AgentAutomationStore {
                     recovery_attempts: 0,
                 };
             }
+            Ok(true)
+        })
+    }
+
+    pub(crate) fn clear_stale_approval_failure(
+        &self,
+        task: &ConversationIdentity,
+        expected: &AutomationTaskState,
+        owner: u64,
+        now_ms: u64,
+    ) -> Result<bool, String> {
+        self.mutate(task, |state| {
+            let owner_message = state.action.kind == Some(AutomationActionKind::OfflineChat)
+                && state.action.goal_revision.is_none();
+            if state.action != expected.action
+                || state.pairing != expected.pairing
+                || state.goal.as_ref().map(|g| (g.revision, g.status))
+                    != expected.goal.as_ref().map(|g| (g.revision, g.status))
+                || state.pairing.verified_owner_generation != Some(owner)
+                || state.action.status != AutomationActionStatus::ApprovalRequired
+                || state.action.kind == Some(AutomationActionKind::PairVerify)
+                || state.action.send_accepted != Some(false)
+                || state.action.messages_fenced
+                || state.action.goal_turn_counted
+                || !state.automatic_retries_enabled
+                || state.action.automatic_retry_paused
+                || state
+                    .goal
+                    .as_ref()
+                    .is_some_and(|g| g.status != GoalStatus::Active)
+                    && !owner_message
+            {
+                return Ok(false);
+            }
+            // The companion verified that the exact conversation is idle and
+            // has no approval. A direct owner message can be answered while the
+            // implementation goal stays blocked, paused or complete.
+            // Preserve the goal, pending message and Send ledger.
+            state.action.status = AutomationActionStatus::Idle;
+            state.action.last_error = None;
+            state.action.updated_at_ms = Some(now_ms);
+            state.approval_resume = None;
             Ok(true)
         })
     }
@@ -4760,6 +5103,55 @@ mod parent_goal_reassignment_tests {
     }
 
     #[test]
+    fn parent_pause_cancels_only_confirmed_unsent_terminal_failures() {
+        for accepted in [Some(false), Some(true), None] {
+            for status in [
+                AutomationActionStatus::Failed,
+                AutomationActionStatus::ConversationUnavailable,
+                AutomationActionStatus::ApprovalRequired,
+                AutomationActionStatus::Queued,
+            ] {
+                let root = tempfile::tempdir().unwrap();
+                let store = AgentAutomationStore::new(root.path().join("state")).unwrap();
+                let task =
+                    ConversationIdentity::from_openai_session("pause-failed-dispatch").unwrap();
+                let goal = store
+                    .set_goal(&task, "Preserve paused assignment", 1)
+                    .unwrap();
+                store.run_goal(&task, goal.revision, 2).unwrap();
+                let mut action =
+                    old_goal_action(AutomationActionKind::OfflineCombined, status, accepted);
+                if status != AutomationActionStatus::Queued {
+                    action.last_error = Some("Old browser preparation failure".into());
+                }
+                store
+                    .mutate(&task, |s| {
+                        s.action = action.clone();
+                        Ok(())
+                    })
+                    .unwrap();
+                store
+                    .apply_parent_goal_command(&task, "pause", 1, OwnerGoalCommand::Stop, 20)
+                    .unwrap();
+                let after = store.load(&task).unwrap();
+                assert_eq!(after.goal.as_ref().unwrap().status, GoalStatus::Configured);
+                if accepted == Some(false) && status != AutomationActionStatus::Queued {
+                    assert_eq!(after.action.status, AutomationActionStatus::Cancelled);
+                    assert!(after.action.last_error.is_none());
+                    assert!(!after.action.messages_fenced);
+                    assert_eq!(after.action.id, action.id);
+                    store
+                        .apply_parent_goal_command(&task, "resume", 1, OwnerGoalCommand::Run, 21)
+                        .unwrap();
+                    assert!(store.load(&task).unwrap().action.id.is_none());
+                } else {
+                    assert_eq!(after.action, action);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn parent_goal_reassignment_releases_confirmed_unsent_old_goal_failures() {
         for status in [
             AutomationActionStatus::Failed,
@@ -4942,6 +5334,114 @@ mod persistence_tests {
 }
 
 #[cfg(test)]
+mod worker_creation_retry_tests {
+    use super::*;
+
+    #[test]
+    fn failed_unsent_worker_creation_retries_with_fresh_pairing_and_bounded_attempts() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = AgentAutomationStore::new(root.path().join("state")).unwrap();
+        store.retry_timings.action_delays_seconds = vec![2, 4];
+        store.retry_timings.jitter_percent = 0;
+        let task = ConversationIdentity::from_openai_session("worker-creation-retry").unwrap();
+        let parent = ConversationIdentity::from_openai_session("worker-parent").unwrap();
+        let goal = store
+            .set_goal(&task, "Implement the assigned module", 1)
+            .unwrap();
+        store.run_goal(&task, goal.revision, 1).unwrap();
+        store
+            .mutate(&task, |state| {
+                state.agents.parent_task_key = Some(parent.stable_key().into());
+                Ok(())
+            })
+            .unwrap();
+        let issue = store
+            .issue_creation_pairing(&task, "https://chatgpt.com/c/worker-retry", 1, 100)
+            .unwrap();
+        store
+            .queue_action(
+                &task,
+                "creation-first",
+                AutomationActionKind::PairVerify,
+                issue.generation,
+                None,
+                110,
+            )
+            .unwrap();
+        store
+            .update_action_status(
+                &task,
+                "creation-first",
+                AutomationActionStatus::Failed,
+                Some("Browser pages are busy"),
+                None,
+                200,
+            )
+            .unwrap();
+        let failed = store.load(&task).unwrap();
+        let deadline = failed.automatic_retry_at_ms().unwrap();
+        assert_eq!(deadline, 2200);
+        assert!(failed.is_automatically_retrying());
+        assert!(
+            store
+                .issue_worker_creation_retry(&task, &failed, deadline - 1)
+                .unwrap()
+                .is_none()
+        );
+        let retried = store
+            .issue_worker_creation_retry(&task, &failed, deadline)
+            .unwrap()
+            .unwrap();
+        assert_ne!(retried.reference, issue.reference);
+        assert_eq!(retried.generation, issue.generation + 1);
+        let saved = store.load(&task).unwrap();
+        assert_eq!(saved.action.automatic_retry_attempts, 1);
+        assert!(saved.action.automatic_retry_in_progress);
+        assert!(saved.pairing.resume_task);
+        assert_eq!(saved.goal, failed.goal);
+        assert!(
+            store
+                .issue_worker_creation_retry(&task, &failed, deadline)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .validate_pending_pairing(&task, issue.generation, 1, &issue.reference, deadline)
+                .is_err()
+        );
+
+        for unsafe_case in [
+            "sent",
+            "unknown",
+            "fenced",
+            "paused",
+            "disabled",
+            "manual-pairing",
+            "verified",
+            "exhausted",
+        ] {
+            let mut changed = failed.clone();
+            match unsafe_case {
+                "sent" => changed.action.send_accepted = Some(true),
+                "unknown" => changed.action.send_accepted = None,
+                "fenced" => changed.action.messages_fenced = true,
+                "paused" => changed.action.automatic_retry_paused = true,
+                "disabled" => changed.automatic_retries_enabled = false,
+                "manual-pairing" => changed.agents.parent_task_key = None,
+                "verified" => changed.pairing.verified_owner_generation = Some(1),
+                "exhausted" => {
+                    changed.action.automatic_retry_attempts =
+                        changed.retry_timings.action_delays_seconds.len() as u32
+                }
+                _ => unreachable!(),
+            }
+            assert!(changed.automatic_retry_at_ms().is_none(), "{unsafe_case}");
+        }
+    }
+}
+
+#[cfg(test)]
 mod schema_rollover_tests {
     use super::*;
 
@@ -4969,6 +5469,106 @@ mod schema_rollover_tests {
             })
             .unwrap();
         (root, store, task)
+    }
+
+    #[test]
+    fn stale_approval_recovery_preserves_send_evidence_and_retry_controls() {
+        for mode in [
+            "unsent",
+            "accepted",
+            "unknown",
+            "fenced",
+            "retry-paused",
+            "retries-disabled",
+            "goal-paused",
+            "goal-work-paused",
+            "wrong-owner",
+            "changed-action",
+        ] {
+            let (_root, mut store, task) = verified_idle_pairing();
+            store
+                .queue_action(
+                    &task,
+                    "blocked-continuation",
+                    AutomationActionKind::OfflineChat,
+                    1,
+                    None,
+                    103,
+                )
+                .unwrap();
+            store
+                .update_action_status(
+                    &task,
+                    "blocked-continuation",
+                    AutomationActionStatus::ApprovalRequired,
+                    Some("Pending approval"),
+                    None,
+                    104,
+                )
+                .unwrap();
+            if mode == "retries-disabled" {
+                store.automatic_retries = false;
+            }
+            store
+                .mutate(&task, |state| {
+                    match mode {
+                        "accepted" => state.action.send_accepted = Some(true),
+                        "unknown" => state.action.send_accepted = None,
+                        "fenced" => {
+                            state.action.send_accepted = Some(true);
+                            state.action.messages_fenced = true;
+                        }
+                        "retry-paused" => state.action.automatic_retry_paused = true,
+                        _ => {}
+                    }
+                    Ok(())
+                })
+                .unwrap();
+            if matches!(mode, "goal-paused" | "goal-work-paused") {
+                let goal = store
+                    .set_goal(&task, "An intentionally paused assignment", 105)
+                    .unwrap();
+                if mode == "goal-work-paused" {
+                    store
+                        .mutate(&task, |state| {
+                            state.action.kind = Some(AutomationActionKind::OfflineGoal);
+                            state.action.goal_revision = Some(goal.revision);
+                            Ok(())
+                        })
+                        .unwrap();
+                }
+            }
+            let expected = store.load(&task).unwrap();
+            if mode == "changed-action" {
+                store
+                    .mutate(&task, |state| {
+                        state.action.last_error = Some("Newer approval failure".into());
+                        Ok(())
+                    })
+                    .unwrap();
+            }
+            let before = store.load(&task).unwrap();
+            let changed = store
+                .clear_stale_approval_failure(
+                    &task,
+                    &expected,
+                    if mode == "wrong-owner" { 2 } else { 1 },
+                    106,
+                )
+                .unwrap();
+            let conversational = matches!(mode, "unsent" | "goal-paused");
+            assert_eq!(changed, conversational, "{mode}");
+            let after = store.load(&task).unwrap();
+            if conversational {
+                assert_eq!(after.action.status, AutomationActionStatus::Idle);
+                assert!(after.action.last_error.is_none());
+                assert_eq!(after.action.send_accepted, Some(false));
+                assert_eq!(after.chat_mirror, before.chat_mirror);
+                assert_eq!(after.goal, before.goal);
+            } else {
+                assert_eq!(after.action, before.action, "{mode}");
+            }
+        }
     }
 
     #[test]

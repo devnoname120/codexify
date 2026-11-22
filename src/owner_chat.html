@@ -243,8 +243,6 @@ dialog:modal{box-sizing:border-box;block-size:fit-content;margin:auto;inset-bloc
 #agents-editor { max-width:640px; margin-left:auto; padding:0; max-height:min(620px,calc(var(--owner-viewport-height,100dvh) - 280px)); overflow:hidden; display:flex; flex-direction:column; font:13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; color:var(--ink); }
 #agents-editor .agents-heading { display:flex; align-items:center; gap:10px; padding:14px 18px; margin:0; border-bottom:1px solid var(--border); flex:none; }
 #agents-editor .agents-heading strong { font-size:15px; font-weight:600; }
-.agent-parent-link { border:0; border-radius:5px; background:transparent; color:var(--accent,#159b27); font:inherit; text-align:left; padding:3px 0; cursor:pointer; }
-.agent-parent-link:focus-visible { outline:2px solid var(--accent,#159b27); outline-offset:2px; }
 #agents-editor-close { margin-left:auto; width:30px; height:30px; padding:5px; }
 #agents-mode-status { padding:2px 8px; border-radius:6px; font-size:11px; color:var(--muted); background:var(--agent); }
 #agents-mode-status[data-enabled=true],#automation-agents[data-enabled=true] { color:var(--accent,#159b27); }
@@ -962,7 +960,7 @@ dialog:modal{box-sizing:border-box;block-size:fit-content;margin:auto;inset-bloc
       const pairChat = byId("automation-pair-chat");
       pairChat.hidden = verified;
       pairChat.disabled = phase === "pairing";
-      pairChat.textContent = phase === "pairing" ? "Pairing…" : phase === "failed" ? "Retry chat pairing" : "Pair chat";
+      pairChat.textContent = phase === "pairing" ? "Pairing…" : phase === "failed" ? pairing.creatingChat ? "Retry setup" : "Retry chat pairing" : "Pair chat";
       byId("pairing-editor-submit").disabled = pairingSubmitting || phase === "pairing" || !byId("pairing-editor-url").value.trim() || !companion.authenticated;
       byId("pairing-editor-close").disabled = pairingSubmitting;
       byId("pairing-editor-url").disabled = pairingSubmitting;
@@ -973,8 +971,8 @@ dialog:modal{box-sizing:border-box;block-size:fit-content;margin:auto;inset-bloc
       nodes.pairing.dataset.state = verified ? "connected" : "disconnected";
       nodes.pairing.textContent = verified ? "Verified" : pairingWaiting ? "Pairing request sent — waiting for agent verification" : pairing.status === "unverified" ? (state.action?.status === "queued" ? (companion.activeActionId ? "Pairing queued — waiting for the current browser submission" : "Pairing verification queued") : pairing.expiresAtMs && state.action?.kind === "pair_verify" && !state.action?.lastError ? "Pairing request sent — waiting for agent verification" : "Verification required") : "Not paired";
       const retryCreation = pairing.creatingChat && !pairing.canonicalUrl;
-      nodes.pair.textContent = retryCreation ? "Retry creation" : pairing.status === "unpaired" ? "Pair conversation" : "Replace pairing";
-      nodes.pair.disabled = retryCreation ? state.action?.sendAccepted !== false || !companion.authenticated : !nodes.url.value.trim() || !companion.authenticated;
+      nodes.pair.textContent = retryCreation ? "Retry setup" : pairing.status === "unpaired" ? "Pair conversation" : "Replace pairing";
+      nodes.pair.disabled = retryCreation ? pairingSubmitting || !companion.authenticated : !nodes.url.value.trim() || !companion.authenticated;
       nodes.unlink.disabled = pairing.status === "unpaired";
       nodes.reveal.disabled = !pairedUrl;
       if (!savingSelection && scope.activeElement !== nodes.model && scope.activeElement !== nodes.effort) renderModels();
@@ -1058,7 +1056,7 @@ dialog:modal{box-sizing:border-box;block-size:fit-content;margin:auto;inset-bloc
         const preparation = state.action?.status === "authentication_required" ? "Sign in from Codexify settings → Browser, or replace pairing if the account changed. " : state.action?.status === "approval_required" ? "Open in ChatGPT to review the approval. " : state.action?.status === "rate_limited" && !cooldown ? "Wait for ChatGPT's limit to reset. " : "";
         const retryPolicy = state.action?.automaticRetryPaused ? "Automatic retries paused. " : state.action?.automaticRetriesEnabled === false ? "Automatic retries disabled in settings. " : "";
         const exhausted = retryPolicy || (!infiniteRetries && state.action?.automaticRetryAttempts >= retryLimit ? `All ${retryLimit} automatic retries failed. ` : "");
-        const nextStep = retryMode === "retry" ? `${preparation}${exhausted}Use Retry to try again. The message was not sent.` : retryMode === "continue_goal" ? `${exhausted}Use Continue to start another goal turn. Previously submitted messages will not be resent.` : state.action?.kind === "pair_verify" ? "Use Retry chat pairing to create a new verification request." : "Open in ChatGPT to check whether the message was sent before sending it again.";
+        const nextStep = retryMode === "retry" ? `${preparation}${exhausted}Use Retry to try again. The message was not sent.` : retryMode === "continue_goal" ? `${exhausted}Use Continue to start another goal turn. Previously submitted messages will not be resent.` : state.action?.kind === "pair_verify" ? pairing.creatingChat ? "Use Retry setup to recover this managed conversation automatically." : "Use Retry chat pairing to create a new verification request." : "Open in ChatGPT to check whether the message was sent before sending it again.";
         setStateError(`${failure} ${nextStep}`);
       } else if (state.action?.lastError) setStateError(failure);
       else setStateError("");
@@ -1170,6 +1168,15 @@ dialog:modal{box-sizing:border-box;block-size:fit-content;margin:auto;inset-bloc
       } catch (error) { if (!closed) pairingSubmissionError = error.message || "Chat pairing failed"; }
       finally { pairingSubmitting = false; if (!closed) { render(current); await refreshState({quiet:true}); } }
     }
+    async function retryManagedSetup() {
+      if(pairingSubmitting)return;
+      pairingSubmissionError="";pairingSubmitting=true;byId("pairing-editor").hidden=true;render(current);
+      try {
+        await post("create/retry",{requestId:requestId("create-retry"),actionId:current.action?.id});
+        if(!closed)pairingRevision+=1;
+      } catch(error){if(!closed)pairingSubmissionError=error.message||"Setup retry failed";}
+      finally{pairingSubmitting=false;if(!closed){render(current);await refreshState({quiet:true});}}
+    }
     const editGoal = async () => {
       try { if (!await ensureConnectorName()) return; }
       catch (error) { setError(error.message); return; }
@@ -1182,6 +1189,12 @@ dialog:modal{box-sizing:border-box;block-size:fit-content;margin:auto;inset-bloc
     byId("automation-settings-toggle").addEventListener("click", () => showSettings(byId("automation-settings").hidden));
     byId("automation-pair-chat").addEventListener("click", () => {
       if (pairingSubmitting || pairingPhase(current, Date.now() + clockOffset) === "pairing") return;
+      if(current?.pairing?.creatingChat){
+        showSettings(false);
+        const known=savedPairingUrl(current.pairing);
+        if(known)void submitPairing(known);else void retryManagedSetup();
+        return;
+      }
       if (pairingSubmissionError || pairingPhase(current, Date.now() + clockOffset) === "failed") {
         showSettings(false);
         const pairing = current?.pairing || {};
@@ -1419,7 +1432,7 @@ dialog:modal{box-sizing:border-box;block-size:fit-content;margin:auto;inset-bloc
     nodes.effort.addEventListener("change", () => { selectionDraft = { model:nodes.model.value, effort:nodes.effort.value }; void saveSelection(); });
     nodes.url.addEventListener("input", () => { nodes.pair.disabled = !nodes.url.value.trim() || !current?.companion?.authenticated; });
     nodes.goal.addEventListener("input", () => { nodes.setGoal.disabled = !nodes.goal.value.trim(); });
-    nodes.pair.addEventListener("click", () => { if (current?.pairing?.creatingChat && !current.pairing.canonicalUrl) void run(async () => { await post("create/retry", {requestId:requestId("create-retry")}); }); else void submitPairing(nodes.url.value.trim()); });
+    nodes.pair.addEventListener("click", () => { if (current?.pairing?.creatingChat && !current.pairing.canonicalUrl) void retryManagedSetup(); else void submitPairing(nodes.url.value.trim()); });
     nodes.unlink.addEventListener("click", () => run(async () => { await post("unlink", { requestId:requestId("unlink") }); nodes.url.value = ""; pairingSubmissionError = ""; lastSubmittedPairingUrl = ""; }));
     nodes.reveal.addEventListener("click", () => run(async () => { await post("reveal"); }));
     nodes.setGoal.addEventListener("click", () => run(async () => { if (await goalCommand(`/goal set ${nodes.goal.value}`)) byId("goal-editor").hidden = true; }));
@@ -1533,12 +1546,6 @@ dialog:modal{box-sizing:border-box;block-size:fit-content;margin:auto;inset-bloc
     const settingsName = scope.getElementById("conversation-settings-name");
     if (settingsName) settingsName.textContent = settingsName.title = chat.title;
     subtitle.replaceChildren(textNode("span", "", conversationDetail(chat)));
-    const parent=teamParent(chat);
-    if(parent){
-      subtitle.append(textNode("span","",chat.agentTeam.role||"Worker"));
-      const back=textNode("button","agent-parent-link",`Parent: ${parent.title}`);back.type="button";back.title=chat.agentTeam.scope||"Open coordinating chat";
-      back.addEventListener("click",()=>select(parent.id));subtitle.append(back);
-    }
     if (chat.projectPath && !chat.isScratch) subtitle.append(textNode("span", "project-path", chat.projectPath));
     subtitle.title = chat.projectPath || conversationDetail(chat);
     const pathInput = scope.getElementById("conversation-project-path");
@@ -1679,7 +1686,7 @@ dialog:modal{box-sizing:border-box;block-size:fit-content;margin:auto;inset-bloc
       const content = textNode("span", "conversation-main", "");
       const parent=teamParent(chat);
       content.append(textNode("span", "conversation-title", worker?(chat.agentTeam?.role||chat.title):chat.title));
-      const detail=parent?`${workerStatus(chat)} · ${chat.workspace} · ${worker?chat.title:"Agent for "+parent.title}`:conversationDetail(chat);
+      const detail=parent?`${workerStatus(chat)} · ${worker?chat.title:"Agent for "+parent.title}`:conversationDetail(chat);
       content.append(textNode("span", "conversation-detail",detail));
       if(parent)button.title=`${chat.agentTeam?.role||chat.title}\nParent: ${parent.title}\nProject: ${chat.projectPath||chat.workspace}\n${chat.agentTeam?.scope||""}`;
       const dot = textNode("span", "unread", "");

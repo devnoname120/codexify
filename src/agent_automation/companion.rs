@@ -33,6 +33,13 @@ pub(crate) const MAX_UNREAD_MESSAGES: usize = 128;
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const EVENT_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ConversationApprovalObservation {
+    pub approved: bool,
+    /// Some(false) requires a verified, idle conversation with no approval card.
+    pub pending: Option<bool>,
+}
+
 #[derive(Clone)]
 pub struct BrowserCompanionClient {
     endpoint: Url,
@@ -560,6 +567,26 @@ impl BrowserCompanionClient {
         allow_navigation: bool,
         cancellation: &CancellationToken,
     ) -> Result<bool, String> {
+        Ok(self
+            .observe_pending_conversation(
+                url,
+                account,
+                connector_name,
+                allow_navigation,
+                cancellation,
+            )
+            .await?
+            .approved)
+    }
+
+    pub async fn observe_pending_conversation(
+        &self,
+        url: &str,
+        account: &str,
+        connector_name: &str,
+        allow_navigation: bool,
+        cancellation: &CancellationToken,
+    ) -> Result<ConversationApprovalObservation, String> {
         validate_chatgpt_url(url)?;
         validate_opaque(account, "browser account fingerprint")?;
         validate_visible(connector_name, 128, "browser connector name")?;
@@ -569,6 +596,8 @@ impl BrowserCompanionClient {
             protocol_version: u32,
             build: String,
             approved: bool,
+            #[serde(default)]
+            pending: Option<bool>,
         }
         let mut request = serde_json::json!({"url":url,"expectedAccountFingerprint":account,"connectorName":connector_name});
         if allow_navigation {
@@ -583,7 +612,10 @@ impl BrowserCompanionClient {
             )
             .await?;
         self.validate_envelope(receipt.protocol_version, &receipt.build)?;
-        Ok(receipt.approved)
+        Ok(ConversationApprovalObservation {
+            approved: receipt.approved,
+            pending: receipt.pending,
+        })
     }
 
     pub async fn login(&self, cancellation: &CancellationToken) -> Result<CompanionHealth, String> {
@@ -1259,6 +1291,31 @@ impl BrowserCompanionClient {
         if response.status() != StatusCode::CONFLICT {
             return fallback;
         }
+        if response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.split(';').next() == Some("text/plain"))
+        {
+            let Ok(bytes) = read_bounded_response(response, cancellation, 4096).await else {
+                return fallback;
+            };
+            let Ok(message) = std::str::from_utf8(&bytes) else {
+                return fallback;
+            };
+            return match message.trim() {
+                "This ChatGPT conversation already owns an action"
+                | "This ChatGPT conversation is being inspected"
+                | "All browser companion action pages are busy"
+                | "Browser companion action pages are busy"
+                | "Browser companion is busy with another action"
+                | "Browser companion account changed before the action could start"
+                | "Browser companion is busy; account maintenance requires idle action pages" => {
+                    message.trim().into()
+                }
+                _ => fallback,
+            };
+        }
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields, rename_all = "camelCase")]
         struct Failure {
@@ -1290,6 +1347,8 @@ impl BrowserCompanionClient {
             "capability_discovery",
         ];
         const CODES: &[&str] = &[
+            "authentication_required",
+            "connector_unavailable",
             "selector_drift",
             "model_unavailable",
             "external_interference",

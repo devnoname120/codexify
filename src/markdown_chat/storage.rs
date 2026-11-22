@@ -74,6 +74,8 @@ struct Cursor {
     agent_presence_until_ms: Option<u64>,
     #[serde(default)]
     agent_stop_requested: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    agent_pause_requested: bool,
     #[serde(default)]
     agent_stop_requests: Vec<String>,
     #[serde(default)]
@@ -257,6 +259,15 @@ impl ChatFile {
                     return Err(
                         "Markdown chat read was cancelled; no messages were consumed".into(),
                     );
+                }
+                if consume && cursor.agent_pause_requested {
+                    // A failed/interrupted parent-message commit may have
+                    // staged text. Keep it unread until resumption commits.
+                    return Ok(ChatSnapshot {
+                        text: String::new(),
+                        notification: cursor.notification,
+                        end: cursor.offset,
+                    });
                 }
                 let snapshot = snapshot(chat, file, cursor)?;
                 if !snapshot.text.is_empty() {

@@ -2,6 +2,25 @@ import {expect,test} from 'bun:test';
 import {DraftRecoveryJournal} from '../src/draft-recovery';
 import {renderActionPrompt} from '../src/protocol';
 const draft=renderActionPrompt({kind:'turn_renewal',handoffId:`renew-${'a'.repeat(64)}`});
+test('parallel new conversations retain independent draft ownership at the same project URL',()=>{
+ const journal=new DraftRecoveryJournal(),url='https://chatgpt.com/g/g-p-fixture/project';
+ const actions=['bionic','toolchain','devutils','fifa'];
+ for(const action of actions)journal.prepare('account',url,action,`Initialize ${action}`);
+ for(const action of actions){
+  expect(journal.recoverable('account',url,`Initialize ${action}`)).toBe(true);
+  journal.beforeSend(action);
+  expect(journal.recoverable('account',url,`Initialize ${action}`)).toBe(false);
+ }
+});
+test('a later uncertain send supersedes an older prepared copy of the same draft',()=>{
+ const journal=new DraftRecoveryJournal();
+ journal.prepare('account','url','interrupted','Owner instructions');
+ journal.prepare('account','url','retry','Owner instructions');
+ journal.beforeSend('retry');
+ expect(journal.recoverable('account','url','Owner instructions')).toBe(false);
+ journal.forget('retry');
+ expect(journal.recoverable('account','url','Owner instructions')).toBe(false);
+});
 test('only the exact owned fixed handoff draft is eligible after final-turn proof',()=>{
  const journal=new DraftRecoveryJournal();
  expect(journal.recoverableHandoffDraft('account','url',draft)).toBe(false);

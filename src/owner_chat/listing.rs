@@ -174,8 +174,8 @@ async fn read_chat(
         false
     };
     let automation_wake = wake::status(&automation, &wake_activity, pending_queue, enabled, now);
-    let agent_team = (state.config.markdown_chat.features.agent_folders && (automation.agents.parent_task_key.is_some()
-        || !automation.agents.children.is_empty())).then(|| json!({
+    let agent_team = (automation.agents.parent_task_key.is_some()
+        || !automation.agents.children.is_empty()).then(|| json!({
             "taskKey":team_task_key,
             "parentTaskKey":automation.agents.parent_task_key,
             "role":automation.agents.role,

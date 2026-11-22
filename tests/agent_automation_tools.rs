@@ -849,6 +849,65 @@ async fn goal_finish_requires_complete_reports_before_changing_state_and_keeps_t
 }
 
 #[tokio::test]
+async fn new_chat_pairing_requests_one_sentinel_only_when_setup_priming_is_enabled() {
+    for (enabled, creating) in [(false, true), (true, true), (true, false)] {
+        let mut fixture = fixture("pair-sentinel");
+        assert!(
+            !fixture
+                .config
+                .markdown_chat
+                .automation
+                .prime_file_materialization
+        );
+        fixture
+            .config
+            .markdown_chat
+            .automation
+            .prime_file_materialization = enabled;
+        let names = codexify::registry::load_tools_for_config(&fixture.config);
+        assert_eq!(
+            names
+                .iter()
+                .any(|tool| tool.name() == "materialize_sentinel"),
+            enabled
+        );
+        let url = "https://chatgpt.com/c/sentinel-fixture";
+        let issued = if creating {
+            fixture
+                .automation
+                .issue_creation_pairing(&fixture.task, url, 0, now_ms())
+                .unwrap()
+        } else {
+            fixture
+                .automation
+                .issue_pairing(&fixture.task, url, 0, now_ms())
+                .unwrap()
+        };
+        fixture
+            .automation
+            .record_pairing_canonical_url(&fixture.task, issued.generation, url, now_ms())
+            .unwrap();
+        let verified = AutomationVerifyPairing
+            .call_with_context(
+                json!({"reference":issued.reference}),
+                &fixture.config,
+                &fixture.session,
+                &fixture.context,
+            )
+            .await;
+        assert!(!verified.is_error, "{}", verified.joined_text());
+        assert_eq!(
+            verified
+                .joined_text()
+                .contains("Call materialize_sentinel once"),
+            enabled && creating
+        );
+        assert_eq!(payload(&verified)["terminal"], !(enabled && creating));
+        assert!(!verified.joined_text().contains("quota"));
+    }
+}
+
+#[tokio::test]
 async fn pairing_verification_consumes_the_reference_and_discloses_no_private_values() {
     let fixture = fixture("pair-success");
     let issued = fixture

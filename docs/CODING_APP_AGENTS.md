@@ -6,7 +6,7 @@ teams. There are no app-specific adapters or connection profiles.
 
 ## Start once with the tunnel
 
-Enable **Agent teams** and **AI agent control** in Settings, with browser
+Enable **Agent teams** and **AI agent control** in **Settings → Agents**, with browser
 automation and the ChatGPT connector configured. These added features remain
 off by default. Restart Codexify once.
 
@@ -92,7 +92,10 @@ workspace; assign separate scopes and use `readOnly:true` for an audit.
 Control actions are `message`, `set_goal`, `pause`, `resume`, `stop`, and `retire`.
 Supply `content` for messages and new goals; use `expectedRevision` for lifecycle
 and goal changes. `set_goal` can also update `scope`. Retirement requires reviewed,
-completed work. Messages do not resume stopped, paused, or completed assignments.
+completed work. A message from the verified direct parent resumes a
+coordinator-paused child without changing its assignment. Sibling messages do not
+resume it. Messages cannot override explicit Stop or reopen completed or retired
+assignments.
 
 Teams, reports, and inboxes survive reconnects and service restarts. Retrying an
 interrupted setup with identical arguments recovers its team. `spawnError` means

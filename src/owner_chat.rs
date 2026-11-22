@@ -1318,12 +1318,39 @@ async fn automation_pair(
         .automation
         .as_ref()
         .ok_or_else(|| internal_error("Browser automation supervisor is unavailable"))?;
+    let saved = context.store.load(&context.task).map_err(internal_error)?;
+    let completing_creation = saved.pairing.creating_chat
+        && [
+            saved.pairing.canonical_url.as_deref(),
+            saved.pairing.last_attempted_url.as_deref(),
+        ]
+        .contains(&Some(body.url.as_str()));
     supervisor.discard_queued_actions(&context.task).await;
     let now_ms = crate::markdown_chat::now_ms();
-    let issue = context
-        .store
-        .issue_pairing(&context.task, &body.url, context.owner_generation, now_ms)
-        .map_err(internal_error)?;
+    let issue = if completing_creation {
+        context.store.issue_creation_pairing(
+            &context.task,
+            &body.url,
+            context.owner_generation,
+            now_ms,
+        )
+    } else {
+        context
+            .store
+            .issue_pairing(&context.task, &body.url, context.owner_generation, now_ms)
+    }
+    .map_err(internal_error)?;
+    if context
+        .chat
+        .agent_stop_requested()
+        .await
+        .map_err(internal_error)?
+    {
+        context
+            .store
+            .permit_paused_pairing(&context.task, issue.generation, context.owner_generation)
+            .map_err(internal_error)?;
+    }
     context
         .store
         .bind_pairing_account(&context.task, issue.generation, &fingerprint)
@@ -3188,7 +3215,8 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let mut config = crate::config::default_config(temp.path().into());
         config.markdown_chat.enabled = true;
-        config.markdown_chat.features.agent_folders = true;
+        config.markdown_chat.features =
+            serde_json::from_value(json!({"agentFolders":false})).unwrap();
         config.markdown_chat.default_message_mode = crate::markdown_chat::MessageMode::Steer;
         config.markdown_chat.default_message_mode = crate::markdown_chat::MessageMode::Queue;
         config.memory.dir = Some(temp.path().join("state").display().to_string());

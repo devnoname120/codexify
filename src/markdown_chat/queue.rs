@@ -344,6 +344,31 @@ pub(super) fn append_steering_guarded(
     attachment_ids: Vec<String>,
     respect_stop: bool,
 ) -> Result<UserSendReceipt, String> {
+    let checked_id = id.clone();
+    let checked_attachments = attachment_ids.clone();
+    append_steering_with(
+        chat,
+        &checked_id,
+        &checked_attachments,
+        respect_stop,
+        |cursor, file| {
+            if respect_stop && cursor.agent_stop_requested {
+                return Err(
+                    "Worker is explicitly stopped; resume it before sending instructions".into(),
+                );
+            }
+            widget::append_user_locked(chat, cursor, file, id, message, attachment_ids)
+        },
+    )
+}
+
+pub(super) fn append_steering_with(
+    chat: &ChatFile,
+    id: &str,
+    attachment_ids: &[String],
+    respect_pending: bool,
+    append: impl FnOnce(&mut Cursor, &mut File) -> Result<UserSendReceipt, String>,
+) -> Result<UserSendReceipt, String> {
     with_queue(chat, false, |state| {
         if state.messages.iter().any(|m| m.id == id) {
             return Err("This message is queued; use its Steer action to send it".into());
@@ -360,7 +385,7 @@ pub(super) fn append_steering_guarded(
         if let Some(pending) = &state.pending {
             let committed =
                 chat.with_cursor(|_, file| widget::contains_user_message(file, &pending.id))?;
-            if respect_stop && !committed {
+            if respect_pending && !committed {
                 return Err(
                     "Worker has an unresolved queued send; wait for its receipt before steering"
                         .into(),
@@ -374,14 +399,7 @@ pub(super) fn append_steering_guarded(
                 persist(chat, state)?;
             }
         }
-        let sent = chat.with_cursor(|cursor, file| {
-            if respect_stop && cursor.agent_stop_requested {
-                return Err(
-                    "Worker is explicitly stopped; resume it before sending instructions".into(),
-                );
-            }
-            widget::append_user_locked(chat, cursor, file, id, message, attachment_ids)
-        })?;
+        let sent = chat.with_cursor(append)?;
         if state.completed_waiting || state.input_waiting {
             state.completed_waiting = false;
             state.input_waiting = false;

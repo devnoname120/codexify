@@ -261,6 +261,7 @@ impl AgentAutomationStore {
             {
                 return Ok(None);
             }
+            state.pairing.initialization_pending = false;
             if let Some(saved) = &mut state.turn_renewal.send
                 && saved.action_id == send.action_id
             {

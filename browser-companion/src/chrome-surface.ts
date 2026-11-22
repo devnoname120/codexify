@@ -168,6 +168,12 @@ export class ChromeSingleWindowSurface implements SingleBrowserSurface {
     return this.ownedPage();
   }
 
+  async approvalPages():Promise<Page[]> {
+    await this.state.registration;
+    if(this.state.contextClosed)return [];
+    return [...this.state.registeredLanePages].filter(page=>!page.isClosed());
+  }
+
   private ownedPage():Page {
     if (this.state.contextClosed || this.sharedPage.isClosed()) {
       throw new BrowserCompanionError("The shared Chrome ChatGPT window was closed", "external_interference");
@@ -189,7 +195,9 @@ export class ChromeSingleWindowSurface implements SingleBrowserSurface {
     let page:Page|undefined;
     try {
       await previous;
-      this.ownedPage();
+      if(this.state.contextClosed)throw new BrowserCompanionError("The shared Chrome context was closed","external_interference");
+      if(this.context.pages().some(page=>!page.isClosed()&&!this.state.registeredLanePages.has(page)))
+        throw new BrowserCompanionError("Chrome exposed an unmanaged browser page outside the action lanes","external_interference");
       if(this.state.registeredLanePages.size>=this.state.actionLaneLimit)
         throw new BrowserCompanionError("Browser action lane capacity is already allocated");
       page=await this.context.newPage();

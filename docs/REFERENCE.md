@@ -2289,6 +2289,13 @@ one-time reference is valid; it clears any pairing error. Created conversation
 URLs are saved as soon as the browser confirms them, before model restoration,
 and remain available in settings and Retry pairing even if verification fails.
 
+For automatically created worker chats, **Retry setup** reuses the saved
+conversation URL or retries a confirmed unsent creation without asking for a URL.
+If setup was sent but no conversation URL was saved, a paused worker can recover
+through a new ownership handoff. Its assignment and history are retained, the
+assignment stays paused, and the previous owner is retired when the new setup
+claims the handoff. A running worker must be paused before this recovery.
+
 Control discovery prefers test IDs, roles, state and model metadata. Where the
 browser exposes only display text, the companion uses a bundled projection of
 ChatGPT's published locale messages rather than English-only names. The catalog
@@ -2991,6 +2998,13 @@ The optional `agentChat.notifications.events` object selects the categories to
 deliver. Each field defaults to `true` when omitted; old configurations retain
 their ordinary-message and offline alerts. Set unwanted categories to `false`.
 
+Settings → Notifications → Subagents has a global **Subagent notifications**
+toggle (`agentChat.notifications.subagents`). It defaults to `true` to preserve
+existing behavior. Set it to `false` to mute every notification category from all
+subagents, including nested subagents. Coordinator chats still follow the event
+filters below. This only changes external notification delivery; chat messages,
+agent coordination, and status in the interface remain available.
+
 | Field | Alert |
 | --- | --- |
 | `messages` | Ordinary `chat_write` messages and progress updates. |
@@ -3008,6 +3022,7 @@ For completion and actionable alerts only:
     "notifications": {
       "urls": ["ntfys://ntfy.example/your-topic?image=no"],
       "pythonPath": "/absolute/path/to/notifications-venv/bin/python",
+      "subagents": true,
       "events": {
         "messages": false,
         "completed": true,
@@ -3216,6 +3231,17 @@ Like the environment, the result is published more than one way:
 
 Instructions are built per MCP session, so editing `AGENTS.md` takes effect on the next connection without restarting the server.
 
+## File materialization during setup
+
+`agentChat.automation.primeFileMaterialization` is off by default. Enable it under
+Settings → Browser → File materialization during setup, then restart Codexify
+and refresh the connector. After a new conversation verifies pairing, its only
+extra initialization instruction is to call `materialize_sentinel` once before
+completing the turn. The tool returns a nine-byte `sentinel.txt` resource without
+creating or reading a project file. The setup page is retained before the first
+work prompt so the conversation's materialization permission can be granted.
+Existing conversations are not primed merely by reconnecting or pairing again.
+
 ## Skills
 
 `AGENTS.md` says what is true of the project always. A **skill** says how to do one recurring task well — cut a release, review a PR the way this team reviews PRs, debug the flaky suite — and is only read when that task comes up. Codexify uses the `SKILL.md` format and discovery model from `codex-rs/ext/skills` and `codex-rs/skills`.
@@ -3256,6 +3282,33 @@ Repo skills come first, so a project decides how a name behaves inside it; a per
 **Plugin skills.** Codexify mirrors Codex's local plugin-skill discovery. It reads enabled `[plugins."<plugin>@<marketplace>"]` entries from the Codex user `config.toml`, resolves the same active cache version (`local` wins; otherwise Codex's semver/lexical ordering), and reads the plugin manifest rather than assuming every cache entry has a `skills/` directory. Legacy manifests can declare one or more skill roots and are searched recursively; current Agent Plugin manifests use the conventional direct-child `skills/` layout. Legacy migrated-command skills are included too, and `[[skills.config]]` name/path disable rules are honored. Plugin skills use the manifest namespace as `<plugin>:<skill>`. With `experimental.claudeSkills` enabled, Claude Code plugin discovery uses `installPath` entries in `~/.claude/plugins/installed_plugins.json`, not an inventory of cached versions. Project/local installations apply only within their recorded project path and take precedence over user installations. An absent or empty registry offers no Claude plugin skills; an unreadable or malformed registry produces a discovery warning, without falling back to stale cache entries. Turn all plugin-skill discovery off with `"skills": { "includePlugins": false }`. Setting `skills.dirs` overrides the standalone roots and, by default, disables plugin discovery too — set `includePlugins: true` alongside `dirs` to keep it.
 
 **What the model sees.** The catalogue — a name and the full trigger description per implicitly invocable skill — goes into the project-aware brief under a `## Skills` heading. In single-project mode that is available at initialization; in multi-project mode it arrives from `get_agent_brief` after selection. Bodies are not loaded: `skills_read` fetches one only once a skill has actually been chosen. UI captions such as `interface.short_description` do not replace the trigger description. The section is omitted entirely when no skill permits implicit invocation.
+
+**Blacklisting skills.** Set `skills.blacklist` in `codexify.config.json` to
+exclude individual skills from Codexify without changing Codex's configuration:
+
+```json
+{
+  "skills": {
+    "blacklist": ["superpowers:dispatching-parallel-agents"]
+  }
+}
+```
+
+Entries match complete names from `skills_list`, ignoring case and surrounding
+whitespace. Plugin skills need their `<plugin>:<skill>` namespace. Matching is
+exact; wildcards and paths are not supported. The default is an empty list.
+The blacklist applies to repository, user, and plugin skills, removing them
+from the agent brief and `skills_list` and preventing access through
+`skills_read`, including package resources. It does not disable native agent
+tools or prevent other clients from loading the skill independently.
+
+You can also set it with the CLI:
+
+```sh
+codexify config set skills.blacklist '["superpowers:dispatching-parallel-agents"]'
+```
+
+Restart a running service and reconnect the client to apply configuration changes.
 
 **Invocation policy.** A skill can opt out of automatic selection in its
 `agents/openai.yaml`:
@@ -3804,10 +3857,19 @@ The **Agents** button beside **Add goal** creates up to eight workers per reques
 and 32 children per team. Workers inherit the parent's selected project and model/
 effort, with independent goals and progress. Give editing workers separate scopes;
 inspection workers default to read-only instructions. The team controls expose
-role, scope, status, and milestone reports. Reusing the same request ID is
+role, scope, status, and milestone reports. The coordinator's chosen role is
+saved as the worker's chat title; an owner-renamed title is preserved on retries.
+Reusing the same request ID is
 idempotent; changing its arguments is rejected.
 
-Agent teams are off by default in Settings → Chats & goals. After enabling
+Agent teams are off by default in Settings → Agents. **Worker levels**
+(`agentChat.features.maxWorkerDepth`) defaults to **1**: the main agent may
+create workers, and workers cannot create further workers. Set it to **2** to
+allow workers to create one further level. Per-chat delegation permissions still
+apply. Changing the limit does not stop existing workers. Restart Codexify after
+changing it.
+
+After enabling
 them and opting into delegation for a chat, use `agent_spawn` for requested work. **Allow requested delegation** can explicitly
 disable or re-enable this behavior for a chat. Agents use `agent_status` to coordinate and
 `agent_report` for findings. Worker chats cannot recursively delegate by default.
@@ -3817,8 +3879,15 @@ from the saved model/account selection without opening a model picker or waiting
 for another browser action. Dispatch still checks the live account and exact
 selection before sending.
 These are cooperative instructions, not an operating-system file-write sandbox.
-Failed initial creation is retried only after confirmed non-submission; unknown
-submission outcomes remain protected against duplication.
+Failed initial worker creation is retried automatically on the configured retry
+schedule only after confirmed non-submission, with fresh pairing credentials and
+the same worker identity and goal. Unknown submission outcomes remain protected
+against duplication. Once pairing succeeds, a new worker starts its active goal
+without waiting for the normal conversation offline timeout.
+Generated team development-access updates, coordinator instructions, inter-agent
+messages, and report notifications reach agents in the background and are
+omitted from the displayed user conversation, including older notices. Team
+reports remain available through the Agents panel and `agent_status`.
 
 The Agents panel shows the saved delegation mode and refreshes team progress while
 open. Creation errors stay beside the worker drafts, which retain their request
@@ -3827,9 +3896,9 @@ cards scroll, with themed fields on desktop and mobile. Enabled parent briefs
 explicitly describe `agent_spawn`; referring to existing worker notes is not a
 substitute for creating and tracking a requested team.
 
-The sidebar groups recorded workers in a collapsible **Agents** section below
-their coordinator, with reserved setup slots, role/status summaries and a parent
-navigation button. Search includes worker roles and scopes. Pinned workers remain
+The sidebar always groups recorded workers in a collapsible **Agents** section below
+their coordinator, with reserved setup slots and role/status summaries.
+Search includes worker roles and scopes. Pinned workers remain
 in Pinned; expansion and focused controls survive polling.
 
 An active goal continues through recoverable errors and managed handoffs until
@@ -3852,7 +3921,11 @@ control its own children, within the same selected project and account. Workers
 can read sibling status but cannot control siblings or parents. Lifecycle and goal
 changes compare `expectedRevision` under the goal-store lock. Stable control IDs
 and durable receipts prevent duplicate instructions and old pause/stop replays.
-Messages never implicitly resume a stopped worker. A goal edit or pause retains
+Messages from the verified direct parent, through either `agent_message` or
+`agent_control(message)`, resume a coordinator-paused child. The instruction is
+delivered before the pause is released. Sibling messages and child reports do not
+resume paused recipients. Explicit Stop, completed goals and retirement retain
+their existing lifecycle controls. A goal edit or pause retains
 any in-progress browser action and its accepted/uncertain-send ledger. Interrupted
 multi-step controls report their recorded change and require fresh status before
 any remaining action; they never claim completion or blindly replay a resume.
@@ -3860,8 +3933,10 @@ Worker cards expose reports, errors, goal revisions, tool counts and stopped sta
 Polling preserves focused instructions and retry drafts.
 `agent_message` lets workers and their parent exchange focused dependency requests,
 answers and handoffs inside the recorded team. It has durable duplicate protection,
-checks current team/project/account membership, and never resumes a paused or
-finished recipient. `get_agent_brief` and new worker goals include the
+checks current team/project/account membership, and uses the recorded
+direct-parent relationship to authorize resumption. Other team messages cannot
+resume a paused recipient or reopen a finished assignment. `get_agent_brief` and
+new worker goals include the
 [team working agreement](AGENT_COORDINATION.md), covering job distribution, scopes,
 message format, independent work, conflict escalation and verified reporting.
 
@@ -3990,8 +4065,10 @@ requests complete saved reports. No project coordination file is created.
 ### Optional Windows additions
 
 All added features are off by default, including for older configurations that
-omit their keys. In Settings → Chats & goals, enable Agent teams, Auto mode,
-Agent folders, Conversation recovery, or Retry without a limit individually.
+omit their keys. In Settings → Agents, enable Agent teams, Auto mode,
+or AI agent control individually. Worker chats are always grouped beneath their
+coordinator; the legacy `agentFolders` setting is ignored. Settings → Chats & goals
+contains Conversation recovery and Retry without a limit.
 AI agent control is a separate off-by-default switch. With Agent teams
 and browser automation enabled, it exposes `agent_client` for persistent team
 setup, worker control, reports, and reconnects from standard MCP clients.

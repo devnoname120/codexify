@@ -10,6 +10,7 @@ import { ChatGptBrowserDriver, stopLingeringResponse, type SingleBrowserSurface 
 import {selectPairingMedium} from "../src/pairing-model";
 import {captureSubmissionBaseline,waitForSubmissionAcceptance} from "../src/turn-binding";
 import { privateChromeExecutable } from "../src/chrome-executable";
+import {observeReadOnly} from "../src/observation";
 import { activeComposer, composerText, insertExactPrompt, uniqueSendButton } from "../src/composer";
 import { protocolBuild, renderActionPrompt, type ExecuteActionRequest } from "../src/protocol";
 
@@ -63,6 +64,7 @@ let sessionUnavailableBeforeLoad=0;
 let changedAccountAfterReload = false;
 let changedUrlAfterReload = false;
 let shiftedEfforts = false;
+let newChatHydrationFamily:string|null=null;
 let hideEffortLabels = false;
 let nestedHistory = false;
 let missingHistoryId = false;
@@ -244,6 +246,7 @@ async function installFixtureRoutes(){
             form.insertAdjacentHTML('beforeend','<button type="button" data-testid="stop-button">Stop</button>');
             setTimeout(finish,${quietGenerationMs});
           } else finish();
+          if(${JSON.stringify(newChatHydrationFamily)}){window.family=${JSON.stringify(newChatHydrationFamily)};window.renderModel();}
         });
       </script></body></html>`});
   });
@@ -277,7 +280,7 @@ async function fixture(draft="",canSend=true,name=connector,quietMs=0,generating
   initialDraft=draft;ready=canSend;chipName=name;quietGenerationMs=quietMs;
   generatingOnLoad=generating;acceptsStop=stopWorks;stopFinishDelayMs=200;stopConfirmation=undefined;fixtureLanguage="en";localizedStopFallback=false;
   documentLoads=0;stopReloadAt=2;sessionRequests=0;sessionUnavailableBeforeLoad=0;changedAccountAfterReload=false;changedUrlAfterReload=false;
-  initialModel=model;shiftedEfforts=false;hideEffortLabels=false;nestedHistory=false;missingHistoryId=false;duplicateHistoryViews=false;
+  initialModel=model;shiftedEfforts=false;newChatHydrationFamily=null;hideEffortLabels=false;nestedHistory=false;missingHistoryId=false;duplicateHistoryViews=false;
   destinationLocks={};absentFamilies=[];duplicateEffortLabels=false;changeAccountAtRequest=Number.MAX_SAFE_INTEGER;
   await surface.navigate(url);
   return new ChatGptBrowserDriver(surface,build);
@@ -768,6 +771,130 @@ test.skipIf(!native)("automatic pairing uses Medium before applying the configur
   expect(await page.locator('[data-testid="stop-button"]').count()).toBe(1);
   expect((await coordinator.action(create.actionId))?.selected).toEqual({model:"gpt-6-astra",effort:"max"});
 },30_000);
+
+test.skipIf(!native)("new-chat model hydration after Send applies the requested preference without restoring stale defaults",async()=>{
+  const driver=await fixture("",true,connector,31_000,false,true,{family:"5.6",value:2,locked:[]});
+  newChatHydrationFamily="6";
+  const create:ExecuteActionRequest={...request,url:"https://chatgpt.com/new",expectedUrl:"https://chatgpt.com/new",model:"gpt-6-astra",effort:"max",prompt:{kind:"create_chat",reference:newReference,continuationToken:Buffer.alloc(32,2).toString('base64url'),setupReference:null}};
+  const coordinator=new SingleWindowCoordinator(driver,build);
+  await executeCoordinatorFixture(coordinator,create);
+  const events:Parameters<DriverExecution['emit']>[0][]=[];
+  for await(const event of coordinator.events(create.actionId,0))events.push(event);
+  expect(events.at(-1)).toMatchObject({type:'submission_complete'});
+  expect(await page.evaluate(()=>[document.body.dataset.sentFamily,document.body.dataset.sentEffort,document.body.dataset.sends])).toEqual(['5.6','Medium','1']);
+  expect(await page.evaluate(()=>[document.body.dataset.family,document.body.dataset.effort])).toEqual(['6','Pro']);
+},30_000);
+
+test.skipIf(!native)("new-chat acceptance survives temporary local conversation IDs",async()=>{
+  for(const draft of ['/c/local-chatgpt:prepared','/g/g-p-fixture/c/local-chatgpt%3Aprepared']) {
+    await fixture("",true,connector,0,false,true,{family:"5.6",value:2,locked:[]});
+    const destination=draft.startsWith('/g/')?'https://chatgpt.com/g/g-p-fixture/project':'https://chatgpt.com/new';
+    const draftSurface:SingleBrowserSurface={...surface,navigate:async destination=>{
+      const loaded=await surface.navigate(destination);
+      await loaded.evaluate(draft=>{
+        document.querySelector('#effort')!.addEventListener('click',()=>history.replaceState({},'',draft),{once:true});
+        document.querySelector('form')!.addEventListener('submit',()=>{
+          history.replaceState({},'','/c/new-created-fixture');
+          (window as any).family='6';(window as any).renderModel();
+        },{capture:true});
+      },draft);
+      return loaded;
+    }};
+    const driver=new ChatGptBrowserDriver(draftSurface,build);
+    const create:ExecuteActionRequest={...request,url:destination,expectedUrl:destination,model:'gpt-6-astra',effort:'max',prompt:{kind:'create_chat',reference:newReference,continuationToken:Buffer.alloc(32,2).toString('base64url'),setupReference:null}};
+    const coordinator=new SingleWindowCoordinator(driver,build),events:Parameters<DriverExecution['emit']>[0][]=[];
+    await executeCoordinatorFixture(coordinator,create);
+    for await(const event of coordinator.events(create.actionId,0))events.push(event);
+    expect(events.at(-1)).toMatchObject({type:'submission_complete',canonicalUrl:'https://chatgpt.com/c/new-created-fixture'});
+    expect(await page.evaluate(()=>document.body.dataset.sends)).toBe('1');
+  }
+},30_000);
+
+test.skipIf(!native)("pairing cleanup preserves the original submission failure",async()=>{
+  await fixture("",true,connector,0,false,true,{family:"5.6",value:2,locked:[]});
+  newChatHydrationFamily='6';
+  await context.route('https://chatgpt.com/backend-api/f/conversation',route=>route.fulfill({status:429,body:'limited'}));
+  const networkSurface:SingleBrowserSurface={...surface,requireSubmissionNetworkProof:true,navigate:async destination=>{
+    const loaded=await surface.navigate(destination);
+    await loaded.evaluate(()=>document.querySelector('form')!.addEventListener('submit',()=>{
+      void fetch('/backend-api/f/conversation',{method:'POST'});
+    },{capture:true}));
+    return loaded;
+  }};
+  const driver=new ChatGptBrowserDriver(networkSurface,build);
+  const create:ExecuteActionRequest={...request,url:'https://chatgpt.com/new',expectedUrl:'https://chatgpt.com/new',model:'gpt-6-astra',effort:'max',prompt:{kind:'create_chat',reference:newReference,continuationToken:Buffer.alloc(32,2).toString('base64url'),setupReference:null}};
+  const error=await executeFixture(driver,{request:create,renderedPrompt:renderActionPrompt(create.prompt),signal:new AbortController().signal,emit:()=>{}}).catch(error=>error);
+  expect(error).toMatchObject({code:'ambiguous_send',sendAccepted:true,message:"ChatGPT's conversation submission returned HTTP 429"});
+  expect(await page.evaluate(()=>document.body.dataset.sends)).toBe('1');
+},15_000);
+
+for(const banner of ['limit','quoted'] as const)test.skipIf(!native)(`rejected submission waits for the conversation length banner (banner=${banner})`,async()=>{
+  await fixture();
+  await context.route('https://chatgpt.com/backend-api/f/conversation',route=>route.fulfill({status:400,body:'rejected'}));
+  await page.evaluate(({html,banner})=>document.querySelector('form')!.addEventListener('submit',()=>{
+    void fetch('/backend-api/f/conversation',{method:'POST'}).then(()=>setTimeout(()=>{
+      document.body.insertAdjacentHTML('beforeend',banner==='limit'?html:`<div data-conversation-role="assistant"><div class="markdown">${html}</div></div>`);
+      document.querySelector('[role="alert"] button')?.addEventListener('click',()=>{document.body.dataset.errorRetries='1';});
+    },150));
+  },{capture:true}),{html:conversationLimitHtml,banner});
+  const driver=new ChatGptBrowserDriver({...surface,requireSubmissionNetworkProof:true},build);
+  const submitted=offlineRequest('gpt-6-sol','high'),coordinator=new SingleWindowCoordinator(driver,build);
+  await executeCoordinatorFixture(coordinator,submitted);
+  const events=[];for await(const event of coordinator.events(submitted.actionId,0))events.push(event);
+  expect(events.at(-1)).toMatchObject(banner==='limit'?{type:'failed',code:'conversation_limit'}:{type:'ambiguous_send'});
+  if(banner==='limit')expect((await coordinator.action(submitted.actionId))?.sendAccepted).toBeFalse();
+  else expect((await coordinator.action(submitted.actionId))?.state).toBe('ambiguous');
+  expect(events.some(event=>event.type==='send_accepted')).toBeFalse();
+  expect(await page.evaluate(()=>[document.body.dataset.sends,document.body.dataset.errorRetries??'0'])).toEqual(['1','0']);
+  expect(await page.locator('[role="alert"] button').evaluateAll(buttons=>buttons.length)).toBe(1);
+},30_000);
+
+test.skipIf(!native)("structured conversation limit rolls over without an English or visible banner",async()=>{
+  await fixture();
+  await context.route('https://chatgpt.com/backend-api/f/conversation',route=>route.fulfill({status:400,
+    json:{detail:{code:'conversation_length_exceeds_limit',message:'会話が長すぎます。新しい会話を開始してください。'}}}));
+  await page.evaluate(()=>document.querySelector('form')!.addEventListener('submit',()=>{
+    void fetch('/backend-api/f/conversation',{method:'POST'});
+  },{capture:true}));
+  const driver=new ChatGptBrowserDriver({...surface,requireSubmissionNetworkProof:true},build);
+  const submitted=offlineRequest('gpt-6-sol','high'),coordinator=new SingleWindowCoordinator(driver,build);
+  await executeCoordinatorFixture(coordinator,submitted);
+  const events=[];for await(const event of coordinator.events(submitted.actionId,0))events.push(event);
+  expect(events.at(-1)).toMatchObject({type:'failed',code:'conversation_limit'});
+  expect((await coordinator.action(submitted.actionId))?.sendAccepted).toBeFalse();
+  expect(events.some(event=>event.type==='send_accepted')).toBeFalse();
+  expect(await page.locator('[role="alert"]').count()).toBe(0);
+  expect(await page.evaluate(()=>document.body.dataset.sends)).toBe('1');
+},30_000);
+
+test.skipIf(!native)("HTTP 413 rejects a small continuation and requests conversation rollover",async()=>{
+  await fixture();
+  await context.route('https://chatgpt.com/backend-api/f/conversation',route=>route.fulfill({status:413,body:'too large'}));
+  await page.evaluate(()=>document.querySelector('form')!.addEventListener('submit',()=>{
+    void fetch('/backend-api/f/conversation',{method:'POST'});
+  },{capture:true}));
+  const driver=new ChatGptBrowserDriver({...surface,requireSubmissionNetworkProof:true},build);
+  const submitted=offlineRequest('gpt-6-sol','high'),coordinator=new SingleWindowCoordinator(driver,build);
+  await executeCoordinatorFixture(coordinator,submitted);
+  const events=[];for await(const event of coordinator.events(submitted.actionId,0))events.push(event);
+  expect(events.at(-1)).toMatchObject({type:'failed',code:'conversation_limit'});
+  expect(events.at(-1)).toHaveProperty('message',expect.stringContaining('HTTP 413'));
+  expect((await coordinator.action(submitted.actionId))?.sendAccepted).toBeFalse();
+  expect(events.some(event=>event.type==='send_accepted')).toBeFalse();
+  expect(await page.evaluate(()=>document.body.dataset.sends)).toBe('1');
+},20_000);
+
+test.skipIf(!native)("a browser read timeout identifies the setup step and proves no Send",async()=>{
+  await fixture();
+  const stalled:SingleBrowserSurface={...surface,navigate:async()=>{
+    await observeReadOnly(new Promise<never>(()=>{}),undefined,20);return page;
+  }};
+  const driver=new ChatGptBrowserDriver(stalled,build);
+  const create:ExecuteActionRequest={...request,url:'https://chatgpt.com/new',expectedUrl:'https://chatgpt.com/new',prompt:{kind:'create_chat',reference:newReference,continuationToken:Buffer.alloc(32,2).toString('base64url'),setupReference:null}};
+  const failure=await driver.execute({request:create,renderedPrompt:renderActionPrompt(create.prompt),signal:new AbortController().signal,emit:()=>{}}).catch(error=>error);
+  expect(failure).toMatchObject({code:'editor_unavailable',sendAccepted:false,message:'ChatGPT browser read timed out while loading conversation; nothing was sent'});
+  expect(await page.evaluate(()=>document.body.dataset.sends)).toBe('0');
+},5_000);
 
 test.skipIf(!native)("cancelled automatic pairing preserves the original composer and configured preferences",async()=>{
   const driver=await fixture("",false,connector,0,false,true,{family:"5.6",value:2,locked:[]});

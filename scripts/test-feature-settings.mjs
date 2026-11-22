@@ -12,8 +12,9 @@ const launch=()=>chromium.launch({executablePath:fileURLToPath(new URL(chrome.ex
 const example=JSON.parse(readFileSync(new URL('../codexify.config.example.json',import.meta.url)));
 const switches=[
   'agentChat.features.agentTeams','agentChat.features.externalAgentControl','agentChat.features.autoMode',
-  'agentChat.features.agentFolders','agentChat.features.conversationRecovery',
+  'agentChat.features.conversationRecovery',
   'agentChat.automation.recoveryEnhancements',
+  'agentChat.automation.primeFileMaterialization',
   'agentChat.automation.retryTimings.infiniteRetries',
 ];
 const at=(value,path)=>path.split('.').reduce((value,key)=>value?.[key],value);
@@ -106,6 +107,8 @@ test('fast setup is one metadata-driven atomic save and does not restart or chan
     assert.equal(fixture.document().agentChat.automation.requestBlockingEnabled,false);
     assert.equal(fixture.document().agentChat.features.externalAgentControl,false);
     assert.equal(fixture.document().agentChat.features.agentFolders,false);
+    await dialog.getByRole('searchbox',{name:'Search settings'}).fill('agentChat.features.agentFolders');
+    assert.equal(await dialog.locator('[data-setting-row="agentChat.features.agentFolders"]').count(),0);
     assert.deepEqual(fixture.document().agentChat.turnRenewal.limits,example.agentChat.turnRenewal.limits);
     assert.equal(Object.keys(writes[0].changes).some(key=>/model|effort/i.test(key)),false);
     assert.deepEqual(errors,[]);

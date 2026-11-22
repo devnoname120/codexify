@@ -421,6 +421,11 @@ pub struct SkillsConfig {
     /// directories.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub include_plugins: Option<bool>,
+    /// Exclude these complete skill names from discovery in every scope.
+    /// Matching ignores case and surrounding whitespace; plugin names include
+    /// their namespace, for example `superpowers:dispatching-parallel-agents`.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub blacklist: Option<Vec<String>>,
 }
 
 /// Governs what the file-walking tools skip. Every field is optional; the

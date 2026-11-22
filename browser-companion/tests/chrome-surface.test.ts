@@ -261,6 +261,16 @@ test("configured four-page capacity remains in one context and rejects a fifth l
   expect(new Set(await Promise.all([surface,...lanes].map(lane=>lane.page()))).size).toBe(4);
   await expect(surface.createActionLane()).rejects.toThrow("capacity");
   expect(fake.pages()).toHaveLength(4);
+  expect(await surface.approvalPages()).toHaveLength(4);
+});
+
+test("the context owner can replace a closed primary page while a sibling remains open",async()=>{
+  const {surface}=await createSurface();const sibling=await surface.createActionLane();
+  const survivor=await sibling.page();await surface.closeActionPage();
+  const replacement=await surface.createActionLane();
+  expect(await sibling.page()).toBe(survivor);
+  expect((await replacement.page()).context()).toBe(survivor.context());
+  expect(await surface.approvalPages()).toHaveLength(2);
 });
 
 test("lane creation honors disabled capacity and rejects out-of-range limits before browser launch",async()=>{
@@ -495,7 +505,13 @@ test.skipIf(process.env.CODEXIFY_TEST_BROWSER_COMPANION_CHROME !== "1")(
       await Promise.all([surface.endAction(),lane.endAction()]);
       await lane.close();await lane.closed;
       expect(page.isClosed()).toBeFalse();
-      await page.close();
+      const survivor=await surface.createActionLane();
+      const survivorPage=await survivor.page();await insertExactPrompt(await activeComposer(survivorPage),'Preserved sibling draft');
+      await surface.closeActionPage();
+      const replacement=await surface.createActionLane();
+      expect(await composerText(await activeComposer(survivorPage))).toBe('Preserved sibling draft');
+      expect((await replacement.page()).context()).toBe(survivorPage.context());
+      await replacement.close();await survivor.close();
       const closed = await Promise.race([surface.closed.then(()=>true),Bun.sleep(2_000).then(()=>false)]);
       expect(closed).toBeTrue();
     } finally {

@@ -92,6 +92,17 @@ test("two fixed lanes navigate independently while one is blocked and a third ac
   expect((await collect(pool,"second")).at(-1)!.type).toBe("generation_complete");
 });
 
+test("new chats from the same project can use separate action pages",async()=>{
+  const {pool,drivers}=fixture(),url="https://chatgpt.com/g/g-p-fixture/project";
+  const create=(id:string)=>request(id,{url,expectedUrl:url,prompt:{kind:"create_chat",continuationToken:Buffer.alloc(32,1).toString('base64url'),reference:Buffer.alloc(32,2).toString('base64url'),setupReference:null}});
+  await pool.execute(create("new-first"));await drivers[0]!.started.promise;
+  await pool.execute(create("new-second"));await drivers[1]!.started.promise;
+  expect(drivers.map(driver=>driver.runs)).toEqual([["new-first"],["new-second"]]);
+  drivers[0]!.executions.get('new-first')!.emit({type:'conversation_created',canonicalUrl:'https://chatgpt.com/c/new-owned'});
+  drivers[1]!.release();await collect(pool,'new-second');
+  await expect(pool.execute(request('new-alias',{url:'https://chatgpt.com/c/new-owned',expectedUrl:'https://chatgpt.com/c/new-owned'}))).rejects.toThrow('conversation already owns an action');
+});
+
 test("canonical conversation aliases cannot acquire a second lane",async()=>{
   const {pool,drivers}=fixture();
   await pool.execute(request("alias-first",{url:"https://chatgpt.com/g/project/c/shared?view=one",expectedUrl:"https://chatgpt.com/g/project/c/shared?view=one"}));
@@ -192,6 +203,21 @@ test("warming capacity does not claim authentication and explicit readiness wait
   expect(await pending).toMatchObject({status:"idle",authenticated:true,accountFingerprint:"account-1",actionCapacity:2,availableActionSlots:2,activeActionIds:[]});
 });
 
+test("health capacity stays consistent when a submission starts during an idle observation",async()=>{
+  const {pool,drivers,coordinators}=fixture();
+  const observed=deferred(),release=deferred();
+  const health=coordinators[0]!.health.bind(coordinators[0]);let first=true;
+  coordinators[0]!.health=async()=>{
+    const value=await health();
+    if(first){first=false;observed.resolve();await release.promise;}
+    return value;
+  };
+  const pending=pool.health();await observed.promise;
+  await pool.execute(request('starts-during-health'));await drivers[0]!.started.promise;
+  release.resolve();
+  expect(await pending).toMatchObject({actionCapacity:2,availableActionSlots:1,activeActionIds:['starts-during-health']});
+});
+
 test("a retired primary page preserves healthy lane actions and idle maintenance",async()=>{
   const drivers=[new LaneDriver(),new LaneDriver()];drivers[0]!.ignoreAbort=true;
   const coordinators=[new SingleWindowCoordinator(drivers[0]!,BUILD,{operationMs:20,cleanupMs:10,hardStopMs:10}),new SingleWindowCoordinator(drivers[1]!,BUILD)];
@@ -221,4 +247,27 @@ test("pool shutdown closes each action page before the shared context callback e
   await Promise.all([pool.close(),pool.close()]);await pool.close();
   expect(contextCloses).toBe(1);
   expect(await pool.health()).toMatchObject({status:"unavailable",authenticated:false,availableActionSlots:0});
+});
+
+test("retired pages are replaced without losing receipts or interrupting healthy actions",async()=>{
+  const drivers=[new LaneDriver(),new LaneDriver(),new LaneDriver()];drivers[0]!.ignoreAbort=true;
+  const old=new SingleWindowCoordinator(drivers[0]!,BUILD,{operationMs:20,cleanupMs:10,hardStopMs:10});
+  const healthy=new SingleWindowCoordinator(drivers[1]!,BUILD);let replacements=0;
+  const pool=new PooledWindowCoordinator([old,healthy],BUILD,undefined,async()=>{
+    replacements++;return new SingleWindowCoordinator(drivers[2]!,BUILD);
+  });fixtures.push({pool,drivers});
+  const failed=request('retired-receipt');await pool.execute(failed);await collect(pool,failed.actionId);
+  const until=Date.now()+2_000;
+  while(old.ownedActionId!==null&&Date.now()<until)await Bun.sleep(5);
+  const receipt=(await pool.action(failed.actionId))!;expect(receipt).toBeDefined();
+  let health=await pool.health();
+  while(health.availableActionSlots!==2&&Date.now()<until){await Bun.sleep(5);health=await pool.health();}
+  expect(health.availableActionSlots).toBe(2);expect(replacements).toBe(1);
+  expect(drivers[1]!.closeCalls).toBe(0);
+  expect(await pool.action(failed.actionId)).toEqual(receipt);
+  expect(await pool.execute(failed)).toEqual(receipt);
+  expect(drivers[0]!.runs).toEqual([failed.actionId]);expect(drivers[2]!.runs).toEqual([]);
+  await pool.execute(request('healthy-held'));await drivers[1]!.started.promise;
+  await pool.execute(request('replacement-work'));await drivers[2]!.started.promise;
+  expect(drivers[1]!.runs).toEqual(['healthy-held']);expect(drivers[2]!.runs).toEqual(['replacement-work']);
 });

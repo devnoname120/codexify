@@ -15,7 +15,8 @@ use codexify::agent_automation::{
     AcceptedChatBatch, ActionPrompt, AgentAutomationStore, AgentAutomationSupervisor,
     AutomationActionStatus, AutomationExecution, AutomationExecutionError, AutomationExecutor,
     AutomationTaskHandle, BrowserAutomationExecutor, CompanionActionSnapshot, CompanionActionState,
-    CompanionEvent, CompanionEventKind, GoalFinish, GoalStatus, PairingCommit,
+    CompanionEvent, CompanionEventKind, ConversationApprovalObservation, GoalFinish, GoalStatus,
+    PairingCommit,
 };
 use codexify::config::default_config;
 use codexify::exec_sessions::SessionState;
@@ -586,6 +587,285 @@ struct ApprovalExecutor {
     inner: Arc<FakeExecutor>,
     pending: AtomicBool,
     checks: Mutex<Vec<(String, String, String)>>,
+}
+
+struct ExternalApprovalExecutor {
+    inner: Arc<FakeExecutor>,
+    opened: AtomicBool,
+    pending: Mutex<Option<bool>>,
+}
+
+#[async_trait]
+impl AutomationExecutor for ExternalApprovalExecutor {
+    async fn observe_pending_conversation(
+        &self,
+        _url: &str,
+        _account: &str,
+        _connector: &str,
+        _navigate: bool,
+    ) -> Result<ConversationApprovalObservation, String> {
+        Ok(ConversationApprovalObservation {
+            approved: false,
+            pending: *self.pending.lock().unwrap(),
+        })
+    }
+    async fn execute(
+        &self,
+        execution: AutomationExecution,
+        events: mpsc::UnboundedSender<CompanionEvent>,
+        cancel: CancellationToken,
+    ) -> Result<CompanionActionSnapshot, AutomationExecutionError> {
+        if !self.opened.swap(true, Ordering::SeqCst) {
+            let mut snapshot = snapshot_for(execution);
+            snapshot.state = CompanionActionState::ApprovalRequired;
+            snapshot.send_accepted = false;
+            snapshot.attention = Some(codexify::agent_automation::CompanionAttention {
+                code: "approval_required".into(),
+                message: Some("Connector approval during initialization".into()),
+            });
+            return Ok(snapshot);
+        }
+        self.inner.execute(execution, events, cancel).await
+    }
+}
+
+#[tokio::test]
+async fn approval_cleared_by_background_monitor_releases_unsent_message_once_across_restart() {
+    for restart in [false, true] {
+        let f = fixture().await;
+        f.chat
+            .append_user(
+                "pending-after-setup".into(),
+                "Continue the actual user request".into(),
+            )
+            .await
+            .unwrap();
+        let executor = Arc::new(ExternalApprovalExecutor {
+            inner: f.executor.clone(),
+            opened: AtomicBool::new(false),
+            pending: Mutex::new(Some(true)),
+        });
+        let mut config = f.config.markdown_chat.automation.clone();
+        config.auto_approve_tool_calls = true;
+        let mut supervisor = AgentAutomationSupervisor::new(config.clone(), executor.clone());
+        supervisor
+            .register_task(AutomationTaskHandle::new(
+                f.task.clone(),
+                0,
+                f.store.clone(),
+                f.chat.clone(),
+            ))
+            .await
+            .unwrap();
+        supervisor.scan_once(1000).await.unwrap();
+        supervisor.run_next(1001).await.unwrap().unwrap();
+        let blocked = f.store.load(&f.task).unwrap();
+        assert_eq!(
+            blocked.action.status,
+            AutomationActionStatus::ApprovalRequired
+        );
+        assert_eq!(blocked.action.send_accepted, Some(false));
+        assert!(!blocked.action.messages_fenced);
+        assert_eq!(f.chat.unread_snapshot().await.unwrap().messages.len(), 1);
+        // The monitor or user approved independently. There is no second click
+        // to observe; the old boolean-only response would remain false forever.
+        *executor.pending.lock().unwrap() = Some(false);
+        if restart {
+            supervisor = AgentAutomationSupervisor::new(config, executor.clone());
+            supervisor
+                .register_task(AutomationTaskHandle::new(
+                    f.task.clone(),
+                    0,
+                    f.store.clone(),
+                    f.chat.clone(),
+                ))
+                .await
+                .unwrap();
+        }
+        supervisor.scan_once(7000).await.unwrap();
+        let cleared = f.store.load(&f.task).unwrap();
+        assert_eq!(cleared.action.status, AutomationActionStatus::Idle);
+        assert!(cleared.action.last_error.is_none());
+        assert!(
+            cleared.approval_resume.is_none(),
+            "an unsent continuation needs no existing-turn approval grace"
+        );
+        assert_eq!(cleared.action.send_accepted, Some(false));
+        assert_eq!(f.chat.unread_snapshot().await.unwrap().messages.len(), 1);
+        supervisor.scan_once(7001).await.unwrap();
+        supervisor.run_next(7002).await.unwrap().unwrap();
+        assert_eq!(f.executor.calls.load(Ordering::SeqCst), 1);
+        assert!(f.store.load(&f.task).unwrap().action.messages_fenced);
+        supervisor.scan_once(20_000).await.unwrap();
+        assert!(supervisor.run_next(20_001).await.unwrap().is_none());
+        assert_eq!(f.executor.calls.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[tokio::test]
+async fn pending_or_unknown_approval_never_releases_the_failed_continuation() {
+    for pending in [Some(true), None] {
+        let f = fixture().await;
+        f.chat
+            .append_user(
+                "still-pending".into(),
+                "Do not send this while blocked".into(),
+            )
+            .await
+            .unwrap();
+        let executor = Arc::new(ExternalApprovalExecutor {
+            inner: f.executor.clone(),
+            opened: AtomicBool::new(false),
+            pending: Mutex::new(pending),
+        });
+        let mut config = f.config.markdown_chat.automation.clone();
+        config.auto_approve_tool_calls = true;
+        let supervisor = AgentAutomationSupervisor::new(config, executor);
+        supervisor
+            .register_task(AutomationTaskHandle::new(
+                f.task.clone(),
+                0,
+                f.store.clone(),
+                f.chat.clone(),
+            ))
+            .await
+            .unwrap();
+        supervisor.scan_once(1000).await.unwrap();
+        supervisor.run_next(1001).await.unwrap().unwrap();
+        for now in [7000, 14_000] {
+            supervisor.scan_once(now).await.unwrap();
+            assert!(supervisor.run_next(now + 1).await.unwrap().is_none());
+        }
+        assert_eq!(
+            f.store.load(&f.task).unwrap().action.status,
+            AutomationActionStatus::ApprovalRequired
+        );
+        assert_eq!(f.chat.unread_snapshot().await.unwrap().messages.len(), 1);
+        assert_eq!(f.executor.calls.load(Ordering::SeqCst), 0);
+    }
+}
+
+#[tokio::test]
+async fn cleared_approval_delivers_owner_question_without_resuming_a_blocked_goal() {
+    let f = fixture().await;
+    let goal = f
+        .store
+        .set_goal(
+            &f.task,
+            "Implement only after the user approves the design",
+            100,
+        )
+        .unwrap();
+    f.store.run_goal(&f.task, goal.revision, 101).unwrap();
+    f.store
+        .finish_goal(
+            &f.task,
+            goal.revision,
+            GoalFinish::Blocked {
+                reason: "Waiting for design approval".into(),
+            },
+            102,
+        )
+        .unwrap();
+    let blocked_goal = f.store.load(&f.task).unwrap().goal;
+    f.chat
+        .append_user(
+            "clarification-after-block".into(),
+            "Why is an option needed inside this CMake function?".into(),
+        )
+        .await
+        .unwrap();
+    let executor = Arc::new(ExternalApprovalExecutor {
+        inner: f.executor.clone(),
+        opened: AtomicBool::new(false),
+        pending: Mutex::new(Some(true)),
+    });
+    let mut config = f.config.markdown_chat.automation.clone();
+    config.auto_approve_tool_calls = true;
+    let supervisor = AgentAutomationSupervisor::new(config, executor.clone());
+    supervisor
+        .register_task(AutomationTaskHandle::new(
+            f.task.clone(),
+            0,
+            f.store.clone(),
+            f.chat.clone(),
+        ))
+        .await
+        .unwrap();
+    supervisor.scan_once(1000).await.unwrap();
+    supervisor.run_next(1001).await.unwrap().unwrap();
+    *executor.pending.lock().unwrap() = Some(false);
+    supervisor.scan_once(7000).await.unwrap();
+    assert_eq!(
+        f.store.load(&f.task).unwrap().action.status,
+        AutomationActionStatus::Idle
+    );
+    assert_eq!(f.store.load(&f.task).unwrap().goal, blocked_goal);
+    supervisor.scan_once(7001).await.unwrap();
+    supervisor.run_next(7002).await.unwrap().unwrap();
+    assert_eq!(f.executor.calls.load(Ordering::SeqCst), 1);
+    assert!(matches!(
+        f.executor.executions.lock().unwrap()[0].request.prompt,
+        ActionPrompt::OfflineChat { .. }
+    ));
+    assert_eq!(
+        f.store.load(&f.task).unwrap().goal,
+        blocked_goal,
+        "answering a question must not authorize implementation"
+    );
+}
+
+#[tokio::test]
+async fn stale_approval_is_rechecked_even_after_an_ordinary_approval_probe_used_the_scan() {
+    let f = fixture().await;
+    let (other, other_chat) = add_task(
+        &f,
+        "approval-rotation",
+        "https://chatgpt.com/c/other-approval",
+    )
+    .await;
+    let (target, chat) = if f.task.audit_hash() > other.audit_hash() {
+        (&f.task, &f.chat)
+    } else {
+        (&other, &other_chat)
+    };
+    chat.append_user("urgent-continuation".into(), "Continue after setup".into())
+        .await
+        .unwrap();
+    let executor = Arc::new(ExternalApprovalExecutor {
+        inner: f.executor.clone(),
+        opened: AtomicBool::new(false),
+        pending: Mutex::new(Some(true)),
+    });
+    let mut config = f.config.markdown_chat.automation.clone();
+    config.auto_approve_tool_calls = true;
+    let supervisor = AgentAutomationSupervisor::new(config, executor.clone());
+    for (task, chat) in [(&f.task, &f.chat), (&other, &other_chat)] {
+        supervisor
+            .register_task(AutomationTaskHandle::new(
+                task.clone(),
+                0,
+                f.store.clone(),
+                chat.clone(),
+            ))
+            .await
+            .unwrap();
+    }
+    supervisor.scan_once(1000).await.unwrap();
+    supervisor.run_next(1001).await.unwrap().unwrap();
+    supervisor.scan_once(7000).await.unwrap();
+    assert_eq!(
+        f.store.load(target).unwrap().action.status,
+        AutomationActionStatus::ApprovalRequired
+    );
+    *executor.pending.lock().unwrap() = Some(false);
+    // Cursor rotation puts the ordinary, nonblocked conversation first again.
+    supervisor.scan_once(14_000).await.unwrap();
+    assert_eq!(
+        f.store.load(target).unwrap().action.status,
+        AutomationActionStatus::Idle
+    );
+    assert_eq!(f.executor.calls.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
@@ -3553,7 +3833,15 @@ async fn superseded_combined_action_still_fences_its_accepted_unread_batch() {
 
 #[tokio::test]
 async fn real_executor_defers_shared_browser_contention_without_consuming_send_retries() {
-    for (pairing, session_status, active_id, authenticated, expected_execute_calls, pool) in [
+    for (
+        pairing,
+        session_status,
+        active_id,
+        authenticated,
+        expected_execute_calls,
+        pool,
+        admission_error,
+    ) in [
         (true, "busy", None, true, 1),
         (false, "busy", None, true, 0),
         (true, "busy", Some("other-action"), true, 0),
@@ -3573,6 +3861,37 @@ async fn real_executor_defers_shared_browser_contention_without_consuming_send_r
         (false, "busy", Some("other-page-action"), true, 1, true),
         (false, "busy", Some("other-page-action"), false, 0, true),
         (false, "idle", Some("other-page-action"), false, 0, true),
+        (true, "busy", None, true, 0, true),
+    ])
+    .map(|(a, b, c, d, e, f)| (a, b, c, d, e, f, None))
+    .chain([
+        (
+            true,
+            "idle",
+            None,
+            true,
+            1,
+            false,
+            Some("Browser companion action pages are busy"),
+        ),
+        (
+            true,
+            "idle",
+            None,
+            true,
+            1,
+            false,
+            Some("This ChatGPT conversation is being inspected"),
+        ),
+        (
+            true,
+            "idle",
+            None,
+            true,
+            1,
+            false,
+            Some("Browser companion account changed before the action could start"),
+        ),
     ]) {
         let execute_calls = Arc::new(AtomicUsize::new(0));
         let execute_counter = execute_calls.clone();
@@ -3593,8 +3912,8 @@ async fn real_executor_defers_shared_browser_contention_without_consuming_send_r
                 });
                 if pool {
                     health["actionCapacity"]=serde_json::json!(2);
-                    health["availableActionSlots"]=serde_json::json!(1);
-                    health["activeActionIds"]=serde_json::json!([active_id.unwrap()]);
+                    health["availableActionSlots"]=serde_json::json!(if active_id.is_some() {1} else {0});
+                    health["activeActionIds"]=serde_json::json!(active_id.into_iter().collect::<Vec<_>>());
                 }
                 axum::Json(health)
             }))
@@ -3602,13 +3921,16 @@ async fn real_executor_defers_shared_browser_contention_without_consuming_send_r
                 let execute_counter = execute_counter.clone();
                 async move {
                     execute_counter.fetch_add(1, Ordering::SeqCst);
+                    if let Some(error)=admission_error {
+                        return (StatusCode::CONFLICT,error).into_response();
+                    }
                     axum::Json(serde_json::json!({
                         "protocolVersion":codexify::agent_automation::PROTOCOL_VERSION,
                         "build":COMPANION_BUILD, "actionId":"draft-replacement",
                         "state":"external_interference", "sendAccepted":false,
                         "canonicalUrl":null, "selected":null, "lastEventSequence":0,
                         "attention":{"code":"external_interference","message":"User draft is not a pairing verification"}
-                    }))
+                    })).into_response()
                 }
             }));
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
@@ -3664,7 +3986,18 @@ async fn real_executor_defers_shared_browser_contention_without_consuming_send_r
             .execute(execution, events, CancellationToken::new())
             .await;
         assert_eq!(execute_calls.load(Ordering::SeqCst), expected_execute_calls);
-        if expected_execute_calls == 1 {
+        if let Some(message) = admission_error {
+            if message.contains("account changed") {
+                let error = outcome.err().unwrap();
+                assert!(!error.send_accepted);
+                assert_eq!(error.message, message);
+            } else {
+                let waiting = outcome.unwrap();
+                assert_eq!(waiting.state, CompanionActionState::Waiting);
+                assert!(!waiting.send_accepted);
+                assert!(waiting.cooldown_until_ms.is_some());
+            }
+        } else if expected_execute_calls == 1 {
             let snapshot = outcome.unwrap();
             assert!(!snapshot.send_accepted);
             assert_eq!(snapshot.state, CompanionActionState::ExternalInterference);
@@ -8052,6 +8385,64 @@ impl AutomationExecutor for CreatedPairingFailureExecutor {
 }
 
 #[tokio::test]
+async fn automatic_worker_creation_retry_respects_stop_before_send() {
+    let f = fixture().await;
+    let goal = f
+        .store
+        .set_goal(&f.task, "Implement assigned work", 1000)
+        .unwrap();
+    f.store.run_goal(&f.task, goal.revision, 1000).unwrap();
+    let state_path = f
+        .store
+        .task_directory(&f.task)
+        .unwrap()
+        .join("automation.json");
+    let mut saved: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
+    saved["agents"]["parentTaskKey"] = serde_json::json!("a".repeat(64));
+    std::fs::write(&state_path, serde_json::to_vec(&saved).unwrap()).unwrap();
+    let issue = f
+        .store
+        .issue_creation_pairing(
+            &f.task,
+            "https://chatgpt.com/g/g-p-project/project",
+            0,
+            1000,
+        )
+        .unwrap();
+    f.supervisor
+        .queue_new_chat(
+            &f.task,
+            &issue.reference,
+            issue.generation,
+            1001,
+            "B".repeat(43),
+            None,
+        )
+        .await
+        .unwrap();
+    let mut saved: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
+    saved["action"]["automaticRetryAttempts"] = serde_json::json!(1);
+    saved["action"]["automaticRetryInProgress"] = serde_json::json!(true);
+    std::fs::write(&state_path, serde_json::to_vec(&saved).unwrap()).unwrap();
+    f.chat
+        .request_agent_stop("stop-worker-setup".into())
+        .await
+        .unwrap();
+    assert!(f.supervisor.run_next(1002).await.unwrap().is_none());
+    assert_eq!(f.executor.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(f.supervisor.queued_count().await, 0);
+    let stopped = f.store.load(&f.task).unwrap();
+    assert_eq!(stopped.action.send_accepted, Some(false));
+    assert_eq!(
+        stopped.action.last_error.as_deref(),
+        Some("Worker conversation creation was stopped before Send")
+    );
+    assert!(f.chat.agent_stop_requested().await.unwrap());
+}
+
+#[tokio::test]
 async fn creation_records_its_url_before_failure_and_accepts_verification_after_the_grace_period() {
     let f = fixture().await;
     let issue = f
@@ -8108,6 +8499,122 @@ async fn creation_records_its_url_before_failure_and_accepts_verification_after_
     assert_eq!(state.pairing.verified_owner_generation, Some(0));
     assert!(state.action.last_error.is_none());
     assert!(!state.action_needs_attention_at(70_001));
+}
+
+#[tokio::test]
+async fn native_delivery_clears_stale_approval_and_access_errors_without_replaying_or_resuming() {
+    for failure in [
+        AutomationActionStatus::ApprovalRequired,
+        AutomationActionStatus::ConversationUnavailable,
+    ] {
+        for stopped in [false, true] {
+            let f = fixture().await;
+            let goal = f
+                .store
+                .set_goal(&f.task, "Keep the assignment", 100)
+                .unwrap();
+            f.store.run_goal(&f.task, goal.revision, 101).unwrap();
+            f.chat.record_agent_call(1000).await.unwrap();
+            f.chat
+                .append_user(
+                    "original-followup".into(),
+                    "Read this instruction once".into(),
+                )
+                .await
+                .unwrap();
+            let executor = Arc::new(PreSendFailureExecutor {
+                calls: AtomicUsize::new(0),
+            });
+            let supervisor = AgentAutomationSupervisor::new(
+                f.config.markdown_chat.automation.clone(),
+                executor.clone(),
+            );
+            supervisor
+                .register_task(AutomationTaskHandle::new(
+                    f.task.clone(),
+                    0,
+                    f.store.clone(),
+                    f.chat.clone(),
+                ))
+                .await
+                .unwrap();
+            let now = 1000 + AUTOMATION_OFFLINE_AFTER_MS;
+            supervisor.scan_once(now).await.unwrap();
+            assert!(supervisor.run_next(now + 1).await.is_err());
+            let action = f.store.load(&f.task).unwrap().action;
+            f.store
+                .update_action_status(
+                    &f.task,
+                    action.id.as_deref().unwrap(),
+                    failure,
+                    Some("Browser follow-up blocked"),
+                    None,
+                    now + 2,
+                )
+                .unwrap();
+            // Mere activity cannot acknowledge an unread instruction.
+            f.chat.record_agent_call(now + 3).await.unwrap();
+            supervisor.scan_once(now + 3).await.unwrap();
+            assert_eq!(f.store.load(&f.task).unwrap().action.status, failure);
+            f.chat.read(true).await.unwrap();
+            f.chat
+                .append_user(
+                    "later-unread".into(),
+                    "Keep this new instruction queued".into(),
+                )
+                .await
+                .unwrap();
+            if stopped {
+                let saved_action = f.store.load(&f.task).unwrap().action;
+                f.store
+                    .pause_goal_for_agent_stop(&f.task, "pause-after-read", now + 4)
+                    .unwrap();
+                f.chat
+                    .request_agent_stop("pause-after-read".into())
+                    .await
+                    .unwrap();
+                // Parent controls retain failed dispatches when pausing a goal.
+                let path = f
+                    .store
+                    .task_directory(&f.task)
+                    .unwrap()
+                    .join("automation.json");
+                let mut record: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+                record["action"] = serde_json::to_value(saved_action).unwrap();
+                std::fs::write(path, serde_json::to_vec(&record).unwrap()).unwrap();
+            }
+            let before = f.store.load(&f.task).unwrap();
+            supervisor.scan_once(now + 5).await.unwrap();
+            let after = f.store.load(&f.task).unwrap();
+            assert!(after.action.last_error.is_none());
+            if after.action.id == before.action.id {
+                assert_eq!(after.action.status, AutomationActionStatus::Idle);
+                assert!(after.action.messages_fenced);
+            } else {
+                // A running task may queue the newer unread instruction, but
+                // the stopped task must remain idle after reconciliation.
+                assert!(!stopped);
+                assert_eq!(after.action.status, AutomationActionStatus::Queued);
+            }
+            assert!(!after.action.goal_turn_counted);
+            assert_eq!(after.goal, before.goal);
+            assert_eq!(f.chat.agent_stop_requested().await.unwrap(), stopped);
+            assert_eq!(executor.calls.load(Ordering::SeqCst), 1);
+            assert_eq!(after.chat_mirror.message_ids, vec!["original-followup"]);
+            assert_eq!(
+                f.chat
+                    .unread_snapshot()
+                    .await
+                    .unwrap()
+                    .messages
+                    .iter()
+                    .map(|message| message.id.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["later-unread"]
+            );
+        }
+    }
 }
 
 #[tokio::test]
@@ -10217,6 +10724,69 @@ struct MaterializationInspectionExecutor {
     visits: AtomicUsize,
     approved: bool,
     busy: AtomicBool,
+}
+
+#[tokio::test]
+async fn queued_verification_keeps_navigation_priority_over_materialization_probes() {
+    let f = fixture().await;
+    f.chat.record_agent_call(1000).await.unwrap();
+    assert!(
+        f.chat
+            .record_file_materialization("direct", 1)
+            .await
+            .unwrap()
+    );
+    let executor = Arc::new(MaterializationInspectionExecutor {
+        visits: AtomicUsize::new(0),
+        approved: false,
+        busy: AtomicBool::new(false),
+    });
+    let mut config = f.config.markdown_chat.automation.clone();
+    config.auto_approve_tool_calls = true;
+    let supervisor = AgentAutomationSupervisor::new(config, executor.clone());
+    supervisor
+        .register_task(AutomationTaskHandle::new(
+            f.task.clone(),
+            0,
+            f.store.clone(),
+            f.chat.clone(),
+        ))
+        .await
+        .unwrap();
+    let setup = ConversationIdentity::from_openai_session("explicit-setup-priority").unwrap();
+    let chat = MarkdownChatStore::default()
+        .chat(&f.config, Some(&setup), &SessionState::new())
+        .unwrap();
+    let issue = f
+        .store
+        .issue_pairing(&setup, "https://chatgpt.com/c/setup-priority", 0, 1000)
+        .unwrap();
+    f.store
+        .bind_pairing_account(&setup, issue.generation, "account-1")
+        .unwrap();
+    supervisor
+        .register_task(AutomationTaskHandle::new(
+            setup.clone(),
+            0,
+            f.store.clone(),
+            chat,
+        ))
+        .await
+        .unwrap();
+    supervisor
+        .queue_pair_verification(&setup, &issue.reference, issue.generation, 1000)
+        .await
+        .unwrap();
+    supervisor
+        .scan_once(1000 + AUTOMATION_OFFLINE_AFTER_MS)
+        .await
+        .unwrap();
+    assert_eq!(
+        executor.visits.load(Ordering::SeqCst),
+        0,
+        "passive approvals may run, but a background visit must not spend the setup's next navigation slot"
+    );
+    assert_eq!(supervisor.queued_count().await, 1);
 }
 
 #[async_trait]

@@ -417,6 +417,7 @@ async fn only_model_visible_calls_start_offline_notification_monitors() {
     config.markdown_chat.default_message_mode = crate::markdown_chat::MessageMode::Steer;
     config.markdown_chat.notifications = Some(crate::markdown_chat::NotificationsConfig {
         urls: vec!["ntfys://ntfy.example/topic?image=no".into()],
+        subagents: true,
         python_path: root.path().join("missing-python").display().to_string(),
         timeout_ms: 1000,
         events: Default::default(),

@@ -787,7 +787,6 @@ mod tests {
             "agentChat.features.agentTeams",
             "agentChat.features.externalAgentControl",
             "agentChat.features.autoMode",
-            "agentChat.features.agentFolders",
             "agentChat.features.conversationRecovery",
             "agentChat.automation.minimalUi",
             "agentChat.automation.recoveryEnhancements",
@@ -1005,6 +1004,14 @@ mod tests {
             shown["defaults"]["agentChat"]["notifications"]["urls"],
             json!([])
         );
+        assert_eq!(
+            shown["defaults"]["agentChat"]["notifications"]["subagents"],
+            true
+        );
+        assert_eq!(
+            shown["fieldSchema"]["agentChat"]["notifications"]["subagents"],
+            true
+        );
         let saved = save(
             &config,
             shown["revision"].as_str().unwrap(),
@@ -1028,6 +1035,7 @@ mod tests {
         let defaults = crate::config::settings_defaults(&config, &document);
         assert_eq!(defaults["projectCloneDir"], "/another/project");
         assert_eq!(defaults["skills"]["includePlugins"], false);
+        assert_eq!(defaults["skills"]["blacklist"], json!([]));
         assert!(
             defaults["memory"]["dir"]
                 .as_str()

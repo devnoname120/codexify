@@ -22,9 +22,9 @@ pub use companion::{
     ActionPrompt, BrowserCompanionClient, COMPANION_KIND, CancelActionReceipt, CapabilityCatalog,
     CompanionActionSnapshot, CompanionActionState, CompanionAttention, CompanionEvent,
     CompanionEventKind, CompanionHealth, CompanionSelection, CompanionSessionStatus,
-    CompanionUnreadMessage, EffortCapability, ExecuteActionRequest, ModelCapability,
-    PROTOCOL_BUILD_SUFFIX, PROTOCOL_SCHEMA_HASH, PROTOCOL_VERSION, RevealWindowReceipt,
-    RevealWindowRequest,
+    CompanionUnreadMessage, ConversationApprovalObservation, EffortCapability,
+    ExecuteActionRequest, ModelCapability, PROTOCOL_BUILD_SUFFIX, PROTOCOL_SCHEMA_HASH,
+    PROTOCOL_VERSION, RevealWindowReceipt, RevealWindowRequest,
 };
 pub use install::{
     BrowserArchiveKind, BrowserCompanionManager, BrowserCompanionStatus, BrowserInstallReceipt,

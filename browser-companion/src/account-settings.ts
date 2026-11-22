@@ -164,24 +164,31 @@ export async function readBillingPlan(page:Page,signal?:AbortSignal,expectedAcco
   return {...classifyPlan(sourceLabel|| (sessionPlan.kind!=="unknown"?sessionPlan.label:"")),accountFingerprint:account.fingerprint};
 }
 
-async function markRefreshButton(page:Page):Promise<void> {
-  const marked=await page.locator('html').evaluate(()=>{
-    for(const button of document.querySelectorAll('button'))button.removeAttribute('data-refresh-tools-target');
-    const direct=[...document.querySelectorAll<HTMLButtonElement>('button[data-testid*="refresh"],button[data-action="refresh-tools"],button[name="refresh_tools"]')].filter(button=>button.getClientRects().length>0);
-    if(direct.length===1){direct[0]!.setAttribute('data-refresh-tools-target','true');return true;}
-    const candidates=new Set<HTMLButtonElement>();
-    // The Manage app card has two edit controls, Refresh, then a destructive Delete.
-    // This evidence is independent of the translated labels and never selects the Delete row.
-    for(const node of document.querySelectorAll('div,section')) {
-      const buttons=[...node.querySelectorAll<HTMLButtonElement>('button')].filter(button=>button.getClientRects().length>0);
-      if(buttons.length!==4)continue;
-      const destructive=(button:HTMLButtonElement)=>{const color=getComputedStyle(button).color;const c=/^rgba?\(/.test(color)?color.match(/\d+/g)?.map(Number)||[]:[];return c.length>=3&&c[0]!>c[1]!*1.3&&c[0]!>c[2]!*1.3;};
-      if(destructive(buttons[3]!)&&buttons.slice(0,3).every(button=>!destructive(button)))candidates.add(buttons[2]!);
-    }
-    if(candidates.size===1){[...candidates][0]!.setAttribute('data-refresh-tools-target','true');return true;}
-    return false;
-  },undefined,{timeout:1_500});
-  if(!marked)throw selectorDrift("ChatGPT did not expose one identifiable tool-refresh control");
+async function markRefreshButton(page:Page,signal?:AbortSignal):Promise<void> {
+  const deadline=Date.now()+5_000;
+  do {
+    signal?.throwIfAborted();
+    const marked=await page.locator('html').evaluate(()=>{
+      for(const button of document.querySelectorAll('button'))button.removeAttribute('data-refresh-tools-target');
+      const direct=[...document.querySelectorAll<HTMLButtonElement>('button[data-testid*="refresh"],button[data-action="refresh-tools"],button[name="refresh_tools"]')].filter(button=>button.getClientRects().length>0);
+      if(direct.length===1){direct[0]!.setAttribute('data-refresh-tools-target','true');return true;}
+      const candidates=new Set<HTMLButtonElement>();
+      // The Manage app card has two edit controls, Refresh, then a destructive Delete.
+      // This evidence is independent of the translated labels and never selects the Delete row.
+      for(const node of document.querySelectorAll('div,section')) {
+        const buttons=[...node.querySelectorAll<HTMLButtonElement>('button')].filter(button=>button.getClientRects().length>0);
+        if(buttons.length!==4)continue;
+        const destructive=(button:HTMLButtonElement)=>{const color=getComputedStyle(button).color;const c=/^rgba?\(/.test(color)?color.match(/\d+/g)?.map(Number)||[]:[];return c.length>=3&&c[0]!>c[1]!*1.3&&c[0]!>c[2]!*1.3;};
+        if(destructive(buttons[3]!)&&buttons.slice(0,3).every(button=>!destructive(button)))candidates.add(buttons[2]!);
+      }
+      if(candidates.size===1){[...candidates][0]!.setAttribute('data-refresh-tools-target','true');return true;}
+      return false;
+    },undefined,{timeout:1_500});
+    if(marked)return;
+    signal?.throwIfAborted();
+    await new Promise(resolve=>setTimeout(resolve,100));
+  }while(Date.now()<deadline);
+  throw selectorDrift("ChatGPT did not expose one identifiable tool-refresh control");
 }
 
 async function allowAllChoice(page:Page,signal?:AbortSignal) {
@@ -267,7 +274,7 @@ export async function beginConnectorToolRefresh(page:Page,appId:string,name:stri
   // Settings can also contain a hidden app-name copy. Select visible text before
   // taking the first match, rather than waiting on that hidden copy.
   await page.getByText(name,{exact:true}).and(page.locator(':visible')).first().waitFor({state:"visible",timeout:5_000,signal});
-  await markRefreshButton(page);
+  await markRefreshButton(page,signal);
   const button=page.locator('button[data-refresh-tools-target="true"]');
   await assertPage();
   // A fast refresh may finish before click() returns. Record its loading
@@ -376,7 +383,7 @@ export async function inspectConnectorSettings(page:Page,appId:string,name:strin
   await observeReadOnly(page.getByText(name,{exact:true}).and(page.locator(':visible')).first().waitFor({state:"visible",timeout:15_000,signal}),signal,15_000);
   await assertPage();signal?.throwIfAborted();
   traceRefresh("connector name visible");
-  await markRefreshButton(page);
+  await markRefreshButton(page,signal);
   return connectorPermissionSummary(page,signal);
 }
 
@@ -390,7 +397,7 @@ export async function prepareConnectorRefresh(page:Page,name:string,expectedAcco
     permissionChanged=await setConnectorAllowAll(page,appId,account,signal);
     await connectorPage(page,appId,account,false,signal);
     await page.getByText(name,{exact:true}).and(page.locator(':visible')).first().waitFor({state:"visible",timeout:5_000,signal});
-    await markRefreshButton(page);
+    await markRefreshButton(page,signal);
   }
   const verified=await connectorPermissionSummary(page);
   if(verified?.summary)witness?.remember(verified.summary);

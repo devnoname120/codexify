@@ -35,6 +35,7 @@ fn goal_events(chat: &ChatFile) -> Result<Vec<GoalEvent>, String> {
 }
 
 pub const AGENT_STOP_MESSAGE: &str = "Write your current progress and status using chat_write if that tool is available, then immediately finish your turn without running any further tools. The user has stopped this turn and paused the goal; do not continue the goal unless the user explicitly resumes it.";
+pub const AGENT_PAUSE_MESSAGE: &str = "The coordinator paused this assignment. Do not perform task work or resume the goal until explicitly resumed. Report current progress once with chat_write if needed, then call chat_await for further instructions. Repeat chat_await after every timeout or cancellation without instructions; a pause does not authorize ending the assistant turn.";
 
 #[derive(Debug, Serialize)]
 pub struct WidgetMessage {
@@ -162,17 +163,23 @@ struct Span {
 }
 
 impl Span {
-    fn is_goal_update(&self) -> bool {
-        // Owner goal edits use this reserved ID with the SHA-256 of the request ID.
+    fn is_internal_message(&self) -> bool {
+        // Controls and team messages use reserved IDs with a SHA-256 digest.
         // Keep these control notices in CHAT.md for agent delivery, including old
         // notices, but omit them from the displayed conversation. Do not match text.
         self.role == "user"
-            && self.id.strip_prefix("goal-update-").is_some_and(|digest| {
-                digest.len() == 64
-                    && digest
-                        .bytes()
-                        .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
-            })
+            && self
+                .id
+                .strip_prefix("goal-update-")
+                .or_else(|| self.id.strip_prefix("dev-access-"))
+                .or_else(|| self.id.strip_prefix("team-message-"))
+                .or_else(|| self.id.strip_prefix("parent-control-"))
+                .is_some_and(|digest| {
+                    digest.len() == 64
+                        && digest
+                            .bytes()
+                            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+                })
     }
 }
 
@@ -314,8 +321,9 @@ fn widget_message(
     file: &mut File,
     span: Span,
     store: &super::super::attachments::AttachmentStore,
+    include_internal: bool,
 ) -> Result<Option<WidgetMessage>, String> {
-    if span.is_goal_update() {
+    if !include_internal && span.is_internal_message() {
         return Ok(None);
     }
     let text = read_range(file, span.body_start, span.body_end, MAX_UNREAD_BYTES)?;
@@ -439,7 +447,7 @@ impl ChatFile {
                 }
                 let records: Vec<_> = spans(file)?
                     .into_iter()
-                    .filter(|span| !span.is_goal_update())
+                    .filter(|span| !span.is_internal_message())
                     .collect();
                 let title: String = records
                     .iter()
@@ -670,6 +678,23 @@ impl ChatFile {
         before: Option<u64>,
         known_revision: Option<String>,
     ) -> Result<WidgetPage, String> {
+        self.conversation_page(before, known_revision, false).await
+    }
+
+    pub(crate) async fn agent_inbox_page(
+        self: &Arc<Self>,
+        before: Option<u64>,
+        known_revision: Option<String>,
+    ) -> Result<WidgetPage, String> {
+        self.conversation_page(before, known_revision, true).await
+    }
+
+    async fn conversation_page(
+        self: &Arc<Self>,
+        before: Option<u64>,
+        known_revision: Option<String>,
+        include_internal: bool,
+    ) -> Result<WidgetPage, String> {
         self.run(move |chat| {
             chat.with_cursor(|cursor, file| {
                 check_cursor(file, cursor)?;
@@ -686,8 +711,13 @@ impl ChatFile {
                     .and_then(|metadata| metadata.modified().ok())
                     .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
                     .map_or(0, |time| time.as_nanos());
+                let projection = if include_internal {
+                    "agent"
+                } else {
+                    "owner-v2"
+                };
                 let revision = format!(
-                    "{length}-{modified}-{}-{}-{events_stamp}",
+                    "{projection}-{length}-{modified}-{}-{}-{events_stamp}",
                     cursor.delivered_through, cursor.offset
                 );
                 let unchanged = before.is_none() && known_revision.as_deref() == Some(&revision);
@@ -725,7 +755,7 @@ impl ChatFile {
                 for span in records
                     .into_iter()
                     .rev()
-                    .filter(|span| !span.is_goal_update())
+                    .filter(|span| include_internal || !span.is_internal_message())
                     .filter(|span| before.is_none_or(|end| span.start < end))
                 {
                     if page.messages.len() >= PAGE_MESSAGES
@@ -738,6 +768,7 @@ impl ChatFile {
                         file,
                         span,
                         &super::super::attachments::AttachmentStore::for_chat(&chat.path)?,
+                        include_internal,
                     )?
                     else {
                         continue;
@@ -885,6 +916,7 @@ impl ChatFile {
                         file,
                         span,
                         &super::super::attachments::AttachmentStore::for_chat(&chat.path)?,
+                        false,
                     )?
                     else {
                         continue;
@@ -1141,6 +1173,48 @@ impl ChatFile {
         .await
     }
 
+    pub(crate) async fn append_parent_instruction(
+        self: &Arc<Self>,
+        id: String,
+        message: String,
+        store: Arc<crate::agent_automation::AgentAutomationStore>,
+        task: crate::project_bindings::ConversationIdentity,
+        parent: crate::project_bindings::ConversationIdentity,
+        expected: crate::agent_automation::AutomationTaskState,
+    ) -> Result<UserSendReceipt, String> {
+        self.run(move |chat| {
+            let checked_id = id.clone();
+            super::queue::append_steering_with(chat, &checked_id, &[], true, |cursor, file| {
+                if cursor.archived_at_ms.is_some() {
+                    return Err("Archived workers cannot receive parent instructions".into());
+                }
+                if cursor.agent_stop_requested && !cursor.agent_pause_requested {
+                    return Err(
+                        "Worker is explicitly stopped; resume it before sending instructions"
+                            .into(),
+                    );
+                }
+                let paused = cursor.agent_pause_requested;
+                let receipt =
+                    store.append_parent_message(&task, &parent, &expected, paused, || {
+                        append_user_with_resume_locked(
+                            chat,
+                            cursor,
+                            file,
+                            id,
+                            message,
+                            Vec::new(),
+                            false,
+                        )
+                    })?;
+                resume_agent(chat, cursor)?;
+                chat.clear_agent_waiting();
+                Ok(receipt)
+            })
+        })
+        .await
+    }
+
     pub async fn append_user_with_attachments(
         self: &Arc<Self>,
         id: String,
@@ -1273,6 +1347,21 @@ impl ChatFile {
     }
 
     pub async fn request_agent_stop(self: &Arc<Self>, request_id: String) -> Result<(), String> {
+        self.request_agent_suspension(request_id, false).await
+    }
+
+    pub(crate) async fn request_agent_pause(
+        self: &Arc<Self>,
+        request_id: String,
+    ) -> Result<(), String> {
+        self.request_agent_suspension(request_id, true).await
+    }
+
+    async fn request_agent_suspension(
+        self: &Arc<Self>,
+        request_id: String,
+        paused: bool,
+    ) -> Result<(), String> {
         if !valid_id(&request_id) {
             return Err("Invalid agent stop request ID.".into());
         }
@@ -1283,6 +1372,7 @@ impl ChatFile {
                 }
                 let mut next = cursor.clone();
                 next.agent_stop_requested = true;
+                next.agent_pause_requested = paused;
                 next.agent_stop_requests.push(request_id);
                 if next.agent_stop_requests.len() > 32 {
                     next.agent_stop_requests.remove(0);
@@ -1299,6 +1389,24 @@ impl ChatFile {
     pub async fn agent_stop_requested(self: &Arc<Self>) -> Result<bool, String> {
         self.run(|chat| chat.with_cursor(|cursor, _| Ok(cursor.agent_stop_requested)))
             .await
+    }
+
+    pub(crate) async fn agent_pause_requested(self: &Arc<Self>) -> Result<bool, String> {
+        self.run(|chat| chat.with_cursor(|cursor, _| Ok(cursor.agent_pause_requested)))
+            .await
+    }
+
+    pub(crate) async fn agent_suspension_message(self: &Arc<Self>) -> Result<&'static str, String> {
+        self.run(|chat| {
+            chat.with_cursor(|cursor, _| {
+                Ok(if cursor.agent_pause_requested {
+                    AGENT_PAUSE_MESSAGE
+                } else {
+                    AGENT_STOP_MESSAGE
+                })
+            })
+        })
+        .await
     }
 
     pub async fn resume_agent(self: &Arc<Self>) -> Result<(), String> {
@@ -1330,6 +1438,7 @@ fn resume_agent(chat: &ChatFile, cursor: &mut Cursor) -> Result<(), String> {
     if cursor.agent_stop_requested {
         let mut next = cursor.clone();
         next.agent_stop_requested = false;
+        next.agent_pause_requested = false;
         next.last_agent_call_at_ms = None;
         next.agent_presence_until_ms = None;
         next.offline_claims.remove(MATERIALIZATION_PENDING);
@@ -1449,6 +1558,18 @@ pub(super) fn append_user_locked(
     message: String,
     attachment_ids: Vec<String>,
 ) -> Result<UserSendReceipt, String> {
+    append_user_with_resume_locked(chat, cursor, file, id, message, attachment_ids, true)
+}
+
+fn append_user_with_resume_locked(
+    chat: &ChatFile,
+    cursor: &mut Cursor,
+    file: &mut File,
+    id: String,
+    message: String,
+    attachment_ids: Vec<String>,
+    resume: bool,
+) -> Result<UserSendReceipt, String> {
     if !valid_id(&id) {
         return Err("Invalid chat message request ID.".into());
     }
@@ -1482,7 +1603,7 @@ pub(super) fn append_user_locked(
             {
                 return Err("This request ID already belongs to a different message.".into());
             }
-            if span.end > cursor.offset {
+            if resume && span.end > cursor.offset {
                 chat.clear_agent_waiting();
             }
             return Ok(UserSendReceipt {
@@ -1510,8 +1631,10 @@ pub(super) fn append_user_locked(
             "CHAT.md changed during send; reload and retry with the same request ID.".into(),
         );
     }
-    resume_agent(chat, cursor)?;
-    chat.clear_agent_waiting();
+    if resume {
+        resume_agent(chat, cursor)?;
+        chat.clear_agent_waiting();
+    }
     Ok(UserSendReceipt {
         id,
         end,
@@ -1523,6 +1646,99 @@ pub(super) fn append_user_locked(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn staged_parent_message_stays_unread_until_resume_commits_and_retries_once() {
+        use crate::agent_automation::{AgentAutomationStore, GoalStatus};
+        use crate::project_bindings::ConversationIdentity;
+        let root = tempfile::tempdir().unwrap();
+        let mut config = crate::config::default_config(root.path().to_path_buf());
+        config.memory.dir = Some(root.path().join("state").display().to_string());
+        config.markdown_chat.enabled = true;
+        let parent = ConversationIdentity::from_openai_session("staged-parent").unwrap();
+        let child = ConversationIdentity::from_openai_session("staged-child").unwrap();
+        let chat = crate::markdown_chat::MarkdownChatStore::default()
+            .chat(
+                &config,
+                Some(&child),
+                &crate::exec_sessions::SessionState::new(),
+            )
+            .unwrap();
+        let store = Arc::new(AgentAutomationStore::for_config(&config).unwrap());
+        let goal = store
+            .set_goal(&child, "Verify the saved assignment", 100)
+            .unwrap();
+        store
+            .mutate_test_state(&child, |state| {
+                state.agents.parent_task_key = Some(parent.stable_key().into());
+                Ok(())
+            })
+            .unwrap();
+        chat.request_agent_pause("coordinator-pause".into())
+            .await
+            .unwrap();
+        let expected = store.load(&child).unwrap();
+        let injected = chat
+            .run({
+                let store = store.clone();
+                let child = child.clone();
+                let parent = parent.clone();
+                let expected = expected.clone();
+                move |chat| {
+                    chat.with_cursor(|cursor, file| {
+                        store.append_parent_message(&child, &parent, &expected, true, || {
+                            append_user_with_resume_locked(
+                                chat,
+                                cursor,
+                                file,
+                                "staged-instruction".into(),
+                                "Continue the saved assignment".into(),
+                                vec![],
+                                false,
+                            )?;
+                            Err::<(), _>("interrupted after staging".into())
+                        })
+                    })
+                }
+            })
+            .await;
+        assert_eq!(injected.unwrap_err(), "interrupted after staging");
+        assert_eq!(
+            store.load(&child).unwrap().goal.unwrap().status,
+            GoalStatus::Configured
+        );
+        assert!(chat.agent_pause_requested().await.unwrap());
+        assert_eq!(chat.unread_snapshot().await.unwrap().messages.len(), 1);
+        assert!(chat.read(true).await.unwrap().text.is_empty());
+        chat.append_parent_instruction(
+            "staged-instruction".into(),
+            "Continue the saved assignment".into(),
+            store.clone(),
+            child.clone(),
+            parent,
+            expected,
+        )
+        .await
+        .unwrap();
+        let active = store.load(&child).unwrap().goal.unwrap();
+        assert_eq!(active.status, GoalStatus::Active);
+        assert_eq!(active.revision, goal.revision);
+        assert!(!chat.agent_stop_requested().await.unwrap());
+        assert!(
+            chat.read(true)
+                .await
+                .unwrap()
+                .text
+                .contains("Continue the saved assignment")
+        );
+        assert_eq!(
+            std::fs::read_to_string(chat.path())
+                .unwrap()
+                .matches("Continue the saved assignment")
+                .count(),
+            1
+        );
+    }
 
     #[tokio::test]
     async fn owner_titles_strip_markdown_before_shortening_and_keep_messages_unchanged() {
@@ -2200,7 +2416,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn goal_update_notices_are_hidden_without_rewriting_or_consuming_history() {
+    async fn internal_messages_are_hidden_without_rewriting_or_consuming_history() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("CHAT.md");
         let chat = Arc::new(ChatFile::new(path.clone(), true));
@@ -2214,6 +2430,24 @@ mod tests {
             .append_user(notice_id.clone(), notice.into())
             .await
             .unwrap();
+        let access_id = format!("dev-access-{:064x}", 2);
+        chat.append_worker_instruction(
+            access_id.clone(),
+            "Internal development-access update".into(),
+        )
+        .await
+        .unwrap();
+        let team_id = format!("team-message-{:064x}", 3);
+        chat.append_worker_instruction(team_id.clone(), "Internal team report".into())
+            .await
+            .unwrap();
+        let control_id = format!("parent-control-{:064x}", 4);
+        chat.append_worker_instruction(
+            control_id.clone(),
+            "The coordinator updated your goal".into(),
+        )
+        .await
+        .unwrap();
         let original = std::fs::read(&path).unwrap();
 
         // Existing notices are hidden on reopen without changing CHAT.md or its cursor.
@@ -2221,6 +2455,9 @@ mod tests {
         let page = reopened.widget_page(None, None).await.unwrap();
         assert_eq!(page.messages.len(), 1);
         assert_eq!(page.messages[0].id, "actual-user-message");
+        let inbox = reopened.agent_inbox_page(None, None).await.unwrap();
+        assert_eq!(inbox.messages.len(), 5);
+        assert_ne!(inbox.revision, page.revision);
         let summary = reopened.owner_summary().await.unwrap();
         assert_eq!(summary.title, before.title);
         assert_eq!(summary.last_entry_end, before.last_entry_end);
@@ -2232,10 +2469,13 @@ mod tests {
             "## You\n\nKeep working"
         );
         let pending = reopened.unread_snapshot().await.unwrap();
-        assert_eq!(pending.messages.len(), 2);
+        assert_eq!(pending.messages.len(), 5);
         assert_eq!(pending.messages[1].id, notice_id);
         assert_eq!(pending.messages[1].markdown, notice);
         assert_eq!(pending.messages[1].end, receipt.end);
+        assert_eq!(pending.messages[2].id, access_id);
+        assert_eq!(pending.messages[3].id, team_id);
+        assert_eq!(pending.messages[4].id, control_id);
         assert_eq!(page.read_through, pending.read_through);
         assert!(reopened.read(false).await.unwrap().text.contains(notice));
         assert_eq!(std::fs::read(&path).unwrap(), original);

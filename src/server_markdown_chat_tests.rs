@@ -4,6 +4,184 @@ struct MarkdownPassthroughFixture {
     data: Option<Value>,
 }
 
+#[tokio::test]
+async fn empty_inbox_and_bookkeeping_cannot_complete_a_delivered_request() {
+    let root = tempfile::tempdir().unwrap();
+    let mut config = crate::config::default_config(std::fs::canonicalize(root.path()).unwrap());
+    config.memory.dir = Some(root.path().join("state").display().to_string());
+    config.markdown_chat.enabled = true;
+    config.markdown_chat.max_wait_ms = 5;
+    config.markdown_chat.rollout_enabled = false;
+    let mut handler = handler_with_tools(
+        root.path(),
+        crate::registry::load_tools_for_config(&config),
+        crate::types::ToolLogLevel::Info,
+    );
+    handler.config = Arc::new(config.clone());
+    let conversation = "request-progress";
+    let identity = ConversationIdentity::from_openai_session(conversation).unwrap();
+    bind_fixture_workspace(&handler, Some(&identity)).await;
+    let chat = handler
+        .markdown_chat
+        .chat(&config, Some(&identity), &handler.session)
+        .unwrap();
+    for id in ["first", "second"] {
+        chat.queue_user_message(id.into(), format!("Handle {id}"), vec![])
+            .await
+            .unwrap();
+    }
+    let (server_transport, client_transport) = tokio::io::duplex(32 * 1024);
+    let server = tokio::spawn(async move {
+        handler
+            .serve(server_transport)
+            .await
+            .unwrap()
+            .waiting()
+            .await
+            .unwrap()
+    });
+    let client = ().serve(client_transport).await.unwrap();
+    let delivered = client
+        .call_tool(automation_request(
+            "turn_completed",
+            json!({}),
+            conversation,
+        ))
+        .await
+        .unwrap();
+    assert!(format!("{delivered:?}").contains("Handle first"));
+    for name in [
+        "chat_read",
+        "get_agent_brief",
+        "clock_curr_time",
+        "chat_read",
+    ] {
+        let response = client
+            .call_tool(automation_request(name, json!({}), conversation))
+            .await
+            .unwrap();
+        assert_ne!(response.is_error, Some(true), "{name}: {response:?}");
+    }
+    let blocked = client
+        .call_tool(automation_request(
+            "turn_completed",
+            json!({}),
+            conversation,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        blocked.structured_content.as_ref().unwrap()["required_next_action"],
+        "chat_write"
+    );
+    assert_eq!(chat.queued_messages().await.unwrap().len(), 1);
+    assert!(
+        !std::fs::read_to_string(chat.path())
+            .unwrap()
+            .contains("Handle second")
+    );
+    let written = client
+        .call_tool(automation_request(
+            "chat_write",
+            json!({"message":"First request answered", "event":"completed"}),
+            conversation,
+        ))
+        .await
+        .unwrap();
+    assert_ne!(written.is_error, Some(true));
+    assert!(format!("{written:?}").contains("Handle second"));
+    client.cancel().await.unwrap();
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn coordinator_pause_repeats_instruction_waits_but_stop_still_ends_the_turn() {
+    let root = tempfile::tempdir().unwrap();
+    let mut config = crate::config::default_config(std::fs::canonicalize(root.path()).unwrap());
+    config.memory.dir = Some(root.path().join("state").display().to_string());
+    config.markdown_chat.enabled = true;
+    config.markdown_chat.max_wait_ms = 5;
+    config.markdown_chat.rollout_enabled = false;
+    let mut tools = crate::registry::load_tools_for_config(&config);
+    tools.retain(|tool| tool.name() != "exec_command");
+    tools.push(Box::new(MarkdownPassthroughFixture {
+        name: "exec_command",
+        schema: None,
+        data: None,
+    }));
+    let mut handler = handler_with_tools(root.path(), tools, crate::types::ToolLogLevel::Info);
+    handler.config = Arc::new(config.clone());
+    let conversation = "paused-worker";
+    let identity = ConversationIdentity::from_openai_session(conversation).unwrap();
+    bind_fixture_workspace(&handler, Some(&identity)).await;
+    let chat = handler
+        .markdown_chat
+        .chat(&config, Some(&identity), &handler.session)
+        .unwrap();
+    chat.request_agent_pause("parent-pause".into())
+        .await
+        .unwrap();
+    chat.queue_user_message("private-task".into(), "Private queued task".into(), vec![])
+        .await
+        .unwrap();
+    let (server_transport, client_transport) = tokio::io::duplex(32 * 1024);
+    let server = tokio::spawn(async move {
+        handler
+            .serve(server_transport)
+            .await
+            .unwrap()
+            .waiting()
+            .await
+            .unwrap()
+    });
+    let client = ().serve(client_transport).await.unwrap();
+    let blocked = client
+        .call_tool(automation_request("exec_command", json!({}), conversation))
+        .await
+        .unwrap();
+    assert_eq!(blocked.is_error, Some(true));
+    assert!(format!("{blocked:?}").contains("coordinator paused"));
+    assert!(
+        !format!("{blocked:?}").contains("test://resource"),
+        "task tool must not run"
+    );
+    for _ in 0..3 {
+        let waiting = client
+            .call_tool(automation_request("chat_await", json!({}), conversation))
+            .await
+            .unwrap();
+        assert_ne!(waiting.is_error, Some(true));
+        let data = waiting.structured_content.as_ref().unwrap();
+        assert_eq!(data["status"], "timeout");
+        assert_eq!(data["required_next_action"], "chat_await");
+        assert_eq!(data["assistant_turn_may_end"], false);
+        assert!(
+            data[crate::markdown_chat::USER_MESSAGE_FIELD]
+                .as_str()
+                .unwrap()
+                .contains("Repeat chat_await")
+        );
+        assert!(!format!("{waiting:?}").contains("immediately finish your turn"));
+    }
+    assert_eq!(chat.queued_messages().await.unwrap().len(), 1);
+    chat.resume_agent().await.unwrap();
+    assert!(!chat.agent_stop_requested().await.unwrap());
+    let resumed = client
+        .call_tool(automation_request("exec_command", json!({}), conversation))
+        .await
+        .unwrap();
+    assert_ne!(resumed.is_error, Some(true));
+    assert!(format!("{resumed:?}").contains("test://resource"));
+    chat.request_agent_stop("owner-stop".into()).await.unwrap();
+    let stopped = client
+        .call_tool(automation_request("chat_read", json!({}), conversation))
+        .await
+        .unwrap();
+    assert!(format!("{stopped:?}").contains("immediately finish your turn"));
+    client.cancel().await.unwrap();
+    server.await.unwrap();
+}
+
 #[async_trait]
 impl Tool for MarkdownPassthroughFixture {
     fn name(&self) -> &'static str {

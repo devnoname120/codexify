@@ -6,6 +6,95 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.5.0] - 2026-11-22
+
+### Added
+
+- Add a global Subagent notifications toggle under Settings → Notifications.
+  Keep it on by default; turning it off mutes all notification categories from
+  subagent chats while retaining coordinator notifications and agent messages.
+- Add `agentChat.features.maxWorkerDepth` under Settings → Agents → Worker levels.
+  Default to one level; allow two only when configured explicitly.
+- Add off-by-default `agentChat.automation.primeFileMaterialization` to request a
+  tiny sentinel file after new-chat setup and before completing initialization.
+- Add `skills.blacklist` to exclude individual repository, user, and plugin
+  skills from Codexify's agent brief, skill listing, and skill reads without
+  changing Codex's configuration.
+
+### Changed
+
+- Remove the repeated worker role and parent link from subagent chat headers.
+- Remove the workspace name from nested worker subtitles in the sidebar.
+- Move agent teams, delegation, worker limits, AI agent control, and Auto mode
+  into a dedicated Agents tab in settings.
+- Always group worker chats beneath their coordinator. Remove the Agent folders
+  setting and ignore its legacy configuration value.
+
+### Fixed
+
+- Replace retired browser action pages without interrupting healthy sibling
+  pages or losing the original actions' receipts and idempotency checks.
+- Recover a rejected, small continuation request with HTTP 413 in a new
+  conversation instead of repeatedly submitting it to the same full context.
+- Cancel confirmed unsent failed dispatches when a coordinator pauses a worker,
+  retaining unread instructions and preserving accepted or uncertain Sends.
+- Finish interrupted worker verification at its known conversation URL while
+  preserving setup priming and the worker's paused assignment.
+- Give queued verification priority over background materialization visits that
+  would consume the same conversation-navigation slot.
+- Clear stale approval and conversation-access errors after the current agent
+  reads the exact queued message batch through its mailbox, without replaying
+  the browser send, acknowledging newer messages, or resuming paused goals.
+- Check file approvals in every managed browser tab, including restored profiles
+  without an explicit Login record. Always choose the conversation option from
+  the approval menu; never use the Allow once button.
+- Issue automatic worker setup retry tokens from the current task owner after a
+  handoff, so a retired original chat cannot abort scans for other workers.
+- Report browser action capacity consistently when submissions start during a
+  health read, and include the current action step in browser read timeouts.
+- Defer setup during browser maintenance and verified admission contention
+  without consuming a failed Send retry.
+- Preserve a failed creation's browser error when model selection is incomplete.
+- Recognize a new chat's temporary local conversation ID becoming permanent
+  after Send, and preserve the original submission error if pairing cleanup fails.
+- Route managed-worker setup retry through saved conversation details or automatic
+  creation instead of an empty URL form. Paused, attached workers with an unknown
+  post-Send URL recover through an ownership handoff while retaining their paused
+  goal and history, including while waiting for a navigation cooldown; running
+  workers and stale retry requests remain protected.
+- Preserve connector-refresh error details instead of showing a generic state-change
+  failure; keep temporary browser contention on the existing retry path.
+- Give new-chat requests independent browser-page ownership even when they share
+  a project URL, then bind ownership to the actual created conversation. Preserve
+  specific admission-conflict messages instead of reducing them to "state changed".
+- Apply the requested model/effort directly after new-chat hydration instead of
+  trying to restore defaults belonging to the previous new-chat picker.
+- Retry failed worker creation on the configured automatic retry schedule when
+  Send was confirmed not to have happened, retaining the same worker and goal
+  while issuing fresh pairing credentials. Preserve retry limits and stops.
+- Start a new worker's goal after verified setup without waiting for the normal
+  conversation offline timeout, and use its coordinator-assigned role as its
+  chat title.
+- Keep generated team controls, agent messages, and report notifications out of
+  the displayed user conversation while preserving background delivery and history.
+- Scroll to the latest conversation content before checking connector and file
+  materialization approvals, including cards rendered only after scrolling.
+- Keep paused workers quiet while offline. A direct parent message resumes a
+  worker paused by its coordinator, and only direct parents can pause or resume
+  their workers through team controls.
+- Hold incoming task work until managed setup finishes. Empty inbox reads no
+  longer count as progress toward finishing a turn.
+- Recover from a structured conversation length rejection without relying on
+  the language of the ChatGPT error banner.
+- Keep draft records for parallel setups separate and prevent an uncertain send
+  from making an earlier draft eligible for replay.
+- Retry an unsent message after verified approval clearance even when its
+  implementation goal is blocked.
+- Verify successful steering for owner messages and recover a timed-out
+  navigation when the paired conversation and its editor are already available.
+- Report a worker's actual assignment restriction separately from the
+  team-wide development override and delegation setting.
+
 ## [2.4.0] - 2026-11-15
 
 ### Added
@@ -1360,7 +1449,9 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   drained through bounded head/tail buffers, while component-only `_meta` remains
   outside the model-visible limit.
 
-[Unreleased]: https://github.com/devnoname120/codexify/compare/v2.3.29...HEAD
+[Unreleased]: https://github.com/devnoname120/codexify/compare/v2.5.0...HEAD
+[2.5.0]: https://github.com/devnoname120/codexify/compare/v2.4.0...v2.5.0
+[2.4.0]: https://github.com/devnoname120/codexify/compare/v2.3.29...v2.4.0
 [2.3.29]: https://github.com/devnoname120/codexify/compare/v2.3.28...v2.3.29
 [2.3.28]: https://github.com/devnoname120/codexify/compare/v2.3.25...v2.3.28
 [2.3.25]: https://github.com/devnoname120/codexify/compare/v2.3.24...v2.3.25

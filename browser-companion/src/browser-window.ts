@@ -67,7 +67,8 @@ export type BrowserStepRunner = <T>(operation:(signal:AbortSignal)=>Promise<T>,s
 export interface BrowserDriver {
   presentation?(signal?:AbortSignal,screenshot?:boolean):Promise<unknown>;
   setPresentationStyle?(css:string,signal?:AbortSignal):Promise<unknown>;
-  approvePendingConversation?(request:ConversationApprovalRequest,signal:AbortSignal,once?:boolean):Promise<boolean>;
+  approvePendingConversation?(request:ConversationApprovalRequest,signal:AbortSignal):Promise<boolean>;
+  pendingConversationApproval?(request:ConversationApprovalRequest,signal:AbortSignal):Promise<boolean|undefined>;
   liveness?():Promise<boolean>;
   health(signal?:AbortSignal): Promise<{
     authenticated:boolean;
@@ -365,7 +366,7 @@ export class SingleWindowCoordinator {
     };
   }
 
-  async approvePendingConversation(raw:ConversationApprovalRequest,signal?:AbortSignal,navigate=false,once=false):Promise<{protocolVersion:number;build:string;approved:boolean}> {
+  async approvePendingConversation(raw:ConversationApprovalRequest,signal?:AbortSignal,navigate=false):Promise<{protocolVersion:number;build:string;approved:boolean;pending?:boolean}> {
     const request = conversationApprovalRequestSchema.parse(raw);
     const receipt = (approved:boolean) => ({protocolVersion:PROTOCOL_VERSION,build:this.build,approved});
     if (this.activeActionId || this.windowOperationActive || !this.driver.approvePendingConversation) {
@@ -384,7 +385,10 @@ export class SingleWindowCoordinator {
           throw new BrowserCompanionError('ChatGPT account changed before approval recovery','authentication_required');
         await this.driver.reveal(request.url,operationSignal);
       }
-      return receipt(await this.driver.approvePendingConversation!(request,operationSignal,once));
+      const approved=await this.driver.approvePendingConversation!(request,operationSignal);
+      if(approved)return receipt(true);
+      const pending=await this.driver.pendingConversationApproval?.(request,operationSignal);
+      return {...receipt(false),...(pending===undefined?{}:{pending})};
     },bounded,false,this.timeouts.operationMs,"connector approval");
   }
 

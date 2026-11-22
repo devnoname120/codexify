@@ -645,11 +645,61 @@ async fn chat_file_links_resolve_real_exports_and_reject_ambiguous_or_foreign_fi
 }
 
 #[tokio::test]
+async fn muted_subagent_writes_keep_transcripts_without_starting_delivery() {
+    for event in ["message", "completed", "input_required"] {
+        let (_root, mut config, session, context) = fixture();
+        config.markdown_chat.notifications = Some(
+            serde_json::from_value(json!({
+                "urls":["ntfys://test-topic"],"pythonPath":"missing-notification-interpreter",
+                "subagents":false
+            }))
+            .unwrap(),
+        );
+        let chat = context
+            .markdown_chat
+            .chat(&config, context.task_conversation.as_ref(), &session)
+            .unwrap();
+        chat.ensure().await.unwrap();
+        let path = chat.path().with_file_name("automation.json");
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&json!({"agents":{"parentTaskKey":"a".repeat(64)}})).unwrap(),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let result = load_tools_for_config(&config)
+            .into_iter()
+            .find(|tool| tool.name() == "chat_write")
+            .unwrap()
+            .call_with_context(
+                json!({"message":"Keep this worker update", "event":event}),
+                &config,
+                &session,
+                &context,
+            )
+            .await;
+        assert!(!result.is_error, "{}", result.joined_text());
+        assert_eq!(
+            result.structured_content.unwrap()["notification"],
+            "suppressed"
+        );
+        let history = chat.widget_page(None, None).await.unwrap();
+        assert_eq!(history.messages.len(), 1);
+        assert_eq!(history.messages[0].markdown, "Keep this worker update");
+    }
+}
+
+#[tokio::test]
 async fn apprise_runtime_failure_does_not_undo_or_duplicate_a_chat_write() {
     let (root, mut config, session, context) = fixture();
     config.markdown_chat.notifications = Some(
         serde_json::from_value(json!({
-            "urls":["ntfys://test-topic"],"pythonPath":root.path().join("missing-python")
+            "urls":["ntfys://test-topic"],"pythonPath":root.path().join("missing-python"),
+            "subagents":false
         }))
         .unwrap(),
     );

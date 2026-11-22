@@ -28,9 +28,14 @@ export class DraftRecoveryJournal {
   return normalize(text)===normalize(fixed)&&this.entries.some(e=>e.account===account&&e.url===url&&e.hash===hash(fixed));
  }
  prepare(account:string,url:string,actionId:string,text:string):void {
-  this.entries=[...this.entries.filter(e=>e.account!==account||e.url!==url),record.parse({account,url,actionId,hash:hash(text),phase:'prepared'})].slice(-32);this.persist();
+  // Distinct setup pages share the same project URL until their first Send.
+  // Another lane must not replace this action's pre-Send checkpoint.
+  // An exact retry supersedes its old checkpoint so an uncertain send cannot
+  // leave an earlier prepared copy eligible for replay.
+  const digest=hash(text);
+  this.entries=[...this.entries.filter(e=>e.actionId!==actionId&&(e.account!==account||e.url!==url||e.hash!==digest)),record.parse({account,url,actionId,hash:digest,phase:'prepared'})].slice(-32);this.persist();
  }
- beforeSend(actionId:string):void {const entry=this.entries.find(e=>e.actionId===actionId);if(!entry)throw new BrowserCompanionError('Message draft ownership changed before Send','external_interference');entry.phase='uncertain';this.persist();}
+ beforeSend(actionId:string):void {const entry=this.entries.find(e=>e.actionId===actionId);if(!entry)throw new BrowserCompanionError('Codexify lost its prepared draft record before Send; nothing was sent','external_interference');entry.phase='uncertain';this.persist();}
  forget(actionId:string):void {this.entries=this.entries.filter(e=>e.actionId!==actionId);try{this.persist();}catch{}}
  private persist():void {
   if(!this.path)return;

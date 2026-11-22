@@ -479,7 +479,7 @@ pub(crate) fn settings_defaults(
             "maxBytes":crate::memory::memory_max_bytes(&defaults)},
         "agentChat":chat,
         "skills":{"enabled":crate::skills::skills_enabled(&defaults),"dirs":null,
-            "includePlugins":crate::skills::plugins_enabled(&defaults)},
+            "includePlugins":crate::skills::plugins_enabled(&defaults),"blacklist":[]},
         "ignore":{"useGitignore":crate::ignore_rules::use_gitignore(&defaults),
             "useDefaultPatterns":crate::ignore_rules::use_default_patterns(&defaults),"customPatterns":[]},
         "codexMcp":{"enabled":codex_mcp.enabled(),"useCli":codex_mcp.use_cli(),
@@ -2040,6 +2040,35 @@ mod tests {
     }
 
     #[test]
+    fn skill_blacklist_loads_without_replacing_other_skill_settings() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("config.json");
+        std::fs::write(
+            &path,
+            json!({
+                "workDir": root.path(),
+                "codexMcp": {"enabled": false},
+                "skills": {
+                    "enabled": true,
+                    "dirs": [],
+                    "includePlugins": false,
+                    "blacklist": ["superpowers:dispatching-parallel-agents"]
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let config = load_config_quiet_read_only(cli(root.path(), &path)).unwrap();
+        assert_eq!(config.skills.enabled, Some(true));
+        assert_eq!(config.skills.dirs, Some(vec![]));
+        assert_eq!(config.skills.include_plugins, Some(false));
+        assert_eq!(
+            config.skills.blacklist,
+            Some(vec!["superpowers:dispatching-parallel-agents".into()])
+        );
+    }
+
+    #[test]
     fn config_path_precedence_is_cli_env_user_then_defaults() {
         let root = tempfile::tempdir().unwrap();
         let current_dir = root.path().join("cwd");
@@ -2650,7 +2679,10 @@ mod tests {
                     "port",
                 ],
             ),
-            ("skills", &["dirs", "enabled", "includePlugins"]),
+            (
+                "skills",
+                &["blacklist", "dirs", "enabled", "includePlugins"],
+            ),
             ("codexMcp", &["cliPath", "enabled", "useCli"]),
             ("projectCatalog", &["codexConfig", "entries"]),
         ] {
@@ -2661,6 +2693,7 @@ mod tests {
             "agentChat.automation",
             &[
                 "autoApproveToolCalls",
+                "primeFileMaterialization",
                 "automaticRetries",
                 "browserActionLanes",
                 "newConversationOnLoadRateLimit",
@@ -2684,7 +2717,7 @@ mod tests {
         assert_keys(
             &example["agentChat"]["notifications"],
             "agentChat.notifications",
-            &["events", "pythonPath", "timeoutMs", "urls"],
+            &["events", "pythonPath", "subagents", "timeoutMs", "urls"],
         );
         assert_keys(
             &example["agentChat"]["notifications"]["events"],

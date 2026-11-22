@@ -71,6 +71,13 @@ test("semantic submission evidence prefers the accepted user turn", () => {
   })).toBe("generation_running");
 });
 
+test("steering acceptance requires a new user turn even while the previous response runs",()=>{
+ const state={initialTurnIdentities:['user:old','assistant:old'],userIdentities:['user:old'],responseIdentities:['assistant:old'],generationRunning:true};
+ expect(submissionEvidence(state,{requireUserTurn:true})).toBeUndefined();
+ expect(submissionEvidence({...state,responseIdentities:['assistant:old','assistant:new']},{requireUserTurn:true})).toBeUndefined();
+ expect(submissionEvidence({...state,userIdentities:['user:old','user:new']},{requireUserTurn:true})).toBe('user_turn');
+});
+
 test("rebound assistant identity never chooses among competing turns", () => {
   const initial = ["group:assistant:old"];
   expect(reboundTurnIdentity(initial, "group:assistant:optimistic", ["group:assistant:optimistic"]))

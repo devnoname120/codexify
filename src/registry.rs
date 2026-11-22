@@ -35,6 +35,12 @@ pub fn load_tools_for_config(config: &AppConfig) -> Vec<Box<dyn Tool>> {
     );
     if config.markdown_chat.enabled
         && config.markdown_chat.automation.enabled
+        && config.markdown_chat.automation.prime_file_materialization
+    {
+        tools.push(Box::new(tools::materialize_sentinel::MaterializeSentinel));
+    }
+    if config.markdown_chat.enabled
+        && config.markdown_chat.automation.enabled
         && config.markdown_chat.features.agent_teams
     {
         tools.push(Box::new(tools::agents::AgentTool::Spawn));

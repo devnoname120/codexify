@@ -223,7 +223,7 @@ for(const [engineName,engine] of [['Chromium',chromium],['WebKit',webkit]])test(
  const browser=await engine.launch();
  try {
   const page=await browser.newPage({viewport:{width:1280,height:900}});page.setDefaultTimeout(5000);await page.clock.install();
-  const defaults={workDir:'/example',multiProject:true,port:3000,debug:false,worktrees:{mode:'auto',keepCount:15},agentChat:{automation:{enabled:false,requestBlockList:[]},notifications:{events:{completed:true,inputRequired:true,errors:true,offline:true}}},mcpServers:{example:{command:'example'}},openaiTunnels:[{tunnelId:'example'}]};
+  const defaults={workDir:'/example',multiProject:true,port:3000,debug:false,worktrees:{mode:'auto',keepCount:15},agentChat:{automation:{enabled:false,requestBlockList:[]},notifications:{subagents:true,events:{completed:true,inputRequired:true,errors:true,offline:true}}},mcpServers:{example:{command:'example'}},openaiTunnels:[{tunnelId:'example'}]};
   let document={workDir:'/projects',multiProject:true,port:3000,worktrees:{mode:'always',keepCount:5},agentChat:{automation:{enabled:true,requestBlockList:[]}},mcpServers:{local:{command:'fixture-tools'}},openaiTunnels:[]},revision=1;
   const writes=[],errors=[];let failSave=false,heldSave=null;
   page.on('pageerror',error=>errors.push(error.message));
@@ -260,6 +260,12 @@ for(const [engineName,engine] of [['Chromium',chromium],['WebKit',webkit]])test(
   assert.equal(Object.hasOwn(document.worktrees,'mode'),false,'Default removes the override rather than writing invalid null');
   assert.equal(document.worktrees.keepCount,5);assert.equal(document.mcpServers.local.command,'fixture-tools');assert.equal(typeof writes[0].raw,'string');
   await dialog.getByRole('button',{name:'Notifications',exact:true}).click();
+  const subagents=dialog.getByRole('group',{name:'agentChat.notifications.subagents',exact:true});
+  assert.equal(await subagents.getByRole('button',{name:'On (default)',exact:true}).getAttribute('aria-pressed'),'true');
+  await subagents.getByRole('button',{name:'Off',exact:true}).click();
+  await page.clock.fastForward(700);await dialog.getByText('Saved. Restart Codexify to apply changes.',{exact:true}).waitFor();
+  assert.equal(document.agentChat.notifications.subagents,false);
+  assert.equal(document.agentChat.notifications.events,undefined,'The scope toggle leaves event preferences unchanged');
   assert.equal(await dialog.getByRole('group',{name:'agentChat.notifications.events.completed',exact:true}).getByRole('button',{name:'On (default)',exact:true}).getAttribute('aria-pressed'),'true');
   await dialog.getByRole('group',{name:'agentChat.notifications.events.completed',exact:true}).getByRole('button',{name:'Off',exact:true}).click();
   await page.clock.fastForward(700);await dialog.getByText('Saved. Restart Codexify to apply changes.',{exact:true}).waitFor();assert.equal(document.agentChat.notifications.events.completed,false);

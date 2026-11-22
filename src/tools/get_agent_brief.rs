@@ -85,7 +85,15 @@ impl Tool for GetAgentBrief {
         {
             match store.load(task) {
                 Ok(state) => {
+                    brief.push_str("\n\n## Agent capability flags\n\n");
+                    brief.push_str(crate::agent_automation::agents::CAPABILITY_FLAGS_BRIEF);
                     let delegation_enabled = config.markdown_chat.features.agent_teams
+                        && (state.agents.parent_task_key.is_none()
+                            || context.agent_runtime.as_ref().is_some_and(|runtime| {
+                                runtime.worker_depth(task).is_ok_and(|depth| {
+                                    depth < config.markdown_chat.features.max_worker_depth
+                                })
+                            }))
                         && state.agents.delegation_enabled_with_default(
                             config.markdown_chat.features.default_delegation,
                         );
@@ -101,7 +109,7 @@ impl Tool for GetAgentBrief {
                         brief.push_str(crate::agent_automation::agents::FULL_DEVELOPMENT_BRIEF);
                     }
                     if delegation_enabled {
-                        brief.push_str("\n\n## Requested agent delegation\n\nUse agent_spawn when independent workers can advance the authorized task or team goal. The user does not need to open the Agents tab first. Give workers distinct roles, concrete goals, non-overlapping scopes, and a stable requestId. Workers inherit this project's selection and automatic continuation. Read agent_status before spawning to reuse appropriate existing workers instead of duplicating them. Use agent_control to send focused instructions, update goals, pause, resume or stop your own workers; use their current goal revision for lifecycle changes. Messages preserve pauses and stops. After a control failure reuse its requestId and arguments, inspect status, and never claim an unconfirmed change succeeded. Keep a rolling backlog and keep doing independent work. Check agent_status after dispatch, at milestones, and before waiting or completion; review actual activity and verify reports. Reassign finished workers with agent_control set_goal using their fresh expectedRevision and verify the new goal is active. Messages do not change goal revisions. Create editing workers for implementation instead of asking read-only auditors to edit. Do not let a completed audit or short turn end the overall project. Do not claim you created agents unless agent_spawn returned their identities; referring to existing Agent 1/2/3 notes does not create or assign workers. After browser/tool failure, inspect team status and retry the same creation requestId instead of inventing a new team. Respect explicit delegation off switches, pauses, stops and project boundaries.\n");
+                        brief.push_str("\n\n## Requested agent delegation\n\nUse agent_spawn when independent workers can advance the authorized task or team goal. The user does not need to open the Agents tab first. Give workers distinct roles, concrete goals, non-overlapping scopes, and a stable requestId. Workers inherit this project's selection and automatic continuation. Read agent_status before spawning to reuse appropriate existing workers instead of duplicating them. Use agent_control to send focused instructions, update goals, pause, resume or stop your own workers; use their current goal revision for lifecycle changes. A direct parent message resumes its coordinator-paused child; sibling messages preserve pauses. Explicit Stop and terminal assignments require their existing lifecycle controls. After a control failure reuse its requestId and arguments, inspect status, and never claim an unconfirmed change succeeded. Keep a rolling backlog and keep doing independent work. Check agent_status after dispatch, at milestones, and before waiting or completion; review actual activity and verify reports. Reassign finished workers with agent_control set_goal using their fresh expectedRevision and verify the new goal is active. Messages do not change goal revisions. Create editing workers for implementation instead of asking read-only auditors to edit. Do not let a completed audit or short turn end the overall project. Do not claim you created agents unless agent_spawn returned their identities; referring to existing Agent 1/2/3 notes does not create or assign workers. After browser/tool failure, inspect team status and retry the same creation requestId instead of inventing a new team. Respect explicit delegation off switches, pauses, stops and project boundaries.\n");
                     }
                     if config.markdown_chat.features.agent_teams
                         && state.agents.parent_task_key.is_some()

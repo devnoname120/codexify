@@ -10,7 +10,7 @@ parent and worker chats, including after continuation.
    Read the worker's goal revision immediately before a lifecycle or goal change
    and supply it as `expectedRevision`. A chat controls only its own recorded
    children; workers cannot control siblings or their parent.
-3. Use `agent_message` to contact the parent or a sibling. Get the recipient's
+3. Use `agent_message` to contact the parent, a sibling or an owned child. Get the recipient's
    `taskKey` from `agent_status`; a worker's `parentTaskKey` identifies its parent.
    Send one focused message with context, request/result, affected files,
    verification evidence, dependency owner and next step. Keep the same
@@ -27,9 +27,12 @@ parent and worker chats, including after continuation.
 6. Call `agent_report` at milestones, on blockers and before finishing. Include
    changed files, checks, results and remaining work. The parent verifies reports
    and integration; a delivered message or report does not prove completion.
-7. Respect paused, stopped and terminal goals. Team messages cannot reactivate
-   them. Use an explicit parent resume only when authorized and the blocker is
-   resolved. Never replay an accepted or uncertain browser send.
+7. A message from the verified direct parent resumes its coordinator-paused
+   child, with the message delivered before work continues. Sibling messages
+   and child reports do not resume paused recipients. Use standalone `resume`
+   to continue a child without a new message. Explicit Stop, terminal goals and
+   retirement retain their existing lifecycle controls. A chat can pause or
+   resume only its direct children. Never replay an accepted or uncertain browser send.
 8. Keep supervising until the overall goal is implemented and verified. Check
    worker status after dispatch, at milestones and before waiting or completion.
    Review actual results and tests, then assign a new concrete goal when useful.
@@ -113,6 +116,13 @@ without changing setup digests, current goals, completed goals, stops, or Send r
 Existing descendants receive a durable instruction; `agent_status` and
 `get_agent_brief` expose the effective authorization. Workers may implement, build,
 test and debug independently while coordinating ownership and priorities with the parent.
+
+`fullDevelopmentAccess` is a team-wide override, not a command/edit permission
+switch. Its absence or `false` value does not make a coordinator or implementing
+worker read-only. `agent_status.assignmentReadOnly` reports the caller's effective
+worker assignment restriction; root coordinators have no such restriction.
+`allowDelegation` controls worker creation only. Both status responses and unchanged
+receipts retain this distinction; task scope and the actual available tools still apply.
 
 New commands, patches, file writes and team controls require `chat_read` first when
 owner/team messages are unread. Command polling and cancellation remain available.

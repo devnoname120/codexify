@@ -10,7 +10,7 @@ const executablePath=process.env.CODEXIFY_TEST_CHROME_PATH??await privateChromeE
 const browser=await chromium.launch({executablePath,headless:true,timeout:20_000});
 try {
   const context=await browser.newContext();await installMinimalChatGptPage(context,"",0,"bones");
-  let delayMs=5_500,accountId="fixture-account",changeAfterSessionRead=false,sessionReads=0;
+  let delayMs=5_500,controlDelayMs=0,accountId="fixture-account",changeAfterSessionRead=false,sessionReads=0;
   const settingsUrl="https://chatgpt.com/settings/plugins-settings/plugin_asdk_app_fixture";
   await context.route("**/*",async route=>{
     if(new URL(route.request().url()).pathname==="/api/auth/session"){
@@ -18,13 +18,19 @@ try {
       if(changeAfterSessionRead){changeAfterSessionRead=false;accountId="changed-account";}
       return;
     }
-    await route.fulfill({contentType:"text/html",body:`<!doctype html><div id="loading" role="progressbar">Loading</div><main hidden><header><h1>Settings</h1></header><h2 id="connector">Codexify</h2><button data-action="refresh-tools" id="refresh">Refresh tools</button></main><script>document.body.dataset.clicks='0';document.querySelector('#refresh').onclick=()=>document.body.dataset.clicks=String(Number(document.body.dataset.clicks)+1);setTimeout(()=>{document.querySelector('main').hidden=false;document.querySelector('#loading').remove();},${delayMs});</script>`});
+    await route.fulfill({contentType:"text/html",body:`<!doctype html><div id="loading" role="progressbar">Loading</div><main hidden><header><h1>Settings</h1></header><h2 id="connector">Codexify</h2><button data-action="refresh-tools" id="refresh" ${controlDelayMs?'hidden':''}>Refresh tools</button></main><script>document.body.dataset.clicks='0';document.querySelector('#refresh').onclick=()=>document.body.dataset.clicks=String(Number(document.body.dataset.clicks)+1);setTimeout(()=>{document.querySelector('main').hidden=false;document.querySelector('#loading').remove();},${delayMs});setTimeout(()=>document.querySelector('#refresh').hidden=false,${delayMs+controlDelayMs});</script>`});
   });
   const page=await context.newPage();await page.goto(settingsUrl);
   const fingerprint=(await readChatGptAccount(page)).fingerprint;
   const started=performance.now();await inspectConnectorSettings(page,"asdk_app_fixture","Codexify",fingerprint);const hydratedMs=performance.now()-started;
   assert(hydratedMs>5_000&&hydratedMs<15_000,"Settings must hydrate after the former five-second budget");
   assert.equal(await page.locator('#connector').isVisible(),true);assert.equal(await page.locator('[data-refresh-tools-target="true"]').count(),1);
+
+  delayMs=10;controlDelayMs=700;await page.goto(settingsUrl);
+  const controlStarted=performance.now();await inspectConnectorSettings(page,"asdk_app_fixture","Codexify",fingerprint);
+  assert(performance.now()-controlStarted>=600,"A visible connector name must not bypass delayed control hydration");
+  assert.equal(await page.locator('[data-refresh-tools-target="true"]').count(),1);
+  controlDelayMs=0;
 
   delayMs=2_000;await page.goto(settingsUrl);
   const cancelled=new AbortController();const timer=setTimeout(()=>cancelled.abort(),60);const cancellingAt=performance.now();

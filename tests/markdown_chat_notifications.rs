@@ -69,6 +69,26 @@ fn apprise_configuration_is_opt_in_validated_and_redacted() {
 }
 
 #[test]
+fn subagent_notifications_default_on_and_round_trip_off() {
+    let mut config: MarkdownChatConfig = serde_json::from_value(json!({"notifications":{
+        "urls":["ntfys://test"]
+    }}))
+    .unwrap();
+    assert!(config.notifications.as_ref().unwrap().subagents);
+    config.notifications.as_mut().unwrap().subagents = false;
+    let serialized = serde_json::to_value(&config).unwrap();
+    assert_eq!(serialized["notifications"]["subagents"], false);
+    let restored: MarkdownChatConfig = serde_json::from_value(serialized).unwrap();
+    assert!(!restored.notifications.unwrap().subagents);
+    assert!(
+        serde_json::from_value::<MarkdownChatConfig>(json!({"notifications":{
+            "urls":["ntfys://test"],"subagents":"false"
+        }}))
+        .is_err()
+    );
+}
+
+#[test]
 fn notification_filters_round_trip_and_reject_misspelled_categories() {
     let config: MarkdownChatConfig = serde_json::from_value(json!({"notifications":{
         "urls":["ntfys://test"],"events":{"messages":false,"offline":false}

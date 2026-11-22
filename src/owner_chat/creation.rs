@@ -440,7 +440,13 @@ async fn queue_creation(
         .owner_generation_for_task_key(task.stable_key())
         .map_err(internal_error)?;
     let saved = store.load(task).map_err(internal_error)?;
-    if owner != 0 && (!saved.pairing.creating_chat || saved.action.send_accepted != Some(false)) {
+    let paused_replacement = owner > 0
+        && saved.paused_creation_without_url()
+        && chat.agent_stop_requested().await.map_err(internal_error)?;
+    if owner != 0
+        && !paused_replacement
+        && (!saved.pairing.creating_chat || saved.action.send_accepted != Some(false))
+    {
         return Err(internal_error(
             "This chat was already created; replace its pairing instead of creating it again",
         ));
@@ -472,13 +478,27 @@ async fn queue_creation(
         .chatgpt_project_url
         .as_deref()
         .unwrap_or("https://chatgpt.com/new");
-    let issue = store
-        .issue_creation_pairing(task, destination, next_owner, now)
-        .map_err(internal_error)?;
+    let issue = if paused_replacement {
+        store
+            .issue_paused_creation_replacement(task, destination, next_owner, now, &saved)
+            .map_err(internal_error)?
+            .ok_or_else(|| {
+                internal_error("The paused setup changed before it could be recovered")
+            })?
+    } else {
+        store
+            .issue_creation_pairing(task, destination, next_owner, now)
+            .map_err(internal_error)?
+    };
     let supervisor = state
         .automation
         .as_ref()
         .ok_or_else(|| internal_error("Browser automation supervisor is unavailable"))?;
+    if chat.agent_stop_requested().await.map_err(internal_error)? {
+        store
+            .permit_paused_pairing(task, issue.generation, next_owner)
+            .map_err(internal_error)?;
+    }
     supervisor
         .register_task(AutomationTaskHandle::new(
             task.clone(),
@@ -510,18 +530,44 @@ async fn queue_creation(
     Ok(())
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct RetryCreationBody {
+    request_id: String,
+    action_id: Option<String>,
+}
+
 pub(super) async fn retry_creation(
     State(state): State<OwnerState>,
     Path(id): Path<String>,
-    Json(_body): Json<OwnerMutationBody>,
+    Json(body): Json<RetryCreationBody>,
 ) -> ApiResult {
+    validate_owner_request_id(&body.request_id)?;
     let _guard = state.creation_lock.lock().await;
     let located = selected(&state, &id)?;
     let context = automation_context(&state, &located).await?;
     let saved = context.store.load(&context.task).map_err(internal_error)?;
-    if !saved.pairing.creating_chat || saved.action.send_accepted != Some(false) {
+    if body
+        .action_id
+        .as_deref()
+        .is_some_and(|id| saved.action.id.as_deref() != Some(id))
+    {
         return Err(internal_error(
-            "Creation can only be retried after a confirmed failure before Send",
+            "The managed setup changed before retry; refresh its current state",
+        ));
+    }
+    let paused_replacement = body.action_id.is_some()
+        && saved.paused_creation_without_url()
+        && context
+            .chat
+            .agent_stop_requested()
+            .await
+            .map_err(internal_error)?;
+    if !saved.pairing.creating_chat
+        || (saved.action.send_accepted != Some(false) && !paused_replacement)
+    {
+        return Err(internal_error(
+            "The original setup may already exist. Pause the worker before retrying automatic setup; its existing conversation was preserved",
         ));
     }
     if !saved.conversation_recovery.previous_urls.is_empty() {
@@ -915,6 +961,178 @@ mod tests {
             .unwrap();
         let context = automation_context(&state, &located).await.unwrap();
         (temp, state, executor, server, created, context, source)
+    }
+
+    #[tokio::test]
+    async fn verification_retry_finishes_the_existing_paused_worker_setup() {
+        let (_temp, state, executor, server) = fixture().await;
+        let _ = prepare_chat(State(state.clone()), Json(Default::default()))
+            .await
+            .unwrap();
+        let created = create_chat(State(state.clone()), Json(body("paused-known-url", false)))
+            .await
+            .unwrap()
+            .0;
+        let id = created["id"].as_str().unwrap().to_owned();
+        let located = selected(&state, &id).unwrap();
+        let context = automation_context(&state, &located).await.unwrap();
+        state
+            .automation
+            .as_ref()
+            .unwrap()
+            .run_next(crate::markdown_chat::now_ms())
+            .await
+            .unwrap();
+        context
+            .store
+            .set_goal(
+                &context.task,
+                "Keep this assignment paused",
+                crate::markdown_chat::now_ms(),
+            )
+            .unwrap();
+        context
+            .chat
+            .request_agent_stop("paused-before-verification".into())
+            .await
+            .unwrap();
+        let path = context
+            .store
+            .task_directory(&context.task)
+            .unwrap()
+            .join("automation.json");
+        let mut record: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        record["agents"]["parentTaskKey"] = json!("a".repeat(64));
+        std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+        let before = context.store.load(&context.task).unwrap();
+        let url = before.pairing.canonical_url.clone().unwrap();
+        let _ = super::super::automation_pair(
+            State(state.clone()),
+            Path(id),
+            Json(PairBody {
+                request_id: "retry-paused-verification".into(),
+                url,
+            }),
+        )
+        .await
+        .unwrap();
+        let after = context.store.load(&context.task).unwrap();
+        assert!(after.pairing.creating_chat);
+        assert!(after.pairing.resume_task);
+        assert!(after.permits_paused_setup(1));
+        assert_eq!(after.goal, before.goal);
+        assert!(context.chat.agent_stop_requested().await.unwrap());
+        state
+            .automation
+            .as_ref()
+            .unwrap()
+            .run_next(crate::markdown_chat::now_ms())
+            .await
+            .unwrap();
+        assert!(matches!(
+            executor
+                .executions
+                .lock()
+                .unwrap()
+                .last()
+                .unwrap()
+                .request
+                .prompt,
+            ActionPrompt::PairVerify { .. }
+        ));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn automatic_worker_setup_retry_uses_its_current_owner_after_a_handoff() {
+        let (_temp, state, executor, server, _created, context, source) = schema_source().await;
+        let supervisor = state.automation.as_ref().unwrap();
+        let now = crate::markdown_chat::now_ms();
+        let goal = context
+            .store
+            .set_goal(&context.task, "Continue assigned work", now)
+            .unwrap();
+        context
+            .store
+            .run_goal(&context.task, goal.revision, now)
+            .unwrap();
+        let path = context
+            .store
+            .task_directory(&context.task)
+            .unwrap()
+            .join("automation.json");
+        let mut record: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        record["agents"]["parentTaskKey"] = json!("a".repeat(64));
+        std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+        let issue = context
+            .store
+            .issue_creation_pairing(&context.task, "https://chatgpt.com/new", 2, now)
+            .unwrap();
+        supervisor
+            .register_task(AutomationTaskHandle::new(
+                context.task.clone(),
+                2,
+                context.store.clone(),
+                context.chat.clone(),
+            ))
+            .await
+            .unwrap();
+        let token = state
+            .continuations
+            .issue_token_for_owner(&context.task, 1, &state.config.work_dir)
+            .unwrap();
+        supervisor
+            .queue_new_chat(
+                &context.task,
+                &issue.reference,
+                issue.generation,
+                now,
+                token,
+                None,
+            )
+            .await
+            .unwrap();
+        let queued = context.store.load(&context.task).unwrap();
+        supervisor.discard_queued_actions(&context.task).await;
+        context
+            .store
+            .update_action_status(
+                &context.task,
+                queued.action.id.as_ref().unwrap(),
+                crate::agent_automation::AutomationActionStatus::Failed,
+                Some("Browser read timed out before Send"),
+                None,
+                now,
+            )
+            .unwrap();
+        let failed = context.store.load(&context.task).unwrap();
+        let ready = failed.automatic_retry_at_ms().unwrap();
+        supervisor.scan_once(ready).await.unwrap();
+        assert_eq!(supervisor.queued_count().await, 1);
+        assert_eq!(context.store.load(&context.task).unwrap().goal, failed.goal);
+        supervisor.run_next(ready).await.unwrap().unwrap();
+        let retry = executor.executions.lock().unwrap().last().unwrap().clone();
+        let ActionPrompt::CreateChat {
+            continuation_token,
+            reference,
+            ..
+        } = retry.request.prompt
+        else {
+            panic!("retry must create a chat");
+        };
+        let replacement =
+            ConversationIdentity::from_openai_session("automatic-worker-retry-owner").unwrap();
+        let claim = state
+            .continuations
+            .claim(&replacement, &continuation_token, |_, _| Ok(()))
+            .unwrap();
+        assert_eq!(claim.task.stable_key(), context.task.stable_key());
+        assert!(!state.continuations.owner_snapshot(&source).unwrap().active);
+        context
+            .store
+            .verify_pairing_reference(&context.task, 2, &reference, ready)
+            .unwrap();
+        server.abort();
     }
 
     #[tokio::test]
@@ -2152,6 +2370,172 @@ mod tests {
         );
         assert_eq!(state.automation.as_ref().unwrap().queued_count().await, 0);
         assert!(executor.executions.lock().unwrap().is_empty());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn paused_managed_setup_without_a_saved_url_recovers_and_retires_its_old_owner() {
+        let (_temp, state, executor, server) = fixture().await;
+        let _ = prepare_chat(State(state.clone()), Json(Default::default()))
+            .await
+            .unwrap();
+        let created = create_chat(
+            State(state.clone()),
+            Json(body("paused-missing-url", false)),
+        )
+        .await
+        .unwrap()
+        .0;
+        let id = created["id"].as_str().unwrap().to_owned();
+        let located = selected(&state, &id).unwrap();
+        let context = automation_context(&state, &located).await.unwrap();
+        state
+            .automation
+            .as_ref()
+            .unwrap()
+            .run_next(crate::markdown_chat::now_ms())
+            .await
+            .unwrap();
+        let old = executor.executions.lock().unwrap()[0].clone();
+        let ActionPrompt::CreateChat {
+            continuation_token, ..
+        } = old.request.prompt
+        else {
+            panic!("wrong initial prompt")
+        };
+        let old_physical =
+            ConversationIdentity::from_openai_session("old-unlocated-worker").unwrap();
+        state
+            .continuations
+            .claim(&old_physical, &continuation_token, |_, _| Ok(()))
+            .unwrap();
+        context
+            .store
+            .set_goal(
+                &context.task,
+                "Keep this assignment paused",
+                crate::markdown_chat::now_ms(),
+            )
+            .unwrap();
+        let path = context
+            .store
+            .task_directory(&context.task)
+            .unwrap()
+            .join("automation.json");
+        let mut record: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        record["agents"]["parentTaskKey"] = json!("a".repeat(64));
+        record["pairing"]["canonicalUrl"] = Value::Null;
+        record["pairing"]["lastAttemptedUrl"] = Value::Null;
+        record["action"]["status"] = json!("ambiguous");
+        record["action"]["sendAccepted"] = json!(true);
+        record["action"]["lastError"] = json!("Legacy model restoration failed");
+        std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+        let saved = context.store.load(&context.task).unwrap();
+        let action_id = saved.action.id.clone().unwrap();
+        let denied = retry_creation(
+            State(state.clone()),
+            Path(id.clone()),
+            Json(RetryCreationBody {
+                request_id: "running-original".into(),
+                action_id: Some(action_id.clone()),
+            }),
+        )
+        .await;
+        assert!(
+            denied.is_err(),
+            "a worker that is not stopped must not be replaced"
+        );
+        context
+            .chat
+            .request_agent_stop("pause-for-setup-repair".into())
+            .await
+            .unwrap();
+        let recovered = retry_creation(
+            State(state.clone()),
+            Path(id.clone()),
+            Json(RetryCreationBody {
+                request_id: "repair-paused-setup".into(),
+                action_id: Some(action_id.clone()),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(recovered["queued"], true);
+        let queued = context.store.load(&context.task).unwrap();
+        assert_eq!(queued.goal, saved.goal);
+        assert_eq!(queued.pairing.pending.as_ref().unwrap().owner_generation, 2);
+        assert!(queued.permits_paused_setup(2));
+        assert!(!queued.permits_paused_setup(1));
+        assert!(context.chat.agent_stop_requested().await.unwrap());
+        // A navigation cooldown must not discard the explicit setup repair
+        // just because the assignment itself remains stopped.
+        let ready_at = crate::markdown_chat::now_ms() + 100;
+        let mut waiting: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        waiting["action"]["cooldownUntilMs"] = json!(ready_at);
+        std::fs::write(&path, serde_json::to_vec(&waiting).unwrap()).unwrap();
+        state
+            .automation
+            .as_ref()
+            .unwrap()
+            .scan_once(ready_at - 1)
+            .await
+            .unwrap();
+        assert_eq!(
+            context.store.load(&context.task).unwrap().action.id,
+            queued.action.id
+        );
+        assert!(
+            retry_creation(
+                State(state.clone()),
+                Path(id),
+                Json(RetryCreationBody {
+                    request_id: "stale-repair".into(),
+                    action_id: Some(action_id)
+                })
+            )
+            .await
+            .is_err()
+        );
+        *executor.created_url.lock().unwrap() =
+            "https://chatgpt.com/c/recovered-paused-worker".into();
+        state
+            .automation
+            .as_ref()
+            .unwrap()
+            .run_next(ready_at)
+            .await
+            .unwrap();
+        let new = executor.executions.lock().unwrap()[1].clone();
+        let ActionPrompt::CreateChat {
+            continuation_token,
+            reference,
+            ..
+        } = new.request.prompt
+        else {
+            panic!("wrong repair prompt")
+        };
+        let new_physical =
+            ConversationIdentity::from_openai_session("recovered-paused-worker").unwrap();
+        let claimed = state
+            .continuations
+            .claim(&new_physical, &continuation_token, |_, _| Ok(()))
+            .unwrap();
+        assert_eq!(claimed.task.stable_key(), context.task.stable_key());
+        assert!(
+            !state
+                .continuations
+                .owner_snapshot(&old_physical)
+                .unwrap()
+                .active
+        );
+        let pairing = context
+            .store
+            .verify_pairing_reference(&context.task, 2, &reference, crate::markdown_chat::now_ms())
+            .unwrap();
+        assert_eq!(pairing.verified_owner_generation, Some(2));
+        assert_eq!(context.store.load(&context.task).unwrap().goal, saved.goal);
+        assert!(context.chat.agent_stop_requested().await.unwrap());
         server.abort();
     }
 

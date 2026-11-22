@@ -5,8 +5,29 @@ import { canonicalChatGptConversationUrl, type ConversationApprovalRequest } fro
 
 const APPROVAL_SELECTOR = '[data-codex-approval-surface="true"], [data-testid="tool-approval-card"]';
 
+/** Reveal the latest turn before inspecting approvals in a virtualized thread. */
+export async function scrollConversationToLatest(page:Page):Promise<void> {
+  for(let pass=0;pass<2;pass++) {
+    await page.evaluate(()=>{
+      const turns=document.querySelectorAll('[data-turn-key], article[data-testid^="conversation-turn-"], [data-turn-id-container]');
+      const latest=turns[turns.length-1];
+      const main=document.querySelector('main');
+      const containers=new Set<Element>();
+      for(let element:Element|null=latest??main;element;element=element.parentElement)containers.add(element);
+      if(!latest&&main)for(const element of main.querySelectorAll('*')) {
+        if(element.scrollHeight>element.clientHeight&&/auto|scroll/.test(getComputedStyle(element).overflowY))containers.add(element);
+      }
+      if(document.scrollingElement)containers.add(document.scrollingElement);
+      for(const element of containers)if(element.scrollHeight>element.clientHeight)element.scrollTo({top:element.scrollHeight,behavior:'instant'});
+    });
+    // Wait on the host so background pages do not depend on animation frames.
+    if(pass===0)await new Promise(resolve=>setTimeout(resolve,50));
+  }
+}
+
 /** Old unanswered cards must not mask the blocker in the current turn. */
 export async function latestConversationApprovalCards(page:Page) {
+  await scrollConversationToLatest(page);
   const groups = page.locator('[data-turn-key]').filter({visible:true});
   if (await groups.count()) return groups.last().locator(APPROVAL_SELECTOR).filter({visible:true});
   const legacy = page.locator('article[data-testid^="conversation-turn-"], [data-turn-id-container]').filter({visible:true});
@@ -21,14 +42,12 @@ export async function throwIfConversationApproval(page:Page):Promise<void> {
 }
 
 /** Only the connector card in the verified conversation may grant conversation scope. */
-export async function approveConversationCard(page:Page, request:ConversationApprovalRequest, expectedAppId:string|undefined, signal:AbortSignal,mode:'conversation'|'once'='conversation'):Promise<boolean> {
+export async function approveConversationCard(page:Page, request:ConversationApprovalRequest, expectedAppId:string|undefined, signal:AbortSignal):Promise<boolean> {
   const sameConversation = () => {
     try { return canonicalChatGptConversationUrl(page.url()) === canonicalChatGptConversationUrl(request.url); }
     catch { return false; }
   };
   if (!sameConversation()) return false;
-  if(mode==='once'&&!expectedAppId)return false;
-  if(!await page.locator(APPROVAL_SELECTOR).filter({visible:true}).count())return false;
   const cards = (await latestConversationApprovalCards(page)).and(page.locator('[data-codex-approval-surface="true"]'));
   if (await cards.count() !== 1) return false;
   const card = cards.first();
@@ -83,12 +102,6 @@ export async function approveConversationCard(page:Page, request:ConversationApp
     }
   };
   await verify();
-  if(mode==='once'){
-    const once=card.locator('form button[type="button"].bg-primary-solid:not([aria-haspopup])');
-    if(await once.count()!==1||!await once.isEnabled())return false;
-    await verify();await once.click({timeout:750,signal});
-    await card.waitFor({state:'hidden',timeout:1_500,signal});return true;
-  }
   let opened = false;
   try {
     if (!existingMenus) await trigger.click({timeout:750,signal});

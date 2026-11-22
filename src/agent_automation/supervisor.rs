@@ -18,7 +18,7 @@ use super::{
     AcceptedChatBatch, ActionPrompt, AgentAutomationStore, AutomationActionKind,
     AutomationActionStatus, BrowserCompanionClient, CompanionActionSnapshot, CompanionActionState,
     CompanionEvent, CompanionEventKind, CompanionHealth, CompanionSessionStatus,
-    CompanionUnreadMessage, ExecuteActionRequest, GoalStatus,
+    CompanionUnreadMessage, ConversationApprovalObservation, ExecuteActionRequest, GoalStatus,
 };
 
 // Contention for the single shared Chrome window is not a failed Send.
@@ -49,7 +49,10 @@ fn shared_browser_observation_wait(
     // Preserve uncertainty for an existing action, and defer new work only.
     (!same_action
         && (health.free_action_slots() == 0
-            && (health.active_action_id.is_some() || !health.active_action_ids.is_empty())
+            && (health.active_action_id.is_some()
+                || !health.active_action_ids.is_empty()
+                || health.available_action_slots == Some(0)
+                    && health.status == CompanionSessionStatus::Busy)
             || health.status == CompanionSessionStatus::Busy && !health.authenticated))
         .then(|| shared_browser_waiting(health, action_id))
 }
@@ -95,6 +98,12 @@ mod browser_session_observation_tests {
         health.authenticated = true;
         health.account_fingerprint = Some("different-account".into());
         assert!(shared_browser_observation_wait(&health, "queued-action").is_none());
+        health.action_capacity = Some(4);
+        health.available_action_slots = Some(0);
+        assert!(
+            shared_browser_observation_wait(&health, "queued-action").is_some(),
+            "pooled maintenance reserves all pages even when the account is already verified"
+        );
     }
 
     #[test]
@@ -220,6 +229,26 @@ pub trait AutomationExecutor: Send + Sync {
         Ok(false)
     }
 
+    async fn observe_pending_conversation(
+        &self,
+        url: &str,
+        account: &str,
+        connector: &str,
+        navigate: bool,
+    ) -> Result<ConversationApprovalObservation, String> {
+        let approved = if navigate {
+            self.inspect_pending_materialization(url, account, connector)
+                .await?
+        } else {
+            self.approve_pending_conversation(url, account, connector)
+                .await?
+        };
+        Ok(ConversationApprovalObservation {
+            approved,
+            pending: None,
+        })
+    }
+
     async fn turn_handoff_complete(
         &self,
         _url: &str,
@@ -289,16 +318,16 @@ impl BrowserAutomationExecutor {
         account: &str,
         connector_name: &str,
         allow_navigation: bool,
-    ) -> Result<bool, String> {
+    ) -> Result<ConversationApprovalObservation, String> {
         if !self.config.auto_approve_tool_calls {
-            return Ok(false);
+            return Ok(ConversationApprovalObservation::default());
         }
         let lifecycle = super::BrowserCompanionControl::new(&self.config)?.public_status();
         if lifecycle["manuallyStopped"] == true || lifecycle["waitingForServerRestart"] == true {
             return if allow_navigation {
                 Err("Materialization inspection deferred while the browser is stopped".into())
             } else {
-                Ok(false)
+                Ok(ConversationApprovalObservation::default())
             };
         }
         // Reuse an existing companion without starting or revealing it.
@@ -306,7 +335,7 @@ impl BrowserAutomationExecutor {
         let cancellation = CancellationToken::new();
         let result = tokio::time::timeout(
             Duration::from_secs(if allow_navigation { 35 } else { 6 }),
-            client.approve_pending_conversation_with_navigation(
+            client.observe_pending_conversation(
                 url,
                 account,
                 connector_name,
@@ -356,6 +385,7 @@ impl AutomationExecutor for BrowserAutomationExecutor {
     ) -> Result<bool, String> {
         self.check_pending_approval(url, account, connector_name, false)
             .await
+            .map(|observation| observation.approved)
     }
     async fn inspect_pending_materialization(
         &self,
@@ -364,6 +394,18 @@ impl AutomationExecutor for BrowserAutomationExecutor {
         connector_name: &str,
     ) -> Result<bool, String> {
         self.check_pending_approval(url, account, connector_name, true)
+            .await
+            .map(|observation| observation.approved)
+    }
+
+    async fn observe_pending_conversation(
+        &self,
+        url: &str,
+        account: &str,
+        connector: &str,
+        navigate: bool,
+    ) -> Result<ConversationApprovalObservation, String> {
+        self.check_pending_approval(url, account, connector, navigate)
             .await
     }
     async fn turn_handoff_complete(
@@ -595,22 +637,42 @@ impl AutomationExecutor for BrowserAutomationExecutor {
                 .map_err(|message| execution_error(message, false))?;
         }
 
-        let initial = client
+        let admitted = client
             .execute_with_acceptance(&execution.request, &cancellation)
-            .await
-            .map_err(|error| {
-                if recover_authentication && !error.send_accepted {
-                    // Older compatible companions can reject recovery before
-                    // recording an action. Retain the known sign-in failure.
-                    AutomationExecutionError {
-                        message: "Browser companion authentication is required".into(),
-                        send_accepted: false,
-                        failure_status: Some(AutomationActionStatus::AuthenticationRequired),
-                    }
-                } else {
-                    execution_error(error.message, error.send_accepted)
+            .await;
+        if let Err(error) = &admitted
+            && !same_action
+            && !error.send_accepted
+            && matches!(
+                error.message.as_str(),
+                "This ChatGPT conversation already owns an action"
+                    | "This ChatGPT conversation is being inspected"
+                    | "All browser companion action pages are busy"
+                    | "Browser companion action pages are busy"
+                    | "Browser companion is busy with another action"
+                    | "Browser companion is busy; account maintenance requires idle action pages"
+            )
+        {
+            // Admission can race another page or maintenance after readiness.
+            // A verified rejection with no recorded action is a wait, not a Send failure.
+            return Ok(shared_browser_waiting(
+                &health,
+                &execution.request.action_id,
+            ));
+        }
+        let initial = admitted.map_err(|error| {
+            if recover_authentication && !error.send_accepted {
+                // Older compatible companions can reject recovery before
+                // recording an action. Retain the known sign-in failure.
+                AutomationExecutionError {
+                    message: "Browser companion authentication is required".into(),
+                    send_accepted: false,
+                    failure_status: Some(AutomationActionStatus::AuthenticationRequired),
                 }
-            })?;
+            } else {
+                execution_error(error.message, error.send_accepted)
+            }
+        })?;
         if action_is_terminal(initial.state) {
             if initial.last_event_sequence > 0 {
                 let mut last_event_sequence = 0;
@@ -1163,6 +1225,16 @@ impl AgentAutomationSupervisor {
         task.store
             .notify_state(&task.chat, &task.store.load(&task.task)?)
             .await;
+        let reason = if schema_changed {
+            "tool_catalog_changed"
+        } else if state.action.conversation_load_rate_limited {
+            "conversation_load_rate_limit"
+        } else if state.action.status == AutomationActionStatus::ConversationLimit {
+            "conversation_length_limit"
+        } else {
+            "replacement"
+        };
+        tracing::info!(target:"codexify::automation",task=%task.task.audit_hash(),from_generation=state.pairing.generation,to_generation=issue.generation,reason,"queued ChatGPT conversation replacement");
         Ok(true)
     }
 
@@ -1917,7 +1989,9 @@ impl AgentAutomationSupervisor {
             (None, None)
         };
         let retain_pairing_window = creation.is_some()
-            && (automatic_rollover || owner_generation > 1)
+            && (automatic_rollover
+                || owner_generation > 1
+                || self.config.prime_file_materialization)
             && self.executor.supports_pairing_reservation();
         let mut queue = self.queue.lock().await;
         let previous = queue
@@ -2079,6 +2153,7 @@ impl AgentAutomationSupervisor {
             tasks.rotate_left(offset);
         }
         let mut approval_probed = false;
+        let mut approval_recovery_probed = false;
         for task in tasks {
             // A snapshot/queue scan may run while another page is submitting.
             // Do not replace that chat's persisted action underneath its Send.
@@ -2121,6 +2196,66 @@ impl AgentAutomationSupervisor {
                     continue;
                 }
             };
+            // Mailbox delivery can finish a browser follow-up that failed
+            // before Send. Reconcile the exact read batch even after a parent
+            // pauses the task; this does not resume the goal or grant approval.
+            if self.reconcile_chat_delivery(&task, &state, now_ms).await? {
+                state = task.store.load(&task.task)?;
+            }
+            if let Some(at) = state.worker_creation_retry_at_ms() {
+                if at > now_ms {
+                    self.next_retry_scan_ms.fetch_min(at, Ordering::Relaxed);
+                } else if !activity.agent_stop_requested
+                    && let Some(context) = self.rollover.get()
+                    && let Ok(_run_guard) = self.run_lock.try_read()
+                    && self.queue.lock().await.len() < self.config.max_queued_actions
+                    && let Some(root) = context
+                        .bindings
+                        .selected_project_root(&context.config, &task.task)?
+                {
+                    let owner = context
+                        .continuations
+                        .owner_generation_for_task_key(task.task.stable_key())?;
+                    if state
+                        .pairing
+                        .pending
+                        .as_ref()
+                        .map(|pending| pending.owner_generation)
+                        != owner.checked_add(1)
+                    {
+                        // A target that already claimed ownership must finish
+                        // pairing there, rather than create another physical owner.
+                        continue;
+                    }
+                    let token = context
+                        .continuations
+                        .issue_token_for_owner(&task.task, owner, &root)?;
+                    if let Some(issue) = task
+                        .store
+                        .issue_worker_creation_retry(&task.task, &state, now_ms)?
+                    {
+                        self.queue_new_chat(
+                            &task.task,
+                            &issue.reference,
+                            issue.generation,
+                            now_ms,
+                            token,
+                            context
+                                .config
+                                .conversation_auth_token
+                                .as_deref()
+                                .map(str::to_owned),
+                        )
+                        .await?;
+                        self.clear_live_action(
+                            task.task.stable_key(),
+                            state.action.id.as_deref().unwrap(),
+                        )
+                        .await;
+                    }
+                }
+                continue;
+            }
             if state.action.conversation_load_rate_limited
                 && let Some(action_id) = state.action.id.as_deref()
                 && let Ok(_run_guard) = self.run_lock.try_write()
@@ -2188,7 +2323,11 @@ impl AgentAutomationSupervisor {
                     .await
                     .iter()
                     .any(|q| q.task_key == task.task.stable_key());
-                if online || activity.agent_stop_requested || (!queued && now_ms >= until) {
+                let paused_setup = state.action.kind == Some(AutomationActionKind::PairVerify)
+                    && state.permits_paused_setup(task.owner_generation);
+                if (!paused_setup && (online || activity.agent_stop_requested))
+                    || (!queued && now_ms >= until)
+                {
                     if task
                         .store
                         .restore_missing_cooldown_action(&task.task, &state.action)?
@@ -2236,7 +2375,9 @@ impl AgentAutomationSupervisor {
                 state = task.store.load(&task.task)?;
             }
             if check_approvals
-                && !approval_probed
+                && (!approval_probed
+                    || state.action.status == AutomationActionStatus::ApprovalRequired
+                        && !approval_recovery_probed)
                 && !activity.agent_stop_requested
                 && (activity.materialization_pending
                     || state
@@ -2263,30 +2404,42 @@ impl AgentAutomationSupervisor {
                     activity.activity_sequence
                 };
                 approval_probed = true;
+                approval_recovery_probed |=
+                    state.action.status == AutomationActionStatus::ApprovalRequired;
+                let setup_queued = self
+                    .queue
+                    .lock()
+                    .await
+                    .iter()
+                    .any(|queued| execution_kind(queued) == AutomationActionKind::PairVerify);
                 let visit = activity.materialization_pending
+                    && !setup_queued
                     && !activity.is_online(now_ms, task.store.offline_after_ms())
                     && activity
                         .agent_waiting_until_ms
                         .is_none_or(|until| now_ms >= until);
-                let approval = if visit {
-                    self.executor
-                        .inspect_pending_materialization(url, account, &connector)
-                        .await
-                } else {
-                    self.executor
-                        .approve_pending_conversation(url, account, &connector)
-                        .await
-                };
+                let approval = self
+                    .executor
+                    .observe_pending_conversation(url, account, &connector, visit)
+                    .await;
                 if activity.materialization_pending
-                    && (visit && approval.is_ok() || matches!(approval, Ok(true)))
+                    && (visit && approval.is_ok()
+                        || approval.as_ref().is_ok_and(|result| result.approved))
                 {
                     task.chat
                         .finish_materialization_check(epoch, sequence)
                         .await?;
                 }
-                if matches!(approval, Ok(true)) {
+                if approval.as_ref().is_ok_and(|result| result.approved) {
                     self.record_approved_resume(&task, &state, epoch, sequence, now_ms)
                         .await?;
+                    continue;
+                }
+                if approval
+                    .as_ref()
+                    .is_ok_and(|result| result.pending == Some(false))
+                    && self.record_cleared_approval(&task, &state, now_ms).await?
+                {
                     continue;
                 }
             }
@@ -3348,10 +3501,13 @@ impl AgentAutomationSupervisor {
                     }
                 }
             }
-            let (cooldown, worker) = match task.store.load(&task.task) {
+            let (cooldown, worker, worker_creation_retry) = match task.store.load(&task.task) {
                 Ok(state) => (
                     state.browser_cooldown_until_ms(),
                     state.agents.parent_task_key.is_some(),
+                    state.agents.parent_task_key.is_some()
+                        && state.action.kind == Some(AutomationActionKind::PairVerify)
+                        && state.action.automatic_retry_in_progress,
                 ),
                 Err(error) => {
                     // A transient unreadable state must not silently drop a
@@ -3404,13 +3560,17 @@ impl AgentAutomationSupervisor {
                     continue;
                 }
             }
-            if execution.activity_epoch == "conversation-rollover"
+            if (execution.activity_epoch == "conversation-rollover" || worker_creation_retry)
                 && task.chat.offline_activity().await?.agent_stop_requested
             {
                 task.store.fail_creation_before_send(
                     &task.task,
                     execution.request.pairing_generation,
-                    "Replacement conversation creation was stopped before Send",
+                    if worker_creation_retry {
+                        "Worker conversation creation was stopped before Send"
+                    } else {
+                        "Replacement conversation creation was stopped before Send"
+                    },
                     now_ms,
                 )?;
                 continue;
@@ -4053,17 +4213,20 @@ impl AgentAutomationSupervisor {
             let pending = task.store.load(&task.task)?;
             if pending.action.id.as_deref() == Some(execution.request.action_id.as_str())
                 && pending.pairing.verified_owner_generation == Some(task.owner_generation)
+                && !task.chat.agent_stop_requested().await?
                 && let Some(connector) = task.store.connector_name(&self.config.connector_name)?
-                && let Ok(true) = self
+                && let Ok(observation) = self
                     .executor
-                    .approve_pending_conversation(
+                    .observe_pending_conversation(
                         &execution.request.expected_url,
                         &execution.account_fingerprint,
                         &connector,
+                        false,
                     )
                     .await
-                && self
-                    .record_approved_resume(
+            {
+                let recovered = if observation.approved {
+                    self.record_approved_resume(
                         &task,
                         &pending,
                         &execution.activity_epoch,
@@ -4071,8 +4234,15 @@ impl AgentAutomationSupervisor {
                         terminal_at_ms,
                     )
                     .await?
-            {
-                return Ok(Some(snapshot));
+                } else if observation.pending == Some(false) {
+                    self.record_cleared_approval(&task, &pending, terminal_at_ms)
+                        .await?
+                } else {
+                    false
+                };
+                if recovered {
+                    return Ok(Some(snapshot));
+                }
             }
             self.notify();
         }
@@ -4106,6 +4276,32 @@ impl AgentAutomationSupervisor {
                             .is_none_or(|until| now_ms >= until)
                     })
         })
+    }
+
+    async fn record_cleared_approval(
+        &self,
+        task: &AutomationTaskHandle,
+        expected: &super::AutomationTaskState,
+        now_ms: u64,
+    ) -> Result<bool, String> {
+        if !task.store.clear_stale_approval_failure(
+            &task.task,
+            expected,
+            task.owner_generation,
+            now_ms,
+        )? {
+            return Ok(false);
+        }
+        if let Some(id) = expected.action.id.as_deref() {
+            self.queue.lock().await.retain(|queued| {
+                queued.task_key != task.task.stable_key() || queued.request.action_id != id
+            });
+            self.clear_live_action(task.task.stable_key(), id).await;
+        }
+        let state = task.store.load(&task.task)?;
+        task.store.notify_state(&task.chat, &state).await;
+        self.notify();
+        Ok(true)
     }
 
     async fn record_approved_resume(
@@ -4163,6 +4359,9 @@ impl AgentAutomationSupervisor {
             return Ok(false);
         }
         if let Some(action_id) = state.action.id.as_deref() {
+            self.queue.lock().await.retain(|queued| {
+                queued.task_key != task.task.stable_key() || queued.request.action_id != action_id
+            });
             self.clear_live_action(task.task.stable_key(), action_id)
                 .await;
         }
@@ -4499,7 +4698,9 @@ fn validate_terminal_snapshot(
             .unwrap_or("ChatGPT did not confirm creation of the new conversation");
         return Err(execution_error(message.to_owned(), true));
     }
-    if execution.request.model.is_some() {
+    if execution.request.model.is_some()
+        && (snapshot.state == CompanionActionState::Idle || snapshot.selected.is_some())
+    {
         let selected = snapshot.selected.as_ref().ok_or_else(|| {
             execution_error(
                 "Browser companion did not prove the selected model and effort".into(),
@@ -4595,6 +4796,24 @@ mod model_fallback_snapshot_tests {
             "ChatGPT did not confirm creation of the new conversation"
         );
         assert!(failure.send_accepted);
+    }
+
+    #[test]
+    fn failed_creation_with_a_saved_url_does_not_mask_its_incomplete_model_selection() {
+        let mut execution = execution();
+        execution.request.prompt = ActionPrompt::CreateChat {
+            continuation_token: "A".repeat(43),
+            reference: "B".repeat(43),
+            setup_reference: None,
+        };
+        let mut snapshot: CompanionActionSnapshot = serde_json::from_value(serde_json::json!({
+            "protocolVersion":1,"build":"test","actionId":"fallback","state":"ambiguous","sendAccepted":true,
+            "canonicalUrl":"https://chatgpt.com/c/created","selected":null,"lastEventSequence":6,
+            "attention":{"code":"ambiguous_send","message":"ChatGPT did not expose its model options (step: model_options)"}
+        })).unwrap();
+        assert!(validate_terminal_snapshot(&execution, &snapshot).is_ok());
+        snapshot.state = CompanionActionState::Idle;
+        assert!(validate_terminal_snapshot(&execution, &snapshot).is_err());
     }
 
     #[test]

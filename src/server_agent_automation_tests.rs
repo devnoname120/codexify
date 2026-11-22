@@ -5,6 +5,19 @@ fn automation_request(name: &str, arguments: Value, conversation: &str) -> CallT
     request
 }
 
+#[test]
+fn initialization_fence_preserves_legacy_running_conversations_without_send_clocks() {
+    let saved = json!({
+        "pairing":{"generation":3,"verifiedOwnerGeneration":2},
+        "action":{"kind":"offline_chat","status":"idle","sendAccepted":true}
+    });
+    let mut state: crate::agent_automation::AutomationTaskState = serde_json::from_value(saved).unwrap();
+    assert!(!state.initializing_owner(2), "an older working conversation is not initialization");
+    state.action.kind = Some(crate::agent_automation::AutomationActionKind::PairVerify);
+    assert!(state.initializing_owner(2), "an older setup turn is still fenced");
+    assert!(!state.initializing_owner(1), "a different owner cannot claim setup");
+}
+
 struct ServerAutomationNoopExecutor;
 
 #[async_trait::async_trait]
@@ -138,6 +151,14 @@ async fn pairing_continues_existing_task(preselected: bool) {
     assert!(store.load(&source).unwrap().pairing.pending.is_none());
     assert_eq!(chat.unread_snapshot().await.unwrap().messages.len(), 1);
 
+    let boot_read = client.call_tool(automation_request("chat_read", json!({}), target_name)).await.unwrap();
+    assert_eq!(boot_read.is_error, Some(true));
+    assert_eq!(chat.unread_snapshot().await.unwrap().messages.len(), 1);
+    let now = crate::markdown_chat::now_ms();
+    store.queue_action(&source, "paired-task-turn", crate::agent_automation::AutomationActionKind::OfflineChat, issue.generation, None, now).unwrap();
+    store.record_turn_send(&source, crate::agent_automation::turn_renewal::TurnSend {
+        action_id: "paired-task-turn".into(), at_ms: now, model: None, effort: None, pairing_generation: issue.generation, owner_generation: 1,
+    }).unwrap();
     let read = client.call_tool(automation_request("chat_read", json!({}), target_name)).await.unwrap();
     assert_ne!(read.is_error, Some(true));
     assert!(format!("{read:?}").contains("Continue the existing task after pairing."));
@@ -153,6 +174,7 @@ async fn pairing_verification_respects_setup_and_receives_the_owner_generation()
     config.memory.dir = Some(root.path().join("metadata").display().to_string());
     config.markdown_chat.enabled = true;
     config.markdown_chat.automation.enabled = true;
+    config.markdown_chat.automation.prime_file_materialization = true;
     config.conversation_auth_token = Some("a".repeat(64).into());
     let mut handler = handler_with_tools(
         root.path(),
@@ -265,6 +287,67 @@ async fn pairing_verification_respects_setup_and_receives_the_owner_generation()
             .delivered_through,
         0
     );
+    // All delivery paths must preserve the inbox throughout initialization,
+    // including when the follow-up is queued but has not actually been sent.
+    for name in [
+        "get_agent_brief",
+        "chat_read",
+        "chat_await",
+        "turn_completed",
+        "materialize_sentinel",
+    ] {
+        let response = client
+            .call_tool(automation_request(name, json!({}), conversation))
+            .await
+            .unwrap();
+        assert!(
+            !format!("{response:?}").contains("Start the actual work"),
+            "{name}: {response:?}"
+        );
+        assert_eq!(chat.unread_snapshot().await.unwrap().messages.len(), 1);
+        assert_eq!(
+            chat.widget_page(None, None)
+                .await
+                .unwrap()
+                .delivered_through,
+            0
+        );
+    }
+    // An explicit Stop still wins over initialization's normal final handoff.
+    chat.request_agent_stop("stop-during-setup".into()).await.unwrap();
+    let stopped = client.call_tool(automation_request("chat_read", json!({}), conversation)).await.unwrap();
+    assert!(format!("{stopped:?}").contains("immediately finish your turn"));
+    assert_eq!(chat.unread_snapshot().await.unwrap().messages.len(), 1);
+    chat.resume_agent().await.unwrap();
+    store
+        .queue_action(
+            &identity,
+            "first-task-turn",
+            crate::agent_automation::AutomationActionKind::OfflineChat,
+            issued.generation,
+            None,
+            crate::markdown_chat::now_ms(),
+        )
+        .unwrap();
+    let queued = client
+        .call_tool(automation_request("chat_read", json!({}), conversation))
+        .await
+        .unwrap();
+    assert!(!format!("{queued:?}").contains("Start the actual work"));
+    assert_eq!(chat.unread_snapshot().await.unwrap().messages.len(), 1);
+    store
+        .record_turn_send(
+            &identity,
+            crate::agent_automation::turn_renewal::TurnSend {
+                action_id: "first-task-turn".into(),
+                at_ms: crate::markdown_chat::now_ms(),
+                model: None,
+                effort: None,
+                pairing_generation: issued.generation,
+                owner_generation: 0,
+            },
+        )
+        .unwrap();
     let normal = client
         .call_tool(automation_request(
             "get_agent_brief",

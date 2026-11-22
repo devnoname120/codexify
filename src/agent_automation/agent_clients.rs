@@ -455,7 +455,9 @@ impl AgentRuntime {
                 let chat = self
                     .chats
                     .chat(&config, Some(&task), &SessionState::new())?;
-                let page = chat.widget_page(*before, known_revision.clone()).await?;
+                let page = chat
+                    .agent_inbox_page(*before, known_revision.clone())
+                    .await?;
                 Ok(
                     json!({"teamId":team_id,"revision":page.revision,"messages":page.messages,
                     "hasMore":page.has_more,"before":page.before,"unchanged":page.unchanged}),

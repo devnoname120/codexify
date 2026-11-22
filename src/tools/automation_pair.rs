@@ -118,6 +118,10 @@ impl Tool for AutomationVerifyPairing {
             Ok(value) => value,
             Err(error) => return ToolResult::error(error),
         };
+        let prime = config.markdown_chat.automation.prime_file_materialization
+            && store
+                .load(task)
+                .is_ok_and(|state| state.pairing.creating_chat);
         match store.verify_pairing_reference(
             task,
             owner_generation,
@@ -125,12 +129,16 @@ impl Tool for AutomationVerifyPairing {
             crate::markdown_chat::now_ms(),
         ) {
             Ok(pairing) => {
-                let content = "Agent-chat pairing verified. Do not perform task work in this verification turn.";
+                let content = if prime {
+                    "Agent-chat pairing verified. Call materialize_sentinel once before completing this initialization turn. Do not perform task work."
+                } else {
+                    "Agent-chat pairing verified. Do not perform task work in this verification turn."
+                };
                 ToolResult::text(content).with_structured(json!({
                     "content": content,
                     "verified": true,
                     "pairingGeneration": pairing.generation,
-                    "terminal": true
+                    "terminal": !prime
                 }))
             }
             Err(error) => ToolResult::error(error),

@@ -133,6 +133,7 @@
       "maxQueuedActions": 64,
       "browserActionLanes": 1,
       "autoApproveToolCalls": true,
+      "primeFileMaterialization": false,
       "newConversationOnLoadRateLimit": false,
       "automaticRetries": true,
       "retryTimings": {
@@ -152,6 +153,7 @@
       "recoveryEnhancements": false
     },
     "notifications": {
+      "subagents": true,
       "urls": [
         "ntfys://ntfy.example/codexify?image=no"
       ],
@@ -274,16 +276,17 @@
       "agentTeams": false,
       "defaultDelegation": false,
       "maxActiveWorkers": 4,
+      "maxWorkerDepth": 1,
       "externalAgentControl": false,
       "autoMode": false,
-      "agentFolders": false,
       "conversationRecovery": false
     }
   },
   "skills": {
     "enabled": true,
     "dirs": null,
-    "includePlugins": true
+    "includePlugins": true,
+    "blacklist": []
   },
   "codexMcp": {
     "enabled": true,

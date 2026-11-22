@@ -166,6 +166,7 @@ pub struct AgentAutomationConfig {
     pub max_queued_actions: usize,
     pub browser_action_lanes: usize,
     pub auto_approve_tool_calls: bool,
+    pub prime_file_materialization: bool,
     pub automatic_retries: bool,
     pub new_conversation_on_load_rate_limit: bool,
     pub retry_timings: RetryTimings,
@@ -189,6 +190,7 @@ impl Default for AgentAutomationConfig {
             max_queued_actions: DEFAULT_AUTOMATION_MAX_QUEUED_ACTIONS,
             browser_action_lanes: 1,
             auto_approve_tool_calls: true,
+            prime_file_materialization: false,
             automatic_retries: true,
             new_conversation_on_load_rate_limit: false,
             retry_timings: RetryTimings::default(),
@@ -371,6 +373,7 @@ impl Default for MarkdownChatConfig {
 
 pub const DEFAULT_MAX_ACTIVE_WORKERS: usize = 4;
 pub const MAX_ACTIVE_WORKERS_LIMIT: usize = 32;
+pub const MAX_WORKER_DEPTH_LIMIT: usize = 2;
 
 /// Feature gates stay opt-in. Delegation needs either this global switch or a
 /// per-team grant, and active workers are capped per project.
@@ -380,9 +383,12 @@ pub struct ChatFeatures {
     pub agent_teams: bool,
     pub default_delegation: bool,
     pub max_active_workers: usize,
+    pub max_worker_depth: usize,
     pub external_agent_control: bool,
     pub auto_mode: bool,
-    pub agent_folders: bool,
+    /// Accepted for older configurations; worker grouping is always enabled.
+    #[serde(rename = "agentFolders", skip_serializing)]
+    pub _legacy_agent_folders: Option<bool>,
     pub conversation_recovery: bool,
 }
 impl Default for ChatFeatures {
@@ -391,9 +397,10 @@ impl Default for ChatFeatures {
             agent_teams: false,
             default_delegation: false,
             max_active_workers: DEFAULT_MAX_ACTIVE_WORKERS,
+            max_worker_depth: 1,
             external_agent_control: false,
             auto_mode: false,
-            agent_folders: false,
+            _legacy_agent_folders: None,
             conversation_recovery: false,
         }
     }
@@ -427,6 +434,8 @@ impl Default for ExtrasConfig {
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct NotificationsConfig {
     pub urls: Vec<String>,
+    #[serde(default = "default_subagent_notifications")]
+    pub subagents: bool,
     #[serde(default = "default_notification_python")]
     pub python_path: String,
     #[serde(default = "default_notification_timeout")]
@@ -463,6 +472,10 @@ fn default_notification_python() -> String {
     if cfg!(windows) { "python" } else { "python3" }.into()
 }
 
+fn default_subagent_notifications() -> bool {
+    true
+}
+
 fn default_notification_timeout() -> u64 {
     15_000
 }
@@ -471,6 +484,7 @@ impl fmt::Debug for NotificationsConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("NotificationsConfig")
             .field("destinations", &self.urls.len())
+            .field("subagents", &self.subagents)
             .field("python_path", &self.python_path)
             .field("timeout_ms", &self.timeout_ms)
             .field("events", &self.events)
@@ -528,6 +542,11 @@ impl MarkdownChatConfig {
             notifications.validate()?;
         }
         self.automation.validate()?;
+        if !(1..=MAX_WORKER_DEPTH_LIMIT).contains(&self.features.max_worker_depth) {
+            return Err(format!(
+                "agentChat.features.maxWorkerDepth must be between 1 and {MAX_WORKER_DEPTH_LIMIT}"
+            ));
+        }
         if !(1..=MAX_ACTIVE_WORKERS_LIMIT).contains(&self.features.max_active_workers) {
             return Err(format!(
                 "agentChat.features.maxActiveWorkers must be between 1 and {MAX_ACTIVE_WORKERS_LIMIT}"
@@ -707,6 +726,15 @@ impl MarkdownChatStore {
                 let config = config.clone();
                 let monitor_wake = wake.clone();
                 tokio::spawn(async move {
+                    if !notification::enabled_for_chat(
+                        &config,
+                        notification::NotificationEvent::Offline,
+                        &chat,
+                    )
+                    .await
+                    {
+                        return;
+                    }
                     let offline_after_ms = config.offline_after_ms();
                     offline::monitor(chat, monitor_wake, offline_after_ms, move || {
                         let config = config.clone();
@@ -829,13 +857,17 @@ mod tests {
             assert_eq!(config.features, ChatFeatures::default());
             assert!(!config.features.default_delegation);
             assert_eq!(config.features.max_active_workers, 4);
+            assert_eq!(config.features.max_worker_depth, 1);
             assert!(
                 serde_json::to_value(&config.features)
                     .unwrap()
                     .as_object()
                     .unwrap()
                     .iter()
-                    .filter(|(key, _)| key.as_str() != "maxActiveWorkers")
+                    .filter(|(key, _)| !matches!(
+                        key.as_str(),
+                        "maxActiveWorkers" | "maxWorkerDepth"
+                    ))
                     .all(|(_, value)| value == false)
             );
             assert_eq!(config.automation.browser_action_lanes, 1);

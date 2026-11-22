@@ -36,12 +36,37 @@ pub fn enabled(config: &MarkdownChatConfig, event: NotificationEvent) -> bool {
         .is_some_and(|notifications| notifications.includes(event))
 }
 
+pub(crate) async fn enabled_for_chat(
+    config: &MarkdownChatConfig,
+    event: NotificationEvent,
+    chat: &std::sync::Arc<super::ChatFile>,
+) -> bool {
+    if !enabled(config, event) {
+        return false;
+    }
+    if config.notifications.as_ref().is_some_and(|n| n.subagents) {
+        return true;
+    }
+    let path = chat.path().to_path_buf();
+    match tokio::task::spawn_blocking(move || {
+        crate::agent_automation::AgentAutomationStore::chat_is_subagent(&path)
+    })
+    .await
+    {
+        Ok(Ok(worker)) => !worker,
+        _ => {
+            tracing::warn!("notification suppressed because agent membership could not be read");
+            false
+        }
+    }
+}
+
 pub(crate) async fn notify_input(
     chat: &std::sync::Arc<super::ChatFile>,
     config: &MarkdownChatConfig,
     workspace: &str,
 ) -> Result<(), String> {
-    if !enabled(config, NotificationEvent::InputRequired)
+    if !enabled_for_chat(config, NotificationEvent::InputRequired, chat).await
         || !chat.claim_input_notification().await?
     {
         return Ok(());
@@ -77,6 +102,9 @@ pub(crate) async fn notify_automation(
     state: &crate::agent_automation::AutomationTaskState,
 ) -> Result<(), String> {
     use crate::agent_automation::{AutomationActionStatus as Action, GoalStatus};
+    if !config.subagents && state.agents.parent_task_key.is_some() {
+        return Ok(());
+    }
     if let Some(goal) = &state.goal {
         let event = match goal.status {
             GoalStatus::Completed => Some((
@@ -317,6 +345,145 @@ mod tests {
 
     fn claims(root: &std::path::Path) -> serde_json::Value {
         serde_json::from_slice(&std::fs::read(root.join("cursor.json")).unwrap()).unwrap()
+    }
+
+    fn membership(root: &std::path::Path, parent: serde_json::Value) {
+        let path = root.join("automation.json");
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&serde_json::json!({
+                "agents":{"parentTaskKey":parent}, "unrelatedFutureField":true
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn subagent_scope_filters_every_event_and_preserves_root_event_filters() {
+        let root = tempfile::tempdir().unwrap();
+        let chat = Arc::new(super::super::ChatFile::new(
+            root.path().join("CHAT.md"),
+            true,
+        ));
+        let mut cfg: MarkdownChatConfig = serde_json::from_value(serde_json::json!({
+            "notifications":{"urls":["ntfys://test"],"subagents":false}
+        }))
+        .unwrap();
+        for event in [
+            NotificationEvent::Message,
+            NotificationEvent::Completed,
+            NotificationEvent::InputRequired,
+            NotificationEvent::GoalBlocked,
+            NotificationEvent::Error,
+            NotificationEvent::Offline,
+        ] {
+            assert!(
+                enabled_for_chat(&cfg, event, &chat).await,
+                "ordinary chat: {event:?}"
+            );
+            membership(root.path(), serde_json::json!("a".repeat(64)));
+            assert!(
+                !enabled_for_chat(&cfg, event, &chat).await,
+                "worker: {event:?}"
+            );
+            cfg.notifications.as_mut().unwrap().subagents = true;
+            assert!(
+                enabled_for_chat(&cfg, event, &chat).await,
+                "worker opted in: {event:?}"
+            );
+            cfg.notifications.as_mut().unwrap().subagents = false;
+            membership(root.path(), serde_json::Value::Null);
+            assert!(
+                enabled_for_chat(&cfg, event, &chat).await,
+                "coordinator: {event:?}"
+            );
+        }
+        cfg.notifications.as_mut().unwrap().events.completed = false;
+        assert!(!enabled_for_chat(&cfg, NotificationEvent::Completed, &chat).await);
+        membership(root.path(), serde_json::json!("a".repeat(64)));
+        cfg.notifications.as_mut().unwrap().subagents = true;
+        assert!(!enabled_for_chat(&cfg, NotificationEvent::Completed, &chat).await);
+    }
+
+    #[tokio::test]
+    async fn unreadable_membership_suppresses_delivery_without_failing_chat() {
+        let root = tempfile::tempdir().unwrap();
+        let chat = Arc::new(super::super::ChatFile::new(
+            root.path().join("CHAT.md"),
+            true,
+        ));
+        let mut cfg = config();
+        cfg.notifications.as_mut().unwrap().subagents = false;
+        membership(root.path(), serde_json::json!("invalid-parent"));
+        assert!(!enabled_for_chat(&cfg, NotificationEvent::InputRequired, &chat).await);
+        std::fs::write(root.path().join("automation.json"), b"{").unwrap();
+        assert!(!enabled_for_chat(&cfg, NotificationEvent::InputRequired, &chat).await);
+        chat.append("Which option?".into()).await.unwrap();
+        notify_input(&chat, &cfg, "test").await.unwrap();
+        assert!(chat.claim_input_notification().await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn muted_worker_alerts_do_not_consume_input_goal_or_error_claims() {
+        let root = tempfile::tempdir().unwrap();
+        let chat = Arc::new(super::super::ChatFile::new(
+            root.path().join("CHAT.md"),
+            true,
+        ));
+        membership(root.path(), serde_json::json!("a".repeat(64)));
+        let mut cfg = config();
+        cfg.notifications.as_mut().unwrap().subagents = false;
+        chat.append("Which option?".into()).await.unwrap();
+        notify_input(&chat, &cfg, "test").await.unwrap();
+        assert!(chat.claim_input_notification().await.unwrap());
+        let mut state = AutomationTaskState::default();
+        state.agents.parent_task_key = Some("a".repeat(64));
+        state.goal = Some(
+            serde_json::from_value(serde_json::json!({
+                "revision":1,"markdown":"Finish task","status":"blocked","createdAtMs":1,
+                "updatedAtMs":2,"finishedAtMs":2,"summary":null,"blockedReason":"Need an answer"
+            }))
+            .unwrap(),
+        );
+        state.action.id = Some("action-1".into());
+        state.action.kind = Some(AutomationActionKind::OfflineChat);
+        state.action.last_error = Some("Chat cannot be opened".into());
+        state.action.automatic_retry_attempts = 5;
+        for action in [
+            AutomationActionStatus::Failed,
+            AutomationActionStatus::ApprovalRequired,
+        ] {
+            state.action.status = action;
+            for goal in [GoalStatus::Blocked, GoalStatus::Completed] {
+                state.goal.as_mut().unwrap().status = goal;
+                notify_automation(&chat, cfg.notifications.as_ref().unwrap(), "test", &state)
+                    .await
+                    .unwrap();
+                assert!(
+                    claims(root.path())["notificationClaims"]
+                        .get("goal")
+                        .is_none()
+                );
+                assert!(
+                    claims(root.path())["notificationClaims"]
+                        .get("error")
+                        .is_none()
+                );
+            }
+        }
+        // The same settings still deliver coordinator transitions.
+        state.agents.parent_task_key = None;
+        notify_automation(&chat, cfg.notifications.as_ref().unwrap(), "test", &state)
+            .await
+            .unwrap();
+        assert!(claims(root.path())["notificationClaims"]["goal"].is_string());
+        assert!(claims(root.path())["notificationClaims"]["error"].is_string());
     }
 
     #[tokio::test]

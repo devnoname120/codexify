@@ -323,6 +323,98 @@ fn discover_searches_nothing_when_disabled() {
     assert!(catalog.roots.is_empty());
 }
 
+#[test]
+fn discover_blacklist_matches_complete_names_across_scopes() {
+    let dir = TempDir::new().unwrap();
+    let user_dir = dir.path().join("personal");
+    let plugin_dir = dir.path().join("generated");
+    for (root, name) in [
+        (repo_root(dir.path()), "Deploy"),
+        (user_dir.clone(), "deploy"),
+        (user_dir.clone(), "dispatching-parallel-agents"),
+        (
+            plugin_dir.clone(),
+            "superpowers:dispatching-parallel-agents",
+        ),
+        (plugin_dir.clone(), "other:dispatching-parallel-agents"),
+    ] {
+        write_skill(&root, &name.replace(':', "-"), &default_skill_body(name));
+    }
+
+    let mut config = skills_config(dir.path());
+    config.skills.dirs = Some(vec![user_dir.to_string_lossy().into_owned()]);
+    config.generated_skills_dir = Some(plugin_dir);
+    config.skills.blacklist = Some(markers(&[
+        " DEPLOY ",
+        "SUPERPOWERS:DISPATCHING-PARALLEL-AGENTS",
+        "missing",
+    ]));
+    let catalog = discover_skills(&config);
+    assert!(catalog.warnings.is_empty(), "{:?}", catalog.warnings);
+    assert_eq!(
+        catalog
+            .skills
+            .iter()
+            .map(|skill| (skill.name.as_str(), skill.scope))
+            .collect::<Vec<_>>(),
+        vec![
+            ("dispatching-parallel-agents", SkillScope::User),
+            ("other:dispatching-parallel-agents", SkillScope::Plugin),
+        ]
+    );
+
+    config.skills.blacklist = Some(vec![]);
+    assert_eq!(discover_skills(&config).skills.len(), 4);
+}
+
+#[test]
+fn discover_blacklist_filters_installed_codex_plugins() {
+    // Isolate CODEX_HOME in a child process rather than changing the test
+    // runner's environment while other discovery tests run concurrently.
+    const FIXTURE_HOME: &str = "CODEXIFY_TEST_SKILL_BLACKLIST_HOME";
+    if let Some(home) = std::env::var_os(FIXTURE_HOME) {
+        let mut config = skills_config(Path::new(&home));
+        config.skills.include_plugins = Some(true);
+        assert_eq!(discover_skills(&config).skills.len(), 2);
+        config.skills.blacklist = Some(markers(&[" SUPERPOWERS:DISPATCHING-PARALLEL-AGENTS "]));
+        let catalog = discover_skills(&config);
+        assert!(catalog.warnings.is_empty(), "{:?}", catalog.warnings);
+        assert_eq!(catalog.skills.len(), 1);
+        assert_eq!(catalog.skills[0].name, "superpowers:allowed");
+        assert_eq!(catalog.skills[0].scope, SkillScope::Plugin);
+        return;
+    }
+
+    let home = TempDir::new().unwrap();
+    let plugin = home.path().join("plugins/cache/market/superpowers/1.0.0");
+    write_file(
+        &home.path().join("config.toml"),
+        "[plugins.\"superpowers@market\"]\nenabled = true\n",
+    );
+    write_file(
+        &plugin.join(".codex-plugin/plugin.json"),
+        r#"{"name":"superpowers"}"#,
+    );
+    for name in ["dispatching-parallel-agents", "allowed"] {
+        write_skill(&plugin.join("skills"), name, &default_skill_body(name));
+    }
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "discover_blacklist_filters_installed_codex_plugins",
+        ])
+        .env(FIXTURE_HOME, home.path())
+        .env("CODEX_HOME", home.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 // --- findSkill ----------------------------------------------------------
 
 #[test]
@@ -1119,6 +1211,58 @@ fn build_omits_catalogue_when_skills_disabled() {
 }
 
 // --- skills_list tool ---------------------------------------------------
+
+#[tokio::test]
+async fn blacklist_omits_skills_from_brief_and_list_and_blocks_package_reads() {
+    let dir = TempDir::new().unwrap();
+    let state = TempDir::new().unwrap();
+    let root = repo_root(dir.path());
+    let blocked = write_skill(&root, "blocked", &default_skill_body("blocked"));
+    write_file(
+        &blocked.join("references/guide.md"),
+        "Blocked resource body",
+    );
+    write_skill(&root, "allowed", &default_skill_body("allowed"));
+    let mut config = brief_config(dir.path(), state.path(), "bash");
+    config.skills.blacklist = Some(markers(&["blocked"]));
+    let session = SessionState::new();
+
+    let brief = build_instructions(&config);
+    assert!(!brief.contains("- blocked (repo)"));
+    assert!(brief.contains("- allowed (repo)"));
+
+    let list = SkillsList.call(json!({}), &config, &session).await;
+    assert!(!list.is_error);
+    assert!(!list.joined_text().contains("blocked"));
+    let skills = &list.structured_content.as_ref().unwrap()["skills"];
+    assert_eq!(skills.as_array().unwrap().len(), 1);
+    assert_eq!(skills[0]["name"], "allowed");
+
+    for args in [
+        json!({"name":"blocked"}),
+        json!({"name":" BLOCKED ","resource":"references/guide.md"}),
+    ] {
+        let read = SkillsRead.call(args, &config, &session).await;
+        assert!(read.is_error, "{}", read.joined_text());
+        assert!(read.joined_text().contains("No skill named"));
+        assert!(!read.joined_text().contains("Blocked resource body"));
+    }
+    let read = SkillsRead
+        .call(json!({"name":"allowed"}), &config, &session)
+        .await;
+    assert!(!read.is_error, "{}", read.joined_text());
+    assert!(read.joined_text().contains("Do the thing."));
+
+    config
+        .skills
+        .blacklist
+        .as_mut()
+        .unwrap()
+        .push("allowed".into());
+    assert!(!build_instructions(&config).contains("## Skills"));
+    let list = SkillsList.call(json!({}), &config, &session).await;
+    assert_eq!(list.structured_content.unwrap()["skills"], json!([]));
+}
 
 #[tokio::test]
 async fn skills_list_gives_name_reason_path() {

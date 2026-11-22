@@ -10,6 +10,7 @@ import {ChatGptBrowserDriver,type SingleBrowserSurface} from "../src/chatgpt-dri
 import {SingleWindowCoordinator} from "../src/browser-window";
 import {privateChromeExecutable} from "../src/chrome-executable";
 import {protocolBuild,type ConversationApprovalRequest} from "../src/protocol";
+import {startAutoApprovalMonitor} from "../src/approval-monitor";
 
 const native=process.env.CODEXIFY_TEST_BROWSER_COMPANION_CHROME==="1";
 const url="https://chatgpt.com/c/approval-fixture",name="Fixtüre 工具",appId="asdk_app_approval_fixture";
@@ -77,6 +78,49 @@ test.skipIf(!native)("English, Greek and Italian approval menus grant conversati
     expect(page.url()).toBe(url);expect(context.pages()).toEqual([page]);
     expect(await coordinator.approvePendingConversation(request)).toMatchObject({approved:false});
     expect((await coordinator.health()).activeActionId).toBeNull();
+  }
+});
+
+test.skipIf(!native)("independently approved cards remain observable without another approval or Send",async()=>{
+  fixture();await surface.navigate(url);
+  const coordinator=new SingleWindowCoordinator(new ChatGptBrowserDriver(surface,build),build);
+  expect(await approveConversationCard(page,request,appId,new AbortController().signal)).toBe(true);
+  const observed=await coordinator.approvePendingConversation(request);
+  expect(observed).toMatchObject({approved:false,pending:false});
+  expect(await page.evaluate(()=>JSON.parse(document.body.dataset.clicks!))).toEqual({arrow:1,once:0,conversation:1,deny:0,send:0});
+},12_000);
+
+test.skipIf(!native)("clear approval proof requires the same idle account and conversation; blocked cards remain pending",async()=>{
+  fixture({header:'Another connector'});await surface.navigate(url);
+  const coordinator=new SingleWindowCoordinator(new ChatGptBrowserDriver(surface,build),build);
+  expect(await coordinator.approvePendingConversation(request)).toMatchObject({approved:false,pending:true});
+  await page.locator('[data-codex-approval-surface="true"]').evaluate(element=>element.remove());
+  await page.evaluate(()=>{const stop=document.createElement('button');stop.dataset.testid='stop-button';stop.textContent='Stop';document.body.append(stop);});
+  expect(await coordinator.approvePendingConversation(request)).not.toHaveProperty('pending');
+  await page.locator('[data-testid="stop-button"]').evaluate(element=>element.remove());
+  expect(await coordinator.approvePendingConversation({...request,url:'https://chatgpt.com/c/other'})).not.toHaveProperty('pending');
+  expect(await coordinator.approvePendingConversation({...request,expectedAccountFingerprint:'wrong-account'})).not.toHaveProperty('pending');
+  expect(await coordinator.approvePendingConversation(request)).toMatchObject({approved:false,pending:false});
+  expect(await page.evaluate(()=>JSON.parse(document.body.dataset.clicks!))).toEqual({arrow:0,once:0,conversation:0,deny:0,send:0});
+});
+
+test.skipIf(!native)("materialization checks reveal the latest approval in document and nested scrollers",async()=>{
+  for(const nested of [false,true]) {
+    fixture();
+    body=`<main><div id="thread" ${nested?'style="height:360px;overflow-y:auto"':''}><div style="height:3000px" data-turn-key="older-turn">Older conversation content</div>${body}</div></main>
+      <script>
+        const thread=${nested?'document.getElementById("thread")':'document.scrollingElement'};
+        const approval=document.querySelector('[data-codex-approval-surface="true"]');
+        approval.style.display='none';
+        ${nested?'thread':'window'}.addEventListener('scroll',()=>{
+          if(thread.scrollTop+thread.clientHeight>=thread.scrollHeight-20)approval.style.display='block';
+        });
+      </script>`;
+    await page.goto(url);
+    expect(await page.locator('[data-codex-approval-surface="true"]').isVisible()).toBe(false);
+    expect(await approveConversationCard(page,request,appId,new AbortController().signal)).toBe(true);
+    expect(await page.evaluate(nested=> (nested?document.querySelector('#thread'):document.scrollingElement)!.scrollTop,nested)).toBeGreaterThan(0);
+    expect(await page.evaluate(()=>JSON.parse(document.body.dataset.clicks!))).toEqual({arrow:1,once:0,conversation:1,deny:0,send:0});
   }
 });
 
@@ -237,7 +281,7 @@ test.skipIf(!native)('an inherited connector approval requires the cached app an
   }
 },30_000);
 
-test.skipIf(!native)('automatic once approval handles a configured connector without a new mention',async()=>{
+test.skipIf(!native)('automatic conversation approval handles a configured connector without a new mention',async()=>{
   fixture();await surface.navigate(url);
   await page.evaluate(()=>{
     document.querySelector('[data-user-message-bubble]')!.textContent='Continue the existing work';
@@ -247,10 +291,27 @@ test.skipIf(!native)('automatic once approval handles a configured connector wit
       document.querySelector('[data-codex-approval-surface]')!.remove();
     };
   });
-  expect(await approveConversationCard(page,request,undefined,new AbortController().signal,'once')).toBe(false);
-  expect(await approveConversationCard(page,request,appId,new AbortController().signal,'once')).toBe(true);
-  expect(await page.evaluate(()=>JSON.parse(document.body.dataset.clicks!))).toMatchObject({arrow:0,once:1,conversation:0,deny:0,send:0});
+  expect(await approveConversationCard(page,request,undefined,new AbortController().signal)).toBe(false);
+  expect(await approveConversationCard(page,request,appId,new AbortController().signal)).toBe(true);
+  expect(await page.evaluate(()=>JSON.parse(document.body.dataset.clicks!))).toMatchObject({arrow:1,once:0,conversation:1,deny:0,send:0});
 });
+
+test.skipIf(!native)('the background monitor scrolls a secondary tab and opens its conversation approval menu',async()=>{
+  fixture();
+  body=`<main style="height:380px;overflow-y:auto"><div style="height:2500px" data-turn-key="older">Older content</div>${body}</main>
+    <script>const thread=document.querySelector('main'),card=document.querySelector('[data-codex-approval-surface]');card.style.display='none';
+    thread.addEventListener('scroll',()=>{if(thread.scrollTop+thread.clientHeight>=thread.scrollHeight-20)card.style.display='block';});</script>`;
+  await page.goto(url);
+  const driver=new ChatGptBrowserDriver(surface,build),coordinator=new SingleWindowCoordinator(driver,build);
+  const home={url:()=> 'https://chatgpt.com/',isClosed:()=>false} as Page;
+  const stop=startAutoApprovalMonitor(coordinator,{page:async()=>home,approvalPages:async()=>[home,page]},'unused',{
+    policy:()=>({connectorName:name,accountFingerprint:request.expectedAccountFingerprint}),intervalMs:20});
+  try {
+    await page.waitForFunction(()=>JSON.parse(document.body.dataset.clicks!).conversation===1,undefined,{timeout:8_000});
+    expect(await page.evaluate(()=>JSON.parse(document.body.dataset.clicks!))).toEqual({arrow:1,once:0,conversation:1,deny:0,send:0});
+    expect(await page.locator('main').evaluate(node=>node.scrollTop)).toBeGreaterThan(0);
+  }finally{stop();await coordinator.close();}
+},12_000);
 
 for(const capture of ['materialization-approval','materialization-approval-neutral']) {
 test.skipIf(!native)(`the captured ${capture} card and portalled Radix menu select conversation scope exactly once`,async()=>{

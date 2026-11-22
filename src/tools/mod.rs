@@ -28,6 +28,7 @@ pub mod list_directory;
 pub mod list_projects;
 pub mod markdown_chat;
 pub mod markdown_chat_ui;
+pub mod materialize_sentinel;
 pub mod read_file;
 pub mod recall;
 pub mod remember;

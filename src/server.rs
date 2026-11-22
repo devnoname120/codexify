@@ -231,18 +231,6 @@ impl CodexHandler {
             !tool_name.starts_with("chat_"),
         )
         .await;
-        if !matches!(tool_name, "chat_await" | "turn_completed")
-            && let Some(root) = self.selected_project_root(task_conversation)
-            && let Ok(chat) = self
-                .effective_task_config(task_conversation, root)
-                .and_then(|config| {
-                    self.markdown_chat
-                        .chat(&config, task_conversation, &self.session)
-                })
-            && let Err(error) = chat.queue_agent_work(true).await
-        {
-            tracing::warn!(%error, "could not record queued-message turn progress");
-        }
         if counts_rollout_work(tool_name)
             && let Some(root) = self.selected_project_root(task_conversation)
             && let Ok(config) = self.effective_task_config(task_conversation, root)
@@ -590,6 +578,55 @@ fn counts_rollout_work(name: &str) -> bool {
     )
 }
 
+fn counts_request_work(name: &str) -> bool {
+    !name.starts_with("chat_")
+        && !matches!(
+            name,
+            "turn_completed"
+                | "setup"
+                | "continue_task"
+                | "set_project_root"
+                | "automation_verify_pairing"
+                | "materialize_sentinel"
+                | "ticket_wait"
+                | "get_agent_brief"
+                | "get_environment"
+                | "clock_curr_time"
+                | "clock_sleep"
+                | "goal_read"
+                | "rollout_read"
+                | "agent_status"
+        )
+}
+
+const INITIALIZATION_ONLY: &str = "This is the initialization turn. Complete the required setup, pairing verification and optional sentinel materialization, then finish this initialization turn. Do not perform task work or read ordinary requests here. Pending user messages are preserved for the separate task turn, which will start automatically after initialization finishes.";
+
+fn initialization_in_progress(
+    config: &AppConfig,
+    task: Option<&ConversationIdentity>,
+    owner: Option<u64>,
+) -> bool {
+    config.markdown_chat.automation.enabled
+        && task.zip(owner).is_some_and(|(task, owner)| {
+            crate::agent_automation::AgentAutomationStore::for_config(config)
+                .and_then(|store| store.load(task))
+                .is_ok_and(|state| state.initializing_owner(owner))
+        })
+}
+
+fn initialization_call_allowed(name: &str) -> bool {
+    matches!(
+        name,
+        "setup"
+            | "continue_task"
+            | "set_project_root"
+            | "automation_verify_pairing"
+            | "materialize_sentinel"
+            | "get_agent_brief"
+            | "get_environment"
+    )
+}
+
 fn ticketed_model_tool(tool: &dyn Tool, config: &AppConfig) -> bool {
     config.experimental.agent_tickets
         && !app_only_tool(tool)
@@ -605,6 +642,31 @@ fn builtin_ui_resources(ui_widgets: bool) -> Vec<rmcp::model::Resource> {
         self_update_ui::resource(),
         setup_ui::resource(),
     ]
+}
+
+fn paused_setup_call_allowed(
+    name: &str,
+    config: &AppConfig,
+    task: Option<&ConversationIdentity>,
+    owner: Option<u64>,
+) -> bool {
+    if !matches!(
+        name,
+        "setup"
+            | "continue_task"
+            | "automation_verify_pairing"
+            | "materialize_sentinel"
+            | "get_agent_brief"
+            | "get_environment"
+    ) {
+        return false;
+    }
+    let Some((task, owner)) = task.zip(owner) else {
+        return false;
+    };
+    crate::agent_automation::AgentAutomationStore::for_config(config)
+        .and_then(|store| store.load(task))
+        .is_ok_and(|state| state.permits_paused_setup(owner))
 }
 
 fn builtin_ui_contents(ui_widgets: bool, uri: &str) -> Option<rmcp::model::ResourceContents> {
@@ -732,6 +794,21 @@ impl ServerHandler for CodexHandler {
         context: RequestContext<RoleServer>,
     ) -> Result<ReadResourceResponse, McpError> {
         let protocol_version = context.protocol_version();
+        if let Some(contents) = crate::tools::materialize_sentinel::contents(
+            self.config
+                .markdown_chat
+                .automation
+                .prime_file_materialization,
+            &request.uri,
+        ) {
+            let mut result = ReadResourceResult::new(vec![contents]);
+            ensure_modern_cache_hints(
+                protocol_version.as_ref(),
+                &mut result.ttl_ms,
+                &mut result.cache_scope,
+            );
+            return Ok(result.into());
+        }
         match self
             .bridged_resources
             .read_resource(&request.uri, &context.ct)
@@ -1059,7 +1136,24 @@ impl ServerHandler for CodexHandler {
                     })
                     .is_some_and(|key| key != task.stable_key())
             });
-        let _analytics_tool_guard = if agent_call && authorized_before && name != ContinueTask::NAME
+        let initializing = agent_call
+            && self
+                .selected_project_root(task_conversation.as_ref())
+                .and_then(|root| {
+                    self.effective_task_config(task_conversation.as_ref(), root)
+                        .ok()
+                })
+                .is_some_and(|config| {
+                    initialization_in_progress(
+                        &config,
+                        task_conversation.as_ref(),
+                        task_owner_generation,
+                    )
+                });
+        let _analytics_tool_guard = if agent_call
+            && authorized_before
+            && !initializing
+            && name != ContinueTask::NAME
         {
             task_conversation
                 .as_ref()
@@ -1166,6 +1260,12 @@ impl ServerHandler for CodexHandler {
         {
             if chat.agent_stop_requested().await.unwrap_or(true)
                 && tool.is_some_and(|tool| !tool.behavior().read_only)
+                && !paused_setup_call_allowed(
+                    &name,
+                    &config,
+                    task_conversation.as_ref(),
+                    task_owner_generation,
+                )
                 && !matches!(
                     name.as_str(),
                     "chat_write"
@@ -1177,7 +1277,12 @@ impl ServerHandler for CodexHandler {
                         | "agent_report"
                 )
             {
-                Some((crate::markdown_chat::AGENT_STOP_MESSAGE, None))
+                Some((
+                    chat.agent_suspension_message()
+                        .await
+                        .unwrap_or(crate::markdown_chat::AGENT_STOP_MESSAGE),
+                    None,
+                ))
             } else if matches!(
                 name.as_str(),
                 "exec_command"
@@ -1214,6 +1319,8 @@ impl ServerHandler for CodexHandler {
                 ToolResult::error(format!("Invalid arguments for `{name}`: {error}"))
             } else if let Some(error) = tool.and_then(|tool| tool.validate_arguments(&args).err()) {
                 ToolResult::error(format!("Invalid arguments for `{name}`: {error}"))
+            } else if initializing && !initialization_call_allowed(&name) {
+                ToolResult::error(INITIALIZATION_ONLY)
             } else if let Some((message, inline_config)) = work_preflight {
                 if let Some(config) = inline_config
                     && matches!(&workspace_at_start, Ok((Some(root), None)) if root == &config.work_dir)
@@ -1668,6 +1775,21 @@ impl ServerHandler for CodexHandler {
             ));
         }
 
+        if agent_call
+            && !result.is_error
+            && !initializing
+            && !inline_chat_read
+            && counts_request_work(&name)
+            && let Some(root) = self.selected_project_root(task_conversation.as_ref())
+            && let Ok(config) = self.effective_task_config(task_conversation.as_ref(), root)
+            && let Ok(chat) =
+                self.markdown_chat
+                    .chat(&config, task_conversation.as_ref(), &self.session)
+            && let Err(error) = chat.queue_agent_work(true).await
+        {
+            tracing::warn!(%error, "could not record queued-message turn progress");
+        }
+
         if !result.is_error
             && name == "get_agent_brief"
             && let Ok((Some(root), Some(change))) = &workspace_at_start
@@ -1722,12 +1844,26 @@ impl ServerHandler for CodexHandler {
             tracing::warn!(%error, "could not save conversation schema baseline");
         }
 
-        if name == "automation_verify_pairing"
-            && !result.is_error
-            && result
-                .structured_content
-                .as_ref()
-                .is_some_and(|value| value["verified"] == true)
+        let initializing_after = self
+            .selected_project_root(task_conversation.as_ref())
+            .and_then(|root| {
+                self.effective_task_config(task_conversation.as_ref(), root)
+                    .ok()
+            })
+            .is_some_and(|config| {
+                initialization_in_progress(
+                    &config,
+                    task_conversation.as_ref(),
+                    task_owner_generation,
+                )
+            });
+        if (initializing_after
+            || name == "automation_verify_pairing"
+                && !result.is_error
+                && result
+                    .structured_content
+                    .as_ref()
+                    .is_some_and(|value| value["verified"] == true))
             && let (Some(activity), Some(root)) = (
                 activity.as_ref(),
                 self.selected_project_root(task_conversation.as_ref()),
@@ -1798,7 +1934,7 @@ impl ServerHandler for CodexHandler {
             && let Some(root) = chat_delivery_root
         {
             let chat = self
-                .effective_task_config(task_conversation.as_ref(), root)
+                .effective_task_config(task_conversation.as_ref(), root.clone())
                 .and_then(|effective| {
                     self.markdown_chat
                         .chat(&effective, task_conversation.as_ref(), &self.session)
@@ -1807,7 +1943,7 @@ impl ServerHandler for CodexHandler {
                 Ok(chat) => chat.agent_stop_requested().await.unwrap_or(false),
                 Err(_) => false,
             };
-            let pending = if stop_requested {
+            let pending = if stop_requested || initializing_after {
                 Ok(String::new())
             } else {
                 match &chat {
@@ -1841,16 +1977,52 @@ impl ServerHandler for CodexHandler {
                     "Markdown chat is unavailable: {error}. The original tool result above is unchanged; do not repeat a successful operation just to retry chat delivery."
                 ))),
             }
-            if stop_requested {
+            let paused_setup = stop_requested
+                && self
+                    .effective_task_config(task_conversation.as_ref(), root.clone())
+                    .is_ok_and(|config| {
+                        paused_setup_call_allowed(
+                            &name,
+                            &config,
+                            task_conversation.as_ref(),
+                            task_owner_generation,
+                        )
+                    });
+            if stop_requested && !paused_setup {
+                let suspension_message = match &chat {
+                    Ok(chat) => chat
+                        .agent_suspension_message()
+                        .await
+                        .unwrap_or(crate::markdown_chat::AGENT_STOP_MESSAGE),
+                    Err(_) => crate::markdown_chat::AGENT_STOP_MESSAGE,
+                };
                 result.new_chat_message_from_user = Some(if inline_chat_read {
                     format!(
                         "{}\n\n{}",
-                        crate::markdown_chat::AGENT_STOP_MESSAGE,
+                        suspension_message,
                         result.new_chat_message_from_user.take().unwrap_or_default()
                     )
                 } else {
-                    crate::markdown_chat::AGENT_STOP_MESSAGE.into()
+                    suspension_message.into()
                 });
+            }
+            if paused_setup
+                && !result.is_error
+                && (name == "materialize_sentinel"
+                    || name == "automation_verify_pairing"
+                        && result
+                            .structured_content
+                            .as_ref()
+                            .and_then(|value| value.get("terminal"))
+                            .and_then(serde_json::Value::as_bool)
+                            == Some(true))
+                && let (Some(task), Some(owner)) =
+                    (task_conversation.as_ref(), task_owner_generation)
+                && let Ok(config) = self.effective_task_config(task_conversation.as_ref(), root)
+                && let Ok(store) =
+                    crate::agent_automation::AgentAutomationStore::for_config(&config)
+            {
+                let _ = store.finish_paused_setup(task, owner);
             }
             if let Ok(chat) = chat
                 && let Some(end) = result.chat_delivery_end
@@ -4602,6 +4774,62 @@ mod tests {
                 .contains("Retry with narrower arguments")
         );
         assert!(crate::output_budget::approx_token_count(&result.joined_text()) <= 20);
+    }
+
+    #[test]
+    fn paused_setup_permission_is_owner_scoped_and_never_allows_task_tools() {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = crate::config::default_config(root.path().into());
+        config.task_state_root = Some(root.path().join("metadata"));
+        let task = ConversationIdentity::from_openai_session("paused-setup-permission").unwrap();
+        let store = crate::agent_automation::AgentAutomationStore::for_config(&config).unwrap();
+        let goal = store.set_goal(&task, "Keep actual work paused", 1).unwrap();
+        store
+            .issue_creation_pairing(&task, "https://chatgpt.com/new", 2, 2)
+            .unwrap();
+        let path = store.task_directory(&task).unwrap().join("automation.json");
+        let mut record: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        record["pairing"]["allowPausedSetup"] = json!(true);
+        std::fs::write(path, serde_json::to_vec(&record).unwrap()).unwrap();
+        for name in [
+            "setup",
+            "continue_task",
+            "automation_verify_pairing",
+            "materialize_sentinel",
+            "get_agent_brief",
+            "get_environment",
+        ] {
+            assert!(
+                paused_setup_call_allowed(name, &config, Some(&task), Some(2)),
+                "{name}"
+            );
+            assert!(
+                !paused_setup_call_allowed(name, &config, Some(&task), Some(1)),
+                "old owner: {name}"
+            );
+        }
+        for name in [
+            "exec_command",
+            "write_file",
+            "apply_patch",
+            "agent_spawn",
+            "goal_run",
+            "goal_finish",
+            "read_file",
+        ] {
+            assert!(
+                !paused_setup_call_allowed(name, &config, Some(&task), Some(2)),
+                "{name}"
+            );
+        }
+        store.run_goal(&task, goal.revision, 3).unwrap();
+        assert!(!paused_setup_call_allowed(
+            "automation_verify_pairing",
+            &config,
+            Some(&task),
+            Some(2)
+        ));
     }
 
     #[test]

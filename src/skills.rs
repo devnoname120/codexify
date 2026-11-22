@@ -5,7 +5,7 @@
 //! names and descriptions in the prompt, and reads a body only once a skill is
 //! chosen — the progressive disclosure that keeps a large library affordable.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::codex_plugin_skills::discover_codex_plugin_skills;
@@ -301,6 +301,14 @@ pub fn discover_skills(config: &AppConfig) -> SkillCatalog {
         return SkillCatalog::default();
     }
 
+    let blacklist: HashSet<_> = config
+        .skills
+        .blacklist
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .map(|name| name.trim().to_lowercase())
+        .collect();
     let roots = skill_roots(config);
     let mut skills: Vec<Skill> = Vec::new();
     let mut warnings: Vec<SkillWarning> = Vec::new();
@@ -326,6 +334,9 @@ pub fn discover_skills(config: &AppConfig) -> SkillCatalog {
             };
 
             let key = parsed.name.to_lowercase();
+            if blacklist.contains(&key) {
+                continue;
+            }
             if let Some(shadowed) = by_name.get(&key) {
                 warnings.push(SkillWarning {
                     path,
@@ -358,6 +369,9 @@ pub fn discover_skills(config: &AppConfig) -> SkillCatalog {
         let (claude_plugin_skills, claude_plugin_warnings) = discover_claude_plugin_skills(config);
         for skill in codex_plugin_skills.into_iter().chain(claude_plugin_skills) {
             let key = skill.name.to_lowercase();
+            if blacklist.contains(&key) {
+                continue;
+            }
             if let Some(shadowed) = by_name.get(&key) {
                 warnings.push(SkillWarning {
                     path: skill.path.clone(),

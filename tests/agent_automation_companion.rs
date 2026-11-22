@@ -71,6 +71,59 @@ async fn spawn_fake(app: Router) -> (String, tokio::task::JoinHandle<()>) {
     (format!("http://{address}"), task)
 }
 
+#[tokio::test]
+async fn approval_observation_distinguishes_clear_pending_and_legacy_unknown_receipts() {
+    for (approved, pending) in [
+        (false, None),
+        (false, Some(true)),
+        (false, Some(false)),
+        (true, None),
+    ] {
+        let mut receipt =
+            json!({"protocolVersion":PROTOCOL_VERSION,"build":BUILD,"approved":approved});
+        if let Some(pending) = pending {
+            receipt["pending"] = pending.into();
+        }
+        let app = Router::new().route(
+            "/v1/approvals/conversation",
+            post(move || {
+                let receipt = receipt.clone();
+                async move { axum::Json(receipt) }
+            }),
+        );
+        let (url, server) = spawn_fake(app).await;
+        let root = tempfile::tempdir().unwrap();
+        let path = private_descriptor(root.path(), &url, TOKEN, std::process::id(), BUILD);
+        let client = BrowserCompanionClient::from_descriptor_path(&path).unwrap();
+        let observation = client
+            .observe_pending_conversation(
+                "https://chatgpt.com/c/example",
+                "account",
+                "Configured connector",
+                false,
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(observation.approved, approved);
+        assert_eq!(observation.pending, pending);
+        assert_eq!(
+            client
+                .approve_pending_conversation_with_navigation(
+                    "https://chatgpt.com/c/example",
+                    "account",
+                    "Configured connector",
+                    false,
+                    &CancellationToken::new()
+                )
+                .await
+                .unwrap(),
+            approved
+        );
+        server.abort();
+    }
+}
+
 async fn spawn_stalled_event_server() -> (String, tokio::task::JoinHandle<()>) {
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
         .await
@@ -759,6 +812,35 @@ async fn action_attention_uses_the_protocol_delta_bound() {
         .unwrap();
     assert_eq!(snapshot.attention.unwrap().message.unwrap().len(), 5400);
     task.abort();
+}
+
+#[tokio::test]
+async fn known_plaintext_admission_conflicts_are_preserved_without_exposing_other_response_bodies()
+{
+    for message in [
+        "This ChatGPT conversation already owns an action",
+        "All browser companion action pages are busy",
+        "private page text must not be displayed",
+    ] {
+        let app = Router::new().route(
+            "/v1/session/capabilities",
+            post(move || async move { (StatusCode::CONFLICT, message) }),
+        );
+        let (endpoint, task) = spawn_fake(app).await;
+        let root = tempfile::tempdir().unwrap();
+        let path = private_descriptor(root.path(), &endpoint, TOKEN, std::process::id(), BUILD);
+        let client = BrowserCompanionClient::from_descriptor_path(&path).unwrap();
+        let error = client
+            .capabilities(&CancellationToken::new())
+            .await
+            .unwrap_err();
+        if message.starts_with("private") {
+            assert!(!error.contains("private"));
+        } else {
+            assert_eq!(error, message);
+        }
+        task.abort();
+    }
 }
 
 #[tokio::test]

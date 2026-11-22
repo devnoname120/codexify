@@ -74,7 +74,10 @@ async function main(): Promise<void> {
     const lane=await surface.createActionLane();
     lanes.push(new SingleWindowCoordinator(driver.fork(lane),BUILD));
   }
-  const coordinator = new PooledWindowCoordinator(lanes,BUILD,()=>surface!.close());
+  const coordinator = new PooledWindowCoordinator(lanes,BUILD,()=>surface!.close(),async()=>{
+    const lane=await surface!.createActionLane();
+    return new SingleWindowCoordinator(driver.fork(lane),BUILD);
+  });
   server = await startControlServer(coordinator, descriptorPath);
   startAutoApprovalMonitor(coordinator,surface,root);
   app.on("before-quit", event => {

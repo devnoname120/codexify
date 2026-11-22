@@ -26,6 +26,7 @@
       "connectorName": "",
       "maxQueuedActions": 64,
       "autoApproveToolCalls": true,
+      "primeFileMaterialization": false,
       "newConversationOnLoadRateLimit": false,
       "requestBlockingEnabled": false,
       "requestBlockList": [
@@ -148,7 +149,8 @@
   "skills": {
     "enabled": true,
     "dirs": null,
-    "includePlugins": true
+    "includePlugins": true,
+    "blacklist": []
   },
   "codexMcp": {
     "enabled": true,

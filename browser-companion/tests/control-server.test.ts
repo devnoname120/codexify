@@ -188,6 +188,19 @@ test("presentation diagnostics require private bearer auth and defer while an ac
   }finally{await server.close();}
 });
 
+test("connector refresh preserves its structured public failure detail",async()=>{
+ class RefreshFailureDriver extends ImmediateDriver {
+  async refreshConnector():Promise<never>{throw new BrowserCompanionError("ChatGPT did not expose one identifiable tool-refresh control","selector_drift");}
+ }
+ const root=await mkdtemp(join(tmpdir(),"connector-refresh-detail-"));
+ const server=await startControlServer(new SingleWindowCoordinator(new RefreshFailureDriver(),TEST_BUILD),join(root,"descriptor.json"));
+ try {
+  const response=await fetch(`${server.endpoint}/v1/connectors/refresh`,{method:"POST",headers:{Authorization:`Bearer ${server.token}`,"Content-Type":"application/json"},body:JSON.stringify({name:"Codexify"})});
+  expect(response.status).toBe(409);
+  expect(await response.json()).toMatchObject({error:{code:'selector_drift',phase:'capability_discovery',message:expect.stringContaining('identifiable tool-refresh control')}});
+ }finally{await server.close();}
+});
+
 test("connector refresh yields a retryable status after another action takes the page",async()=>{
  class RefreshRaceDriver extends ImmediateDriver {
   async refreshConnector():Promise<never>{throw new BrowserCompanionError("Inspect connector settings: Another browser action changed pages during connector refresh","external_interference");}

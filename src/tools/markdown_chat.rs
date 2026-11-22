@@ -371,6 +371,13 @@ impl Tool for ChatTool {
                 Ok(receipt) => receipt,
                 Err(error) => return ToolResult::error(error),
             };
+            // A successful reply is progress; observing or acknowledging an
+            // inbox is not. Record this before a completed reply releases work.
+            if let Err(error) = chat.queue_agent_work(true).await {
+                return ToolResult::error(format!(
+                    "The message was appended, but its request progress could not be saved: {error}. Do not append it again."
+                ));
+            }
             let mut next_action = NEXT_CONTINUE_OR_COMPLETED;
             if !receipt.user_text.is_empty()
                 && let Err(error) = chat.queue_reply_received().await
@@ -414,7 +421,7 @@ impl Tool for ChatTool {
                     }
                 }
             }
-            let notify = notification::enabled(&config.markdown_chat, event);
+            let notify = notification::enabled_for_chat(&config.markdown_chat, event, &chat).await;
             let claimed = if notify && event == notification::NotificationEvent::InputRequired {
                 match chat.claim_input_notification().await {
                     Ok(claimed) => claimed,

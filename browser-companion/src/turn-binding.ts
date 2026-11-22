@@ -74,8 +74,9 @@ export function submissionEvidence(state: {
   userIdentities: readonly string[];
   responseIdentities: readonly string[];
   generationRunning: boolean;
-}): SubmissionEvidence | undefined {
+}, options:{requireUserTurn?:boolean}={}): SubmissionEvidence | undefined {
   if (newTurnIdentity(state.initialTurnIdentities, state.userIdentities)) return "user_turn";
+  if (options.requireUserTurn) return undefined;
   if (newTurnIdentity(state.initialTurnIdentities, state.responseIdentities)) return "assistant_turn";
   if (state.generationRunning) return "generation_running";
   return undefined;
@@ -152,7 +153,8 @@ export async function readTurnDomState(page: Page, browserBaselineId?: number, s
       // Other route changes still invalidate the action's history baseline.
       const previous=cache.url?new URL(cache.url):null;
       const created=allowCreatedConversation&&previous?.origin===location.origin
-        &&!/(?:^|\/)c\//.test(previous.pathname)
+        &&(!/(?:^|\/)c\//.test(previous.pathname)
+          ||/^\/(?:g\/[^/]+\/)?c\/local-chatgpt(?::|%3A)[^/]+\/?$/i.test(previous.pathname))
         &&/^\/(?:g\/[^/]+\/)?c\/[^/]+\/?$/.test(location.pathname);
       if(!created)cache.baseline=undefined;
     }
@@ -268,12 +270,13 @@ export async function waitForSubmissionAcceptance(
   baseline: SubmissionBaseline,
   deadline: number,
   signal?: AbortSignal,
+  options:{requireUserTurn?:boolean}={},
 ): Promise<SubmissionEvidence> {
   while (Date.now() < deadline) {
     if (signal?.aborted) throw new DOMException("Browser action aborted", "AbortError");
     const state = await submissionPoll(page, baseline, signal, Math.max(1, Math.min(5_000, deadline-Date.now())));
     await throwIfConversationLimit(page);
-    const evidence = submissionEvidence({ ...state, initialTurnIdentities:baseline.initialTurnIdentities });
+    const evidence = submissionEvidence({ ...state, initialTurnIdentities:baseline.initialTurnIdentities },options);
     if (evidence === "user_turn") {
       const identity = newTurnIdentity(baseline.initialTurnIdentities, state.userIdentities)!;
       if (baseline.acceptedUserIdentity && baseline.acceptedUserIdentity !== identity) {

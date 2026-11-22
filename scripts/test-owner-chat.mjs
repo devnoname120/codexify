@@ -179,6 +179,36 @@ test(`${engineName}: unpaired composer offers Pair chat until verification compl
   } finally {await browser.close();}
 });
 
+test(`${engineName}: managed setup retry recovers automatically without a URL form`, {timeout:30000}, async () => {
+  const browser=await engine.launch();
+  try {
+    for(const scenario of ['unsent','sent-paused','known-conversation']) {
+      const page=await ownerTestPage(browser);page.setDefaultTimeout(5000);await page.clock.install();
+      const id='e'.repeat(64),submitted=[],known='https://chatgpt.com/c/existing-worker';
+      const state={enabled:true,pairing:{status:'unverified',creatingChat:true,candidateUrl:'https://chatgpt.com/g/g-p-fixture/project',canonicalUrl:scenario==='known-conversation'?known:null,lastTriedUrl:null},goal:{status:'configured',markdown:'Paused assignment',revision:1},action:{id:'failed-setup',kind:'pair_verify',status:'ambiguous',sendAccepted:scenario!=='unsent',lastError:'Legacy setup failed'},selection:{},companion:{authenticated:true,status:'idle'},presence:{}};
+      await routeOwner(page,'http://127.0.0.1:43229/**',route=>{
+        const request=route.request(),path=new URL(request.url()).pathname;
+        if(path==='/')return route.fulfill({contentType:'text/html',body:ownerHtml});
+        if(path==='/api/chats')return route.fulfill({json:{chats:[{id,title:'Managed worker',workspace:'fixture',lastEntryEnd:0,lastEntryAtMs:Date.now(),totalToolCalls:0}],serverTimeMs:Date.now()}});
+        if(path.endsWith('/automation/create/retry')||path.endsWith('/automation/pair')) {
+          submitted.push({path,body:request.postDataJSON()});state.action={id:'new-setup',kind:'pair_verify',status:'queued',sendAccepted:false};state.pairing.expiresAtMs=Date.now()+600000;
+          return route.fulfill({json:{queued:true,pairing:state.pairing,action:state.action}});
+        }
+        if(path.endsWith('/automation'))return route.fulfill({json:{...state,serverTimeMs:Date.now()}});
+        return route.fulfill({json:{_meta:{[META]:{chat_file:'/fixture/CHAT.md',revision:'0',delivered_through:0,read_through:0,total_tool_calls:0,messages:[],server_time_ms:Date.now(),has_more:false}}}});
+      });
+      await page.goto(`http://127.0.0.1:43229/?chat=${id}#test-token`);const host=page.locator('#chat-host');
+      await host.getByRole('button',{name:'Retry setup',exact:true}).click();
+      await host.getByRole('button',{name:'Pairing…',exact:true}).waitFor();
+      assert.equal(await host.locator('#pairing-editor').isVisible(),false);
+      assert.equal(submitted.length,1);
+      if(scenario==='known-conversation'){assert.ok(submitted[0].path.endsWith('/pair'));assert.equal(submitted[0].body.url,known);}
+      else{assert.ok(submitted[0].path.endsWith('/create/retry'));assert.equal(submitted[0].body.actionId,'failed-setup');}
+      await page.close();
+    }
+  }finally{await browser.close();}
+});
+
 test(`${engineName}: pairing failures open a prefilled retry box and submit one new request`, {timeout:30000}, async () => {
   const browser=await engine.launch();
   let releasePost,releasePoll;
@@ -239,10 +269,10 @@ test(`${engineName}: pairing failures open a prefilled retry box and submit one 
 
     for(const width of [1280,375]) {
       await page.setViewportSize({width,height:900});
-      state.pairing={status:'unpaired',creatingChat:true,lastTriedUrl:null,candidateUrl:'https://chatgpt.com/g/g-p-project/project'};
+      state.pairing={status:'unpaired',creatingChat:false,lastTriedUrl:null,candidateUrl:'https://chatgpt.com/g/g-p-project/project'};
       state.action={kind:'pair_verify',status:'failed',lastError:'Creation failed'};
       await page.clock.fastForward(1600);await retry.waitFor();await retry.click();
-      assert.equal(await field.inputValue(),'','no created conversation means an empty prefill');
+      assert.equal(await field.inputValue(),'','a manual pairing without a saved conversation starts with an empty prefill');
       assert.equal(await pair.isDisabled(),true);
       await field.fill('https://chatgpt.com/c/manual');assert.equal(await pair.isEnabled(),true);
       const box=await editor.boundingBox();assert(box&&box.x>=0&&box.x+box.width<=width,`${width}px: retry box must fit in the viewport`);
