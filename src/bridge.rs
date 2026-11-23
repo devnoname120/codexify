@@ -274,6 +274,12 @@ pub(crate) async fn forward_tool_call(
     context: UpstreamCallContext<'_>,
 ) -> ToolResult {
     let UpstreamCallContext { resources, control } = context;
+    // This preflight is shared by direct, gateway and catalog MCP exposure.
+    // Never send an isolation request to a browser extension as a fallback.
+    if let Err(error) = control.check_browser_context_request(tool, &params) {
+        return ToolResult::error(format!("Upstream MCP server '{server}': {error}"));
+    }
+    let isolated_requested = control.isolated_tab_requested(tool, &params);
     let timeout = tool_timeout.unwrap_or(Duration::from_secs(60));
     let deadline = tokio::time::Instant::now() + timeout;
     let token = cancellation.cloned().unwrap_or_default();
@@ -307,10 +313,34 @@ pub(crate) async fn forward_tool_call(
     });
 
     match result {
-        Ok(result) => map_call_result(result, peer, server, tool_timeout, resources),
-        Err(error) => ToolResult::error(format!(
-            "Upstream MCP server '{server}' failed to run '{tool}': {error}"
-        )),
+        Ok(result) => {
+            if isolated_requested && result.is_error == Some(true) {
+                let message = result
+                    .content
+                    .iter()
+                    .filter_map(|block| match block {
+                        ContentBlock::Text(text) => Some(text.text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if let Some(error) = control.browser_context_refusal(isolated_requested, &message) {
+                    return ToolResult::error(format!(
+                        "Upstream MCP server '{server}' failed to run '{tool}': {error}"
+                    ));
+                }
+            }
+            map_call_result(result, peer, server, tool_timeout, resources)
+        }
+        Err(error) => {
+            let detail = error.to_string();
+            let detail = control
+                .browser_context_refusal(isolated_requested, &detail)
+                .unwrap_or(detail);
+            ToolResult::error(format!(
+                "Upstream MCP server '{server}' failed to run '{tool}': {detail}"
+            ))
+        }
     }
 }
 
@@ -542,9 +572,10 @@ pub async fn connect_upstreams(config: &AppConfig) -> Bridge {
         match connect_one(server_name, spec, config).await {
             Ok((service, upstream_tools, tool_timeout)) => {
                 let peer = service.peer().clone();
-                let control = Arc::new(crate::upstream_control::UpstreamControl::new(
-                    spec.request_limits.clone(),
-                ));
+                let control = Arc::new(
+                    crate::upstream_control::UpstreamControl::new(spec.request_limits.clone())
+                        .for_server(server_name, spec),
+                );
                 upstreams.insert(server_name.clone(), control.clone());
                 monitors.push(monitor_upstream(peer.clone(), control.clone()));
                 let count = upstream_tools.len();
@@ -604,6 +635,18 @@ pub async fn connect_upstreams(config: &AppConfig) -> Bridge {
                                         "Call the `{original_name}` tool on the `{server_name}` MCP server."
                                     )
                                 });
+                            // Warn before a model chooses extension-backed tabs
+                            // for a workflow requiring genuine browser contexts.
+                            let description = if original_name == "browser_tabs"
+                                && control.browser_context_capability()
+                                    == Some("existing-tabs-only")
+                            {
+                                format!(
+                                    "{description} This Playwright extension backend supports existing tabs only;                                      isolatedContext requires a browser-level Playwright backend.                                      No automatic cross-backend fallback is performed."
+                                )
+                            } else {
+                                description
+                            };
                             tools.push(Box::new(BridgedTool {
                                 name: leaked,
                                 original_name,
@@ -1322,6 +1365,12 @@ mod tests {
             if request.name.as_ref() == "slow" {
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
+            if request.name.as_ref() == "browser_tabs" && text == "cdp_refused" {
+                return Ok(CallToolResult::error(vec![ContentBlock::text(
+                    r#"Protocol error (Target.createBrowserContext): {"code":-32000,"message":"Not allowed"}"#,
+                )])
+                .into());
+            }
             Ok(CallToolResult::success(vec![ContentBlock::text(text)]).into())
         }
     }
@@ -1350,6 +1399,135 @@ mod tests {
             axum::serve(listener, app).await.unwrap();
         });
         (format!("http://{address}/mcp"), task)
+    }
+
+    #[tokio::test]
+    async fn playwright_capability_is_enforced_at_real_mcp_forwarding_boundary() {
+        // The test server echoes a marker for any browser_tabs request. If an
+        // extension-only isolated request reaches it, the test will fail.
+        let (url, server_task) = spawn_http_upstream().await;
+        let mut spec = McpServerSpec {
+            url: Some(url),
+            transport: Some("http".into()),
+            ..Default::default()
+        };
+        spec.http_headers
+            .insert("authorization".into(), "Bearer remote-token".into());
+        spec.http_headers
+            .insert("x-static".into(), "static-value".into());
+        spec.http_headers.insert("x-env".into(), "env-value".into());
+        let config = crate::config::default_config(std::env::temp_dir());
+        let (service, _, _) = connect_one_with_env("playwright-test", &spec, &config, &|_| None)
+            .await
+            .unwrap();
+        let resources = BridgedResourceStore::new(config.artifact_egress.clone());
+
+        let extension_spec = McpServerSpec {
+            command: Some("node".into()),
+            args: vec!["@playwright/mcp".into(), "--extension".into()],
+            ..Default::default()
+        };
+        let full_spec = McpServerSpec {
+            command: Some("node".into()),
+            args: vec!["@playwright/mcp".into()],
+            ..Default::default()
+        };
+        let cdp_spec = McpServerSpec {
+            command: Some("node".into()),
+            args: vec!["@playwright/mcp".into(), "--cdp-endpoint=chrome".into()],
+            ..Default::default()
+        };
+        let extension_control = crate::upstream_control::UpstreamControl::default()
+            .for_server("playwright-extension", &extension_spec);
+        let full_control = crate::upstream_control::UpstreamControl::default()
+            .for_server("playwright", &full_spec);
+        let cdp_control =
+            crate::upstream_control::UpstreamControl::default().for_server("playwright", &cdp_spec);
+        let tab_request = |name: &str, context: &str| {
+            CallToolRequestParams::new("browser_tabs").with_arguments(
+                json!({
+                    "action": "new",
+                    "isolatedContext": context,
+                    "url": "https://example.invalid/local-fixture",
+                    "text": name,
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            )
+        };
+
+        let blocked = forward_tool_call(
+            service.peer(),
+            tab_request("never-dispatch", "lane06_grants_funding"),
+            "playwright-extension",
+            "browser_tabs",
+            None,
+            None,
+            UpstreamCallContext {
+                resources: &resources,
+                control: &extension_control,
+            },
+        )
+        .await;
+        assert!(blocked.is_error);
+        assert!(blocked.joined_text().contains("No request was dispatched"));
+        assert!(!blocked.joined_text().contains("never-dispatch"));
+
+        let capable = forward_tool_call(
+            service.peer(),
+            tab_request("capable-backend-called", "lane06_grants_funding"),
+            "playwright",
+            "browser_tabs",
+            None,
+            None,
+            UpstreamCallContext {
+                resources: &resources,
+                control: &full_control,
+            },
+        )
+        .await;
+        assert!(!capable.is_error);
+        assert_eq!(capable.joined_text(), "capable-backend-called");
+
+        let refused = forward_tool_call(
+            service.peer(),
+            tab_request("cdp_refused", "lane07_funded_events"),
+            "playwright",
+            "browser_tabs",
+            None,
+            None,
+            UpstreamCallContext {
+                resources: &resources,
+                control: &cdp_control,
+            },
+        )
+        .await;
+        assert!(refused.is_error);
+        assert!(refused.joined_text().contains("CDP -32000 Not allowed"));
+        assert!(
+            refused
+                .joined_text()
+                .contains("No isolated context was confirmed")
+        );
+
+        // No isolation requested: ordinary existing-tab operation still works.
+        let nonisolated = forward_tool_call(
+            service.peer(),
+            tab_request("ordinary-tab", "default"),
+            "playwright-extension",
+            "browser_tabs",
+            None,
+            None,
+            UpstreamCallContext {
+                resources: &resources,
+                control: &extension_control,
+            },
+        )
+        .await;
+        assert!(!nonisolated.is_error);
+        assert_eq!(nonisolated.joined_text(), "ordinary-tab");
+        server_task.abort();
     }
 
     #[derive(Clone)]
