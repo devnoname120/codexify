@@ -1,0 +1,48 @@
+name: Build experimental Codexify hot reload for Windows
+
+on:
+  push:
+    branches:
+      - feat/per-mcp-hot-reload-20261119
+    paths:
+      - .github/workflows/preview-hot-reload-windows.yml
+      - src/markdown_chat/mod.rs
+      - src/agent_automation/install.rs
+
+permissions:
+  contents: read
+
+jobs:
+  preview-windows:
+    name: Package pinned Windows feature binary
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build from exact branch commit
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cargo build --release --locked --bin codexify
+          if ($LASTEXITCODE -ne 0) { throw 'Cargo build failed' }
+          $out = Join-Path $env:RUNNER_TEMP 'codexify-hot-reload-preview'
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          $binary = Join-Path (Get-Location) 'target\release\codexify.exe'
+          if (!(Test-Path -LiteralPath $binary -PathType Leaf)) { throw 'Expected executable missing' }
+          Copy-Item -LiteralPath $binary -Destination (Join-Path $out 'codexify.exe')
+          & (Join-Path $out 'codexify.exe') --help | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw 'Preview binary self-probe failed' }
+          $hash = (Get-FileHash -LiteralPath (Join-Path $out 'codexify.exe') -Algorithm SHA256).Hash.ToLowerInvariant()
+          Set-Content -LiteralPath (Join-Path $out 'SHA256SUMS.txt') -Value ("$hash  codexify.exe") -Encoding ascii
+          Set-Content -LiteralPath (Join-Path $out 'SOURCE_COMMIT.txt') -Value "${{ github.sha }}" -Encoding ascii
+          Set-Content -LiteralPath (Join-Path $out 'PREVIEW_NOTICE.txt') -Value 'EXPERIMENTAL binary from feature branch PR #11. Not an official release. Activate only after backing up the existing executable; coordinate with other Codexify workers.' -Encoding ascii
+      - uses: actions/upload-artifact@v4
+        with:
+          name: codexify-pr11-windows-preview
+          path: ${{ runner.temp }}/codexify-hot-reload-preview/*
+          if-no-files-found: error
+          retention-days: 7

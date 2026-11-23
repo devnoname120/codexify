@@ -102,6 +102,17 @@ jobs:
       - name: Test
         run: cargo test --all
 
+      - name: Test actual GodPrompt 1.0.3 to 1.1.1 hot reload and rollback
+        env:
+          CODEXIFY_CANARY_OLD_GODPROMPT: ${{ runner.temp }}/godprompt-old/node_modules/god-prompt-mcp/dist/stdio.js
+          CODEXIFY_CANARY_NEW_GODPROMPT: ${{ runner.temp }}/godprompt-new/node_modules/god-prompt-mcp/dist/stdio.js
+        run: |
+          npm install --prefix "$RUNNER_TEMP/godprompt-old" --no-save --no-package-lock --ignore-scripts --no-audit --no-fund god-prompt-mcp@1.0.3
+          npm install --prefix "$RUNNER_TEMP/godprompt-new" --no-save --no-package-lock --ignore-scripts --no-audit --no-fund god-prompt-mcp@1.1.1
+          test -f "$CODEXIFY_CANARY_OLD_GODPROMPT"
+          test -f "$CODEXIFY_CANARY_NEW_GODPROMPT"
+          cargo test --locked --lib service_local_godprompt_candidate_upgrade_and_failed_rollback -- --nocapture
+
       - name: Test Rust and TypeScript browser companion contract
         env:
           CODEXIFY_TEST_BROWSER_COMPANION_BUN: ${{ steps.browser-bun.outputs.bun-path }}
